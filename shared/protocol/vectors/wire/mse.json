@@ -750,6 +750,17 @@
       ],
       "error": "DepthExceeded",
       "why": "MAX_NESTING_DEPTH is 16; deeper recursion is a stack attack"
+    },
+    {
+      "name": "u32_past_the_field_width",
+      "hex": "8080808010",
+      "read_ops": [
+        {
+          "op": "u32"
+        }
+      ],
+      "error": "LengthOverflow",
+      "why": "varints decode as u64 and are then narrowed; a u32 field that does not fit is refused, not wrapped"
     }
   ]
 }

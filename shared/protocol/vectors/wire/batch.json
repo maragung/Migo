@@ -1,0 +1,2893 @@
+{
+  "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, and the hostile payloads a receiver must refuse.",
+  "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE stream in `compressed_cases` is written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
+  "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope.",
+  "cases": [
+    {
+      "name": "empty_batch",
+      "elements": [],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "00"
+      },
+      "hex": "0104000000"
+    },
+    {
+      "name": "two_small_frames",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 48,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "61"
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 49,
+          "correlation": 1,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "6263"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "0205010030006106010031016263"
+      },
+      "hex": "010400000205010030006106010031016263"
+    },
+    {
+      "name": "elements_keep_their_own_flags",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 8,
+          "opcode": 2,
+          "correlation": 7,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 16,
+          "opcode": 16,
+          "correlation": 1,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "01"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "020401080207050110100101"
+      },
+      "hex": "01040000020401080207050110100101"
+    },
+    {
+      "name": "traced_and_fragmented_elements",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 2,
+          "opcode": 1,
+          "correlation": 0,
+          "trace": {
+            "trace_id": "000102030405060708090a0b0c0d0e0f",
+            "span_id": "1011121314151617"
+          },
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 32,
+          "opcode": 5,
+          "correlation": 9,
+          "trace": null,
+          "fragment": {
+            "index": 1,
+            "total": 3
+          },
+          "metadata": null,
+          "payload": "aa"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "021c01020100000102030405060708090a0b0c0d0e0f101112131415161707012005090103aa"
+      },
+      "hex": "01040000021c01020100000102030405060708090a0b0c0d0e0f101112131415161707012005090103aa"
+    },
+    {
+      "name": "a_metadata_element_rides_along",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 64,
+          "opcode": 40,
+          "correlation": 12,
+          "trace": null,
+          "fragment": null,
+          "metadata": {
+            "frame_seq": 7,
+            "sent_at_delta": 300
+          },
+          "payload": "0011"
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 48,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "61"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "020a0140280c07ac02000011050100300061"
+      },
+      "hex": "01040000020a0140280c07ac02000011050100300061"
+    },
+    {
+      "name": "count_at_the_item_limit",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 1,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 2,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 3,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 4,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 5,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 6,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 7,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 8,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 9,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 10,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 11,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 12,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 13,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 14,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 15,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 16,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 17,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 18,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 19,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 20,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 21,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 22,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 23,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 24,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 25,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 26,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 27,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 28,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 29,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 30,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 31,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 32,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 33,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 34,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 35,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 36,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 37,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 38,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 39,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 40,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 41,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 42,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 43,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 44,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 45,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 46,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 47,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 48,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 49,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 50,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 51,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 52,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 53,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 54,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 55,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 56,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 57,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 58,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 59,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 60,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 61,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 62,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 63,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 64,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 65,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 66,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 67,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 68,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 69,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 70,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 71,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 72,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 73,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 74,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 75,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 76,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 77,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 78,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 79,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 80,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 81,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 82,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 83,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 84,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 85,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 86,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 87,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 88,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 89,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 90,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 91,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 92,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 93,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 94,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 95,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 96,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 97,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 98,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 99,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 100,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 101,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 102,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 103,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 104,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 105,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 106,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 107,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 108,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 109,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 110,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 111,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 112,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 113,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 114,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 115,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 116,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 117,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 118,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 119,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 120,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 121,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 122,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 123,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 124,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 125,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 126,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 127,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 128,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 129,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 130,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 131,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 132,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 133,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 134,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 135,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 136,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 137,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 138,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 139,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 140,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 141,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 142,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 143,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 144,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 145,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 146,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 147,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 148,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 149,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 150,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 151,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 152,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 153,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 154,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 155,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 156,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 157,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 158,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 159,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 160,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 161,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 162,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 163,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 164,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 165,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 166,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 167,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 168,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 169,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 170,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 171,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 172,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 173,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 174,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 175,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 176,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 177,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 178,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 179,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 180,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 181,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 182,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 183,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 184,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 185,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 186,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 187,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 188,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 189,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 190,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 191,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 192,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 193,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 194,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 195,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 196,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 197,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 198,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 199,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 200,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 201,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 202,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 203,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 204,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 205,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 206,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 207,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 208,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 209,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 210,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 211,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 212,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 213,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 214,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 215,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 216,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 217,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 218,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 219,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 220,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 221,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 222,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 223,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 224,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 225,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 226,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 227,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 228,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 229,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 230,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 231,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 232,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 233,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 234,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 235,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 236,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 237,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 238,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 239,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 240,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 241,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 242,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 243,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 244,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 245,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 246,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 247,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 248,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 249,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 250,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 251,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 252,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 253,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 254,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 64,
+          "correlation": 255,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": ""
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "80020401004000040100400104010040020401004003040100400404010040050401004006040100400704010040080401004009040100400a040100400b040100400c040100400d040100400e040100400f0401004010040100401104010040120401004013040100401404010040150401004016040100401704010040180401004019040100401a040100401b040100401c040100401d040100401e040100401f0401004020040100402104010040220401004023040100402404010040250401004026040100402704010040280401004029040100402a040100402b040100402c040100402d040100402e040100402f0401004030040100403104010040320401004033040100403404010040350401004036040100403704010040380401004039040100403a040100403b040100403c040100403d040100403e040100403f0401004040040100404104010040420401004043040100404404010040450401004046040100404704010040480401004049040100404a040100404b040100404c040100404d040100404e040100404f0401004050040100405104010040520401004053040100405404010040550401004056040100405704010040580401004059040100405a040100405b040100405c040100405d040100405e040100405f0401004060040100406104010040620401004063040100406404010040650401004066040100406704010040680401004069040100406a040100406b040100406c040100406d040100406e040100406f0401004070040100407104010040720401004073040100407404010040750401004076040100407704010040780401004079040100407a040100407b040100407c040100407d040100407e040100407f050100408001050100408101050100408201050100408301050100408401050100408501050100408601050100408701050100408801050100408901050100408a01050100408b01050100408c01050100408d01050100408e01050100408f01050100409001050100409101050100409201050100409301050100409401050100409501050100409601050100409701050100409801050100409901050100409a01050100409b01050100409c01050100409d01050100409e01050100409f0105010040a00105010040a10105010040a20105010040a30105010040a40105010040a50105010040a60105010040a70105010040a80105010040a90105010040aa0105010040ab0105010040ac0105010040ad0105010040ae0105010040af0105010040b00105010040b10105010040b20105010040b30105010040b40105010040b50105010040b60105010040b70105010040b80105010040b90105010040ba0105010040bb0105010040bc0105010040bd0105010040be0105010040bf0105010040c00105010040c10105010040c20105010040c30105010040c40105010040c50105010040c60105010040c70105010040c80105010040c90105010040ca0105010040cb0105010040cc0105010040cd0105010040ce0105010040cf0105010040d00105010040d10105010040d20105010040d30105010040d40105010040d50105010040d60105010040d70105010040d80105010040d90105010040da0105010040db0105010040dc0105010040dd0105010040de0105010040df0105010040e00105010040e10105010040e20105010040e30105010040e40105010040e50105010040e60105010040e70105010040e80105010040e90105010040ea0105010040eb0105010040ec0105010040ed0105010040ee0105010040ef0105010040f00105010040f10105010040f20105010040f30105010040f40105010040f50105010040f60105010040f70105010040f80105010040f90105010040fa0105010040fb0105010040fc0105010040fd0105010040fe0105010040ff01"
+      },
+      "hex": "0104000080020401004000040100400104010040020401004003040100400404010040050401004006040100400704010040080401004009040100400a040100400b040100400c040100400d040100400e040100400f0401004010040100401104010040120401004013040100401404010040150401004016040100401704010040180401004019040100401a040100401b040100401c040100401d040100401e040100401f0401004020040100402104010040220401004023040100402404010040250401004026040100402704010040280401004029040100402a040100402b040100402c040100402d040100402e040100402f0401004030040100403104010040320401004033040100403404010040350401004036040100403704010040380401004039040100403a040100403b040100403c040100403d040100403e040100403f0401004040040100404104010040420401004043040100404404010040450401004046040100404704010040480401004049040100404a040100404b040100404c040100404d040100404e040100404f0401004050040100405104010040520401004053040100405404010040550401004056040100405704010040580401004059040100405a040100405b040100405c040100405d040100405e040100405f0401004060040100406104010040620401004063040100406404010040650401004066040100406704010040680401004069040100406a040100406b040100406c040100406d040100406e040100406f0401004070040100407104010040720401004073040100407404010040750401004076040100407704010040780401004079040100407a040100407b040100407c040100407d040100407e040100407f050100408001050100408101050100408201050100408301050100408401050100408501050100408601050100408701050100408801050100408901050100408a01050100408b01050100408c01050100408d01050100408e01050100408f01050100409001050100409101050100409201050100409301050100409401050100409501050100409601050100409701050100409801050100409901050100409a01050100409b01050100409c01050100409d01050100409e01050100409f0105010040a00105010040a10105010040a20105010040a30105010040a40105010040a50105010040a60105010040a70105010040a80105010040a90105010040aa0105010040ab0105010040ac0105010040ad0105010040ae0105010040af0105010040b00105010040b10105010040b20105010040b30105010040b40105010040b50105010040b60105010040b70105010040b80105010040b90105010040ba0105010040bb0105010040bc0105010040bd0105010040be0105010040bf0105010040c00105010040c10105010040c20105010040c30105010040c40105010040c50105010040c60105010040c70105010040c80105010040c90105010040ca0105010040cb0105010040cc0105010040cd0105010040ce0105010040cf0105010040d00105010040d10105010040d20105010040d30105010040d40105010040d50105010040d60105010040d70105010040d80105010040d90105010040da0105010040db0105010040dc0105010040dd0105010040de0105010040df0105010040e00105010040e10105010040e20105010040e30105010040e40105010040e50105010040e60105010040e70105010040e80105010040e90105010040ea0105010040eb0105010040ec0105010040ed0105010040ee0105010040ef0105010040f00105010040f10105010040f20105010040f30105010040f40105010040f50105010040f60105010040f70105010040f80105010040f90105010040fa0105010040fb0105010040fc0105010040fd0105010040fe0105010040ff01"
+    },
+    {
+      "name": "a_lone_frame_is_sent_bare",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 48,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "736f6c6f"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 0,
+        "opcode": 48,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "736f6c6f"
+      },
+      "hex": "01003000736f6c6f"
+    }
+  ],
+  "compressed_cases": [
+    {
+      "name": "compressed_batch_of_run_payloads",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 48,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "61616161616161616161616161616161616161616161616161616161616161616161616161616161"
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 49,
+          "correlation": 1,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "62626262626262626262626262626262626262626262626262626262626262626262626262626262"
+        },
+        {
+          "version": 1,
+          "flags": 16,
+          "opcode": 16,
+          "correlation": 2,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "01010101010101010101010101010101010101010101010101010101010101010101010101010101"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 5,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "63d661643060482412e830321832261109741805049818890400"
+      },
+      "hex": "0105000063d661643060482412e830321832261109741805049818890400"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "count_over_the_item_limit",
+      "hex": "010400008102000000000000",
+      "error": "BatchTooLarge",
+      "why": "MAX_BATCH_ITEMS is 256; the count is a batch, not a suggestion"
+    },
+    {
+      "name": "a_lying_count_cannot_force_an_allocation",
+      "hex": "01040000c801000000000000",
+      "error": "BatchTooLarge",
+      "why": "every element costs at least five bytes, so 200 items cannot fit in six"
+    },
+    {
+      "name": "nested_batch_is_refused",
+      "hex": "010400000112010400000205010030006106010031016263",
+      "error": "NestedBatch",
+      "why": "a batch inside a batch is an exponential expansion in a small frame"
+    },
+    {
+      "name": "element_length_over_the_frame_budget",
+      "hex": "01040000018180100000",
+      "error": "FrameTooLarge",
+      "why": "an element is a frame, and a frame over MAX_FRAME_BYTES (262144) is refused before buffering; the two padding bytes exist so the count pre-check lets the length varint be read at all"
+    },
+    {
+      "name": "element_of_zero_bytes",
+      "hex": "01040000010000000000",
+      "error": "UnexpectedEnd",
+      "why": "a frame is at least two bytes, so an element of length zero is truncated; the padding exists so the count pre-check lets the zero-length element be reached at all"
+    },
+    {
+      "name": "element_length_varint_truncated",
+      "hex": "01040000018080808080",
+      "error": "UnexpectedEnd",
+      "why": "the continuation bit keeps promising a length byte that never arrives; the payload is long enough that the count pre-check cannot answer first"
+    },
+    {
+      "name": "truncated_element",
+      "hex": "01040000010801003000",
+      "error": "UnexpectedEnd",
+      "why": "the element's length varint says 8 bytes and 4 are present"
+    },
+    {
+      "name": "trailing_bytes_after_the_last_element",
+      "hex": "0104000002050100300061060100310162636a756e6b",
+      "error": "TrailingBytes",
+      "why": "the count is the whole truth: bytes after the last element mean the sender disagrees"
+    },
+    {
+      "name": "non_minimal_count",
+      "hex": "010400008000",
+      "error": "NonMinimalVarint",
+      "why": "canonicality applies to the count, not only to MSE fields"
+    },
+    {
+      "name": "count_varint_truncated",
+      "hex": "0104000080",
+      "error": "UnexpectedEnd",
+      "why": "the envelope promises a count and cuts it mid-byte"
+    },
+    {
+      "name": "empty_payload",
+      "hex": "01040000",
+      "error": "UnexpectedEnd",
+      "why": "a batch payload is at least the count varint"
+    }
+  ]
+}
