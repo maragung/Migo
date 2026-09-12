@@ -91,10 +91,16 @@ import type { PeerBundleSource } from './session-crypto.js';
 import { GroupCrypto } from './group-crypto.js';
 import { Rpc } from './domains/rpc.js';
 import type { EventErrorHandler } from './domains/rpc.js';
+import { Outbox } from './outbox.js';
+import type { OutboxEntry, OutboxOptions } from './outbox.js';
+import { SyncGate } from './sync-gate.js';
 import { KeysDomain, KeyStore } from './domains/keys.js';
 import type { PeerIdentity } from './domains/keys.js';
 import { MessagingDomain } from './domains/messaging.js';
 import type { CreateConversationOptions } from './domains/conversations.js';
+import type { MessageContent } from './content.js';
+import type { SendOptions } from './domains/messaging.js';
+import type { MessageAccepted } from '@migo/protocol';
 import { ConversationsDomain } from './domains/conversations.js';
 import { SyncDomain } from './domains/sync.js';
 import { TypingDomain } from './domains/typing.js';
@@ -159,6 +165,17 @@ export interface MigoClientOptions {
   onStateChange?: (state: ConnectionState) => void;
   /** Notified after a fresh (non-resumed) session has been re-subscribed, for application resync. */
   onReset?: () => void;
+  /**
+   * Tune the offline outbox: attempt budget, backoff curve, capacity. The defaults suit a stock
+   * client; see {@link OutboxOptions}.
+   */
+  outbox?: OutboxOptions;
+  /**
+   * Whether {@link sendQueued} and the sync gate apply. Default true. A caller that drives
+   * {@link messaging.send} by hand and wants the raw behaviour unchanged can opt out — the
+   * queue simply is not built, and {@link outbox} reads null.
+   */
+  outboxEnabled?: boolean;
 }
 
 /** The default prekey top-up: replenish a full batch once fewer than sixteen remain. */
@@ -237,6 +254,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    */
   #refreshInFlight: Promise<Grant> | null = null;
 
+  /**
+   * The gate client-side sync consults: closed when the page is hidden, open when visible.
+   * Section 158 asks that sync running into the background be stopped neatly; the outbox drain
+   * parks on this gate between entries rather than burning a hidden tab's throttled timers.
+   */
+  readonly #syncGate = new SyncGate();
+  /** The offline outbox, built per session when enabled. Null when opted out or not connected. */
+  #outbox: Outbox | null = null;
+  /** The visibilitychange wiring, torn down on disconnect so a reconnect does not stack a second. */
+  #visibilityOff: (() => void) | null = null;
+
   #ctx: Connected | null = null;
 
   private constructor(options: MigoClientOptions) {
@@ -295,6 +323,35 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    */
   reconnectNow(): void {
     this.#ctx?.transport.reconnectNow();
+  }
+
+  /**
+   * Whether the page is currently visible, as far as the client knows.
+   *
+   * The SDK does not own the document — a host without one (a test, a service) can drive this
+   * by hand: {@link setPageVisible} opens and closes the sync gate, exactly what a browser's
+   * visibilitychange would do. "Visible" is the default, because a client constructed where
+   * there is no notion of hiding must be allowed to sync from the first moment.
+   */
+  get pageVisible(): boolean {
+    return this.#syncGate.open;
+  }
+
+  /** Opens or closes the sync gate by hand — the programmatic form of a visibilitychange. */
+  setPageVisible(visible: boolean): void {
+    this.#syncGate.setOpen(visible);
+  }
+
+  /**
+   * The offline outbox, when one is running.
+   *
+   * Null when the client was built with {@link MigoClientOptions.outboxEnabled} false or while
+   * no session is established. The queue survives reconnects: an entry that could not leave
+   * during an outage drains against the resumed session, which is the whole point of a queue
+   * that does not fail on a dropped link.
+   */
+  get outbox(): Outbox | null {
+    return this.#outbox;
   }
 
   // --- domain accessors (throw until connected) ---
@@ -477,6 +534,9 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     for (const unsubscribe of this.#unsubscribes.splice(0)) {
       unsubscribe();
     }
+    this.#visibilityOff?.();
+    this.#visibilityOff = null;
+    this.#outbox = null;
     this.#ctx = null;
     this.#members.clear();
     this.#userDevices.clear();
@@ -620,6 +680,38 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       ctx.messaging.ingest(event);
     }
     return response;
+  }
+
+  // --- the offline outbox ---
+
+  /**
+   * Sends a message through the offline outbox.
+   *
+   * Identical to {@link MessagingDomain.send} while the link is up — same sealing, same
+   * acknowledgement, same idempotency key reused on retry — but a send composed while the
+   * transport is down is queued rather than failed, and leaves once the session is Ready and
+   * the page visible. The returned promise settles when the server has acknowledged the send
+   * or the entry's attempt budget is spent; the entry's progress is observable on {@link
+   * outbox} for a composer's "sending…" state.
+   *
+   * Section 158 puts the queue's departure *after* sync has caught up, so the drain is kicked
+   * from a resumed session's re-subscription rather than the socket's first Ready.
+   */
+  sendQueued(
+    conversationId: Id,
+    content: MessageContent,
+    options: SendOptions = {},
+  ): Promise<MessageAccepted> {
+    const outbox = this.#outbox;
+    if (outbox === null) {
+      return this.messaging.send(conversationId, content, options);
+    }
+    return outbox.send(conversationId, content, options);
+  }
+
+  /** Registers a handler for outbox entry movement. Returns an unsubscribe function. */
+  onOutboxEntry(handler: (entry: OutboxEntry) => void): (() => void) | null {
+    return this.#outbox?.onEntryChange(handler) ?? null;
   }
 
   // --- membership cache priming ---
@@ -1191,6 +1283,23 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     await keys.publish();
     // Our own user topic carries self-directed events: presence sync across our devices, notifications.
     await this.subscribe([{ kind: TopicKind.User, id: grant.accountId }]);
+
+    // The offline outbox rides above the messaging domain: same send path, one idempotency key
+    // per entry, drained only when the session is ready and the page visible. Built once per
+    // session and null when opted out — a caller that wants the raw send keeps it.
+    if (this.#options.outboxEnabled !== false) {
+      this.#outbox = new Outbox(
+        (conversationId, content, options) => ctx.messaging.send(conversationId, content, options),
+        () => ctx.transport.state === 'ready',
+        this.#syncGate,
+        this.#options.outbox,
+      );
+    }
+
+    // The gate is wired to the document when there is one. A host without a document drives it
+    // through setPageVisible by hand; the SDK never assumes a DOM exists.
+    this.#visibilityOff?.();
+    this.#visibilityOff = wireVisibility(this.#syncGate);
   }
 
   /** The device list for a user, from cache or a single enumeration that also warms the bundle cache. */
@@ -1209,14 +1318,59 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return deviceIds;
   }
 
-  /** Re-subscribes every tracked topic after a fresh session, then hands off to the app's resync. */
+  /**
+   * Re-subscribes every tracked topic after a fresh session, then hands off to the app's resync.
+   *
+   * The order is section 158's, because it is the order in which the client becomes whole
+   * again: the user topic first — it carries the self-directed events (presence sync across
+   * this account's devices, notifications) that no conversation topic replays, so losing it
+   * for even the length of a resubscribe is losing the only copy of a fact — then the room
+   * topics (a room's roster and state, which the conversation topics assume when a room's
+   * chat is a conversation over the room's membership), then every conversation. The frame
+   * carries a topic *list*, so each group leaves in one round trip; ordering groups, not
+   * topics, is what the section actually pins.
+   *
+   * The app's own resync follows the subscriptions ({@link onReset}), so its CONVERSATION_LIST
+   * sync and its gap fills run against a session whose topics are already live — and the
+   * outbox drains last, after sync has caught up, which is the order section 158 names.
+   */
   #handleReset(): void {
-    const topics = Array.from(this.#subscribedTopics.values());
-    if (topics.length > 0 && this.#ctx !== null) {
+    if (this.#ctx === null) {
+      return;
+    }
+    const buckets = new Map<number, Topic[]>();
+    for (const topic of this.#subscribedTopics.values()) {
+      let bucket = buckets.get(topic.kind);
+      if (bucket === undefined) {
+        bucket = [];
+        buckets.set(topic.kind, bucket);
+      }
+      bucket.push(topic);
+    }
+    // User before Room before Conversation: the later kinds' events can reference the earlier
+    // kinds' state, never the other way around.
+    const order = [TopicKind.User, TopicKind.Room, TopicKind.Conversation, TopicKind.Game];
+    const ordered: Topic[] = [];
+    for (const kind of order) {
+      const bucket = buckets.get(kind);
+      if (bucket !== undefined) {
+        ordered.push(...bucket);
+      }
+    }
+    if (ordered.length > 0) {
       // Fire-and-forget: a failure here is routed to the event-error sink, not thrown into the transport.
       this.#ctx.rpc
-        .call(OP.SUBSCRIBE, encodeSubscribeRequest, decodeSubscribeResponse, { topics })
+        .call(OP.SUBSCRIBE, encodeSubscribeRequest, decodeSubscribeResponse, { topics: ordered })
+        .then(() => {
+          // Subscriptions are live again, so the outbox may leave — after sync, per section 158.
+          // The app's resync runs concurrently (it was notified in parallel below); its sync
+          // reads race the drain by design, because an idempotent send that overtakes a sync
+          // read is answered by the later sync, not duplicated.
+          this.#outbox?.drain();
+        })
         .catch((cause: unknown) => this.#options.onEventError?.(OP.SUBSCRIBE, cause));
+    } else {
+      this.#outbox?.drain();
     }
     this.#options.onReset?.();
   }
@@ -1281,6 +1435,26 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
 /** The tracking key for a subscribed topic. */
 function topicKey(topic: Topic): string {
   return `${topic.kind}:${topic.id}`;
+}
+
+/**
+ * Wires the sync gate to the document's visibility, when there is a document to wire.
+ *
+ * Returns a teardown function (null when there was nothing to wire — a non-browser host drives
+ * the gate through {@link MigoClient.setPageVisible} instead). The listener is added once per
+ * session and torn down on disconnect, so a reconnect does not stack a second copy of itself
+ * onto the same document.
+ */
+function wireVisibility(gate: SyncGate): (() => void) | null {
+  const document = (globalThis as { document?: Document }).document;
+  if (document === undefined || typeof document.addEventListener !== 'function') {
+    return null;
+  }
+  const onVisibility = (): void => {
+    gate.setOpen(document.visibilityState === 'visible');
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  return () => document.removeEventListener('visibilitychange', onVisibility);
 }
 
 /** The cache key for one device's bundle. */
