@@ -27,15 +27,15 @@ object Flags {
     /** A fragment index and total precede the payload. */
     const val FRAGMENT = 0x20
 
-    /** Reserved for a future version. Setting it is a decode error today. */
-    const val RESERVED_6 = 0x40
+    /** varint frame_seq, varint sent_at_delta, and optional varint payload_len precede the payload. */
+    const val METADATA = 0x40
 
     /** Reserved as a flags-extension escape. Setting it is a decode error today. */
     const val FLAGS_EXT = 0x80
 
     /** Bits that must be zero in MWP/1. */
-    const val RESERVED_MASK = RESERVED_6 or FLAGS_EXT
+    const val RESERVED_MASK = FLAGS_EXT
 
     /** Bits this version defines. */
-    const val KNOWN_MASK = COMPRESSED or TRACED or BATCH or ERROR or ACK_REQUIRED or FRAGMENT
+    const val KNOWN_MASK = COMPRESSED or TRACED or BATCH or ERROR or ACK_REQUIRED or FRAGMENT or METADATA
 }

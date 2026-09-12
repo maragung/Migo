@@ -20,6 +20,7 @@ pub mod dispatch;
 pub mod message_sweep;
 pub mod ports;
 pub mod room_presence;
+pub mod room_relay;
 
 mod compose;
 pub mod mesh;

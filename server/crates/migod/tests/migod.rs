@@ -880,6 +880,13 @@ async fn dispatcher() -> DispatcherHarness {
         // An unbound gateway handle: these tests exercise dispatch and topic authorization, not
         // the out-of-band publish path, so its publishes are the correct no-ops.
         std::sync::Arc::new(migod::room_presence::GatewayHandle::new()),
+        // A relay over the app's own mesh: these tests authorize and dispatch, so the
+        // subscribe half's asks are what a real node would make and the watch table is
+        // empty because no peer ever answers.
+        std::sync::Arc::new(migod::room_relay::RoomRelay::new(
+            app.federation.clone(),
+            app_store.clone(),
+        )),
     );
     DispatcherHarness { app, dispatcher }
 }

@@ -627,6 +627,15 @@ impl App {
         )
         .context("cannot open the federation mesh")?;
 
+        // Tiered room fanout (section 170): the relay the dispatcher's publish paths
+        // forward through and the mesh transport's ingest path registers watchers into —
+        // one table, two halves, both held by the composition root because neither the
+        // dispatcher nor the transport may own the other.
+        let room_relay = Arc::new(crate::room_relay::RoomRelay::new(
+            federation.clone(),
+            store.clone(),
+        ));
+
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
@@ -654,6 +663,7 @@ impl App {
             bots.clone(),
             calls.clone(),
             Arc::clone(&gateway_handle),
+            Arc::clone(&room_relay),
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
@@ -746,6 +756,7 @@ impl App {
         let mesh_transport = Arc::new(crate::mesh::MeshTransport::new(
             Arc::clone(&federation),
             Some(Arc::clone(&gateway)),
+            Some(Arc::clone(&room_relay)),
             &registry,
             clock.clone(),
         ));
