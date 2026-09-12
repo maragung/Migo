@@ -350,23 +350,29 @@ async fn the_roster_hears_the_second_join_on_the_conversation_topic() {
         .await;
     let conversation_id = summary.conversation_id;
 
-    // The founder joins, and the second member subscribes to the conversation
-    // the way a client that has loaded it does.
+    // The founder subscribes to the conversation the way a client that has
+    // loaded it does — the announcement this test waits for is published to
+    // the conversation's topic, and a session that never subscribed hears
+    // nothing.
+    founder_session
+        .subscribe_conversation(conversation_id, 12)
+        .await;
+
     let call_id = migo_core::Id::from(0x5f01u128);
     let _: migo_protocol::CallTurnResponse = founder_session
-        .ask(Opcode::CallSfuJoin, 12, &sfu_join(call_id, conversation_id))
+        .ask(Opcode::CallSfuJoin, 13, &sfu_join(call_id, conversation_id))
         .await;
     // Drain the founder's own roster event so it cannot be mistaken for the
     // announcement below.
     let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
     second_session
-        .subscribe_conversation(conversation_id, 13)
+        .subscribe_conversation(conversation_id, 14)
         .await;
 
     // The second member joins; the founder — subscribed to the conversation
     // — hears the announcement naming the joiner.
     let _: migo_protocol::CallTurnResponse = second_session
-        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .ask(Opcode::CallSfuJoin, 15, &sfu_join(call_id, conversation_id))
         .await;
 
     let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
@@ -453,16 +459,24 @@ async fn a_leave_tells_the_roster_and_the_last_leave_retires_the_call() {
         .await;
     let conversation_id = summary.conversation_id;
 
+    // The founder subscribes to the conversation the way a client that has
+    // loaded it does — the departure this test waits for is published to the
+    // conversation's topic, and a session that never subscribed hears
+    // nothing.
+    founder_session
+        .subscribe_conversation(conversation_id, 12)
+        .await;
+
     let call_id = migo_core::Id::from(0x5f03u128);
     let _: migo_protocol::CallTurnResponse = founder_session
-        .ask(Opcode::CallSfuJoin, 12, &sfu_join(call_id, conversation_id))
+        .ask(Opcode::CallSfuJoin, 13, &sfu_join(call_id, conversation_id))
         .await;
     let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
     second_session
-        .subscribe_conversation(conversation_id, 13)
+        .subscribe_conversation(conversation_id, 14)
         .await;
     let _: migo_protocol::CallTurnResponse = second_session
-        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .ask(Opcode::CallSfuJoin, 15, &sfu_join(call_id, conversation_id))
         .await;
     // Drain each session's own roster event.
     let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
@@ -473,7 +487,7 @@ async fn a_leave_tells_the_roster_and_the_last_leave_retires_the_call() {
     let _: migo_protocol::Acknowledged = second_session
         .ask(
             Opcode::CallEnd,
-            15,
+            16,
             &migo_protocol::CallEnd { call_id, reason: 0 },
         )
         .await;
