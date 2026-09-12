@@ -2406,3 +2406,262 @@ async fn error_frames_carry_only_their_public_face() {
         );
     }
 }
+
+// ===========================================================================
+// Section 154 — batching and coalescing on the writer.
+//
+// The mailbox already coalesces: a Coalescable frame with a key replaces the
+// older frame for that key in place, so a burst costs one slot, not a hundred.
+// What was missing is the second half — batching — whose wire half
+// (`migo_wire::encode_batch`) was BUILT and whose receivers (web, Android)
+// were BUILT, but no sender ever produced an envelope. These tests pin the
+// sender: a session whose HELLO asked for the BATCHING feature gets its
+// drained frames packed into envelopes (one send, not N), a session that did
+// not ask keeps bare frames, and the elements inside an envelope come out in
+// the mailbox's order with nothing reordered, dropped, or invented.
+// ===========================================================================
+
+/// A dispatcher that, on each application opcode, publishes a burst of
+/// Coalescable presence updates for *distinct* keys — so coalescing cannot
+/// collapse them and the burst's full width reaches the writer — followed by
+/// one Critical frame. The presence frames are the burst batching exists for;
+/// the Critical frame proves a burst does not hold delivery of the one class
+/// that must never be delayed past its own queue turn.
+struct Burst {
+    topic: Topic,
+}
+
+#[async_trait]
+impl Dispatcher for Burst {
+    async fn dispatch(&self, context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        for i in 0..8_u64 {
+            let presence = PresenceUpdate {
+                state: PresenceState::Online,
+                custom_status: None,
+            };
+            // Distinct keys: the room-counter shape (key per room), so the
+            // mailbox's coalescing cannot fold the burst before the writer
+            // sees it. The envelope, not the queue, is under test.
+            context.publish(
+                &self.topic,
+                Opcode::PresenceEvent,
+                &presence,
+                Some(0x1000 + i),
+            )?;
+        }
+        let message = MessageEvent {
+            message_id: id(0xFEED),
+            conversation_id: id(0xBEEF),
+            seq: 1,
+            sender_id: id(ACCOUNT),
+            sender_device: device_of(ACCOUNT),
+            sender_key_id: Some(1),
+            kind: MessageKind::Text,
+            created_at: Timestamp::from_millis(0),
+            envelope: vec![0u8; 1],
+            reply_to: None,
+            edited_at: None,
+            deleted: None,
+        };
+        context.publish(&self.topic, Opcode::MessageEvent, &message, None)?;
+        Ok(())
+    }
+
+    async fn authorize_topics(&self, _request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        vec![true; topics.len()]
+    }
+}
+
+/// A HELLO that asks for given feature bits, carrying the valid inline token.
+fn hello_with_features(features: u64) -> Hello {
+    Hello {
+        protocol_version: PROTOCOL_VERSION,
+        features,
+        access_token: Some(VALID_TOKEN.to_string()),
+        device_id: Some(device_of(ACCOUNT)),
+        ..Default::default()
+    }
+}
+
+/// The sub-frames of every BATCH envelope the server sent, decoded.
+fn batch_elements(frames: &[Frame]) -> Vec<Frame> {
+    let mut elements = Vec::new();
+    for frame in frames {
+        if frame.header.is_batch() {
+            elements.extend(migo_wire::decode_batch(frame).expect("a sent batch must unpack"));
+        }
+    }
+    elements
+}
+
+#[tokio::test]
+async fn a_batching_session_receives_one_envelope_per_burst() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(Burst {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 100, &ProfileRequest::default());
+    h.serve(&pipe).await;
+
+    let sent = pipe.sent();
+    let elements = batch_elements(&sent);
+    assert!(
+        elements.len() >= 9,
+        "the burst must arrive — nine frames per dispatch, got {} elements",
+        elements.len()
+    );
+    let presence = elements
+        .iter()
+        .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent))
+        .count();
+    assert!(
+        presence >= 8,
+        "every presence update must be delivered, got {presence}"
+    );
+    let messages = elements
+        .iter()
+        .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::MessageEvent))
+        .count();
+    assert!(
+        messages >= 1,
+        "the Critical frame must ride inside an envelope"
+    );
+
+    // The shape the metric exists for: at least one BATCH envelope left the
+    // node, and every envelope is counted.
+    let envelopes = sent.iter().filter(|frame| frame.header.is_batch()).count();
+    assert!(
+        envelopes >= 1,
+        "a burst of nine must not send as nine frames"
+    );
+    let batches = h.counter("migo_gateway_batches_out_total", &[]);
+    assert!(batches >= 1, "every envelope must be counted: {batches}");
+}
+
+#[tokio::test]
+async fn a_session_that_did_not_ask_keeps_bare_frames() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(Burst {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    let h = builder.build();
+    let pipe = Pipe::new();
+    // No BATCHING bit — the desktop's HELLO, exactly.
+    pipe.client(Opcode::Hello, 1, &hello_with_features(0));
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 100, &ProfileRequest::default());
+    h.serve(&pipe).await;
+
+    let sent = pipe.sent();
+    assert!(
+        sent.iter().all(|frame| !frame.header.is_batch()),
+        "a client that never asked for the feature must never see an envelope"
+    );
+    let presence = sent
+        .iter()
+        .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent))
+        .count();
+    assert!(presence >= 8, "the burst still arrives, bare: {presence}");
+    assert_eq!(
+        h.counter("migo_gateway_batches_out_total", &[]),
+        0,
+        "no envelope, no batch metric"
+    );
+}
+
+#[tokio::test]
+async fn a_batched_burst_preserves_the_mailbox_order() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(Burst {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 100, &ProfileRequest::default());
+    h.serve(&pipe).await;
+
+    // Order across the whole drain, envelopes and bare frames alike, is the
+    // queue's order: the eight presence events precede the Critical message
+    // that was published after them, because the elements of an envelope ride
+    // in the order they were pushed — a receiver that dispatches as it
+    // unpacks cannot observe the burst reordered.
+    let everything: Vec<Frame> = pipe
+        .sent()
+        .into_iter()
+        .flat_map(|frame| {
+            if frame.header.is_batch() {
+                migo_wire::decode_batch(&frame).expect("a sent batch must unpack")
+            } else {
+                vec![frame]
+            }
+        })
+        .collect();
+    let message_position = everything
+        .iter()
+        .position(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::MessageEvent))
+        .expect("the Critical frame must be in the drain");
+    let burst_presence_before: usize = everything
+        .iter()
+        .take(message_position)
+        .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent))
+        .count();
+    assert_eq!(
+        burst_presence_before, 8,
+        "all eight presence frames precede the message they preceded in the queue"
+    );
+    let out = h.counter("migo_gateway_frames_out_total", &[]);
+    assert!(out >= 9, "the counted frames match what was drained: {out}");
+}

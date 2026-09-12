@@ -38,6 +38,9 @@ pub(crate) struct Settings {
     pub(crate) lagging_deadline_ms: i64,
     /// Whether outbound frames may be compressed per section 155.
     pub(crate) compression: bool,
+    /// How long the writer holds a flush open to collect more frames into one `BATCH`
+    /// envelope (section 154), for sessions that negotiated the feature.
+    pub(crate) batch_linger: Duration,
     /// How long a connection has to complete its handshake before it is dropped.
     pub(crate) handshake_timeout: Duration,
 }
@@ -61,6 +64,7 @@ impl Settings {
             resume_buffer_frames: config.resume_buffer_frames,
             lagging_deadline_ms: i64::try_from(config.lagging_deadline_ms).unwrap_or(i64::MAX),
             compression: config.compression_enabled,
+            batch_linger: Duration::from_millis(config.batch_linger_ms),
             handshake_timeout: Duration::from_millis(config.handshake_timeout_ms),
         }
     }

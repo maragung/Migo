@@ -84,6 +84,11 @@ const FEATURES: u64 = migo_protocol::features::CALLS;
 /// the second option (section 138).
 fn advertised_features(quic_enabled: bool, tcp_enabled: bool) -> u64 {
     let mut features = FEATURES;
+    // The gateway packs outbound frames into BATCH envelopes (section 154), and every client
+    // already unpacks them — the web SDK, Android, and desktop all advertise the bit and the
+    // web and Android transports inflate a batch on arrival. Advertising it here is what turns
+    // the writer's coalescing on; a client that did not ask keeps one frame per send.
+    features |= migo_protocol::features::BATCHING;
     if quic_enabled {
         features |= migo_protocol::features::QUIC;
     }

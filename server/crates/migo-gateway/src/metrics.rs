@@ -215,6 +215,7 @@ pub(crate) struct Meters {
     sessions_closed: Vec<Arc<Counter>>,
     frames_in: Arc<Counter>,
     frames_out: Arc<Counter>,
+    batches_out: Arc<Counter>,
     frames_dropped: Vec<Arc<Counter>>,
     resume: Vec<Arc<Counter>>,
     handshake_rejected: Vec<Arc<Counter>>,
@@ -265,6 +266,13 @@ impl Meters {
             frames_out: registry.counter(
                 "migo_gateway_frames_out_total",
                 "Frames written to clients.",
+                &[],
+            ),
+            batches_out: registry.counter(
+                "migo_gateway_batches_out_total",
+                "BATCH envelopes written to clients that negotiated the feature. Every element \
+                 is already counted in frames_out, so this series measures the sends batching \
+                 saved, not traffic.",
                 &[],
             ),
             frames_dropped: per_variant(
@@ -335,6 +343,10 @@ impl Meters {
 
     pub(crate) fn frames_out(&self, n: u64) {
         self.frames_out.add(n);
+    }
+
+    pub(crate) fn batches_out(&self, n: u64) {
+        self.batches_out.add(n);
     }
 
     pub(crate) fn frame_dropped(&self, class: Dropped) {
