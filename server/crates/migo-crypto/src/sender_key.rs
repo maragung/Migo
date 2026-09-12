@@ -878,6 +878,14 @@ mod tests {
         assert_eq!(receiver.group_key_epoch(), 1);
 
         sender.rotate(2, &mut random);
+        // The distribution is taken at rotation time, before anything is
+        // sealed under the new chain: it names the position the chain starts
+        // at, and adopting it afterwards lets the receiver derive the keys for
+        // the messages it missed. Taking it after the missed message would
+        // name one position further on, and the receiver would rightly refuse
+        // the missed message as a replay — a frame numbered behind the chain
+        // head is indistinguishable from one, which is decrypt's own guard.
+        let resync = sender.distribution(&identity);
         let undelivered = sender
             .encrypt(&identity, GROUP, b"missed rotation")
             .expect("encrypts");
@@ -888,7 +896,7 @@ mod tests {
         );
 
         receiver
-            .adopt(&sender.distribution(&identity))
+            .adopt(&resync)
             .expect("a newer distribution is adopted");
         assert_eq!(receiver.group_key_epoch(), 2);
         assert_eq!(
