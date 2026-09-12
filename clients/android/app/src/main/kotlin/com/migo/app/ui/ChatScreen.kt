@@ -2,6 +2,7 @@ package com.migo.app.ui
 
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -1681,6 +1682,11 @@ private fun Composer(
                             onVoiceNote()
                             onMicHeld(true)
                             cancelSlide = false
+                            // The hold's length decides the release's meaning, so the wall clock
+                            // starts the moment the press does. The event's own timestamps are a
+                            // newer API than this compose version carries; the platform's uptime
+                            // clock is the same measure on every version the app runs on.
+                            val downAt = SystemClock.uptimeMillis()
                             val cancelPx = MIC_CANCEL_SLIDE.toPx()
                             val lockPx = MIC_LOCK_SLIDE.toPx()
                             while (true) {
@@ -1706,7 +1712,7 @@ private fun Composer(
                                 if (!pressed) {
                                     if (cancelSlide) {
                                         onMicCancel()
-                                    } else if (event.uptimeMillis - down.uptimeMillis >= MIC_QUICK_TAP_MS) {
+                                    } else if (SystemClock.uptimeMillis() - downAt >= MIC_QUICK_TAP_MS) {
                                         onMicReleaseSend()
                                     } else {
                                         // A quick tap: the two-step mode's start. The recording
