@@ -4563,7 +4563,7 @@ Idempotency record disimpan minimal selama jendela retry yang mungkin, dan untuk
 
 154. BATCHING AND COALESCING
 
-STATUS: SCHEMA.
+STATUS: BUILT. Envelope di migo-wire (encode_batch/decode_batch, batas 256, larangan nesting) sudah lama ada, dan web serta Android sudah membukanya di transport. Yang baru dibangun adalah pengirimnya: gateway writer memegang flush terbuka sepanjang batch_linger_ms dari config, mengumpulkan apa yang tiba dalam jendela itu, lalu mengirimnya sebagai satu envelope BATCH per chunk 256 — hanya untuk session yang HELLO-nya meminta bit BATCHING dan node yang mengiklankan bit itu. Coalescing per key sudah BUILT lebih dulu di outbound queue per session (nilai terbaru per key menimpa di tempat). Metrik baru migo_gateway_batches_out_total menghitung envelope yang keluar.
 
 Batching:
 

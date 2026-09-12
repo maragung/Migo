@@ -44,6 +44,7 @@ use migo_protocol::{
     PROTOCOL_VERSION,
 };
 use migo_ratelimit::{BucketKey, TrustTier, Verdict};
+use migo_wire::limits::MAX_BATCH_ITEMS;
 
 use crate::codec::{encode_error, encode_message};
 use crate::config::MAX_SUBSCRIPTIONS;
@@ -66,6 +67,7 @@ pub(crate) async fn run<T: Transport>(gateway: &GatewayInner, transport: T, base
         gateway,
         transport,
         compression: gateway.settings.compression,
+        batching: false,
         base,
     };
     connection.drive().await;
@@ -123,6 +125,10 @@ struct Connection<'g, T: Transport> {
     transport: T,
     base: RequestContext,
     compression: bool,
+    /// Whether this connection negotiated the `BATCHING` feature bit. Batching is a sender-side
+    /// concern only — a client that did not ask for it keeps one frame per send, because an
+    /// envelope it cannot unpack is not an optimisation but an outage.
+    batching: bool,
 }
 
 impl<T: Transport> Connection<'_, T> {
@@ -187,6 +193,12 @@ impl<T: Transport> Connection<'_, T> {
         let (phase, identity) = self
             .inline_auth(hello.access_token.as_deref(), hello.device_id, now)
             .await;
+
+        // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
+        // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
+        // writer never re-derives it and a session's frames keep one shape for its whole life.
+        self.batching = hello.features & migo_protocol::features::BATCHING != 0
+            && self.gateway.features & migo_protocol::features::BATCHING != 0;
 
         if !self
             .send_welcome(
@@ -649,18 +661,148 @@ impl<T: Transport> Connection<'_, T> {
 
     /// Drains every queued frame to the socket. Returns `false` if the socket write failed, which
     /// the caller turns into a transport-error close.
+    ///
+    /// When the connection negotiated batching, the drain holds itself open for
+    /// [`batch_linger`](crate::config::Settings::batch_linger): the mailbox's current contents are
+    /// taken, then the writer waits — no longer than the linger — for the burst that is still
+    /// arriving, because twenty presence updates land in the same fifteen milliseconds and the
+    /// whole point of section 154 is that they leave as one envelope, not twenty sends. The
+    /// linger is short on purpose: latency people can feel starts around 100 ms, so the wait buys
+    /// most of the coalescing at a cost nobody notices. What the window collected is packed with
+    /// [`migo_wire::encode_batch`], which enforces the cap of 256 elements, the frame budget, and
+    /// the no-nesting rule; a collection of one sends bare, since wrapping a lone frame adds
+    /// bytes and buys nothing. Order is the mailbox's order throughout, so nothing a client could
+    /// notice is reordered.
     async fn flush(&mut self, outbound: &Outbound) -> bool {
-        let ready = outbound.take_ready();
+        let mut ready = outbound.take_ready();
+        if !self.batching {
+            if ready.is_empty() {
+                return true;
+            }
+            let count = ready.len() as u64;
+            for bytes in ready {
+                if self.transport.send(bytes).await.is_err() {
+                    return false;
+                }
+            }
+            self.gateway.meters.frames_out(count);
+            return true;
+        }
+
+        let linger = tokio::time::sleep(self.gateway.settings.batch_linger);
+        tokio::pin!(linger);
+        // The window: take what is queued, then keep taking while the linger has time left. A
+        // push that happened between the take and the wait is not lost — `Notify` holds its
+        // permit until a waiter reads it — and a closed mailbox ends the window early, since
+        // there will never be more to collect. What the window collects may exceed one
+        // envelope's worth; the send chunks it.
+        loop {
+            if outbound.is_closed() {
+                break;
+            }
+            tokio::select! {
+                () = &mut linger => break,
+                () = outbound.wait() => {
+                    let more = outbound.take_ready();
+                    if more.is_empty() && outbound.is_closed() {
+                        break;
+                    }
+                    ready.extend(more);
+                }
+            }
+        }
         if ready.is_empty() {
             return true;
         }
+
         let count = ready.len() as u64;
-        for bytes in ready {
-            if self.transport.send(bytes).await.is_err() {
-                return false;
+        // The mailbox holds already-encoded bytes; the envelope builder speaks frames. The
+        // round trip cannot fail — everything in the queue was built by this node's own
+        // encoders — but if it ever did, the bytes go out bare rather than not at all: the
+        // mailbox's contract is delivery, and batching is a tax on top, never a gate.
+        let frames = ready
+            .iter()
+            .map(|bytes| migo_wire::Frame::decode(bytes.clone()))
+            .collect::<Result<Vec<_>, _>>();
+        let sent = match frames {
+            Ok(frames) => self.send_batched(&frames).await,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "a queued frame did not decode; sending the drain bare"
+                );
+                let mut sent = true;
+                for bytes in ready {
+                    if self.transport.send(bytes).await.is_err() {
+                        sent = false;
+                        break;
+                    }
+                }
+                sent
             }
+        };
+        if !sent {
+            return false;
         }
         self.gateway.meters.frames_out(count);
+        true
+    }
+
+    /// Sends the collected frames as `BATCH` envelopes, chunked to the item cap. A chunk of one
+    /// sends bare — [`migo_wire::encode_batch`] itself refuses to wrap a lone frame — and a
+    /// chunk whose envelope will not build, a frame near the byte budget, sends its elements
+    /// one by one for the same reason as a failed decode: the frame must arrive.
+    async fn send_batched(&mut self, frames: &[migo_wire::Frame]) -> bool {
+        for chunk in frames.chunks(MAX_BATCH_ITEMS) {
+            match migo_wire::encode_batch(chunk) {
+                Ok(envelope) => match envelope.encode() {
+                    Ok(bytes) => {
+                        if chunk.len() > 1 {
+                            self.gateway.meters.batches_out(1);
+                        }
+                        if self.transport.send(bytes).await.is_err() {
+                            return false;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            "a batch envelope overran the frame budget; sending its elements bare"
+                        );
+                        if !self.send_bare(chunk).await {
+                            return false;
+                        }
+                    }
+                },
+                Err(error) => {
+                    tracing::debug!(?error, "a batch would not build; sending its elements bare");
+                    if !self.send_bare(chunk).await {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Sends frames one at a time, the pre-section-154 shape, for the paths batching cannot
+    /// serve.
+    async fn send_bare(&mut self, frames: &[migo_wire::Frame]) -> bool {
+        for frame in frames {
+            match frame.encode() {
+                Ok(bytes) => {
+                    if self.transport.send(bytes).await.is_err() {
+                        return false;
+                    }
+                }
+                Err(error) => {
+                    // An element that cannot re-encode was already sent once in its original
+                    // bytes by every other path; only the decode round trip lands here, and the
+                    // honest response to the impossible is to say so and keep the session.
+                    tracing::warn!(?error, "a frame could not be re-encoded for a bare send");
+                }
+            }
+        }
         true
     }
 
