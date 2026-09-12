@@ -129,6 +129,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.webrtc.EglBase
+import org.webrtc.VideoTrack
 
 /**
  * Everything the screens are allowed to know, and every action they are allowed to take.
@@ -199,18 +201,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var callStateJob: Job? = null
 
     /**
-     * A voice call waiting on the microphone permission the activity has not asked for yet, as
-     * (conversation, peer). The permission dialog is the activity's to show; what to do with its
-     * answer is this class's to know.
-     */
-    private var stagedVoiceCall: Pair<Id, Id>? = null
-
-    /**
      * A voice note waiting on the microphone permission, as the conversation it will record into.
      * The same moment-of-use pattern the staged call keeps, shared with the same permission — the
      * recording that needs the microphone is the one that explains why.
      */
     private var stagedVoiceNote: Id? = null
+
+    /**
+     * The call the permission dialog is being asked for, as (conversation, (peer, kind)): one
+     * field serves both buttons, because the dialog's answer is one grant either way and the
+     * kind is what the resumed call needs to remember.
+     */
+    private var stagedCall: Pair<Id, Pair<Id, CallMediaKind>>? = null
 
     /** The live recording, or null while the composer is the text field. */
     private var noteRecorder: VoiceNoteRecorder? = null
@@ -762,12 +764,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Places a video call to the peer of a direct conversation: the microphone *and* the camera
+     * must already be permitted -- see [stageVideoCall] for the path that asks for both. Unlike
+     * the answer path, placement does not fall back to voice when the camera cannot open: a
+     * person who pressed the video button asked for video, and silently handing them a voice
+     * call would be the interface lying about what it did.
+     */
+    fun startVideoCall(conversationId: Id, peerId: Id) {
+        callManager?.startCall(conversationId, peerId, CallMediaKind.Video)
+    }
+
+    /**
      * Stages a voice call whose microphone permission has not been granted yet, so the permission
      * dialog's answer can finish what the call button started: the staged conversation and peer
      * are what [microphonePermission] resumes.
      */
     fun stageVoiceCall(conversationId: Id, peerId: Id) {
-        stagedVoiceCall = conversationId to peerId
+        stagedCall = conversationId to (peerId to CallMediaKind.Audio)
+    }
+
+    /**
+     * Stages a video call whose camera (and microphone) permission has not been granted yet.
+     * The staging carries the kind, so one permission path serves both buttons: the dialog's
+     * grant is answered by [microphonePermission] resuming exactly what was asked for.
+     */
+    fun stageVideoCall(conversationId: Id, peerId: Id) {
+        stagedCall = conversationId to (peerId to CallMediaKind.Video)
     }
 
     /**
@@ -777,14 +799,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * with its refusal stated in the banner a refused send would use.
      */
     fun microphonePermission(granted: Boolean) {
-        val staged = stagedVoiceCall
-        stagedVoiceCall = null
+        val staged = stagedCall
+        stagedCall = null
         val stagedNote = stagedVoiceNote
         stagedVoiceNote = null
         when {
-            staged != null && granted -> startVoiceCall(staged.first, staged.second)
+            staged != null && granted ->
+                if (staged.second.second == CallMediaKind.Video) {
+                    startVideoCall(staged.first, staged.second.first)
+                } else {
+                    startVoiceCall(staged.first, staged.second.first)
+                }
+
             staged != null -> callManager?.placementFailed(MICROPHONE_UNAVAILABLE)
             stagedNote != null && granted -> startVoiceNote()
+            stagedNote != null -> signedIn {
+                it.copy(failure = "The microphone permission is needed to record a voice note.")
+            }
+        }
+    }
+
+    /**
+     * The call permission launcher's answer, for the video call's two-permission dialog: the
+     * microphone is the call itself (its refusal is stated on the call screen, exactly as a
+     * voice call's is), while the camera is the video half — refused, the call still places,
+     * because the manager's media path simply attaches no camera and the answer's fewer
+     * m-lines are how WebRTC says "audio only". A voice-call staging never reaches here, so
+     * the camera grant is only ever read for a staging that asked for it.
+     */
+    fun callPermissions(microphoneGranted: Boolean, cameraGranted: Boolean) {
+        val staged = stagedCall
+        stagedCall = null
+        val stagedNote = stagedVoiceNote
+        stagedVoiceNote = null
+        when {
+            staged != null && microphoneGranted ->
+                if (staged.second.second == CallMediaKind.Video) {
+                    startVideoCall(staged.first, staged.second.first)
+                } else {
+                    startVoiceCall(staged.first, staged.second.first)
+                }
+
+            staged != null -> callManager?.placementFailed(MICROPHONE_UNAVAILABLE)
+            stagedNote != null && microphoneGranted -> startVoiceNote()
             stagedNote != null -> signedIn {
                 it.copy(failure = "The microphone permission is needed to record a voice note.")
             }
@@ -820,6 +877,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissCallScreen() {
         callManager?.dismissCall()
     }
+
+    /** This side's camera track on the live call, for the call screen's self-view. Null off one. */
+    val localVideo: VideoTrack?
+        get() = callManager?.localVideo
+
+    /** The peer's camera track once it arrives, for the call screen's main view. */
+    val remoteVideo: StateFlow<VideoTrack?>
+        get() = callManager?.remoteVideo ?: MutableStateFlow(null)
+
+    /**
+     * The session's shared video GL context, for the surfaces the call screens initialize.
+     * Null off a session, which is also when no call screen exists to ask for it.
+     */
+    val callEglContext: EglBase.Context?
+        get() = callManager?.eglContext
 
     /**
      * The display name a call screen shows for an account: the profile name the session has
@@ -4132,7 +4204,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // scope -- the one still alive when the view model is being cleared.
         callManager?.close()
         callManager = null
-        stagedVoiceCall = null
+        stagedCall = null
         // A recording in flight dies with the session it was for; the recorder deletes its own
         // file, so there is nothing on disk to clean up here.
         noteCapJob?.cancel()

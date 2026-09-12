@@ -52,14 +52,23 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AddIceObserver
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.Camera2Enumerator
+import org.webrtc.CameraVideoCapturer
 import org.webrtc.DataChannel
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SurfaceTextureHelper
+import org.webrtc.VideoSource
+import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
@@ -75,11 +84,14 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * is established and closed where it ends; the screens never see the peer connection, only the
  * state and the action methods.
  *
- * This build carries **voice only**: the UI offers the call button on a direct chat and it always
- * places audio. A *video* invite from a newer peer is still answered -- an answer with fewer
- * m-lines than the offer rejects the extra ones, which is ordinary WebRTC, so the caller keeps the
- * conversation and simply sees no video -- and the [ActiveCall.mediaKind] field keeps the invited
- * kind so a future video build has a place to land.
+ * This build carries **voice and video** for 1-on-1 calls, mirroring the web overlay: the call
+ * button offers both kinds, a video call opens the front camera as a second track beside the
+ * microphone's, and the screen shows the peer full-bleed with this side's camera as a small
+ * self-view. A *video* invite answered on a device with no camera (or a camera that cannot open)
+ * is still answered -- audio carries the conversation and the caller simply sees no video, the
+ * answer's fewer m-lines rejecting the extra ones, which is ordinary WebRTC. Placement does not
+ * fall back the same way: a person who pressed the video button asked for video, and silently
+ * handing them a voice call would be the interface lying about what it did.
  *
  * # Why the caller cannot send ICE until the answer arrives
  *
@@ -135,7 +147,7 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * recomposition.
  */
 class CallManager(
-    context: Context,
+    private val context: Context,
     private val client: MigoClient,
     private val accountId: Id,
     /** The session's own scope: every ordinary launch, and every timer, dies with it. */
@@ -219,6 +231,12 @@ class CallManager(
      */
     private companion object {
         @Volatile private var webrtcInitialized = false
+
+        /** What the camera is asked for on a video call: the web build's own stage size, and a
+         * resolution low enough that the encoder keeps up on the phones that need it most. */
+        const val VIDEO_WIDTH = 640
+        const val VIDEO_HEIGHT = 480
+        const val VIDEO_FPS = 30
     }
 
     /**
@@ -235,6 +253,40 @@ class CallManager(
     @Volatile private var peer: PeerConnection? = null
     @Volatile private var audioSource: AudioSource? = null
     @Volatile private var audioTrack: AudioTrack? = null
+    @Volatile private var videoCapturer: CameraVideoCapturer? = null
+    @Volatile private var videoHelper: SurfaceTextureHelper? = null
+    @Volatile private var videoSource: VideoSource? = null
+    @Volatile private var videoTrack: VideoTrack? = null
+
+    /**
+     * The shared OpenGL context every video surface in this app renders through. One per manager
+     * (and so per session), created lazily on first use and released with the factory: the native
+     * resources an `EglBase` pins must not leak per call, and the surfaces the UI attaches
+     * (local preview, remote renderer) all share the one context so the frames never copy through
+     * the CPU.
+     */
+    @Volatile private var eglBase: EglBase? = null
+
+    /**
+     * The shared GL context's handle, for the surfaces the call screens attach. The context
+     * itself stays the manager's -- created with the video factories, released with the factory
+     * -- so a screen can never outlive the resources it renders through.
+     */
+    val eglContext: EglBase.Context?
+        get() = eglBase?.eglBaseContext
+
+    /** The session's local camera track, for the call screen's self-view. Null on a voice call. */
+    val localVideo: VideoTrack?
+        get() = videoTrack
+
+    /**
+     * The peer's camera track once it arrives, for the call screen's main view. The [StateFlow]
+     * carries it because a track that lands mid-call must reach a screen that is already showing.
+     */
+    private val _remoteVideo = MutableStateFlow<VideoTrack?>(null)
+
+    /** See [_remoteVideo]. */
+    val remoteVideo: StateFlow<VideoTrack?> = _remoteVideo.asStateFlow()
 
     init {
         synchronized(CallManager::class.java) {
@@ -248,8 +300,16 @@ class CallManager(
             }
         }
         audioModule = JavaAudioDeviceModule.builder(context).createAudioDeviceModule()
+        // The video encoder and decoder factories need the shared GL context up front, so it is
+        // minted here with the factory rather than lazily at the first video call -- one context
+        // per session, shared by the factories and every surface the call screens attach.
+        eglBase = EglBase.create()
         factory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(audioModule)
+            .setVideoEncoderFactory(
+                DefaultVideoEncoderFactory(eglBase!!.eglBaseContext, true, true),
+            )
+            .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase!!.eglBaseContext))
             .createPeerConnectionFactory()
     }
 
@@ -306,9 +366,12 @@ class CallManager(
         active = null
         incoming = null
         _state.value = CallUiState()
-        // The native audio module and the factory are the session's own; a later session builds
-        // its own. Disposing them frees the native threads a leaked factory would pin forever.
+        // The native audio module, the video factories' GL context, and the factory itself are the
+        // session's own; a later session builds its own. Disposing them frees the native threads
+        // and the GL resources a leaked factory would pin forever.
         audioModule.release()
+        eglBase?.release()
+        eglBase = null
         factory.dispose()
     }
 
@@ -356,11 +419,8 @@ class CallManager(
                 adoptCallKey(callId, callKey)
 
                 val pc = createPeer(iceServersForCall(callId))
-                val source = factory.createAudioSource(MediaConstraints())
-                val track = factory.createAudioTrack("migo-voice", source)
-                pc.addTrack(track, listOf("migo"))
-                audioSource = source
-                audioTrack = track
+                val camera = if (mediaKind == CallMediaKind.Video) openFrontCamera() else null
+                attachMedia(pc, camera)
 
                 val offer = pc.offer()
                 pc.setLocalDescription(offer)
@@ -481,11 +541,21 @@ class CallManager(
                     ?: throw IOException("the call key has not arrived")
 
                 val pc = createPeer(iceServersForCall(invite.callId))
-                val source = factory.createAudioSource(MediaConstraints())
-                val track = factory.createAudioTrack("migo-voice", source)
-                pc.addTrack(track, listOf("migo"))
-                audioSource = source
-                audioTrack = track
+                // A video invite is answered with whatever camera this device can open: none, or
+                // one that fails to start, and the answer still goes out with the microphone's
+                // track alone -- the caller keeps the conversation and simply sees no video.
+                // Falling back here (and not on placement) is the web build's own rule: a person
+                // who tapped the accept button asked for the call, not the camera.
+                val camera = if (mediaKind == CallMediaKind.Video) {
+                    try {
+                        openFrontCamera()
+                    } catch (_: Exception) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                attachMedia(pc, camera)
 
                 val offer = decodeSdpDescription(
                     openCallSignal(invite.sealedOffer, callKey, invite.callId),
@@ -753,6 +823,20 @@ class CallManager(
         audioTrack = null
         audioSource?.dispose()
         audioSource = null
+        // The camera stops first -- a capturer stopped after its source is disposed is a native
+        // crash on some devices -- then the helper that carried its frames, then the track and
+        // the source, then the remote track is dropped from the state so no screen keeps
+        // rendering a dead one.
+        runCatching { videoCapturer?.stopCapture() }
+        videoCapturer?.dispose()
+        videoCapturer = null
+        videoHelper?.dispose()
+        videoHelper = null
+        videoTrack?.dispose()
+        videoTrack = null
+        videoSource?.dispose()
+        videoSource = null
+        _remoteVideo.value = null
         muted = false
         _state.update { it.copy(muted = false) }
     }
@@ -873,6 +957,48 @@ class CallManager(
     // --- the peer connection ---
 
     /**
+     * Opens the front camera, the one a call is made on. The back camera is a document scanner,
+     * not a face; a phone with no front camera (or no camera at all) is a voice call waiting to
+     * happen, so the failure is the caller's to fall back on.
+     */
+    private fun openFrontCamera(): CameraVideoCapturer {
+        val enumerator = Camera2Enumerator(context)
+        val front = enumerator.deviceNames.firstOrNull(enumerator::isFrontFacing)
+            ?: throw IOException("no front-facing camera")
+        return enumerator.createCapturer(front, null)
+    }
+
+    /**
+     * Builds this call's local media onto the peer connection: the microphone always, the camera
+     * when one was opened. The audio is unconditional -- a call without a microphone is not a
+     * call -- while `camera` is nullable because both a voice call and a video invite answered
+     * without a working camera reach here with nothing to attach, and the answer's fewer m-lines
+     * are how WebRTC itself says "audio only".
+     */
+    private fun attachMedia(pc: PeerConnection, camera: CameraVideoCapturer?) {
+        val source = factory.createAudioSource(MediaConstraints())
+        val track = factory.createAudioTrack("migo-voice", source)
+        pc.addTrack(track, listOf("migo"))
+        audioSource = source
+        audioTrack = track
+        if (camera == null) {
+            return
+        }
+        val surface = factory.createVideoSource(camera.isScreencast)
+        // The capturer hands its frames over through a surface-texture thread of its own, built
+        // on the shared GL context so the camera's frames reach the encoder without a CPU copy.
+        val helper = SurfaceTextureHelper.create("migo-video", eglBase?.eglBaseContext)
+        camera.initialize(helper, context, surface.capturerObserver)
+        camera.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+        val video = factory.createVideoTrack("migo-video", surface)
+        pc.addTrack(video, listOf("migo"))
+        videoCapturer = camera
+        videoHelper = helper
+        videoSource = surface
+        videoTrack = video
+    }
+
+    /**
      * The ICE servers for one call's peer connection: the configured TURN relays, then the public
      * STUN fallback. A TURN fetch that fails or returns nothing still yields the fallback -- a
      * call that must relay will fail to connect either way, but a call that only needed STUN must
@@ -955,6 +1081,18 @@ class CallManager(
         override fun onDataChannel(channel: DataChannel?) = Unit
 
         override fun onRenegotiationNeeded() = Unit
+
+        override fun onTrack(transceiver: RtpTransceiver?) {
+            // The peer's camera, arriving as a track on a call that may already be connected. The
+            // track is handed to the state the screen renders from rather than rendered here --
+            // the manager knows media, not surfaces -- and only a video track is news: the audio
+            // path is owned by the audio module the factory was built on. The SDK's transceiver
+            // has no track getter of its own; the receiver it wraps carries the incoming one.
+            val track = transceiver?.receiver?.track() ?: return
+            if (track is VideoTrack) {
+                _remoteVideo.value = track
+            }
+        }
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
             val call = active ?: return
