@@ -6937,6 +6937,8 @@ pub struct ProfileUpdate {
     pub who_can_add: Option<u32>,
     /// New search visibility.
     pub searchable: Option<bool>,
+    /// New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit.
+    pub custom_status: Option<String>,
 }
 
 impl Encode for ProfileUpdate {
@@ -6949,7 +6951,8 @@ impl Encode for ProfileUpdate {
             + usize::from(self.show_last_seen.is_some())
             + usize::from(self.who_can_message.is_some())
             + usize::from(self.who_can_add.is_some())
-            + usize::from(self.searchable.is_some());
+            + usize::from(self.searchable.is_some())
+            + usize::from(self.custom_status.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.display_name {
             w.optional(1, |w| {
@@ -6999,6 +7002,12 @@ impl Encode for ProfileUpdate {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.custom_status {
+            w.optional(9, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7021,6 +7030,7 @@ impl Decode for ProfileUpdate {
                 6 => out.who_can_message = Some(sub.read_u32()?),
                 7 => out.who_can_add = Some(sub.read_u32()?),
                 8 => out.searchable = Some(sub.read_bool()?),
+                9 => out.custom_status = Some(sub.read_string()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -11221,6 +11231,33 @@ impl Opcode {
             Self::StorePurchase => AuthLevel::User,
             Self::Entitlements => AuthLevel::User,
             Self::KickPointsBuy => AuthLevel::User,
+        }
+    }
+
+    /// The negotiable feature bit this opcode is gated on, if any (section 148).
+    ///
+    /// `None` for an opcode any authenticated client may send. `Some(bit)` names the
+    /// feature the registry ties the opcode to, so the dispatcher refuses it with
+    /// FEATURE_NOT_NEGOTIATED on a session whose negotiated set does not carry the bit —
+    /// the client asks for the feature in its HELLO rather than guessing at support.
+    #[must_use]
+    pub const fn feature(self) -> Option<u64> {
+        match self {
+            Self::FedHello => Some(features::FEDERATION),
+            Self::FedAuth => Some(features::FEDERATION),
+            Self::FedPing => Some(features::FEDERATION),
+            Self::FedForward => Some(features::FEDERATION),
+            Self::FedAck => Some(features::FEDERATION),
+            Self::FedRoomSubscribe => Some(features::FEDERATION),
+            Self::FedRoomEvent => Some(features::FEDERATION),
+            Self::FedPresenceDigest => Some(features::FEDERATION),
+            Self::FedKeyRotate => Some(features::FEDERATION),
+            Self::FedHealth => Some(features::FEDERATION),
+            Self::FedShardMap => Some(features::FEDERATION),
+            Self::FedError => Some(features::FEDERATION),
+            Self::FedCallRelay => Some(features::FEDERATION),
+            Self::FedDirectory => Some(features::FEDERATION),
+            _ => None,
         }
     }
 

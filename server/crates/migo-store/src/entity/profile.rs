@@ -39,6 +39,11 @@ pub struct Model {
     /// credential or a routing fact — the same line `birth_year` sits on, and it is
     /// set the same way: once, at registration, by the person it describes.
     pub gender: Option<i16>,
+    /// Free text the owner set, shown wherever the profile is; null not set. An
+    /// empty string clears it (the wire's optional field cannot express "clear", so
+    /// the empty string carries that meaning, the same convention as `bio`).
+    #[sea_orm(column_type = "Text")]
+    pub custom_status: Option<String>,
 }
 
 /// Foreign keys leaving `profile`.

@@ -1486,6 +1486,7 @@ where
                 username: account.username,
                 display_name: profile.display_name,
                 bio: profile.bio,
+                custom_status: profile.custom_status,
                 avatar_media_id: profile.avatar_media_id,
                 country: account.country,
                 locale: account.locale,

@@ -47,19 +47,31 @@ pub(crate) struct SessionHandle {
     /// its event cadence to the mode the client declared, which only works if the mode
     /// outlives the handshake that carried it).
     bandwidth_mode: BandwidthMode,
+    /// The feature set this session negotiated: the client's requested bits masked against
+    /// the node's advertised set, the same intersection `WELCOME` reports.
+    ///
+    /// Stored beside the bandwidth mode for the same reason — the one per-session fact every
+    /// later frame may need to consult. Section 148 makes the intersection fixed for the
+    /// session's lifetime (a feature that appears mid-session reaches a client on its next
+    /// connection), so a value decided once at the handshake is the whole truth, and a
+    /// dispatcher reads it off the context to gate the opcodes the registry ties to a bit.
+    features: u64,
 }
 
 impl SessionHandle {
-    /// Builds a handle around a mailbox and the mode the session negotiated.
+    /// Builds a handle around a mailbox, the mode the session negotiated, and the feature
+    /// set the handshake settled on.
     pub(crate) fn new(
         session_id: Id,
         outbound: Arc<Outbound>,
         bandwidth_mode: BandwidthMode,
+        features: u64,
     ) -> Self {
         Self {
             session_id,
             outbound,
             bandwidth_mode,
+            features,
         }
     }
 
@@ -76,5 +88,13 @@ impl SessionHandle {
     /// The bandwidth mode the session negotiated in `HELLO`.
     pub(crate) fn bandwidth_mode(&self) -> BandwidthMode {
         self.bandwidth_mode
+    }
+
+    /// The feature set this session negotiated: requested bits ∩ advertised bits.
+    ///
+    /// Fixed for the session's lifetime (section 148), so a handler asking "did this client
+    /// negotiate the bit?" is reading a fact the handshake already settled.
+    pub(crate) fn features(&self) -> u64 {
+        self.features
     }
 }

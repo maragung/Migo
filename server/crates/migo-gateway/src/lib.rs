@@ -751,6 +751,9 @@ mod tests {
             session_id,
             Arc::clone(&outbound),
             migo_protocol::BandwidthMode::Normal,
+            // A registered test session negotiated nothing, the honest set for a socket
+            // that never shook hands.
+            0,
         ));
         let room = Topic {
             kind: TopicKind::Room,

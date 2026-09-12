@@ -82,18 +82,36 @@ const FEATURES: u64 = migo_protocol::features::CALLS;
 /// the served set from ever disagreeing. The WebSocket route on the HTTP listener is always
 /// bound and always serves the web client; TCP is the native clients' default transport, QUIC
 /// the second option (section 138).
-fn advertised_features(quic_enabled: bool, tcp_enabled: bool) -> u64 {
+///
+/// `FEDERATION` follows the same listener-conditional rule for the same reason: the bit says
+/// "this node speaks the server-to-server mesh", and a node with no `node.mesh_bind` has no mesh
+/// listener to speak it with, so it must not promise the bit (section 169).
+///
+/// `VOICE_NOTE`, `GROUP_CALL`, and `RICH_PRESENCE` are advertised unconditionally: the surfaces
+/// they describe are part of this build and not tied to a listener. The three are informational
+/// or field-level gates rather than opcode gates — voice notes ride the MEDIA opcodes and
+/// MESSAGE_SEND every deployed client already uses, the SFU opcodes are deliberately not gated
+/// on GROUP_CALL (the calls section records that server decision), and RICH_PRESENCE's own
+/// surface is `PROFILE_UPDATE.custom_status`, which the profile handler refuses unless the
+/// session negotiated the bit.
+fn advertised_features(quic_enabled: bool, tcp_enabled: bool, mesh_enabled: bool) -> u64 {
     let mut features = FEATURES;
     // The gateway packs outbound frames into BATCH envelopes (section 154), and every client
     // already unpacks them — the web SDK, Android, and desktop all advertise the bit and the
     // web and Android transports inflate a batch on arrival. Advertising it here is what turns
     // the writer's coalescing on; a client that did not ask keeps one frame per send.
     features |= migo_protocol::features::BATCHING;
+    features |= migo_protocol::features::VOICE_NOTE
+        | migo_protocol::features::GROUP_CALL
+        | migo_protocol::features::RICH_PRESENCE;
     if quic_enabled {
         features |= migo_protocol::features::QUIC;
     }
     if tcp_enabled {
         features |= migo_protocol::features::TCP_TRANSPORT;
+    }
+    if mesh_enabled {
+        features |= migo_protocol::features::FEDERATION;
     }
     features
 }
@@ -551,9 +569,14 @@ impl App {
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
-        // TCP_TRANSPORT bits are only there when their listeners are configured, and the
-        // gateway masks every client's requested features against exactly this set.
-        let features = advertised_features(config.quic.bind.is_some(), config.tcp.bind.is_some());
+        // TCP_TRANSPORT bits are only there when their listeners are configured, FEDERATION
+        // only while the mesh listener is, and the gateway masks every client's requested
+        // features against exactly this set.
+        let features = advertised_features(
+            config.quic.bind.is_some(),
+            config.tcp.bind.is_some(),
+            config.node.mesh_bind.is_some(),
+        );
 
         let gateway = Arc::new(Gateway::open(
             &registry,

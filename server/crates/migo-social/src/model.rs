@@ -326,13 +326,12 @@ pub struct Found {
 ///
 /// # Why this is not `migo_protocol::UserProfile`
 ///
-/// The wire struct has thirteen fields and this crate can honestly fill seven of them.
-/// `level` belongs to progression, `presence` to presence, `badges` and `verified` to
-/// moderation, and `custom_status` to a column the data model does not have. Returning
-/// the wire struct from here would mean returning it with six fields defaulted, and a
-/// defaulted `verified: false` on a verified account is not a missing field, it is a
-/// wrong answer that looks like an answer. The composition root joins the other domains
-/// in and leaves absent what is absent.
+/// The wire struct has thirteen fields and this crate can honestly fill eight of them.
+/// `level` belongs to progression, `presence` to presence, and `badges` and `verified` to
+/// moderation. Returning the wire struct from here would mean returning it with those
+/// fields defaulted, and a defaulted `verified: false` on a verified account is not a
+/// missing field, it is a wrong answer that looks like an answer. The composition root
+/// joins the other domains in and leaves absent what is absent.
 ///
 /// # What is deliberately missing
 ///
@@ -352,6 +351,13 @@ pub struct ProfileCard {
     pub display_name: String,
     /// Free text the owner wrote, if any.
     pub bio: Option<String>,
+    /// The custom status the owner set, if any — the RICH_PRESENCE bit's own field.
+    ///
+    /// Read here rather than from presence: a status somebody typed is a durable fact
+    /// about their profile, and a presence entry evaporates with the connection cache.
+    /// Setting it is gated on the negotiated bit at the dispatcher, not here — the graph
+    /// serves whatever the profile row holds.
+    pub custom_status: Option<String>,
     /// The avatar object, if there is one.
     ///
     /// An id and not a URL. Brief section 168 forbids the server from proxying media

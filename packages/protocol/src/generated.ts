@@ -4360,6 +4360,8 @@ export interface ProfileUpdate {
   whoCanAdd?: number;
   /** New search visibility. */
   searchable?: boolean;
+  /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
+  customStatus?: string;
 }
 
 export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
@@ -4373,6 +4375,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) present++;
   if (v.whoCanAdd !== undefined) present++;
   if (v.searchable !== undefined) present++;
+  if (v.customStatus !== undefined) present++;
   w.u32(present);
   if (v.displayName !== undefined) { const value = v.displayName; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -4382,6 +4385,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) { const value = v.whoCanMessage; w.optional(6, (w) => { w.u32(value); }); }
   if (v.whoCanAdd !== undefined) { const value = v.whoCanAdd; w.optional(7, (w) => { w.u32(value); }); }
   if (v.searchable !== undefined) { const value = v.searchable; w.optional(8, (w) => { w.bool(value); }); }
+  if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -4400,6 +4404,7 @@ export function decodeProfileUpdate(r: Reader): ProfileUpdate {
       case 6: out.whoCanMessage = sub.u32(); break;
       case 7: out.whoCanAdd = sub.u32(); break;
       case 8: out.searchable = sub.bool(); break;
+      case 9: out.customStatus = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -7049,6 +7054,7 @@ export interface OpcodeMeta {
   readonly payload: string;
   readonly response?: string;
   readonly coalesceKey?: string;
+  readonly feature?: string;
 }
 
 export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
@@ -7138,20 +7144,20 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged' },
   193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged' },
   194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent' },
-  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello' },
-  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged' },
-  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong' },
-  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
-  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged' },
-  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged' },
-  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged' },
-  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region' },
-  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged' },
-  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth' },
-  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged' },
-  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged' },
-  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
-  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory' },
+  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello', feature: 'FEDERATION' },
+  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged', feature: 'FEDERATION' },
+  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong', feature: 'FEDERATION' },
+  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', feature: 'FEDERATION' },
+  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged', feature: 'FEDERATION' },
+  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged', feature: 'FEDERATION' },
+  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged', feature: 'FEDERATION' },
+  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region', feature: 'FEDERATION' },
+  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged', feature: 'FEDERATION' },
+  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth', feature: 'FEDERATION' },
+  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged', feature: 'FEDERATION' },
+  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', feature: 'FEDERATION' },
+  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', feature: 'FEDERATION' },
+  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult' },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent' },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged' },

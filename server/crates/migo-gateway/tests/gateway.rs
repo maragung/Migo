@@ -43,7 +43,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, ConversationMemberEvent,
-    Encode, Error as ErrorMessage, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
+    Encode, Error as ErrorMessage, FedHello, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
     MessageKind, NodeInfo, NotificationEvent, Opcode, Ping, Pong, PresenceState, PresenceUpdate,
     ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
@@ -2583,6 +2583,67 @@ async fn a_server_to_client_opcode_from_a_client_closes_the_session() {
         h.sessions_closed("protocol_violation"),
         1,
         "the session is closed as a protocol violation"
+    );
+}
+
+#[tokio::test]
+async fn a_federation_opcode_from_a_client_socket_closes_the_session() {
+    // The FED_* range is the one the registry tags with the FEDERATION feature bit
+    // (section 148), but a client never reaches the feature gate with one: every FED_*
+    // opcode is server-auth, and server-auth frames are refused on direction grounds
+    // before the feature gate runs. The negotiated-bit gate is a second lock on a door
+    // that is already shut — this pins the ordering, so a client sending FED frames
+    // hears UNEXPECTED_OPCODE and loses the connection, not a feature refusal.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.client(Opcode::FedHello, 2, &FedHello::default());
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _ = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "a FED_* frame from a client is refused as a server-auth opcode, not by the feature gate"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the session is closed as a protocol violation"
+    );
+}
+
+#[tokio::test]
+async fn the_welcome_reports_the_intersection_of_requested_and_advertised_features() {
+    // Section 148's negotiation cut, observed on the wire: the session's feature set is
+    // the client's request masked against the node's advertised set, and WELCOME reports
+    // exactly that intersection — a bit the node never offered cannot be negotiated
+    // unilaterally, and a bit the client never asked for is not granted either.
+    let mut builder = HarnessBuilder::new();
+    builder.features = migo_protocol::features::BATCHING | migo_protocol::features::FEDERATION;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING | migo_protocol::features::QUIC),
+    );
+
+    h.serve(&pipe).await;
+
+    let welcome = welcome_in(&pipe.sent());
+    assert_eq!(
+        welcome.features,
+        migo_protocol::features::BATCHING,
+        "the session carries only the bits both sides named: FEDERATION was never asked \
+         for, QUIC was never offered"
     );
 }
 

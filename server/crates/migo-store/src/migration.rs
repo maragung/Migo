@@ -75,6 +75,7 @@ impl MigratorTrait for Migrator {
             Box::new(ConversationGroups),
             Box::new(PublicRoomCapacity),
             Box::new(PassphraseRename),
+            Box::new(ProfileCustomStatus),
         ]
     }
 }
@@ -401,6 +402,39 @@ impl MigrationTrait for PassphraseRename {
         Err(DbErr::Migration(
             "0010_passphrase_rename cannot be rolled back: deploy a build that
             matches the schema instead"
+                .to_owned(),
+        ))
+    }
+}
+
+/// `0011_profile_custom_status` -- the free-text status the RICH_PRESENCE
+/// feature bit gates, on the profile row where a durable fact about a profile
+/// belongs (a presence entry evaporates with the connection cache). See
+/// `server/migrations/0011_profile_custom_status.sql`.
+struct ProfileCustomStatus;
+
+impl MigrationName for ProfileCustomStatus {
+    fn name(&self) -> &str {
+        "0011_profile_custom_status"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ProfileCustomStatus {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0011_profile_custom_status.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0011_profile_custom_status cannot be rolled back: create a new database instead"
                 .to_owned(),
         ))
     }

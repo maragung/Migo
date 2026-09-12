@@ -372,6 +372,7 @@ impl From<entity::profile::Model> for Profile {
             who_can_message: Visibility::from_i16(row.who_can_message),
             who_can_add: Visibility::from_i16(row.who_can_add),
             searchable: row.searchable,
+            custom_status: row.custom_status,
             updated_at: instant_of(row.updated_at),
         }
     }
@@ -988,6 +989,7 @@ impl AccountStore for PostgresStore {
             who_can_message: Set(profile.who_can_message.to_i16()),
             who_can_add: Set(profile.who_can_add.to_i16()),
             searchable: Set(profile.searchable),
+            custom_status: Set(profile.custom_status),
             updated_at: Set(stamp_of(profile.updated_at)),
         })
         .exec_with_returning(&self.db)
@@ -1065,6 +1067,12 @@ impl AccountStore for PostgresStore {
         }
         if let Some(value) = patch.searchable {
             update = update.col_expr(entity::profile::Column::Searchable, Expr::val(value));
+        }
+        if !patch.custom_status.is_keep() {
+            update = update.col_expr(
+                entity::profile::Column::CustomStatus,
+                Expr::val(patch_value(&patch.custom_status).cloned()),
+            );
         }
 
         update
@@ -5558,6 +5566,7 @@ impl BotStore for PostgresStore {
             who_can_message: Set(Visibility::Friends.to_i16()),
             who_can_add: Set(Visibility::Everyone.to_i16()),
             searchable: Set(true),
+            custom_status: Set(None),
             updated_at: Set(created_at),
         })
         .exec_without_returning(&transaction)
