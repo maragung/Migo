@@ -180,11 +180,11 @@ fun ChatScreen(
     /** Acknowledges a changed safety number for this conversation, from the warning itself. */
     onAcknowledgeSafety: () -> Unit = {},
     /**
-     * Places a voice call to the direct chat's peer, handed the peer's id. Offered only for a
-     * direct chat -- the call is the direct conversation's other half, and a room's audience has
-     * no 1:1 to call. Null when the shell cannot place calls.
+     * Places a call to the direct chat's peer, handed the peer's id and whether the call asked
+     * for video. Offered only for a direct chat -- the call is the direct conversation's other
+     * half, and a room's audience has no 1:1 to call. Null when the shell cannot place calls.
      */
-    onStartCall: ((Id) -> Unit)? = null,
+    onStartCall: ((Id, Boolean) -> Unit)? = null,
     /**
      * Shares this conversation's transcript as a log, from the header. Null when the shell has no
      * share route; the transcript itself is the model's to build, because the log is the same
@@ -515,7 +515,7 @@ private fun ChatHeader(
     onOpenMembers: (() -> Unit)?,
     onOpenGames: () -> Unit,
     onOpenSafety: (() -> Unit)? = null,
-    onStartCall: ((Id) -> Unit)? = null,
+    onStartCall: ((Id, Boolean) -> Unit)? = null,
     onExportLog: (() -> Unit)? = null,
     onToggleSearch: () -> Unit = {},
     onOpenGroupMembers: (() -> Unit)? = null,
@@ -561,14 +561,19 @@ private fun ChatHeader(
                     Text("Safety")
                 }
             }
-            // The direct chat's other extra: the voice call, the conversation's other half. Same
-            // peer-id gate as Safety -- the call button dials the peer, and a chat with no peer has
-            // no number to dial. The glyph is an emoji character, not an icon font, the app's own
-            // rule (and the web client's, whose button this is a port of).
+            // The direct chat's other extras: the two calls, the conversation's other halves.
+            // Same peer-id gate as Safety -- the call buttons dial the peer, and a chat with no
+            // peer has no number to dial. Voice and video are two buttons, as on the web client,
+            // because the two calls are two intents -- a person who means to talk is not asked to
+            // confirm a camera they never wanted. The glyphs are emoji characters, not an icon
+            // font, the app's own rule (and the web client's, whose buttons these are a port of).
             if (chat.peerId != null && onStartCall != null) {
                 val peer = chat.peerId
-                TextButton(onClick = { onStartCall(peer) }) {
+                TextButton(onClick = { onStartCall(peer, false) }) {
                     Text("📞")
+                }
+                TextButton(onClick = { onStartCall(peer, true) }) {
+                    Text("🎥")
                 }
             }
             // The thread's own search, before the Log control as on the web. Offered in every
