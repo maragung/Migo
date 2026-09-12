@@ -73,8 +73,10 @@ pub(crate) const WAVEFORM_BARS: usize = 50;
 
 /// How many samples of the note's own rate one live waveform bar covers: a tenth of a
 /// second, the cadence the Android recorder samples at and the web's analyser graph
-/// approximates, so the bar a speaker watches land is the bar the fold will keep.
-pub(crate) const WAVEFORM_WINDOW_SAMPLES: u64 = u64::from(VOICE_NOTE_SAMPLE_RATE) / 10;
+/// approximates, so the bar a speaker watches land is the bar the fold will keep. The
+/// widening cast rather than `u64::from` because a const is not allowed to call it on this
+/// toolchain, and the cast is const and infallible both.
+pub(crate) const WAVEFORM_WINDOW_SAMPLES: u64 = VOICE_NOTE_SAMPLE_RATE as u64 / 10;
 
 /// One sampled amplitude as a 0–255 bar: the scale the Android client's `amplitudeToBar`
 /// states, so a whisper recorded on either client draws the same height on the third.

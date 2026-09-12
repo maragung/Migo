@@ -427,8 +427,10 @@ impl Calls {
     }
 
     /// Whether a call occupies this device — an ended call still on screen does not block a new
-    /// one, but a placement, an accept, or a ring does.
-    fn busy(&self) -> bool {
+    /// one, but a placement, an accept, or a ring does. `pub(crate)` because the worker asks
+    /// it before opening the microphone for a recording: a call owns the device while it
+    /// runs, and section 179 answers that with a pause, not a fight.
+    pub(crate) fn busy(&self) -> bool {
         self.active
             .as_ref()
             .is_some_and(|call| call.state != CallState::Ended)

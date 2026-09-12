@@ -3307,6 +3307,7 @@ impl Worker {
                     width: Some(width),
                     height: Some(height),
                     duration_ms: None,
+                    waveform: None,
                     caption: None,
                     expires_in_ms,
                 };
@@ -3329,6 +3330,7 @@ impl Worker {
                     width: None,
                     height: None,
                     duration_ms: None,
+                    waveform: None,
                     caption: None,
                     expires_in_ms,
                 };
@@ -7687,6 +7689,9 @@ fn spawn_recording_pump(
     shared: Arc<RecordShared>,
     mut out: std::io::BufWriter<std::fs::File>,
 ) -> std::thread::JoinHandle<()> {
+    // The pump's own narrow import: `Write` is the file's business, not the module's — this
+    // thread is the only writer the store ever has.
+    use std::io::Write as _;
     std::thread::Builder::new()
         .name("migo-voice-record".to_owned())
         .spawn(move || {

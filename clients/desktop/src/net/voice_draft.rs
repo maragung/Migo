@@ -141,6 +141,7 @@ impl VoiceDraftStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     /// A fresh store under a throwaway directory, so the tests never touch a real config
     /// directory. Unique per call, cleaned up on the way out.
