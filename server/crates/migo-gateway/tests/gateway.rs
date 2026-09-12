@@ -48,7 +48,7 @@ use migo_protocol::{
     ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
 };
-use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
+use migo_ratelimit::{CacheRateLimiter, Policies, Scope, SharedRateLimiter, TrustTier};
 
 use migo_gateway::{
     ClientContext, Dispatcher, FeatureGate, FullRollout, Gateway, GatewayServices, NoopDispatcher,
@@ -3268,8 +3268,21 @@ async fn stress_a_flood_of_charged_frames_is_throttled_but_the_session_survives(
 }
 
 /// One peer address opening fresh connections without bound: the anonymous
-/// tier answers the fifth and sixth handshake with `RATE_LIMITED`, because
-/// HELLO costs 5 against a burst of 20 and the frozen clock never refills.
+/// tier throttles the flood at the handshake with `RATE_LIMITED`, and the
+/// count it admits is derived from the limiter's own policy rather than
+/// restated by hand.
+///
+/// An unauthenticated first frame charges two surfaces together — the
+/// caller's network (`Scope::Ip`) and the opcode's endpoint
+/// (`Scope::Endpoint`) — and the first surface to refuse wins. The endpoint
+/// surface is the binding one: it scales with the tier, so it takes the
+/// anonymous burst (20) halved by its scope factor (1,2) — 10 tokens — while
+/// the shared IP surface quadruples the user base it does not scale with
+/// (200 × 4 = 800), which no six-connection flood will ever reach. At
+/// HELLO's cost of 5, ten tokens admit two handshakes; the frozen clock
+/// refills nothing in between. A hand-written count here would be a copy of
+/// that arithmetic, and it would drift the day the schema's costs or the
+/// scope factors change — so the assertion asks the policy instead.
 #[tokio::test]
 async fn stress_one_ip_flooding_fresh_handshakes_is_throttled_at_the_anonymous_tier() {
     let h = Harness::new();
@@ -3277,6 +3290,13 @@ async fn stress_one_ip_flooding_fresh_handshakes_is_throttled_at_the_anonymous_t
         .parse()
         .expect("a documentation address parses");
     let context = RequestContext::at(ts(NOW)).from_ip(ip);
+
+    // The same policy objects the harness's limiter was built from, so the
+    // expectation can never disagree with the enforcement.
+    let policies = Policies::from_config(&Config::default().rate_limit)
+        .expect("the default rate-limit policies are valid");
+    let endpoint = policies.resolve(Scope::Endpoint, TrustTier::Anonymous);
+    let expected = (endpoint.capacity() / Opcode::Hello.cost()) as usize;
 
     let mut pipes = Vec::new();
     for _ in 0..6 {
@@ -3289,7 +3309,7 @@ async fn stress_one_ip_flooding_fresh_handshakes_is_throttled_at_the_anonymous_t
         pipes.push(pipe);
     }
     // Sequential, on purpose: the frozen clock makes the bucket state a simple
-    // running total, so exactly the first four connections are admitted.
+    // running total, so exactly the first `expected` connections are admitted.
     for pipe in &pipes {
         h.serve_with(pipe, context.clone()).await;
     }
@@ -3322,16 +3342,17 @@ async fn stress_one_ip_flooding_fresh_handshakes_is_throttled_at_the_anonymous_t
         );
     }
     assert_eq!(
-        welcomed, 4,
-        "anonymous burst 20 at HELLO cost 5 admits exactly four connections"
+        welcomed, expected,
+        "the anonymous endpoint bucket admits capacity/cost handshakes and no more"
     );
     assert_eq!(
-        refused, 2,
-        "the fifth and sixth are refused at the handshake"
+        refused,
+        pipes.len() - expected,
+        "every handshake past the bucket is refused at the handshake"
     );
     assert_eq!(
         h.sessions_opened(),
-        4,
+        expected as u64,
         "a throttled handshake opens no session and holds no slot"
     );
     assert_eq!(
