@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use migo_core::{Id, Result, Timestamp};
+use migo_core::{Id, Result};
 use parking_lot::Mutex;
 
 use crate::model::{GroupCall, GroupParticipant};
