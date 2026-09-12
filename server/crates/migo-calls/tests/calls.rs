@@ -38,7 +38,7 @@ use migo_calls::Calls;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Timestamp};
-use migo_protocol::{codes, TurnServer};
+use migo_protocol::{codes, Opcode, TurnServer};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 
 const SECOND: i64 = 1_000;
@@ -1485,6 +1485,7 @@ async fn a_group_relay_moves_only_between_seated_devices() {
         .calls
         .group_relay(
             &alice(NOW + SECOND),
+            Opcode::CallSdp,
             id(GROUP_CALL),
             id(ALICE_PHONE),
             id(BOB_PHONE),
@@ -1498,6 +1499,7 @@ async fn a_group_relay_moves_only_between_seated_devices() {
         .calls
         .group_relay(
             &bob(NOW + SECOND),
+            Opcode::CallSdp,
             id(GROUP_CALL),
             id(CAROL_PHONE),
             id(BOB_PHONE),
@@ -1511,6 +1513,7 @@ async fn a_group_relay_moves_only_between_seated_devices() {
         .calls
         .group_relay(
             &alice(NOW + SECOND),
+            Opcode::CallSdp,
             id(GROUP_CALL),
             id(ALICE_PHONE),
             id(BOB_LAPTOP),
@@ -1524,6 +1527,7 @@ async fn a_group_relay_moves_only_between_seated_devices() {
         .calls
         .group_relay(
             &alice(NOW + SECOND),
+            Opcode::CallSdp,
             id(GROUP_CALL),
             id(ALICE_PHONE),
             id(ALICE_PHONE),
@@ -1532,6 +1536,103 @@ async fn a_group_relay_moves_only_between_seated_devices() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), codes::PERMISSION_DENIED);
+    // An empty payload is refused by the field it names, and an ICE batch is
+    // told about the field ICE actually carries — the group relay serves
+    // three frames, so the name has to come from the one that arrived.
+    let error = harness
+        .calls
+        .group_relay(
+            &alice(NOW + SECOND),
+            Opcode::CallIce,
+            id(GROUP_CALL),
+            id(ALICE_PHONE),
+            id(BOB_PHONE),
+            b"",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::FIELD_REQUIRED);
+    assert!(
+        format!("{error}").contains("sealed_candidates"),
+        "an ICE batch is named by its own field, not the SDP's: {error}"
+    );
+}
+
+/// The key update's audience is the whole roster, and it is the *seats* that
+/// decide it.
+///
+/// Section 166 rotates a group call's frame key through `CALL_KEY_UPDATE`
+/// whenever the membership changes, and section 180 requires it — a leaver
+/// must not read what follows, a joiner must not read what came before. The
+/// frame names no target, so a rotation that reached only some participants
+/// would leave the rest unable to read the media that follows it. So the
+/// audience is every seated account, and it is read from the roster rather
+/// than from the frame.
+#[tokio::test]
+async fn a_group_key_update_reaches_the_whole_roster_once_per_account() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_join(
+            &bob(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    // Both seats, and the sender's own among them: Alice's other devices hold
+    // the same frame key and rotate with everyone else, so the account that
+    // minted the rotation is a recipient of it too.
+    let audience = harness
+        .calls
+        .group_key_audience(&alice(NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+    assert_eq!(audience, vec![id(ALICE), id(BOB)]);
+    // The rotation is symmetrical: Bob's device reaches the same set.
+    let audience = harness
+        .calls
+        .group_key_audience(&bob(NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+    assert_eq!(audience, vec![id(ALICE), id(BOB)]);
+    // A *seat* is what counts, not an account with one: Bob's other device
+    // holds no seat, so it holds no frame key either, and a device with no
+    // key has nothing to rotate.
+    let error = harness
+        .calls
+        .group_key_audience(&caller(BOB, BOB_LAPTOP, NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::NOT_FOUND);
+    // A stranger to the call gets the same answer.
+    let error = harness
+        .calls
+        .group_key_audience(&caller(CAROL, CAROL_PHONE, NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::NOT_FOUND);
+    // And an id that names no group call at all is the same answer, which is
+    // what lets the dispatcher fall through to the 1:1 read.
+    let error = harness
+        .calls
+        .group_key_audience(&alice(NOW + SECOND), id(1_000))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1542,6 +1643,7 @@ async fn every_group_series_is_registered_at_zero() {
         "migo_calls_group_join_total",
         "migo_calls_group_left_total",
         "migo_calls_group_relayed_total",
+        "migo_calls_group_rekeyed_total",
     ] {
         assert!(
             rendered.contains(series),

@@ -35,6 +35,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
+use migo_protocol::Opcode;
 
 use crate::model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, Caller, GroupCall, GroupJoinOutcome,
@@ -314,18 +315,60 @@ pub trait Callkeeper: Send + Sync {
     /// Same promise as the 1:1 relay, read against the roster instead of the
     /// two named parties: the sender must be a seated device, the target must
     /// be a *different* seated device, and the payload is returned exactly as
-    /// it arrived. Used by the dispatcher for `CALL_SDP`, `CALL_ICE`,
-    /// `CALL_RENEGOTIATE`, and `CALL_KEY_UPDATE` frames that name a group
-    /// call — the one relay method serves both, because the checks are the
-    /// same question asked of a different roster.
+    /// it arrived. The checks are the 1:1 relay's question asked of a
+    /// different roster, which is why one method serves both.
+    ///
+    /// This is the route for the group-call frames that *name a target* —
+    /// `CALL_SDP`, `CALL_ICE`, and `CALL_RENEGOTIATE` — and only those: a
+    /// frame with a `to_device` has somewhere to be addressed, and the roster
+    /// decides whether that somewhere is real. `CALL_KEY_UPDATE` carries no
+    /// target and is not a relay but a fan-out; it goes through
+    /// [`Callkeeper::group_key_audience`] instead.
+    ///
+    /// `opcode` is the frame that arrived, and it is what the call is charged
+    /// to: one frame in, one frame out, billed in its own bucket rather than
+    /// in `CALL_SDP`'s for every relay the group path carries.
     async fn group_relay(
         &self,
         caller: &Caller,
+        opcode: Opcode,
         call_id: Id,
         from_device: Id,
         to_device: Id,
         sealed: &[u8],
     ) -> Result<GroupCall>;
+
+    /// The accounts a group call's key update must reach, the sender's own
+    /// included.
+    ///
+    /// Section 166 rotates a group call's media key with `CALL_KEY_UPDATE`
+    /// whenever the membership changes, and section 180 requires it: a leaver
+    /// must not read what follows, a joiner must not read what came before.
+    /// The frame carries no target — a rotation is every participant's
+    /// business, and one that reached only some of them would leave the rest
+    /// unable to read the media that follows it — so there is nothing for the
+    /// relay above to address, and this is the routing read that stands in.
+    ///
+    /// The roster is validated the way `group_relay` validates it: the sender
+    /// must be a *seated device*, not merely an account holding a seat, since
+    /// a device with no seat holds no call key and so has no rotation to
+    /// distribute and no business starting one. The audience comes back for
+    /// the dispatcher to publish to, because only the dispatcher knows which
+    /// topic reaches an account — the same seam every other method here keeps.
+    ///
+    /// One entry per *account*, however many of its devices are seated: the
+    /// publication is to the account's user topic, and a second copy of one
+    /// rotation would be a second fact where there is one. The sender's own
+    /// account is in the list — its other seated devices hold the same call
+    /// key and rotate with everyone else — and the dispatcher's publication
+    /// excludes the originating connection, so the one device that does not
+    /// hear the frame is the one that minted it.
+    ///
+    /// `NOT_FOUND` when no group call holds the id, or the caller's device is
+    /// not on the roster. That is the answer the 1:1 read gives for both "no
+    /// such call" and "not your call", so the dispatcher's group-then-1:1
+    /// handoff needs no new error to tell the two stores apart.
+    async fn group_key_audience(&self, caller: &Caller, call_id: Id) -> Result<Vec<Id>>;
 }
 
 /// The call service, shared.

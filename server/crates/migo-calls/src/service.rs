@@ -53,7 +53,10 @@
 //! does is the *signalling* half — roster events and sealed descriptions. A
 //! participant's sealed offer is stored and re-served to joiners, never
 //! opened, which is the 1:1 relay's mail-slot promise extended from two named
-//! devices to a roster.
+//! devices to a roster. The media plane's own key never reaches this crate:
+//! `group_key_audience` answers *who* a rotation must reach and nothing about
+//! what it carries, because the material is sealed between the participants
+//! and a server that could open it would not be running an E2E call.
 //!
 //! *No push.* Whether a ring should wake a device that is offline is
 //! `migo-notify`'s question, and the invite event the dispatcher publishes
@@ -927,12 +930,16 @@ where
         if call_id.is_nil() {
             return Err(fault::field_required("call_id"));
         }
-        self.charge(caller, Opcode::CallEnd).await?;
+        // The store before the charge: the dispatcher tries this method for
+        // every `CALL_END`, and the 1:1 `end` that answers an id this store
+        // does not hold charges the frame itself. Charging here first would
+        // bill every 1:1 hang-up twice for one frame.
         let mut call = self
             .groups
             .get(call_id)
             .await?
             .ok_or_else(|| fault::not_found("call"))?;
+        self.charge(caller, Opcode::CallEnd).await?;
         let Some(index) = call
             .participants
             .iter()
@@ -960,23 +967,39 @@ where
     async fn group_relay(
         &self,
         caller: &Caller,
+        opcode: Opcode,
         call_id: Id,
         from_device: Id,
         to_device: Id,
         sealed: &[u8],
     ) -> Result<GroupCall> {
+        if call_id.is_nil() {
+            return Err(fault::field_required("call_id"));
+        }
+        // The field the length checks name is the one the arriving frame
+        // actually carries: an ICE batch is not an SDP, and a client told
+        // `sealed_sdp` about a frame that has no such field has been told
+        // about the wrong frame.
+        let field = sealed_field(opcode);
         if sealed.is_empty() {
-            return Err(fault::field_required("sealed_sdp"));
+            return Err(fault::field_required(field));
         }
         if sealed.len() > MAX_SEALED_LEN {
-            return Err(fault::field_too_long("sealed_sdp", MAX_SEALED_LEN));
+            return Err(fault::field_too_long(field, MAX_SEALED_LEN));
         }
-        self.charge(caller, Opcode::CallSdp).await?;
+        // The store before the charge, so that one frame is billed once. A
+        // group call and a 1:1 call share no store, and the dispatcher tries
+        // this one first because the id alone does not say which it names —
+        // so an id that turns out to belong to the 1:1 store must not pay
+        // here and again on the path that actually serves it. Nothing escapes
+        // the bill: the 1:1 relay charges the same frame a moment later, and
+        // an id that names no call at all is billed there.
         let call = self
             .groups
             .get(call_id)
             .await?
             .ok_or_else(|| fault::not_found("call"))?;
+        self.charge(caller, opcode).await?;
         // The roster's own routing checks, the group twin of `route`: the
         // sender must be a seated device of the caller's account, and the
         // target a different seat. A frame that names nobody on the roster is
@@ -994,5 +1017,64 @@ where
         }
         self.meters.group_relayed();
         Ok(call)
+    }
+
+    async fn group_key_audience(&self, caller: &Caller, call_id: Id) -> Result<Vec<Id>> {
+        if call_id.is_nil() {
+            return Err(fault::field_required("call_id"));
+        }
+        // The store before the charge, for the reason `group_relay` reads it
+        // that way: the dispatcher tries this store first, and an id that
+        // names a 1:1 call must not be billed for a question about a roster
+        // it was never on. A 1:1 key update pays nothing on either path —
+        // `call` is the deliberate free read — so there is no second bill to
+        // leave dangling here.
+        let call = self
+            .groups
+            .get(call_id)
+            .await?
+            .ok_or_else(|| fault::not_found("call"))?;
+        self.charge(caller, Opcode::CallKeyUpdate).await?;
+        // A *seat*, not merely an account with one: a second device of a
+        // seated account holds no call key, so it can neither read the media
+        // the rotation protects nor have anything to rotate. `NOT_FOUND` and
+        // not `PERMISSION_DENIED` because the 1:1 read answers both "no such
+        // call" and "not your call" the same way, and a device that is not in
+        // the call is a stranger to it.
+        if call.account_of_device(caller.device_id) != Some(caller.account_id) {
+            return Err(fault::not_found("call"));
+        }
+        // One entry per account, in the roster's own order, so the fan-out is
+        // deterministic. The roster holds one seat per account — a rejoin from
+        // a new device replaces the seat — so no two seats of one account can
+        // reach this loop today; the dedupe is here because the publication is
+        // per *account*, and a roster that ever held two seats of one account
+        // would otherwise send one rotation twice.
+        let mut audience: Vec<Id> = Vec::with_capacity(call.participants.len());
+        for participant in &call.participants {
+            if !audience.contains(&participant.account_id) {
+                audience.push(participant.account_id);
+            }
+        }
+        // Counted here rather than at the publication, because this is the
+        // moment the rotation was accepted as one: the dispatcher publishes
+        // what it is handed, and a frame that reached a topic with no
+        // subscriber still rotated the call for everyone it did reach.
+        self.meters.group_rekeyed();
+        Ok(audience)
+    }
+}
+
+/// The name of the sealed payload field `opcode`'s frame carries.
+///
+/// Every relayed call frame seals exactly one opaque blob, and the length
+/// checks name it so a client can point at the field it must shorten. The
+/// group relay serves three frames, so the name has to come from the frame
+/// that arrived rather than from the one the 1:1 relay happened to be written
+/// for.
+fn sealed_field(opcode: Opcode) -> &'static str {
+    match opcode {
+        Opcode::CallIce => "sealed_candidates",
+        _ => "sealed_sdp",
     }
 }
