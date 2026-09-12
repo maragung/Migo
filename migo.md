@@ -4341,7 +4341,7 @@ Hanya diterima pada listener mesh internal. Frame dengan auth level Server yang 
 
 146. RESERVED RANGES AND FUTURE PACKETS
 
-STATUS: SPEC. Range masih berupa kesepakatan dokumen. Penegakan range dilakukan di dispatcher gateway yang belum ditulis.
+STATUS: BUILT. Range ditegakkan di gerbang penerimaan frame gateway (migo-gateway/src/connection.rs, dispatch_frame): opcode 241 sampai 255 yang datang dari client dijawab dengan error UNKNOWN_OPCODE dan detail publik "reserved opcode", lalu sesi ditutup sebagai ProtocolViolation — sama fatalnya dengan pelanggaran opcode khusus server, karena nomor reserved adalah nomor yang build ini berjanji untuk tidak diketahui. Span yang ditegakkan adalah 241-255 dan bukan 240-255 karena section 145 mencatat bahwa STORE_PURCHASE (239) dan ENTITLEMENTS (240) diambil dari kepala range saat v0.16.4 dan keduanya live, sehingga 240 adalah opcode client yang sah. Test registri di migo-protocol/src/lib.rs (no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range) menggagalkan build bila codegen menghasilkan variant di dalam span 241-255, dan invariant yang sama didokumentasikan di dispatcher migod (migod/src/dispatch.rs) bahwa variant di span itu tidak boleh routable. Test wire di server/crates/migo-gateway/tests/gateway.rs (a_reserved_opcode_is_refused_and_closes_the_connection) mengirim opcode 250 mentah dan menuntut penolakan plus close, dan satu test lagi (an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate) membuktikan 240 lolos dari gerbang range dan dijawab gerbang fase.
 
 Range 240 sampai 255 direservasi dan WAJIB tidak dipakai sampai ada keputusan tertulis.
 

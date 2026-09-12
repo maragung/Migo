@@ -819,6 +819,34 @@ impl<T: Transport> Connection<'_, T> {
         let correlation = frame.header.correlation;
         let meters = &self.gateway.meters;
 
+        // Section 146: the head of the reserved range is enforced as never-allocated. The
+        // range 240-255 was set aside before v0.16.4 carved STORE_PURCHASE (239) and
+        // ENTITLEMENTS (240) out of its head — the last numbers ever to be taken from it,
+        // per the written decision in section 145 — so the never-allocated span this gate
+        // polices is 241-255. A client speaking one is speaking a dialect this node promised
+        // not to know — and unlike a merely unknown opcode (a newer client, answered and
+        // kept going), a reserved number is one this build has sworn an opinion about, so
+        // continuing would risk a future allocation being misread by an old session. The
+        // refusal is terminal for the same reason the server-only-opcode violation is: the
+        // peer is not speaking this protocol.
+        if (241..=255).contains(&opcode_raw) {
+            let error = fault::error(
+                codes::UNKNOWN_OPCODE,
+                "reserved opcode range 241-255 is refused until a written decision allocates it",
+            )
+            .public("reserved opcode");
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
+            return FrameOutcome::Close(Closed::ProtocolViolation);
+        }
+
         let Some(opcode) = Opcode::from_wire(opcode_raw) else {
             // An opcode this build does not know: answer and keep going, since a newer client
             // speaking an unknown verb is not a framing violation.

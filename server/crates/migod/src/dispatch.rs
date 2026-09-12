@@ -345,6 +345,13 @@ impl Dispatcher for AppDispatcher {
         let now = context.now();
 
         match context.opcode() {
+            // Section 146 invariant: the reserved span 241-255 is never-allocated, and
+            // the gateway refuses it before a frame can reach this dispatcher (see the
+            // range gate in migo-gateway's connection.rs). A variant generated into that
+            // span therefore must not be routable here — the migo-protocol registry test
+            // (`no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range`) fails
+            // the build first, and the allocation needs a written decision per section
+            // 145's precedent before any number is taken from the reserved head.
             // --- messaging ---
             Opcode::MessageSend => {
                 let caller = MessageCaller::new(
