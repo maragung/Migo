@@ -84,14 +84,20 @@ export function Sheet({
   if (!open) {
     return null;
   }
+  // The sheet is a child of the backdrop, not its sibling: the backdrop is the fixed, z-indexed
+  // layer that must sit above every window the shell stacks, and a sibling sheet — unpositioned,
+  // in normal flow — would paint *under* it, leaving every control in the sheet behind a layer
+  // that eats the tap (the sheet opens, and nothing in it is clickable). Nested, the sheet rides
+  // the backdrop's own stacking context, and stopPropagation keeps a tap inside the sheet from
+  // being the backdrop's close gesture. The one door BottomSheet has always used.
   return createPortal(
-    <>
-      <div className="sheet-backdrop" onClick={onClose} aria-hidden="true" />
+    <div className="sheet-backdrop" onClick={onClose}>
       <div
         className="sheet"
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === 'string' ? title : 'Sheet'}
+        onClick={(event) => event.stopPropagation()}
       >
         <div className="sheet-handle" aria-hidden="true" />
         <div className="sheet-head">
@@ -102,7 +108,7 @@ export function Sheet({
         </div>
         <div className="sheet-body retro-scroll">{children}</div>
       </div>
-    </>,
+    </div>,
     document.body,
   );
 }
