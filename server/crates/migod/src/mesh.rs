@@ -191,8 +191,11 @@ const HANDSHAKE_TICK: Duration = Duration::from_millis(250);
 /// the runner walks the outbox peer by peer, so an unbounded handshake is an unbounded
 /// queue. The budget turns that peer into an ordinary failure — the batch settles
 /// through the same backoff a refused connection takes, and the drain moves on.
+///
+/// `pub(crate)` to match `serve_session`, whose signature names it: a private type in
+/// a `pub(crate)` interface is a `private-interfaces` violation under `-D warnings`.
 #[derive(Clone)]
-struct HandshakeBudget {
+pub(crate) struct HandshakeBudget {
     /// The clock the budget is measured on.
     clock: Arc<dyn Clock>,
     /// How many milliseconds the whole exchange — both hellos, both proofs — may take.
