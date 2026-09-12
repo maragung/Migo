@@ -1,0 +1,20 @@
+{
+  "name": "@migo/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Migo end-to-end suite: one real migod over real PostgreSQL and Redis, driven by the real @migo/sdk client the browser uses.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "e2e": "node --test dist/e2e.test.js"
+  },
+  "dependencies": {
+    "@migo/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

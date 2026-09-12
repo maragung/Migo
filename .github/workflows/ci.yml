@@ -471,6 +471,85 @@ jobs:
       - name: Load run — migod (release) under tools/load/run.sh
         run: make test-load
 
+  # ------------------------------------------------------------------- e2e
+  # The end-to-end gate (brief section 177): one real migod — real process, real
+  # PostgreSQL database, real Redis, real filesystem media — driven by MigoClient
+  # from @migo/sdk, the same code the browser runs. Not a second load run and not
+  # a second hardening run: what it asserts is the observable truth after the
+  # traffic, not the traffic — the message arrived with the sequence the send ack
+  # promised, the media bytes round-trip byte-for-byte, the history survives a
+  # node restart and replays without loss or duplication, /metrics saw the
+  # session. The unit and contract suites mock nothing smaller than a storage
+  # backend; this one mocks nothing at all, which is why it is its own job and
+  # not another step in `server`.
+  e2e:
+    name: End-to-end — the real client through the real node
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gates
+
+    # Real storage, so the real services, same as the server job. The suite creates
+    # its own per-run database inside this cluster through psql (the runner image
+    # ships the client) and drops it on the way out, so concurrent runs cannot
+    # share rows even if two ever land on the same runner.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: migo
+          POSTGRES_PASSWORD: migo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U migo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Same contract as the server job: the suite reads these, and the require
+      # flag turns "not configured" from a skip into a failure. The suite is a
+      # gate; a gate that can skip itself is a gate that can go quiet.
+      MIGO_TEST_DATABASE_URL: postgres://migo:migo@127.0.0.1:5432/postgres
+      MIGO_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      MIGO_TEST_REQUIRE_BACKENDS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # Only migod is built here, not the test binaries the server job
+          # compiles, so this key fills a cache of its own shape.
+          key: server-e2e
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The whole product in one step: the target builds migod, the suite's own
+      # target then starts it against fresh backends and drives it with the SDK.
+      - name: End-to-end suite
+        run: make test-e2e
+
   # ------------------------------------------------------------------ audit
   # Advisories are news, not a reason to block an unrelated change: a CVE published
   # this morning against a transitive dependency would otherwise stop every pull
