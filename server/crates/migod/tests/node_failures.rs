@@ -997,9 +997,16 @@ async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_o
         "each event failed exactly once into the backoff: {:?}",
         retry.iter().map(|event| event.attempts).collect::<Vec<_>>()
     );
+    // Nothing was delivered and nothing was lost: a silent peer never takes delivery,
+    // so under at-least-once (section 153) the honest ending is every event still
+    // owed — exactly as many as started, each failed exactly once and never re-failed
+    // behind the test's back.
+    let owed: Vec<_> = everything_owed(&mesh_b).await;
+    assert_eq!(owed.len(), 3, "nothing was delivered, and nothing was lost");
     assert!(
-        everything_owed(&mesh_b).await.is_empty(),
-        "nothing was delivered, and nothing was lost"
+        owed.iter().all(|event| event.attempts == 1),
+        "each event is still owed after exactly one failed attempt: {:?}",
+        owed.iter().map(|event| event.attempts).collect::<Vec<_>>()
     );
 }
 
