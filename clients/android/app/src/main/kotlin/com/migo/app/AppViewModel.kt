@@ -101,6 +101,7 @@ import com.migo.core.protocol.RoomVoteEvent
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
+import com.migo.core.protocol.UserProfile
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.ServerEndpoint
@@ -240,7 +241,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Insertion order of the resolved objects, oldest first — the eviction the byte budget walks. */
     private val mediaOrder = ArrayDeque<Id>()
 
-    /** How many resolved bytes the session keeps; the oldest object is dropped past it. */
+    /**
+     * How many resolved bytes the session keeps; the oldest object is dropped past it.
+     */
     private var mediaBytes = 0L
 
     /**
@@ -251,6 +254,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * be transient.
      */
     private val mediaCacheMaxBytes = 32L * 1024L * 1024L
+
+    /**
+     * The avatar media object an account's profile names, by account id — the wire's fact, before
+     * any bytes move. The download itself lands in [mediaObjects] keyed by media id, the same map
+     * a bubble's attachment reads, so an avatar costs the session nothing the attachment path was
+     * not already paying and two surfaces showing one person share one download.
+     */
+    private val avatarMediaIds = ConcurrentHashMap<Id, Id>()
+
+    /**
+     * The avatar images themselves, by account id — what every list row and message head reads.
+     * A stable flow like [mediaObjects] for the same reason: session-scoped, off [AppState], and a
+     * surface that recomposes reads it back rather than refetching. The value is the downloaded
+     * bytes; a failed or unannounced avatar stays absent, which renders as the monogram
+     * the row already drew.
+     */
+    private val _avatarBytes = MutableStateFlow<Map<Id, ByteArray>>(emptyMap())
+
+    val avatarBytes: StateFlow<Map<Id, ByteArray>> = _avatarBytes.asStateFlow()
+
+    /** Which account ids have an avatar download in flight, so concurrent surfaces share one. */
+    private val avatarsInFlight = HashSet<Id>()
 
     /**
      * The sealed `.migo` container a registration minted and nobody has saved yet, or null.
@@ -688,6 +713,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mediaInFlight.clear()
         mediaOrder.clear()
         mediaBytes = 0
+        // The avatar map is the same decrypted surface by another door: an avatar's bytes are
+        // plaintext (their audience is everyone who can see the profile), but they belong to the
+        // accounts this session looked at, and a different account signing in over the same
+        // window must not inherit a gallery of the last one's acquaintances.
+        avatarMediaIds.clear()
+        _avatarBytes.value = emptyMap()
+        avatarsInFlight.clear()
         pendingDocumentSave = null
         _state.value = AppState.Starting
         viewModelScope.launch {
@@ -877,6 +909,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.watchConversation(conversationId)
+                // A direct chat's header draws the peer's avatar, and the conversation list's row
+                // knew the peer but never fetched their profile: the read here is what makes the
+                // picture (and the name, when only the title was known) arrive with the open.
+                val peer = signedInState?.open?.peerId
+                if (peer != null && peer != live.client.accountId) {
+                    try {
+                        live.client.profile.fetchOne(peer)?.let { profile ->
+                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                            rememberAvatar(profile)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // The monogram stays; the chat does not fail over a decoration.
+                    }
+                }
                 // The tail fetch starts at the highest sequence the cache holds: everything at or
                 // below it is already decrypted as far as this device is concerned, and asking the
                 // server for it again would replay ciphertext the ratchet refuses as key reuse --
@@ -1110,6 +1158,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     seq = accepted.seq,
                     mine = true,
                     author = live.username,
+                    senderId = live.client.accountId,
                     text = text,
                     at = accepted.createdAt,
                 )
@@ -1306,6 +1355,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             seq = accepted.seq,
             mine = true,
             author = live.username,
+            senderId = live.client.accountId,
             text = body.text,
             at = accepted.createdAt,
             attachment = body.attachment,
@@ -1390,6 +1440,66 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val dropped = (_mediaObjects.value[oldest] as? MediaObject.Ready) ?: continue
             mediaBytes -= dropped.bytes.size
             _mediaObjects.value = _mediaObjects.value - oldest
+        }
+    }
+
+    /**
+     * Records the avatar a fetched profile names, and starts its download when it is new.
+     *
+     * Called everywhere a profile arrives (the name cache's fetches, the roster reads, the profile
+     * panel), so an avatar follows its name into every surface the name already reached — the same
+     * pairing the web client's `use-profiles` keeps, where the name lands first and the picture
+     * resolves behind it. A profile that names no avatar clears the account's entry, so removing
+     * a photo is a fact every surface learns.
+     */
+    private fun rememberAvatar(profile: UserProfile) {
+        val mediaId = profile.avatarMediaId
+        val known = avatarMediaIds[profile.userId]
+        if (mediaId == null) {
+            if (known != null) {
+                avatarMediaIds -= profile.userId
+                _avatarBytes.value = _avatarBytes.value - profile.userId
+            }
+            return
+        }
+        if (known == mediaId) return
+        avatarMediaIds[profile.userId] = mediaId
+        resolveAvatar(profile.userId)
+    }
+
+    /**
+     * Fetches one account's avatar into [avatarBytes], from the media id its profile named.
+     *
+     * An avatar is a plaintext media object — its audience is every account that can see the
+     * profile, so there is no seal to open — and unlike a message attachment it is never the
+     * session's to budget: it is not decrypted with the ratchet's keys, only public bytes, so the
+     * map keeps the decoded image small and bounded by the surfaces that asked for it. A failure
+     * is not cached; the next surface re-asks and retries, the same refusal the media resolver
+     * keeps.
+     */
+    fun resolveAvatar(userId: Id) {
+        val live = session ?: return
+        val mediaId = avatarMediaIds[userId] ?: return
+        if (_avatarBytes.value.containsKey(userId) || userId in avatarsInFlight) return
+        avatarsInFlight += userId
+        viewModelScope.launch {
+            val bytes = try {
+                withContext(Dispatchers.IO) { live.client.media.download(mediaId) }
+            } catch (cancelled: CancellationException) {
+                avatarsInFlight -= userId
+                throw cancelled
+            } catch (_: Exception) {
+                // The row keeps the monogram; a download that failed is not a verdict about the
+                // person. The next ask retries.
+                avatarsInFlight -= userId
+                return@launch
+            }
+            avatarsInFlight -= userId
+            // The profile may have moved on to a different photo while this one downloaded; the
+            // newer name wins, exactly the race the web cache resolves the same way.
+            if (avatarMediaIds[userId] == mediaId) {
+                _avatarBytes.value = _avatarBytes.value + (userId to bytes)
+            }
         }
     }
 
@@ -1912,6 +2022,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
                             names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                            rememberAvatar(profile)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -2420,6 +2531,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
                             names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                            rememberAvatar(profile)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -3308,6 +3420,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val profile = live.client.profile.fetchOne(live.client.accountId)
+                if (profile != null) rememberAvatar(profile)
                 signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = false, profile = profile)) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -3341,6 +3454,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         ?: throw IOException("the chosen image could not be read")
                 }
                 val updated = live.client.changeAvatar(bytes, contentType)
+                // The reply names the new avatar; recording it is what makes every other surface
+                // drop the old photo now rather than at some later refetch nobody would trigger.
+                rememberAvatar(updated)
                 signedIn {
                     it.copy(
                         profileEdit = it.profileEdit.copy(
@@ -3404,6 +3520,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         ),
                     )
                 }
+                // A save can clear the avatar; the reply is authoritative either way.
+                rememberAvatar(saved)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -4054,6 +4172,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             seq = message.seq,
             mine = mine,
             author = if (mine) live.username else names[message.senderId] ?: shortId(message.senderId),
+            senderId = message.senderId,
             text = body.text,
             at = message.createdAt,
             unsupported = body.placeholder,
@@ -4527,6 +4646,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         try {
             for (profile in live.client.profile.fetch(wanted.toList().take(PROFILE_BATCH))) {
                 names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                rememberAvatar(profile)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

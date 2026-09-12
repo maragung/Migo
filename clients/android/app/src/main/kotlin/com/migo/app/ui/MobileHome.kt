@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +72,9 @@ fun MobileHome(
     var intentUser by remember { mutableStateOf<UserTarget?>(null) }
     var intentRoom by remember { mutableStateOf<RoomSummary?>(null) }
     var confirmLogout by remember { mutableStateOf(false) }
+    // The session's avatars, for the Friends view's rows. Collected here because the home screen
+    // owns the view that draws the most people; the map is the same one every other surface reads.
+    val avatarBytes by model.avatarBytes.collectAsState()
 
     Column(modifier = modifier.fillMaxSize()) {
         MeCard(
@@ -99,6 +103,7 @@ fun MobileHome(
                     onGroupTitle = model::setGroupTitle,
                     onToggleGroupPick = model::toggleGroupPick,
                     onCreateGroup = model::createGroup,
+                    avatarBytes = avatarBytes,
                     modifier = Modifier.fillMaxSize(),
                 )
                 AppState.Section.ROOMS -> RoomsScreen(

@@ -70,6 +70,11 @@ fun FriendsScreen(
     onToggleGroupPick: (com.migo.core.wire.Id) -> Unit = {},
     /** Creates the group from the picked members and opens its thread. */
     onCreateGroup: () -> Unit = {},
+    /**
+     * The session's avatars, by account id — the friends list's pictures, absent keys rendering
+     * as the monogram the row already drew.
+     */
+    avatarBytes: Map<com.migo.core.wire.Id, ByteArray> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.search.query) }
@@ -147,6 +152,7 @@ fun FriendsScreen(
                         val direct = state.conversations.firstOrNull { it.peerId == entry.userId }
                         FriendRow(
                             name = name,
+                            avatarBytes = avatarBytes[entry.userId],
                             line = direct?.preview ?: "Tap to chat",
                             unread = direct?.unread ?: 0L,
                             presence = state.presence[entry.userId],
@@ -217,6 +223,7 @@ fun FriendsScreen(
 @Composable
 private fun FriendRow(
     name: String,
+    avatarBytes: ByteArray?,
     line: String,
     unread: Long,
     presence: com.migo.core.protocol.PresenceState?,
@@ -230,7 +237,7 @@ private fun FriendRow(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ListRowAvatar(name = name, online = presence != PresenceState.Offline)
+        ListRowAvatar(name = name, online = presence != PresenceState.Offline, avatarBytes = avatarBytes)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             ListRowName(text = name)

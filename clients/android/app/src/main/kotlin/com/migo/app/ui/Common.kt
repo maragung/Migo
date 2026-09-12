@@ -1,6 +1,8 @@
 package com.migo.app.ui
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -24,13 +26,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -160,6 +165,30 @@ fun Monogram(name: String, size: Dp = 44.dp, modifier: Modifier = Modifier) {
 }
 
 /**
+ * The account's avatar: the downloaded picture clipped to a circle, or the [Monogram] when there
+ * is none yet (no avatar named, still downloading, or the decode refused).
+ *
+ * The bytes are the session's avatar cache — public plaintext, an avatar's audience being everyone
+ * who can see the profile — so decoding here is a display concern, exactly where the bubble decodes
+ * its images. A `null`-bytes avatar is not an error state; it is the monogram the row already drew,
+ * upgraded by a recomposition when the download lands.
+ */
+@Composable
+fun Avatar(name: String, bytes: ByteArray?, size: Dp = 44.dp, modifier: Modifier = Modifier) {
+    val bitmap = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier.size(size).clip(CircleShape),
+        )
+    } else {
+        Monogram(name = name, size = size, modifier = modifier)
+    }
+}
+
+/**
  * A stable colour for a name.
  *
  * `hashCode` rather than anything cryptographic: this picks one of eight colours for a monogram, and
@@ -204,6 +233,7 @@ fun ListRowAvatar(
     online: Boolean = true,
     size: Dp = 38.dp,
     modifier: Modifier = Modifier,
+    avatarBytes: ByteArray? = null,
 ) {
     val ring = if (online) Color(0xFF43C56B) else Color(0xFFB9C7CF)
     val dot = if (online) Color(0xFF3FCE6B) else Color(0xFFA8B8C2)
@@ -214,7 +244,7 @@ fun ListRowAvatar(
                 .background(ring, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Monogram(name = name, size = size)
+            Avatar(name = name, bytes = avatarBytes, size = size)
         }
         Box(
             modifier = Modifier

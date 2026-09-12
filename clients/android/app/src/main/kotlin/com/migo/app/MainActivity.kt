@@ -225,6 +225,7 @@ private fun ShellScreen(
         if (uri != null) model.saveDocumentTo(uri)
     }
     val mediaObjects by model.mediaObjects.collectAsState()
+    val avatarBytes by model.avatarBytes.collectAsState()
     // The media choice, answered as one fact for every bubble on screen: "Wi-Fi only" reads the
     // connection's own metered state, which is the network's word rather than the app's guess.
     // Read per composition rather than remembered — a settings change must reach the next
@@ -371,6 +372,7 @@ private fun ShellScreen(
                         saveDocument.launch(attachment.caption ?: "document")
                     },
                     mediaObjects = mediaObjects,
+                    avatarBytes = avatarBytes,
                     modifier = Modifier.weight(1f),
                 )
             } else {
