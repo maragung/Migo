@@ -69,6 +69,7 @@ use super::call_signal::{
     seal_call_signal, CallDeclineReason, CallEndReason, CallMediaKind, CallState, IceCandidateJson,
     ANSWERED_ELSEWHERE_MESSAGE, CALL_KEY_EVENT, CALL_KEY_LEN, INVITE_RINGING, MISSED_CALL_MESSAGE,
 };
+use super::call_video;
 use super::{Event, Sink, Worker};
 use crate::crypto::content::{self, Content};
 use crate::model::ToastKind;

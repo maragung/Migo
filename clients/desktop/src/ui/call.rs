@@ -256,10 +256,9 @@ fn draw_video_stage(ui: &mut egui::Ui, theme: Theme, frame: &VideoFrame) {
     // aspect — the letterbox is the stage's fill, not the picture's stretch.
     let stage_width = 340.0 - 2.0 * space::MD as f32;
     let stage_height = (stage_width * 3.0 / 4.0).min(300.0);
-    let (fw, fh) = (
-        f32::from(frame.width.max(1)),
-        f32::from(frame.height.max(1)),
-    );
+    // The frame's own pixels, as floats for the fit below. `as` rather than `From` because
+    // the standard library deliberately refuses a lossless `From<u32> for f32`.
+    let (fw, fh) = (frame.width.max(1) as f32, frame.height.max(1) as f32);
     let scale = (stage_width / fw).min(stage_height / fh);
     let (w, h) = (fw * scale, fh * scale);
 
