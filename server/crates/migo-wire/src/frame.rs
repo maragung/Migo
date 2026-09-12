@@ -11,6 +11,9 @@
 //! [8]u8   span_id          only when TRACED
 //! varint  fragment_index   only when FRAGMENT
 //! varint  fragment_total   only when FRAGMENT
+//! varint  frame_seq        only when METADATA
+//! varint  sent_at_delta    only when METADATA
+//! varint  payload_len      only when METADATA; zero means not stated
 //! ...     payload          the remainder of the frame
 //! ```
 //!
@@ -97,6 +100,83 @@ impl Fragment {
     }
 }
 
+/// Frame-level metadata, sent only when both sides negotiated the feature
+/// (section 141). Everything here serves cross-opcode needs — ACK accounting
+/// and resume without reading the payload — which is why it sits in the header
+/// instead of costing every opcode a field.
+///
+/// `payload_len` is the exception to the no-length rule stated in the module
+/// docs: it is present only when the frame needs to state its own length (a
+/// frame stored in a redelivery buffer, or forwarded inside a wrapper that
+/// carries no boundary of its own).
+///
+/// The block is **always three varints**. A trailing optional varint cannot be
+/// decoded: nothing on the wire would distinguish "the block ended here" from
+/// "the block continues", and a greedy decoder would eat the payload's first
+/// byte as a length. So presence is carried by the value instead — `0` means
+/// "not stated" and decodes to `None` — and the block stays self-delimiting
+/// for a parser that never looks past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataBlock {
+    /// Per-direction, per-session frame sequence number. Rises by one for
+    /// every frame the sender sends.
+    pub frame_seq: u32,
+    /// Milliseconds since the anchor for this direction: the server's
+    /// `server_time` from Welcome for server-to-client frames, the HELLO
+    /// time for client-to-server frames.
+    pub sent_at_delta: u32,
+    /// Present when the frame must state its own payload length. `None`
+    /// encodes as a zero varint (see the struct docs).
+    pub payload_len: Option<u32>,
+}
+
+impl MetadataBlock {
+    /// Encoded size of this block in bytes.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        // Always three varints — a zero payload_len is written, not omitted.
+        varint::encoded_len(u64::from(self.frame_seq))
+            + varint::encoded_len(u64::from(self.sent_at_delta))
+            + varint::encoded_len(u64::from(self.payload_len.unwrap_or(0)))
+    }
+
+    /// Appends this block to `out`.
+    fn encode(&self, out: &mut BytesMut) {
+        varint::encode_u64(u64::from(self.frame_seq), out);
+        varint::encode_u64(u64::from(self.sent_at_delta), out);
+        varint::encode_u64(u64::from(self.payload_len.unwrap_or(0)), out);
+    }
+
+    /// Parses a block from `input` at `offset`.
+    ///
+    /// Each varint is narrowed the moment it is read: an over-wide `frame_seq` must fail
+    /// with `FieldOverflow` even when the block is also truncated after it, not fall
+    /// through to `UnexpectedEnd` on the next field.
+    fn decode(input: &[u8], offset: &mut usize) -> Result<Self> {
+        let (raw, used) = varint::decode_u64(input, *offset)?;
+        *offset += used;
+        let frame_seq =
+            u32::try_from(raw).map_err(|_| WireError::FieldOverflow { field: "frame_seq" })?;
+        let (raw, used) = varint::decode_u64(input, *offset)?;
+        *offset += used;
+        let sent_at_delta = u32::try_from(raw).map_err(|_| WireError::FieldOverflow {
+            field: "sent_at_delta",
+        })?;
+        let (raw, used) = varint::decode_u64(input, *offset)?;
+        *offset += used;
+        let payload_len = u32::try_from(raw).map_err(|_| WireError::FieldOverflow {
+            field: "payload_len",
+        })?;
+
+        Ok(Self {
+            frame_seq,
+            sent_at_delta,
+            // A zero payload_len means "not stated"; see the struct docs.
+            payload_len: (payload_len != 0).then_some(payload_len),
+        })
+    }
+}
+
 /// The parsed header of an MWP/1 frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -112,10 +192,12 @@ pub struct FrameHeader {
     pub trace: Option<TraceContext>,
     /// Present when the `FRAGMENT` flag is set.
     pub fragment: Option<Fragment>,
+    /// Present when the `METADATA` flag is set.
+    pub metadata: Option<MetadataBlock>,
 }
 
 impl FrameHeader {
-    /// A minimal header: current version, no flags, no trace, no fragment.
+    /// A minimal header: current version, no flags, no optional blocks.
     #[must_use]
     pub fn new(opcode: u32, correlation: u32) -> Self {
         Self {
@@ -125,6 +207,7 @@ impl FrameHeader {
             correlation,
             trace: None,
             fragment: None,
+            metadata: None,
         }
     }
 
@@ -168,6 +251,17 @@ impl FrameHeader {
         self
     }
 
+    /// Attaches a metadata block (section 141). The caller is responsible for
+    /// sending these only to sessions that negotiated the feature; the codec
+    /// just encodes what it is given. Droppable-class frames should not carry
+    /// one — a frame that may be lost does not need tracking.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: MetadataBlock) -> Self {
+        self.flags |= flags::METADATA;
+        self.metadata = Some(metadata);
+        self
+    }
+
     /// True when the payload needs inflating before decoding.
     #[must_use]
     pub fn is_compressed(&self) -> bool {
@@ -205,6 +299,9 @@ impl FrameHeader {
             len += varint::encoded_len(u64::from(fragment.index))
                 + varint::encoded_len(u64::from(fragment.total));
         }
+        if let Some(metadata) = self.metadata {
+            len += metadata.encoded_len();
+        }
         len
     }
 
@@ -212,15 +309,20 @@ impl FrameHeader {
     ///
     /// The flag bits and the optional blocks are written from the same source of
     /// truth — the `Option` fields — so a header can never claim `TRACED` without
-    /// carrying a trace.
+    /// carrying a trace. A caller-supplied bit without its block is likewise
+    /// corrected: `TRACED`, `FRAGMENT`, and `METADATA` are masked out of the
+    /// caller's flags and re-derived from what is actually present.
     pub fn encode(&self, out: &mut BytesMut) -> Result<()> {
         let mut flag_bits = self.flags;
-        flag_bits &= !(flags::TRACED | flags::FRAGMENT);
+        flag_bits &= !(flags::TRACED | flags::FRAGMENT | flags::METADATA);
         if self.trace.is_some() {
             flag_bits |= flags::TRACED;
         }
         if self.fragment.is_some() {
             flag_bits |= flags::FRAGMENT;
+        }
+        if self.metadata.is_some() {
+            flag_bits |= flags::METADATA;
         }
         if flag_bits & flags::RESERVED_MASK != 0 {
             return Err(WireError::ReservedFlags {
@@ -241,6 +343,9 @@ impl FrameHeader {
             varint::encode_u64(u64::from(fragment.index), out);
             varint::encode_u64(u64::from(fragment.total), out);
         }
+        if let Some(metadata) = &self.metadata {
+            metadata.encode(out);
+        }
         Ok(())
     }
 
@@ -248,10 +353,11 @@ impl FrameHeader {
     /// which the payload begins.
     ///
     /// Rejects, in this order: a short frame, an unsupported version, reserved
-    /// flag bits, a truncated trace block, and an impossible fragment pair.
-    /// Reserved bits are an error and not something to ignore — a peer that sets
-    /// them is speaking a dialect we do not know, and silently discarding the
-    /// bits would let a future extension be stripped by an old node.
+    /// flag bits, a truncated trace block, an impossible fragment pair, and a
+    /// truncated or over-wide metadata block. Reserved bits are an error and
+    /// not something to ignore — a peer that sets them is speaking a dialect we
+    /// do not know, and silently discarding the bits would let a future
+    /// extension be stripped by an old node that had no idea it was doing so.
     pub fn decode(input: &[u8]) -> Result<(Self, usize)> {
         if input.len() < 2 {
             return Err(WireError::UnexpectedEnd {
@@ -322,6 +428,12 @@ impl FrameHeader {
             None
         };
 
+        let metadata = if flag_bits & flags::METADATA != 0 {
+            Some(MetadataBlock::decode(input, &mut offset)?)
+        } else {
+            None
+        };
+
         let header = Self {
             version,
             flags: flag_bits,
@@ -329,6 +441,7 @@ impl FrameHeader {
             correlation,
             trace,
             fragment,
+            metadata,
         };
         Ok((header, offset))
     }
@@ -502,6 +615,7 @@ mod tests {
         assert_eq!(&decoded.payload[..], b"payload");
         assert!(decoded.header.trace.is_none());
         assert!(decoded.header.fragment.is_none());
+        assert!(decoded.header.metadata.is_none());
     }
 
     #[test]
@@ -509,6 +623,11 @@ mod tests {
         let header = FrameHeader::new(300, 65_536)
             .with_trace(trace())
             .with_fragment(Fragment { index: 2, total: 5 })
+            .with_metadata(MetadataBlock {
+                frame_seq: 9001,
+                sent_at_delta: 42,
+                payload_len: Some(3),
+            })
             .ack_required()
             .error();
         let frame = Frame::new(header, Bytes::from_static(b"x"));
@@ -521,6 +640,14 @@ mod tests {
         assert_eq!(
             decoded.header.fragment,
             Some(Fragment { index: 2, total: 5 })
+        );
+        assert_eq!(
+            decoded.header.metadata,
+            Some(MetadataBlock {
+                frame_seq: 9001,
+                sent_at_delta: 42,
+                payload_len: Some(3),
+            })
         );
         assert!(decoded.header.is_ack_required());
         assert!(decoded.header.is_error());
@@ -599,6 +726,122 @@ mod tests {
     fn fragment_ordering_is_reported() {
         assert!(!Fragment { index: 0, total: 3 }.is_last());
         assert!(Fragment { index: 2, total: 3 }.is_last());
+    }
+
+    #[test]
+    fn a_metadata_block_is_always_three_varints() {
+        let header = FrameHeader::new(1, 0).with_metadata(MetadataBlock {
+            frame_seq: 5,
+            sent_at_delta: 300,
+            payload_len: None,
+        });
+        let mut out = BytesMut::new();
+        header.encode(&mut out).expect("encodes");
+        // version, METADATA flag, opcode, correlation, seq, delta, then a zero
+        // payload_len varint. The block is self-delimiting: a trailing optional
+        // varint could not be told apart from the payload's first byte.
+        assert_eq!(
+            &out[..],
+            &[PROTOCOL_VERSION, flags::METADATA, 1, 0, 5, 0xAC, 0x02, 0]
+        );
+        assert_eq!(header.encoded_len(), out.len());
+    }
+
+    #[test]
+    fn a_metadata_block_round_trips_with_payload_len() {
+        let header = FrameHeader::new(1, 0).with_metadata(MetadataBlock {
+            frame_seq: 5,
+            sent_at_delta: 300,
+            payload_len: Some(0x21),
+        });
+        let frame = Frame::new(header, Bytes::from_static(b"payload"));
+        let encoded = frame.encode().expect("encodes");
+        assert_eq!(encoded.len(), frame.encoded_len());
+        let decoded = Frame::decode(encoded).expect("decodes");
+        assert_eq!(
+            decoded.header.metadata,
+            Some(MetadataBlock {
+                frame_seq: 5,
+                sent_at_delta: 300,
+                payload_len: Some(0x21),
+            })
+        );
+        assert_eq!(&decoded.payload[..], b"payload");
+    }
+
+    #[test]
+    fn a_zero_payload_len_decodes_as_not_stated() {
+        // The presence convention made concrete: payload_len presence is
+        // carried by its value. A zero means the frame does not state its own
+        // length, and decodes to `None` — the payload is untouched.
+        let explicit = Bytes::from_static(&[
+            PROTOCOL_VERSION,
+            flags::METADATA,
+            1,
+            0,
+            5,
+            0xAC,
+            0x02,
+            0,
+            0x61,
+        ]);
+        let decoded = Frame::decode(explicit).expect("decodes");
+        assert_eq!(
+            decoded.header.metadata,
+            Some(MetadataBlock {
+                frame_seq: 5,
+                sent_at_delta: 300,
+                payload_len: None,
+            })
+        );
+        assert_eq!(&decoded.payload[..], b"a");
+    }
+
+    #[test]
+    fn a_truncated_metadata_block_is_rejected() {
+        // The block is always three varints; a frame that ends after the
+        // second is truncated, exactly like one that ends mid-varint.
+        let two_varints =
+            Bytes::from_static(&[PROTOCOL_VERSION, flags::METADATA, 1, 0, 5, 0xAC, 0x02]);
+        assert!(matches!(
+            Frame::decode(two_varints),
+            Err(WireError::UnexpectedEnd { .. })
+        ));
+        // frame_seq's continuation bit promises a byte that never arrives.
+        let mid_varint = Bytes::from_static(&[PROTOCOL_VERSION, flags::METADATA, 1, 0, 0x80]);
+        assert!(matches!(
+            Frame::decode(mid_varint),
+            Err(WireError::UnexpectedEnd { .. })
+        ));
+    }
+
+    #[test]
+    fn a_metadata_field_past_u32_is_rejected() {
+        // frame_seq = 2^32 does not fit the field.
+        let mut out = BytesMut::new();
+        out.put_u8(PROTOCOL_VERSION);
+        out.put_u8(flags::METADATA);
+        varint::encode_u64(1, &mut out);
+        varint::encode_u64(0, &mut out);
+        varint::encode_u64(1 << 32, &mut out);
+        assert_eq!(
+            Frame::decode(out.freeze()),
+            Err(WireError::FieldOverflow { field: "frame_seq" })
+        );
+    }
+
+    #[test]
+    fn a_metadata_bit_without_a_block_is_corrected_not_sent() {
+        // The flag is derived from the Option, so a caller-supplied METADATA bit
+        // with no block is stripped rather than written. The same rule as a
+        // TRACED bit with no trace: the wire never carries a promise the bytes
+        // do not keep.
+        let mut header = FrameHeader::new(1, 0);
+        header.flags |= flags::METADATA;
+        assert!(header.metadata.is_none());
+        let mut out = BytesMut::new();
+        header.encode(&mut out).expect("encodes");
+        assert_eq!(&out[..], &[PROTOCOL_VERSION, 0, 1, 0]);
     }
 
     #[test]
@@ -740,6 +983,22 @@ mod tests {
             .prop_flat_map(|total| (0..total).prop_map(move |index| Fragment { index, total }))
     }
 
+    /// Any metadata block this build can encode. The third varint is always
+    /// written; a zero value means "not stated", so `Some(0)` is normalised to
+    /// `None` in the generator and the round trip compares canonical forms.
+    fn any_metadata() -> impl Strategy<Value = MetadataBlock> {
+        (
+            any::<u32>(),
+            any::<u32>(),
+            proptest::option::of(proptest::num::u32::ANY),
+        )
+            .prop_map(|(frame_seq, sent_at_delta, payload_len)| MetadataBlock {
+                frame_seq,
+                sent_at_delta,
+                payload_len: payload_len.filter(|len| *len != 0),
+            })
+    }
+
     /// Any frame this build can build and encode: arbitrary opcode and
     /// correlation, a bounded payload, the optional blocks present or absent.
     /// The payload stays small because the properties below iterate over
@@ -752,11 +1011,12 @@ mod tests {
             proptest::collection::vec(any::<u8>(), 0..=128),
             proptest::option::of(any_trace()),
             proptest::option::of(any_fragment()),
+            proptest::option::of(any_metadata()),
             any::<bool>(),
             any::<bool>(),
         )
             .prop_map(
-                |(opcode, correlation, payload, trace, fragment, ack, error)| {
+                |(opcode, correlation, payload, trace, fragment, metadata, ack, error)| {
                     let mut header = FrameHeader::new(opcode, correlation);
                     if ack {
                         header = header.ack_required();
@@ -769,6 +1029,9 @@ mod tests {
                     }
                     if let Some(fragment) = fragment {
                         header = header.with_fragment(fragment);
+                    }
+                    if let Some(metadata) = metadata {
+                        header = header.with_metadata(metadata);
                     }
                     Frame::new(header, Bytes::from(payload))
                 },
