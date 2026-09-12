@@ -1,0 +1,26 @@
+{
+  "name": "@migo/nnode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "N-node federation sync check: proves which cross-node paths a real mesh link carries and reports the ones it does not.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "migo-nnode-sync-check": "./dist/sync-check.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "start": "node dist/sync-check.js"
+  },
+  "dependencies": {
+    "@migo/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
