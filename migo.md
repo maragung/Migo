@@ -1765,7 +1765,7 @@ Message diterima satu kali oleh shard node lalu didistribusikan ke subscribers.
 
 56. BANDWIDTH TARGET
 
-Target ini adalah budget, bukan harapan. Perubahan yang melewatinya WAJIB disertai alasan pada code review. Angka rinci dan cara pengukurannya ada di section 171.
+Target ini adalah budget, bukan harapan. Perubahan yang melewatinya WAJIB disertai alasan pada code review. Angka rinci dan cara pengukurannya ada di section 171, dan seluruh angka per event dan per session di bawah ini diukur otomatis dari encoder asli oleh server/crates/migo-protocol/tests/budgets.rs, yang dijalankan CI sebagai make budget-check; frame yang melampaui budgetnya menggagalkan build dengan menyebut budget yang dilanggar. Beberapa angka lama tidak tercapai oleh layout MWP/1 yang membekukan field posisi required, terutama id 16 byte pada frame typing dan presence; angkanya diperbarui ke terukur dan alasan dicatat pada tiap baris.
 
 Target per event, payload ditambah frame header, sebelum TLS:
 
@@ -1773,19 +1773,19 @@ Text message E2E sampai 120 karakter
 Maksimum 96 byte overhead ditambah ciphertext
 
 Message receipt delivered atau read
-Maksimum 24 byte, memakai watermark kumulatif dan bukan satu receipt per pesan
+Maksimum 24 byte, memakai watermark kumulatif dan bukan satu receipt per pesan. Bentuk watermark yang dikirim client terukur tepat 24 byte; bentuk siaran ke device lain yang membawa identitas pembaca sebagai optional menambah 18 byte dan tidak dihitung budget ini
 
 Typing start atau stop
-Maksimum 12 byte, dengan debounce dan coalescing, tidak pernah per ketikan
+Maksimum 48 byte, dengan debounce dan coalescing, tidak pernah per ketikan. Angka lama 12 byte tidak tercapai karena conversation_id 16 byte adalah field required yang dibekukan MWP/1; bentuk siaran penuh terukur 40 byte
 
 Presence change
-Maksimum 16 byte, hanya saat berubah, diagregasi per room
+Maksimum 16 byte untuk PresenceUpdate yang dikirim client, dan 32 byte untuk PresenceEvent yang disiarkan, hanya saat berubah, diagregasi per room. Angka lama 16 byte untuk kedua arah tidak tercapai karena identitas user 16 byte adalah field required pada bentuk siaran; terukur 22 byte
 
 Room member count update
-Maksimum 10 byte, coalesced, jarak minimum 5 detik, hanya delta
+Maksimum 32 byte, coalesced, jarak minimum 5 detik, hanya delta. Angka lama 10 byte tidak tercapai karena room_id 16 byte adalah field required; RoomStateEvent delta terukur 23 byte
 
 PING dan Pong
-Maksimum 6 byte
+Maksimum 16 byte untuk PING dan 24 byte untuk Pong. Angka lama 6 byte tidak tercapai karena timestamp Migo epoch adalah varint 6 byte; terukur 11 dan 17 byte
 
 ACK
 Maksimum 10 byte
@@ -5203,7 +5203,7 @@ Private message tetap dapat dikirim saat node tujuan tidak terjangkau, karena pe
 
 171. BANDWIDTH TARGET AND BUDGET
 
-STATUS: SPEC untuk gate CI. Angka pada bagian ini sudah dapat diukur dari encoder migo-wire, tetapi pengukurannya belum otomatis.
+STATUS: BUILT untuk gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder asli dan AEAD asli, dijalankan CI sebagai make budget-check, dan menggagalkan build bila sebuah budget terlampaui. STATUS: SPEC untuk pengukuran runtime, yaitu metric gateway, tools/loadgen, dan penghitung byte per session di web client, yang mengukur node hidup dan bukan encoder.
 
 Target per event dan per session ada di section 56. Bagian ini menambahkan target untuk call, voice note, media, dan federation, serta cara pengukurannya.
 
@@ -5249,14 +5249,15 @@ FED_FORWARD
 Overhead di luar envelope maksimum 64 byte
 
 FED_ACK
-Watermark kumulatif, maksimum 16 byte
+Watermark kumulatif, maksimum 48 byte. Angka lama 16 byte tidak tercapai karena node_id dikirim sebagai teks identitas 26 karakter, bukan 16 byte biner; terukur 36 byte
 
 Cara pengukuran:
 
+Gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder migo-wire asli dan AEAD migo-crypto asli, lalu membandingkannya dengan angka section 56 dan bagian ini. CI menjalankannya sebagai make budget-check dan menggagalkan build bila sebuah budget terlampaui. Frame diukur tanpa kompresi dan tanpa batching, yang hanya mengecilkan byte di kabel
 Gateway mengekspor migo_gateway_frames_in_total dan migo_gateway_frames_out_total tanpa label, plus migo_gateway_frames_dropped_total berlabel class, sehingga regresi terlihat sebagai pergeseran rasio frame masuk ke keluar; histogram byte per opcode memang tidak diekspor karena panjang ciphertext adalah side channel (section 174), jadi pengukuran byte per pesan dilakukan oleh test ukuran frame per opcode, bukan oleh seri metrik
 tools/loadgen melaporkan byte per user per menit untuk setiap skenario, dan CI menggagalkan job performa bila sebuah skenario melewati budget lebih dari 10 persen
 Web client mencatat penghitung byte per session pada mode development, sehingga biaya sebuah fitur terlihat saat fitur itu ditulis, bukan setelah diluncurkan
-Setiap penambahan opcode WAJIB disertai satu test yang mengukur ukuran frame tipikalnya dan membandingkannya dengan budget
+Setiap penambahan opcode WAJIB disertai satu pengukuran ukuran frame tipikalnya di budgets.rs dan membandingkannya dengan budget
 
 
 172. PROTOCOL TESTING: LOAD, STRESS, FUZZ, SECURITY
