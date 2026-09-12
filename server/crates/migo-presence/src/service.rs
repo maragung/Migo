@@ -25,7 +25,7 @@
 //! only, both of them reads about somebody else's privacy settings, plus one write
 //! that records when a device was last seen.
 //!
-//! # Why the minimum interval is advertised and not enforced here
+//! # Why the minimum interval is advertised here and enforced elsewhere
 //!
 //! Brief section 159 asks for a server-side floor on how often one user's presence
 //! may be republished. [`Cadence::min_interval_ms`](crate::model::Cadence) computes
@@ -39,6 +39,12 @@
 //! is a coalescing queue, which is what the gateway already has (brief section 154,
 //! `Coalescable` keyed by user id). Publishing the number and letting the component
 //! with the queue apply it keeps one mechanism instead of two that can disagree.
+//!
+//! The gateway does apply it now: the table lives in `migo-protocol` so the queue
+//! can read it without naming this crate (section 177), and the frame's `paced`
+//! metadata in the schema is what tells the queue which `Coalescable` keys carry
+//! the floor. This crate's part remains the same — compute the number, store the
+//! entry, plan the fanout — and it still sends nothing itself.
 //!
 //! # What is deliberately absent
 //!
@@ -75,7 +81,7 @@ use migo_store::{SharedStore, Store};
 use crate::fanout::Fanout;
 use crate::metrics::{LastSeenOutcome, Meters, SessionEvent, UpdateOutcome};
 use crate::model::{
-    cadence_for, Cadence, Caller, Detail, PresenceConfig, MAX_LAST_SEEN_LOOKUPS,
+    cadence_for, Cadence, CadenceTtl, Caller, Detail, PresenceConfig, MAX_LAST_SEEN_LOOKUPS,
     MAX_SNAPSHOT_SUBJECTS,
 };
 use crate::state::{

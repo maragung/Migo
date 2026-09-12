@@ -325,6 +325,7 @@ impl Gateway {
         self.inner.hub.broadcast(
             &topic,
             &bytes,
+            Opcode::NotificationEvent,
             Opcode::NotificationEvent.class(),
             Some(coalesce_key_for(&recipient)),
             now,
@@ -357,7 +358,7 @@ impl Gateway {
         };
         self.inner
             .hub
-            .broadcast(topic, &bytes, opcode.class(), None, now, None);
+            .broadcast(topic, &bytes, opcode, opcode.class(), None, now, None);
     }
 
     /// Takes topics away from every live session an account holds, returning
@@ -405,9 +406,15 @@ impl Gateway {
             },
             Err(_) => return,
         };
-        self.inner
-            .hub
-            .broadcast(topic, &bytes, opcode.class(), Some(coalesce_key), now, None);
+        self.inner.hub.broadcast(
+            topic,
+            &bytes,
+            opcode,
+            opcode.class(),
+            Some(coalesce_key),
+            now,
+            None,
+        );
     }
 }
 
@@ -746,6 +753,8 @@ mod tests {
             gateway.inner.settings.queue_capacity,
             gateway.inner.settings.resume_buffer_frames,
             gateway.inner.settings.resume_window_ms,
+            migo_protocol::BandwidthMode::Normal,
+            30_000,
         ));
         gateway.inner.hub.register(SessionHandle::new(
             session_id,
@@ -762,7 +771,7 @@ mod tests {
         // untouched and must not panic — the "same gate" property's absence branch.
         gateway.broadcast_to_topic(&room, Opcode::NotificationEvent, &event, ts(NOW));
         assert!(
-            outbound.take_ready().is_empty(),
+            outbound.take_ready(ts(NOW)).is_empty(),
             "a topic with no subscribers delivers nothing"
         );
 
@@ -778,7 +787,7 @@ mod tests {
 
         gateway.broadcast_to_topic(&room, Opcode::NotificationEvent, &event, ts(NOW));
 
-        let ready = outbound.take_ready();
+        let ready = outbound.take_ready(ts(NOW));
         assert_eq!(
             ready.len(),
             1,
