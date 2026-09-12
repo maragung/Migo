@@ -102,7 +102,14 @@ pub fn count(members: i32) -> u32 {
 /// reach, which reads as "stale forever".
 #[must_use]
 pub const fn revision(of: i64) -> u64 {
-    of.max(0) as u64
+    // Not `of.max(0)`: `Ord::max` is not const-callable on the declared MSRV,
+    // and a const fn that only compiles on newer toolchains is a gate that
+    // flatters the machine that wrote it.
+    if of < 0 {
+        0
+    } else {
+        of as u64
+    }
 }
 
 /// A state event carrying only the fields that moved.

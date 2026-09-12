@@ -1099,7 +1099,7 @@ pub struct NewRoom {
 }
 
 /// Room membership, including the moderation state that attaches to it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomMember {
     /// Room.
     pub room_id: Id,

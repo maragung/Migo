@@ -49,16 +49,14 @@
 //! admitted, because admitting somebody a policy meant to hold back is the failure
 //! that cannot be undone by shipping the table later.
 
+use crate::fanout::Fanout;
+use crate::model::{Authorized, Caller, NewRoomRequest, Sanction, Settings};
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
     RoomJoinRequest, RoomJoinResponse, RoomLeaveRequest, RoomListRequest, RoomListResponse,
     RoomRole, RoomSummary, RoomVoteKickResponse,
 };
-use migo_store::model::RoomMember;
-
-use crate::fanout::Fanout;
-use crate::model::{Authorized, Caller, NewRoomRequest, Sanction, Settings};
 
 /// Everything rooms do.
 #[async_trait]
