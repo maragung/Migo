@@ -255,16 +255,21 @@ export function decodeHeader(input: Uint8Array): { header: FrameHeader; offset: 
 
   let metadata: MetadataBlock | null = null;
   if ((bits & flags.METADATA) !== 0) {
+    // Each varint is narrowed the moment it is read: an over-wide frame_seq must fail
+    // with FieldOverflow even when the block is also truncated after it, not fall
+    // through to UnexpectedEnd on the next field.
     const seqRaw = varint.scan(input, offset);
+    const frameSeq = narrow(seqRaw, 'frame_seq');
     offset += seqRaw.used;
     const deltaRaw = varint.scan(input, offset);
+    const sentAtDelta = narrow(deltaRaw, 'sent_at_delta');
     offset += deltaRaw.used;
     const lenRaw = varint.scan(input, offset);
-    offset += lenRaw.used;
     const len = narrow(lenRaw, 'payload_len');
+    offset += lenRaw.used;
     metadata = {
-      frameSeq: narrow(seqRaw, 'frame_seq'),
-      sentAtDelta: narrow(deltaRaw, 'sent_at_delta'),
+      frameSeq,
+      sentAtDelta,
       // The block is always three varints; a zero payload_len means "not
       // stated" and normalises to null.
       payloadLen: len === 0 ? null : len,

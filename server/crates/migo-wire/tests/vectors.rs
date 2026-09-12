@@ -245,7 +245,7 @@ fn header_from_case(frame: &Value) -> FrameHeader {
             payload_len: meta
                 .get("payload_len")
                 .filter(|v| !v.is_null())
-                .map(|v| small(meta, "payload_len")),
+                .map(|_| small(meta, "payload_len")),
         });
 
     FrameHeader {

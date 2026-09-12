@@ -210,16 +210,21 @@ fun decodeHeader(input: ByteArray): DecodedHeader {
 
     var metadata: MetadataBlock? = null
     if ((bits and Flags.METADATA) != 0) {
+        // Each varint is narrowed the moment it is read: an over-wide frame_seq must fail
+        // with FieldOverflow even when the block is also truncated after it, not fall
+        // through to UnexpectedEnd on the next field.
         val seqRaw = Varint.scan(input, offset)
+        val frameSeq = narrow(seqRaw, "frame_seq")
         offset += seqRaw.used
         val deltaRaw = Varint.scan(input, offset)
+        val sentAtDelta = narrow(deltaRaw, "sent_at_delta")
         offset += deltaRaw.used
         val lenRaw = Varint.scan(input, offset)
-        offset += lenRaw.used
         val len = narrow(lenRaw, "payload_len")
+        offset += lenRaw.used
         metadata = MetadataBlock(
-            narrow(seqRaw, "frame_seq"),
-            narrow(deltaRaw, "sent_at_delta"),
+            frameSeq,
+            sentAtDelta,
             // The block is always three varints; a zero payload_len means
             // "not stated" and normalises to null.
             if (len == 0L) null else len,

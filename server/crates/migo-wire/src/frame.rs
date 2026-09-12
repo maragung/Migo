@@ -148,19 +148,23 @@ impl MetadataBlock {
     }
 
     /// Parses a block from `input` at `offset`.
+    ///
+    /// Each varint is narrowed the moment it is read: an over-wide `frame_seq` must fail
+    /// with `FieldOverflow` even when the block is also truncated after it, not fall
+    /// through to `UnexpectedEnd` on the next field.
     fn decode(input: &[u8], offset: &mut usize) -> Result<Self> {
-        let (frame_seq, used) = varint::decode_u64(input, *offset)?;
+        let (raw, used) = varint::decode_u64(input, *offset)?;
         *offset += used;
-        let (sent_at_delta, used) = varint::decode_u64(input, *offset)?;
+        let frame_seq =
+            u32::try_from(raw).map_err(|_| WireError::FieldOverflow { field: "frame_seq" })?;
+        let (raw, used) = varint::decode_u64(input, *offset)?;
         *offset += used;
-        let (payload_len, used) = varint::decode_u64(input, *offset)?;
-        *offset += used;
-        let frame_seq = u32::try_from(frame_seq)
-            .map_err(|_| WireError::FieldOverflow { field: "frame_seq" })?;
-        let sent_at_delta = u32::try_from(sent_at_delta).map_err(|_| WireError::FieldOverflow {
+        let sent_at_delta = u32::try_from(raw).map_err(|_| WireError::FieldOverflow {
             field: "sent_at_delta",
         })?;
-        let payload_len = u32::try_from(payload_len).map_err(|_| WireError::FieldOverflow {
+        let (raw, used) = varint::decode_u64(input, *offset)?;
+        *offset += used;
+        let payload_len = u32::try_from(raw).map_err(|_| WireError::FieldOverflow {
             field: "payload_len",
         })?;
 
