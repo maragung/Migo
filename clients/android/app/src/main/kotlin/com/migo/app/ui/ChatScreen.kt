@@ -8,6 +8,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +51,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
@@ -79,6 +83,7 @@ import com.migo.app.model.MediaObject
 import com.migo.app.model.QUICK_REACTIONS
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
+import com.migo.app.model.VoiceNotePreview
 import com.migo.app.model.VoteTally
 import com.migo.app.model.gameLabelOf
 import com.migo.app.model.groupRoleLabel
@@ -210,9 +215,22 @@ fun ChatScreen(
      * what every conversation is for.
      */
     onVoiceNote: () -> Unit = {},
-    /** Finishes the recording and sends it. Offered only while [ChatState.recording] holds. */
+    /** Pauses the running recording — the speaker's own Pause, lifted by [onResumeVoiceNote]. */
+    onPauseVoiceNote: () -> Unit = {},
+    /** Resumes a recording paused by its speaker. */
+    onResumeVoiceNote: () -> Unit = {},
+    /**
+     * Stops the recording into its preview — the two-step mode's second tap. The note waits on
+     * the preview row's Send and Delete rather than leaving immediately.
+     */
     onStopVoiceNote: () -> Unit = {},
-    /** Throws the recording away. Offered only while [ChatState.recording] holds. */
+    /** Sends the held note: the preview's Send, and the hold mode's release-to-send. */
+    onSendVoiceNote: () -> Unit = {},
+    /** Deletes the previewed note — through the undo window, like every discard of a recording. */
+    onDeleteVoiceNote: () -> Unit = {},
+    /** Restores the note the undo window is holding, back into its preview. */
+    onUndoVoiceNoteDiscard: () -> Unit = {},
+    /** Cancels the recording — the hold mode's slide-to-cancel, and the recording bar's Cancel. */
     onCancelVoiceNote: () -> Unit = {},
     /** Sets one of the quick reactions on a message, from the long-press bar. */
     onReact: (Id, String) -> Unit = { _, _ -> },
@@ -419,12 +437,35 @@ fun ChatScreen(
                 ?.takeIf { it.kind == GAME_KIND_GUESS_NUMBER && it.status == GAME_STATUS_OPEN && it.yourTurn == true }
                 ?.let { active -> GuessCard(game = active, busy = chat.gameBusy, onGuess = onGuess) }
 
-            // While a recording runs, the composer is the recording bar: no text can be typed into a
-            // moment that is being recorded, and the bar that says so is the same surface that
-            // stops or throws it away.
-            if (chat.recording) {
-                RecordingBar(onStop = onStopVoiceNote, onCancel = onCancelVoiceNote)
+            // The composer's four faces, one per state a voice note can leave it in. While a
+            // recording runs *unheld* — the two-step mode, or a hold that slid up into its lock —
+            // the composer is the recording bar, with the whole vocabulary of a recording. While
+            // a recording runs *held* (the finger still pressing the mic), the composer keeps its
+            // own shape — the gesture owns the mic button, and the row between the attach button
+            // and it becomes the timer and the slide hints. A finished note waiting on the word
+            // is the preview row, and a note just cancelled is the undo window's chip.
+            var micHeld by remember { mutableStateOf(false) }
+            if (chat.recording && !micHeld) {
+                RecordingBar(
+                    paused = chat.recordingPaused,
+                    elapsedMs = chat.recordingElapsedMs,
+                    amplitudes = chat.recordingAmplitudes,
+                    onPause = onPauseVoiceNote,
+                    onResume = onResumeVoiceNote,
+                    onStop = onStopVoiceNote,
+                    onCancel = onCancelVoiceNote,
+                )
+            } else if (chat.notePreview != null) {
+                PreviewBar(
+                    preview = chat.notePreview,
+                    onSend = onSendVoiceNote,
+                    onDelete = onDeleteVoiceNote,
+                    uploading = chat.uploading,
+                )
             } else {
+                if (chat.noteDiscardUndo) {
+                    DiscardUndoBar(onUndo = onUndoVoiceNoteDiscard)
+                }
                 Composer(
                     draft = chat.draft,
                     sending = chat.sending,
@@ -433,6 +474,14 @@ fun ChatScreen(
                     onSend = onSend,
                     onAttach = onAttach,
                     onVoiceNote = onVoiceNote,
+                    recordingHeld = chat.recording,
+                    heldElapsedMs = chat.recordingElapsedMs,
+                    heldAmplitudes = chat.recordingAmplitudes,
+                    heldPaused = chat.recordingPaused,
+                    onMicHeld = { held -> micHeld = held },
+                    onMicReleaseSend = { micHeld = false; onSendVoiceNote() },
+                    onMicLock = { micHeld = false },
+                    onMicCancel = { micHeld = false; onCancelVoiceNote() },
                 )
             }
         }
@@ -1483,6 +1532,20 @@ private fun nameColor(name: String): Color {
 }
 
 /**
+ * The hold mode's release window: a press shorter than this is the two-step mode's first tap (the
+ * recording continues, the bar with its Stop takes over), while anything longer is a hold whose
+ * release sends. Two modes on one button, told apart by the only thing that distinguishes them —
+ * how long the finger stayed.
+ */
+private const val MIC_QUICK_TAP_MS = 400L
+
+/** How far left a held mic must be dragged before the release becomes a cancel. */
+private val MIC_CANCEL_SLIDE = 96.dp
+
+/** How far up a held mic must be dragged to lock the recording. */
+private val MIC_LOCK_SLIDE = 72.dp
+
+/**
  * The compose field and the send button.
  *
  * `imePadding` and `navigationBarsPadding` together, because this is the one row that has to stay above
@@ -1493,6 +1556,10 @@ private fun nameColor(name: String): Color {
  * every conversation, because a voice note is speech and speech is what every conversation is for.
  * While an upload runs, the attach slot holds the spinner -- the one honest picture of a file on
  * its way -- and every control stands down until it lands.
+ *
+ * The microphone carries the hold mode's whole vocabulary in one press: the field's place is taken
+ * by the recording it started, and the release decides between send, cancel, and the two-step
+ * mode's handoff to the recording bar.
  */
 @Composable
 private fun Composer(
@@ -1503,7 +1570,16 @@ private fun Composer(
     onSend: () -> Unit,
     onAttach: (() -> Unit)?,
     onVoiceNote: () -> Unit,
+    recordingHeld: Boolean,
+    heldElapsedMs: Long,
+    heldAmplitudes: List<Int>,
+    heldPaused: Boolean,
+    onMicHeld: (Boolean) -> Unit,
+    onMicReleaseSend: () -> Unit,
+    onMicLock: () -> Unit,
+    onMicCancel: () -> Unit,
 ) {
+    var cancelSlide by remember { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(
             modifier = Modifier
@@ -1527,24 +1603,128 @@ private fun Composer(
                     }
                 }
             }
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraft,
-                placeholder = { Text("Message") },
-                maxLines = 5,
-                shape = RoundedCornerShape(24.dp),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                    imeAction = ImeAction.Send,
-                ),
-                modifier = Modifier.weight(1f),
-            )
+            // While the mic is held, the field's place is the recording it started: the clock, the
+            // live waveform, and the two ways the hold can end. The mic button itself stays — the
+            // gesture owns it, and removing it mid-press would end the very hold it shows.
+            if (recordingHeld) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (heldPaused) "⏸" else "●",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 14.sp,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = formatDuration(heldElapsedMs),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    WaveformBars(
+                        amplitudes = heldAmplitudes,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(24.dp),
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = if (cancelSlide) {
+                            "release to cancel"
+                        } else {
+                            "release to send · slide ⇧ to lock"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (cancelSlide) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            } else {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = onDraft,
+                    placeholder = { Text("Message") },
+                    maxLines = 5,
+                    shape = RoundedCornerShape(24.dp),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                        imeAction = ImeAction.Send,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            // The mic is the whole hold-mode vocabulary under one button: press to talk, release to
+            // send, slide left to cancel, slide up to lock — and a quick tap is the two-step mode's
+            // start, the recording continuing into the bar that owns it from there. The gesture
+            // runs in the Initial pass and consumes every change, so the button's own clickable
+            // never sees an unconsumed press and cannot fire a second start; the onClick remains
+            // for an accessibility click, which arrives as performClick and no pointer events.
             TextButton(
                 onClick = onVoiceNote,
                 enabled = !sending && !uploading,
-                modifier = Modifier.size(52.dp),
+                modifier = Modifier
+                    .size(52.dp)
+                    .pointerInput(sending, uploading) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(pass = PointerEventPass.Initial)
+                            if (sending || uploading) {
+                                return@awaitEachGesture
+                            }
+                            down.consume()
+                            onVoiceNote()
+                            onMicHeld(true)
+                            cancelSlide = false
+                            val cancelPx = MIC_CANCEL_SLIDE.toPx()
+                            val lockPx = MIC_LOCK_SLIDE.toPx()
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                event.changes.forEach { it.consume() }
+                                val pressed = event.changes.any { it.pressed }
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change != null) {
+                                    val dx = change.position.x - down.position.x
+                                    val dy = change.position.y - down.position.y
+                                    if (dy < -lockPx) {
+                                        // Locked: the hold ends and the recording keeps going, the
+                                        // bar with its Pause and Cancel and Stop taking over.
+                                        onMicLock()
+                                        break
+                                    }
+                                    if (dx < -cancelPx) {
+                                        cancelSlide = true
+                                    } else if (dx > -cancelPx / 2) {
+                                        cancelSlide = false
+                                    }
+                                }
+                                if (!pressed) {
+                                    if (cancelSlide) {
+                                        onMicCancel()
+                                    } else if (event.uptimeMillis - down.uptimeMillis >= MIC_QUICK_TAP_MS) {
+                                        onMicReleaseSend()
+                                    } else {
+                                        // A quick tap: the two-step mode's start. The recording
+                                        // continues and the bar takes it from here; the release has
+                                        // nothing left to decide.
+                                        onMicLock()
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    },
             ) {
-                Text(text = "🎤", fontSize = 18.sp)
+                Text(
+                    text = if (recordingHeld) "⏺" else "🎤",
+                    fontSize = 18.sp,
+                    color = if (recordingHeld) MaterialTheme.colorScheme.error else Color.Unspecified,
+                )
             }
             Spacer(modifier = Modifier.width(4.dp))
             FilledIconButton(
@@ -1573,26 +1753,21 @@ private fun Composer(
 }
 
 /**
- * The composer's other face: the bar a running recording replaces it with. A red dot and a timer
- * that counts what is being said, a Cancel that throws it away, and the Send that finishes it --
- * the whole vocabulary of a recording, with nothing to type over it.
- *
- * The timer ticks from this composition's own start, which is the same instant [ChatState.recording]
- * turned true; it is a display clock, not a measurement, so it cannot drift from the recorder's
- * own cap without the cap itself having already stopped the recording.
+ * The composer's other face while a recording runs unheld: the two-step mode and the lock share
+ * it, because from the moment the finger is gone the vocabulary is the same — a clock that counts
+ * what is being said, a live waveform, a Pause that lifts, a Cancel that keeps the undo window,
+ * and a Stop that hands the note to the preview.
  */
 @Composable
 private fun RecordingBar(
+    paused: Boolean,
+    elapsedMs: Long,
+    amplitudes: List<Int>,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
     onStop: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    var elapsedMs by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000)
-            elapsedMs += 1000
-        }
-    }
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(
             modifier = Modifier
@@ -1602,25 +1777,141 @@ private fun RecordingBar(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(text = "●", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+            Text(text = if (paused) "⏸" else "●", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
             Spacer(modifier = Modifier.width(8.dp))
+            // The clock the model drives: the state's own elapsed, which stands still through a
+            // pause exactly as the recording does.
             Text(
                 text = formatDuration(elapsedMs),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            Text(
-                text = "  recording",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Spacer(modifier = Modifier.width(10.dp))
+            WaveformBars(
+                amplitudes = amplitudes,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(24.dp),
             )
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.width(10.dp))
+            TextButton(onClick = if (paused) onResume else onPause) {
+                Text(if (paused) "Resume" else "Pause")
+            }
             TextButton(onClick = onCancel) {
                 Text("Cancel")
             }
             Button(onClick = onStop) {
-                Text("Send")
+                Text("Stop")
             }
+        }
+    }
+}
+
+/**
+ * A finished note waiting on the composer's word: the two-step mode's preview, an undone cancel,
+ * or a draft recovered from an app death. Its length and its waveform are stated up front — the
+ * shape of what was said — with Send and Delete as the two things left to do with it.
+ */
+@Composable
+private fun PreviewBar(
+    preview: VoiceNotePreview,
+    onSend: () -> Unit,
+    onDelete: () -> Unit,
+    uploading: Boolean,
+) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(text = "♪", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = formatDuration(preview.durationMs),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            WaveformBars(
+                amplitudes = preview.waveform?.map { it.toInt() and 0xFF } ?: emptyList(),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(24.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            if (uploading) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            } else {
+                TextButton(onClick = onDelete) {
+                    Text("Delete")
+                }
+                Button(onClick = onSend) {
+                    Text("Send")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The undo window's chip: a cancelled note is not gone yet, and the few seconds this row shows are
+ * the whole of brief 179's rule that a slide nobody meant must be undoable.
+ */
+@Composable
+private fun DiscardUndoBar(onUndo: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Recording discarded",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onUndo) {
+                Text("Undo")
+            }
+        }
+    }
+}
+
+/**
+ * The bars a recording samples, drawn right to left as they arrived — the newest sample at the
+ * tail, the way the eye expects a live meter to move. Bars are the amplitude bytes themselves:
+ * 0 is silence and 255 a full-scale swing, drawn against the row's height.
+ */
+@Composable
+private fun WaveformBars(amplitudes: List<Int>, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        if (amplitudes.isEmpty()) {
+            return@Canvas
+        }
+        val barWidth = 3.dp.toPx()
+        val gap = 2.dp.toPx()
+        val barHeight = 2.dp.toPx()
+        val count = minOf(amplitudes.size, (size.width / (barWidth + gap)).toInt().coerceAtLeast(1))
+        // The newest bars keep their place at the right edge; the rest of the row is the silence
+        // that has not been spoken yet.
+        var x = size.width - count * (barWidth + gap)
+        for (i in amplitudes.size - count until amplitudes.size) {
+            val amplitude = amplitudes[i].coerceIn(0, 255) / 255f
+            val height = (barHeight + amplitude * (size.height - barHeight)).coerceAtMost(size.height)
+            drawRoundRect(
+                color = Color(0xFF7BA3AD),
+                topLeft = androidx.compose.ui.geometry.Offset(x, size.height - height),
+                size = androidx.compose.ui.geometry.Size(barWidth, height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2),
+            )
+            x += barWidth + gap
         }
     }
 }
