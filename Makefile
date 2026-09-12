@@ -120,10 +120,10 @@ infra-check: ## Static hygiene checks on infra/ that need no daemon (CI gate)
 	# outside the two documented development constants, privileged containers, host
 	# namespaces and writable host mounts, requests, limits and both probes on every
 	# Kubernetes workload, two services publishing the same host port, and the web
-	# client publishing exactly port 19991.
+	# client publishing exactly port 19992.
 	#
-	# It starts no container, so it is not a substitute for a smoke test; brief
-	# section 177 keeps infra out of BUILT for precisely that reason.
+	# It still starts no container — that half of the claim is `make infra-smoke`,
+	# the nightly gate that boots the compose stack and proves it serves.
 	python3 tools/scripts/infra-audit.py
 
 .PHONY: pydeps-check
@@ -432,6 +432,33 @@ smoke-2node: ## Two-node end-to-end smoke: build migod, run tools/2node/run.sh
 	# containers the script's own defaults (15432/16379) were written for.
 	$(CARGO) build $(MANIFEST) --bin migod
 	tools/2node/run.sh
+
+.PHONY: infra-smoke
+infra-smoke: ## Infra stack smoke: boot the compose stack and prove it serves (nightly gate)
+	# The runtime half of infra/'s validation, beside the static make infra-check:
+	# tools/scripts/infra-smoke.sh runs the README's own quick start (`docker compose
+	# up --build`) against the images built from THIS tree, waits for the stack to be
+	# healthy, then asserts on behaviour rather than on containers being up — the
+	# server answers /health, /ready, /metrics and /v1/config with the identity the
+	# compose file sets, the /ws route exists, an account registered through the REST
+	# surface lands as a row IN the Postgres container, server-written m:* keys turn
+	# up in the Redis container, and the web container serves the exported bundle on
+	# its published port. Images are built from source rather than pulled from a
+	# release because a release artifact only vouches for the commit it was tagged
+	# from, never for the tree under test.
+	#
+	# Deliberately NOT part of `make ci`, and run by the Nightly workflow instead of
+	# the per-PR CI jobs. `make ci` gates every pull request and must stay runnable
+	# on a laptop; this is the one target that needs a Docker daemon and pays a cold
+	# in-container compile of the whole workspace (the image build shares no cache
+	# with anything else), twenty-plus minutes a run. The failures it exists for — a
+	# Dockerfile that rotted as the workspace grew, a base image that moved, a
+	# compose regression — all surface within a day, which is the nightly cadence.
+	#
+	# The stack publishes 8080 and 19992 on the host that runs it. That is right for
+	# a CI runner or a throwaway machine; on a host where those ports belong to a
+	# live node the up fails fast on the bind. Never run this on the production host.
+	tools/scripts/infra-smoke.sh
 
 .PHONY: audit
 audit: ## Dependency vulnerability + licence audit
