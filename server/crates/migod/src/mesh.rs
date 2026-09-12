@@ -2520,6 +2520,8 @@ mod tests {
         let (client_io, server_io) = duplex(64 * 1024);
         let server_mesh = mesh_b;
         let server_router = transport_b.router_ref().clone();
+        // A fresh budget for the second dial: the first moved into the refused session.
+        let server_budget = default_budget();
         let server = tokio::spawn(async move {
             serve_session(server_io, server_mesh, server_router, now, server_budget).await
         });
