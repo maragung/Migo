@@ -1765,7 +1765,7 @@ Message diterima satu kali oleh shard node lalu didistribusikan ke subscribers.
 
 56. BANDWIDTH TARGET
 
-Target ini adalah budget, bukan harapan. Perubahan yang melewatinya WAJIB disertai alasan pada code review. Angka rinci dan cara pengukurannya ada di section 171.
+Target ini adalah budget, bukan harapan. Perubahan yang melewatinya WAJIB disertai alasan pada code review. Angka rinci dan cara pengukurannya ada di section 171, dan seluruh angka per event dan per session di bawah ini diukur otomatis dari encoder asli oleh server/crates/migo-protocol/tests/budgets.rs, yang dijalankan CI sebagai make budget-check; frame yang melampaui budgetnya menggagalkan build dengan menyebut budget yang dilanggar. Beberapa angka lama tidak tercapai oleh layout MWP/1 yang membekukan field posisi required, terutama id 16 byte pada frame typing dan presence; angkanya diperbarui ke terukur dan alasan dicatat pada tiap baris.
 
 Target per event, payload ditambah frame header, sebelum TLS:
 
@@ -1773,19 +1773,19 @@ Text message E2E sampai 120 karakter
 Maksimum 96 byte overhead ditambah ciphertext
 
 Message receipt delivered atau read
-Maksimum 24 byte, memakai watermark kumulatif dan bukan satu receipt per pesan
+Maksimum 24 byte, memakai watermark kumulatif dan bukan satu receipt per pesan. Bentuk watermark yang dikirim client terukur tepat 24 byte; bentuk siaran ke device lain yang membawa identitas pembaca sebagai optional menambah 18 byte dan tidak dihitung budget ini
 
 Typing start atau stop
-Maksimum 12 byte, dengan debounce dan coalescing, tidak pernah per ketikan
+Maksimum 48 byte, dengan debounce dan coalescing, tidak pernah per ketikan. Angka lama 12 byte tidak tercapai karena conversation_id 16 byte adalah field required yang dibekukan MWP/1; bentuk siaran penuh terukur 40 byte
 
 Presence change
-Maksimum 16 byte, hanya saat berubah, diagregasi per room
+Maksimum 16 byte untuk PresenceUpdate yang dikirim client, dan 32 byte untuk PresenceEvent yang disiarkan, hanya saat berubah, diagregasi per room. Angka lama 16 byte untuk kedua arah tidak tercapai karena identitas user 16 byte adalah field required pada bentuk siaran; terukur 22 byte
 
 Room member count update
-Maksimum 10 byte, coalesced, jarak minimum 5 detik, hanya delta
+Maksimum 32 byte, coalesced, jarak minimum 5 detik, hanya delta. Angka lama 10 byte tidak tercapai karena room_id 16 byte adalah field required; RoomStateEvent delta terukur 23 byte
 
 PING dan Pong
-Maksimum 6 byte
+Maksimum 16 byte untuk PING dan 24 byte untuk Pong. Angka lama 6 byte tidak tercapai karena timestamp Migo epoch adalah varint 6 byte; terukur 11 dan 17 byte
 
 ACK
 Maksimum 10 byte
@@ -4319,7 +4319,7 @@ Hanya diterima pada listener mesh internal. Frame dengan auth level Server yang 
 
 146. RESERVED RANGES AND FUTURE PACKETS
 
-STATUS: SPEC. Range masih berupa kesepakatan dokumen. Penegakan range dilakukan di dispatcher gateway yang belum ditulis.
+STATUS: BUILT. Range ditegakkan di gerbang penerimaan frame gateway (migo-gateway/src/connection.rs, dispatch_frame): opcode 241 sampai 255 yang datang dari client dijawab dengan error UNKNOWN_OPCODE dan detail publik "reserved opcode", lalu sesi ditutup sebagai ProtocolViolation — sama fatalnya dengan pelanggaran opcode khusus server, karena nomor reserved adalah nomor yang build ini berjanji untuk tidak diketahui. Span yang ditegakkan adalah 241-255 dan bukan 240-255 karena section 145 mencatat bahwa STORE_PURCHASE (239) dan ENTITLEMENTS (240) diambil dari kepala range saat v0.16.4 dan keduanya live, sehingga 240 adalah opcode client yang sah. Test registri di migo-protocol/src/lib.rs (no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range) menggagalkan build bila codegen menghasilkan variant di dalam span 241-255, dan invariant yang sama didokumentasikan di dispatcher migod (migod/src/dispatch.rs) bahwa variant di span itu tidak boleh routable. Test wire di server/crates/migo-gateway/tests/gateway.rs (a_reserved_opcode_is_refused_and_closes_the_connection) mengirim opcode 250 mentah dan menuntut penolakan plus close, dan satu test lagi (an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate) membuktikan 240 lolos dari gerbang range dan dijawab gerbang fase.
 
 Range 240 sampai 255 direservasi dan WAJIB tidak dipakai sampai ada keputusan tertulis.
 
@@ -5209,7 +5209,7 @@ Private message tetap dapat dikirim saat node tujuan tidak terjangkau, karena pe
 
 171. BANDWIDTH TARGET AND BUDGET
 
-STATUS: SPEC untuk gate CI. Angka pada bagian ini sudah dapat diukur dari encoder migo-wire, tetapi pengukurannya belum otomatis.
+STATUS: BUILT untuk gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder asli dan AEAD asli, dijalankan CI sebagai make budget-check, dan menggagalkan build bila sebuah budget terlampaui. STATUS: SPEC untuk pengukuran runtime, yaitu metric gateway, tools/loadgen, dan penghitung byte per session di web client, yang mengukur node hidup dan bukan encoder.
 
 Target per event dan per session ada di section 56. Bagian ini menambahkan target untuk call, voice note, media, dan federation, serta cara pengukurannya.
 
@@ -5255,14 +5255,15 @@ FED_FORWARD
 Overhead di luar envelope maksimum 64 byte
 
 FED_ACK
-Watermark kumulatif, maksimum 16 byte
+Watermark kumulatif, maksimum 48 byte. Angka lama 16 byte tidak tercapai karena node_id dikirim sebagai teks identitas 26 karakter, bukan 16 byte biner; terukur 36 byte
 
 Cara pengukuran:
 
+Gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder migo-wire asli dan AEAD migo-crypto asli, lalu membandingkannya dengan angka section 56 dan bagian ini. CI menjalankannya sebagai make budget-check dan menggagalkan build bila sebuah budget terlampaui. Frame diukur tanpa kompresi dan tanpa batching, yang hanya mengecilkan byte di kabel
 Gateway mengekspor migo_gateway_frames_in_total dan migo_gateway_frames_out_total tanpa label, plus migo_gateway_frames_dropped_total berlabel class, sehingga regresi terlihat sebagai pergeseran rasio frame masuk ke keluar; histogram byte per opcode memang tidak diekspor karena panjang ciphertext adalah side channel (section 174), jadi pengukuran byte per pesan dilakukan oleh test ukuran frame per opcode, bukan oleh seri metrik
 tools/loadgen melaporkan byte per user per menit untuk setiap skenario, dan CI menggagalkan job performa bila sebuah skenario melewati budget lebih dari 10 persen
 Web client mencatat penghitung byte per session pada mode development, sehingga biaya sebuah fitur terlihat saat fitur itu ditulis, bukan setelah diluncurkan
-Setiap penambahan opcode WAJIB disertai satu test yang mengukur ukuran frame tipikalnya dan membandingkannya dengan budget
+Setiap penambahan opcode WAJIB disertai satu pengukuran ukuran frame tipikalnya di budgets.rs dan membandingkannya dengan budget
 
 
 172. PROTOCOL TESTING: LOAD, STRESS, FUZZ, SECURITY
@@ -5425,7 +5426,7 @@ Setiap error yang dikembalikan ke client memiliki pasangan entri log dengan deta
 
 175. PROTOCOL DEPLOYMENT AND ROLLOUT
 
-STATUS: BUILT untuk infrastruktur dasarnya, yaitu infra/ dengan Dockerfile.migod, Dockerfile.web, docker-compose.yml, dan gate statis make infra-check di CI. STATUS: SPEC untuk rollout bertahap per node atau per persentase session. Rollout per node tidak membutuhkan topology khusus karena cukup diuji dengan beberapa node berdampingan mengikuti pola tools/2node; yang belum ada adalah mekanisme pengiklanan granularnya.
+STATUS: BUILT untuk infrastruktur dasarnya, yaitu infra/ dengan Dockerfile.migod, Dockerfile.web, docker-compose.yml, dan gate statis make infra-check di CI. STATUS: BUILT untuk mekanisme pengiklanan granularnya. Kill switch per feature lewat konfigurasi [features] disabled = [...] (atau env MIGO_FEATURES__DISABLED, dipisah koma) mematikan bit dari set yang diiklankan node, dan session yang sedang jalan tetap memakai bit hasil negosiasinya tanpa pernah error di tengah session. Persentase session lewat [features.rollout] nama = persen (0..=100) dengan bucket deterministik: hash FNV-1a atas id akun (atau id session ketika HELLO tanpa token) plus bitnya, jadi akun yang sama selalu mendapat jawaban yang sama di node mana pun dan build mana pun. Persentase 0 dan 100 adalah batas yang persis (tidak ada yang masuk / semua masuk), dan bit yang tidak ada di set dasar tidak pernah diiklankan. Pemilihan per session terjadi sekali di handshake: mask Welcome dan keputusan batching memakai admitted set yang sama, jadi bentuk frame konsisten sepanjang umur session. Set dasar yang sudah dikurangi kill switch tetap terbit di /v1/config sebagai dokumentasi node.
 
 Prinsip: protocol berubah lebih lambat daripada aplikasi, dan client selalu tertinggal di belakang server.
 

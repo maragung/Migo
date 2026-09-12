@@ -74,7 +74,102 @@ use crate::room_presence::GatewayHandle;
 /// them instead of timing out against a feature mask that never said they were there.
 const FEATURES: u64 = migo_protocol::features::CALLS;
 
-/// The feature set the node advertises, given which optional realtime listeners are configured.
+/// Resolves a configured feature name (section 175) to its bit. The names are the registry's,
+/// lowercased, so `[features] disabled = ["group_call"]` reads the same way the IDL does.
+fn feature_bit(name: &str) -> Option<u64> {
+    use migo_protocol::features as f;
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "compression" => f::COMPRESSION,
+        "batching" => f::BATCHING,
+        "e2e_v1" => f::E2E_V1,
+        "group_e2e_v1" => f::GROUP_E2E_V1,
+        "presence" => f::PRESENCE,
+        "typing" => f::TYPING,
+        "rooms" => f::ROOMS,
+        "media_upload" => f::MEDIA_UPLOAD,
+        "games" => f::GAMES,
+        "bots" => f::BOTS,
+        "translation" => f::TRANSLATION,
+        "voice_message" => f::VOICE_MESSAGE,
+        "quic" => f::QUIC,
+        "tracing" => f::TRACING,
+        "resume" => f::RESUME,
+        "economy" => f::ECONOMY,
+        "voice_note" => f::VOICE_NOTE,
+        "calls" => f::CALLS,
+        "group_call" => f::GROUP_CALL,
+        "federation" => f::FEDERATION,
+        "rich_presence" => f::RICH_PRESENCE,
+        "tcp_transport" => f::TCP_TRANSPORT,
+        _ => return None,
+    })
+}
+
+/// A staged rollout (section 175): each listed feature is admitted to a fixed share of
+/// sessions, decided by a deterministic bucket of the account id (the session id for a
+/// greeting that carried no token), so the same account lands in the same bucket on every
+/// node running this build and across its own reconnects.
+#[derive(Debug)]
+struct StagedRollout {
+    /// `(bit, percent)` for every feature running below 100 percent.
+    staged: Vec<(u64, u8)>,
+}
+
+impl StagedRollout {
+    /// Builds the gate from configuration. Fails on a name the registry does not know, naming
+    /// it, so a typo in `[features]` stops the node at boot instead of silently rolling
+    /// nothing.
+    fn build(features: &migo_core::config::FeaturesConfig) -> anyhow::Result<Self> {
+        let mut staged = Vec::new();
+        for (name, percent) in &features.rollout {
+            let bit = feature_bit(name).with_context(|| {
+                format!("features.rollout: {name:?} is not a feature bit this build knows")
+            })?;
+            staged.push((bit, *percent));
+        }
+        Ok(Self { staged })
+    }
+}
+
+impl migo_gateway::FeatureGate for StagedRollout {
+    fn admit(&self, base: u64, account: Option<Id>, session: Id) -> u64 {
+        if self.staged.is_empty() {
+            return base;
+        }
+        let key = account.unwrap_or(session);
+        let mut admitted = base;
+        for &(bit, percent) in &self.staged {
+            // A bit the node does not advertise is not the rollout's to grant; the listeners'
+            // QUIC/TCP_TRANSPORT promises and the kill switch both speak through `base`.
+            if base & bit == 0 {
+                continue;
+            }
+            if !bucket_admits(key, bit, percent) {
+                admitted &= !bit;
+            }
+        }
+        admitted
+    }
+}
+
+/// One hundred fixed buckets, chosen by a hash of the key and the bit together so different
+/// features bucket the same account independently. FNV-1a over the 16 id bytes and the bit:
+/// fixed constants, no dependence on the hasher of the day, so two builds agree.
+fn bucket_admits(key: Id, bit: u64, percent: u8) -> bool {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for byte in bit.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    (hash % 100) < u64::from(percent)
+}
+
+/// The feature set the node advertises, given which optional realtime listeners are configured
+/// and which bits the operator switched off (section 175's kill switch).
 ///
 /// The `QUIC` and `TCP_TRANSPORT` bits are promises that the node actually carries those
 /// transports, so each is OR'd in only when its `bind` is set — and the composition root binds
@@ -94,7 +189,15 @@ const FEATURES: u64 = migo_protocol::features::CALLS;
 /// on GROUP_CALL (the calls section records that server decision), and RICH_PRESENCE's own
 /// surface is `PROFILE_UPDATE.custom_status`, which the profile handler refuses unless the
 /// session negotiated the bit.
-fn advertised_features(quic_enabled: bool, tcp_enabled: bool, mesh_enabled: bool) -> u64 {
+///
+/// `disabled` can only remove bits: a feature the build does not advertise cannot be switched on
+/// by configuration.
+fn advertised_features(
+    quic_enabled: bool,
+    tcp_enabled: bool,
+    mesh_enabled: bool,
+    disabled: &[String],
+) -> anyhow::Result<u64> {
     let mut features = FEATURES;
     // The gateway packs outbound frames into BATCH envelopes (section 154), and every client
     // already unpacks them — the web SDK, Android, and desktop all advertise the bit and the
@@ -113,7 +216,13 @@ fn advertised_features(quic_enabled: bool, tcp_enabled: bool, mesh_enabled: bool
     if mesh_enabled {
         features |= migo_protocol::features::FEDERATION;
     }
-    features
+    for name in disabled {
+        let bit = feature_bit(name).with_context(|| {
+            format!("features.disabled: {name:?} is not a feature bit this build knows")
+        })?;
+        features &= !bit;
+    }
+    Ok(features)
 }
 
 /// Bytes of ephemeral secret to mint when no node signing key is configured (development only).
@@ -581,14 +690,26 @@ impl App {
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
-        // TCP_TRANSPORT bits are only there when their listeners are configured, FEDERATION
-        // only while the mesh listener is, and the gateway masks every client's requested
-        // features against exactly this set.
+        // TCP_TRANSPORT bits are only there when their listeners are configured, FEDERATION only
+        // while the mesh listener is, the kill switch (section 175) removes the bits the operator
+        // switched off, and the gateway masks every client's requested features against exactly
+        // this set — trimmed per session by the staged rollout below when one is configured.
         let features = advertised_features(
             config.quic.bind.is_some(),
             config.tcp.bind.is_some(),
             config.node.mesh_bind.is_some(),
-        );
+            &config.features.disabled,
+        )
+        .context("features: the advertised set cannot be built")?;
+        let feature_gate: Arc<dyn migo_gateway::FeatureGate> = if config.features.rollout.is_empty()
+        {
+            Arc::new(migo_gateway::FullRollout)
+        } else {
+            Arc::new(
+                StagedRollout::build(&config.features)
+                    .context("features: the staged rollout cannot be built")?,
+            )
+        };
 
         let gateway = Arc::new(Gateway::open(
             &registry,
@@ -602,6 +723,7 @@ impl App {
                 shutdown: shutdown.clone(),
                 node: node.clone(),
                 features,
+                feature_gate,
             },
         ));
 
@@ -819,7 +941,10 @@ mod tests {
     //! default the production wiring falls back to when the configuration is
     //! silent.
 
-    use super::{captcha_gate_for_test, DEFAULT_CAPTCHA_THRESHOLD};
+    use super::{
+        advertised_features, captcha_gate_for_test, StagedRollout, DEFAULT_CAPTCHA_THRESHOLD,
+    };
+    use migo_core::Id;
     use migo_protocol::codes;
 
     /// A threshold of `0` is a posture the gate's contract says means
@@ -867,5 +992,101 @@ mod tests {
         let gate = captcha_gate_for_test(1, b"a-test-secret")
             .expect("a positive threshold is the captcha-on posture");
         assert_eq!(gate.threshold(), 1);
+    }
+
+    /// The kill switch removes exactly the bits it names and nothing else — and a name the
+    /// registry does not know stops the node at boot rather than rolling nothing.
+    #[test]
+    fn the_kill_switch_removes_named_bits_and_refuses_unknown_names() {
+        use migo_protocol::features;
+        let base = advertised_features(true, true, &[]).expect("no kill switch builds");
+        assert!(base & features::QUIC != 0, "the QUIC listener is on");
+        assert!(base & features::BATCHING != 0);
+
+        let killed = advertised_features(true, true, &["quic".into(), "calls".into()])
+            .expect("known names build");
+        assert_eq!(killed, base & !features::QUIC & !features::CALLS);
+
+        let error = advertised_features(true, true, &["teapot".into()])
+            .expect_err("an unknown name must stop the node");
+        assert!(
+            error.to_string().contains("teapot"),
+            "the error names the feature: {error}"
+        );
+    }
+
+    /// A rollout of zero percent admits nobody and one of a hundred admits everybody; the
+    /// answer for one account is the same every time it is asked, whatever the session.
+    #[test]
+    fn rollout_percentages_are_deterministic_and_bounded_by_their_ends() {
+        use std::collections::BTreeMap;
+
+        use migo_core::config::FeaturesConfig;
+        use migo_gateway::FeatureGate;
+
+        let key = Id::from(0xA17E_51DE_AD0B_0F17_0AFE_11BA_5EED_9A11);
+        let session = Id::from(0x00C0_FFEE_0BAD_1DEA_5A17_0000_1234_5678);
+        let bit = migo_protocol::features::GROUP_CALL;
+        let rollout = |name: &str, percent: u8| FeaturesConfig {
+            disabled: Vec::new(),
+            rollout: BTreeMap::from([(name.to_string(), percent)]),
+        };
+
+        let nobody = StagedRollout::build(&rollout("group_call", 0)).expect("a known name builds");
+        assert_eq!(
+            nobody.admit(bit, Some(key), session),
+            0,
+            "zero percent admits nobody"
+        );
+
+        let everybody =
+            StagedRollout::build(&rollout("group_call", 100)).expect("a known name builds");
+        assert_eq!(
+            everybody.admit(bit, Some(key), session),
+            bit,
+            "a hundred percent admits everybody"
+        );
+
+        // Half the account ids land in, half out, and each side is stable across asks.
+        let half = StagedRollout::build(&rollout("group_call", 50)).expect("a known name builds");
+        let mut admitted = 0usize;
+        for n in 0..200u64 {
+            let id = Id::from(u128::from(n));
+            let first = half.admit(bit, Some(id), session);
+            assert_eq!(
+                first,
+                half.admit(bit, Some(id), Id::from(u128::from(n))),
+                "the same account lands in the same bucket no matter the session"
+            );
+            if first != 0 {
+                admitted += 1;
+            }
+        }
+        assert!(
+            (60..=140).contains(&admitted),
+            "fifty percent of two hundred accounts is about a hundred, got {admitted}"
+        );
+
+        // The gate only ever trims; it never grants. A base set that does not carry
+        // the staged feature passes through untouched, and the staged feature cannot
+        // sneak into a base that never advertised it.
+        let unadvertised = migo_protocol::features::RICH_PRESENCE;
+        assert_eq!(
+            half.admit(unadvertised, Some(key), session),
+            unadvertised,
+            "a bit the node advertised but did not stage passes through untouched"
+        );
+        assert_eq!(
+            half.admit(0, Some(key), session),
+            0,
+            "a bit the node never advertised is not the rollout's to grant"
+        );
+
+        let error = StagedRollout::build(&rollout("teapot", 50))
+            .expect_err("an unknown name must stop the node");
+        assert!(
+            error.to_string().contains("teapot"),
+            "the error names the feature: {error}"
+        );
     }
 }

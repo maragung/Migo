@@ -208,24 +208,37 @@ impl<T: Transport> Connection<'_, T> {
             .inline_auth(hello.access_token.as_deref(), hello.device_id, now)
             .await;
 
+        // Section 175: a staged rollout trims the advertised set for this one session before
+        // the mask is cut, decided here and only here so a session's frames keep one shape for
+        // its whole life. The account is the bucket key when the greeting carried a token — the
+        // same account lands in the same bucket across reconnects — and the fresh session id
+        // otherwise.
+        let admitted = self.gateway.feature_gate.admit(
+            self.gateway.features,
+            identity.as_ref().map(Identity::account_id),
+            session_id,
+        );
+
         // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
         // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
         // writer never re-derives it and a session's frames keep one shape for its whole life.
         self.batching = hello.features & migo_protocol::features::BATCHING != 0
-            && self.gateway.features & migo_protocol::features::BATCHING != 0;
+            && admitted & migo_protocol::features::BATCHING != 0;
 
         // Section 148: the session's feature set is the intersection of what the client asked
-        // for and what this node advertised — the same value WELCOME reports back. Decided once
-        // here and stored on the session handle, because the intersection is fixed for the
-        // session's lifetime and every later frame's feature gate reads it rather than
-        // re-deriving it.
-        let negotiated = hello.features & self.gateway.features;
+        // for and what this node advertised *to this session* — the rollout-trimmed `admitted`
+        // set, so a session the staged rollout held back never negotiates what it withheld. It
+        // is the same value WELCOME reports back. Decided once here and stored on the session
+        // handle, because the intersection is fixed for the session's lifetime and every later
+        // frame's feature gate reads it rather than re-deriving it.
+        let negotiated = hello.features & admitted;
 
         if !self
             .send_welcome(
                 session_id,
                 correlation,
-                negotiated,
+                hello.features,
+                admitted,
                 now,
                 resumed,
                 resume_from_seq,
@@ -458,12 +471,18 @@ impl<T: Transport> Connection<'_, T> {
     /// Builds and sends `WELCOME`, the first frame out (section 139: it reuses the `HELLO` opcode
     /// and correlation). Returns whether it was sent; on failure the admission slot is released
     /// and the socket closed, and the caller returns `None`.
+    ///
+    /// `client_features` is what the greeting asked for and `admitted` is what this node offers
+    /// this session after the staged rollout trimmed it (section 175); the feature set reported
+    /// back is their intersection, and `admitted` is passed rather than re-derived so the value in
+    /// the frame and the value the session gate later reads cannot drift apart.
     #[allow(clippy::too_many_arguments)]
     async fn send_welcome(
         &mut self,
         session_id: Id,
         correlation: u32,
-        negotiated: u64,
+        client_features: u64,
+        admitted: u64,
         now: Timestamp,
         resumed: Option<bool>,
         resume_from_seq: Option<u64>,
@@ -474,7 +493,7 @@ impl<T: Transport> Connection<'_, T> {
         let welcome = Welcome {
             session_id,
             node: gateway.node.clone(),
-            features: negotiated,
+            features: client_features & admitted,
             server_time: now,
             limits: Limits {
                 max_frame_bytes: u32::try_from(migo_wire::limits::MAX_FRAME_BYTES)
@@ -893,6 +912,43 @@ impl<T: Transport> Connection<'_, T> {
         true
     }
 
+    /// Refuses a frame whose opcode falls inside the never-allocated span of the
+    /// reserved range.
+    ///
+    /// Section 146: the head of the reserved range is enforced as never-allocated. The
+    /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
+    /// `ENTITLEMENTS` (240) out of its head — the last numbers ever to be taken from it,
+    /// per the written decision in section 145 — so the never-allocated span this gate
+    /// polices is 241-255. A client speaking one is speaking a dialect this node promised
+    /// not to know — and unlike a merely unknown opcode (a newer client, answered and
+    /// kept going), a reserved number is one this build has sworn an opinion about, so
+    /// continuing would risk a future allocation being misread by an old session. The
+    /// refusal is terminal for the same reason the server-only-opcode violation is: the
+    /// peer is not speaking this protocol.
+    fn refuse_reserved_range(
+        &self,
+        outbound: &Outbound,
+        opcode_raw: u32,
+        correlation: u32,
+        now: Timestamp,
+    ) -> FrameOutcome {
+        let error = fault::error(
+            codes::UNKNOWN_OPCODE,
+            "reserved opcode range 241-255 is refused until a written decision allocates it",
+        )
+        .public("reserved opcode");
+        push_error(
+            outbound,
+            &self.gateway.meters,
+            opcode_raw,
+            correlation,
+            &error,
+            now,
+            self.compression,
+        );
+        FrameOutcome::Close(Closed::ProtocolViolation)
+    }
+
     /// Applies the section 149 phase gate to one decoded frame, then either answers a lifecycle
     /// opcode directly or delegates an application opcode to its handler.
     async fn dispatch_frame(
@@ -905,6 +961,12 @@ impl<T: Transport> Connection<'_, T> {
         let opcode_raw = frame.header.opcode;
         let correlation = frame.header.correlation;
         let meters = &self.gateway.meters;
+
+        // Section 146: a number inside the never-allocated span of the reserved range
+        // is refused before the opcode is even resolved — terminal, not answered.
+        if (241..=255).contains(&opcode_raw) {
+            return self.refuse_reserved_range(outbound, opcode_raw, correlation, now);
+        }
 
         let Some(opcode) = Opcode::from_wire(opcode_raw) else {
             // An opcode this build does not know: answer and keep going, since a newer client
