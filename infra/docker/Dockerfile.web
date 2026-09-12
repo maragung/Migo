@@ -35,16 +35,22 @@ WORKDIR /app
 
 # Resolve dependencies against the lockfile from the manifests alone first, so the
 # install layer is cached until a package.json or the lockfile changes — not on
-# every source edit. These are exactly the workspace members that carry a manifest
-# (packages/*, clients/web, and tools/loadgen); the other tools/* and tests/* dirs
-# have no package.json and so are not pnpm workspace members.
+# every source edit. This must copy EVERY workspace importer's manifest, not just
+# the ones this image builds: pnpm-workspace.yaml's globs define the workspace,
+# pnpm-lock.yaml carries an importer entry for each of them, and
+# `pnpm install --frozen-lockfile` refuses a lockfile that does not match the
+# workspace it finds — a manifest left out is a missing importer, which reads as
+# a stale lockfile and fails the install. (tools/chatbot and clients/store are
+# never built here; their manifests exist so the install can resolve.)
 COPY pnpm-lock.yaml pnpm-workspace.yaml .npmrc package.json ./
 COPY packages/wire/package.json      packages/wire/package.json
 COPY packages/protocol/package.json  packages/protocol/package.json
 COPY packages/crypto/package.json    packages/crypto/package.json
 COPY packages/sdk/package.json       packages/sdk/package.json
 COPY clients/web/package.json        clients/web/package.json
+COPY clients/store/package.json      clients/store/package.json
 COPY tools/loadgen/package.json      tools/loadgen/package.json
+COPY tools/chatbot/package.json      tools/chatbot/package.json
 RUN --mount=type=cache,id=migo-pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
