@@ -26,7 +26,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::NotificationKind;
-use migo_store::model::{BadgeAward, Currency, Entitlement, GiftSent};
+use migo_store::model::{
+    BadgeAward, Currency, Entitlement, EntitlementPosition, GiftSent, LedgerPosition,
+};
 
 use crate::model::{
     Award, AwardOutcome, BadgeGrant, Board, Caller, GiftOutcome, GiftTally, Grant, GrantReceipt,
@@ -103,12 +105,16 @@ pub trait Treasurer: Send + Sync {
     /// The caller's balances, one field per currency.
     async fn wallet(&self, caller: &Caller) -> Result<Wallet>;
 
-    /// The caller's recent movements in one currency, newest first.
+    /// One keyset page of the caller's movements in one currency, newest first.
+    ///
+    /// `after` is the position of the last posting a previous page returned, as
+    /// [`crate::cursor::statement`] reads it; `None` starts from the top.
     async fn statement(
         &self,
         caller: &Caller,
         currency: Currency,
         limit: u16,
+        after: Option<LedgerPosition>,
     ) -> Result<Vec<LedgerEntry>>;
 
     /// Buys a catalogue item for the caller's own account.
@@ -139,8 +145,16 @@ pub trait Treasurer: Send + Sync {
     /// the sender cannot afford it, before anything is written.
     async fn send_gift(&self, caller: &Caller, gift: SendGift) -> Result<GiftOutcome>;
 
-    /// Everything the caller owns, oldest first.
-    async fn entitlements(&self, caller: &Caller) -> Result<Vec<Entitlement>>;
+    /// One keyset page of what the caller owns, oldest first.
+    ///
+    /// `after` is the position of the last row a previous page returned, as
+    /// [`crate::cursor::entitlements`] reads it; `None` starts from the beginning.
+    async fn entitlements(
+        &self,
+        caller: &Caller,
+        limit: u16,
+        after: Option<EntitlementPosition>,
+    ) -> Result<Vec<Entitlement>>;
 
     /// Gifts the caller has been given, newest first.
     async fn gifts_received(&self, caller: &Caller, limit: u16) -> Result<Vec<GiftSent>>;

@@ -26,6 +26,7 @@
 //! further to enforce: the answers carry standing, never balances.
 
 use migo_core::Error;
+use migo_economy::cursor;
 use migo_economy::{
     Board, BoardScope, Caller as EconomyCaller, LedgerEntry, Reason, SharedTreasurer, Window,
 };
@@ -35,7 +36,8 @@ use migo_protocol::{
     GiftCatalogueResponse, GiftListing, LeaderboardReq, LeaderboardResponse, LedgerEntryWire,
     LedgerReq, LedgerResponse, ProgressionReq, ProgressionWire, RankWire,
 };
-use migo_store::{model::Currency, MAX_PAGE};
+use migo_store::model::{Currency, LedgerPosition};
+use migo_store::MAX_PAGE;
 
 /// Lists the catalogue and replies with it.
 ///
@@ -96,9 +98,30 @@ pub(crate) async fn handle_ledger_history(
     let limit = request
         .limit
         .map_or(MAX_PAGE, |limit| limit.clamp(1, u32::from(MAX_PAGE)) as u16);
-    let entries = svc.statement(&caller, Currency::Coins, limit).await?;
+    let after = match request.cursor.as_deref() {
+        Some(text) => Some(cursor::statement::decode(text)?),
+        None => None,
+    };
+    let entries = svc
+        .statement(&caller, Currency::Coins, limit, after)
+        .await?;
+    // A cursor whenever the page was full, the same trade the conversation list
+    // makes: it may turn out to name the end of the statement, which costs one
+    // request that comes back empty, rather than fetching one row past the page
+    // on every request to answer a question most callers never ask.
+    let next_cursor = (entries.len() == usize::from(limit))
+        .then(|| {
+            entries.last().map(|entry| {
+                cursor::statement::encode(LedgerPosition {
+                    created_at: entry.at,
+                    tx_id: entry.tx_id,
+                })
+            })
+        })
+        .flatten();
     ctx.reply(&LedgerResponse {
         entries: entries.into_iter().map(wire_entry).collect(),
+        next_cursor,
     })
 }
 

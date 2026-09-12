@@ -13,7 +13,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Id, Secret, Timestamp};
 use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
-use migo_store::model::{Currency, NewAccount};
+use migo_store::model::{Currency, EntitlementPosition, LedgerPosition, NewAccount};
 use migo_store::traits::{AccountStore, EconomyStore};
 use migo_store::MemoryStore;
 
@@ -182,7 +182,10 @@ async fn store_purchase_charges_once_and_grants_the_entitlement() {
     let paid = 1000 - svc.wallet(&buyer).await.expect("wallet read").coins;
     assert_eq!(paid, 10, "the buyer paid exactly the catalogue price");
 
-    let owned = svc.entitlements(&buyer).await.expect("entitlements read");
+    let owned = svc
+        .entitlements(&buyer, 200, None)
+        .await
+        .expect("entitlements read");
     assert_eq!(owned.len(), 1, "the buyer owns the item they paid for");
     assert_eq!(owned[0].sku, "gift.rose");
 
@@ -232,7 +235,10 @@ async fn an_on_chain_claim_is_refused_before_anything_is_written() {
 
     let wallet = svc.wallet(&buyer).await.expect("wallet read");
     assert_eq!(wallet.coins, 10_000, "a refused settlement moves no money");
-    let owned = svc.entitlements(&buyer).await.expect("entitlements read");
+    let owned = svc
+        .entitlements(&buyer, 200, None)
+        .await
+        .expect("entitlements read");
     assert!(
         owned.is_empty(),
         "a refused settlement grants no entitlement"
@@ -263,7 +269,7 @@ async fn a_spend_beyond_the_balance_is_refused_whole() {
         "a refused purchase moves no money"
     );
     assert!(
-        svc.entitlements(&buyer)
+        svc.entitlements(&buyer, 200, None)
             .await
             .expect("entitlements read")
             .is_empty(),
@@ -665,5 +671,112 @@ async fn kick_points_sum_to_zero_across_a_grant_and_a_spend() {
     assert_eq!(
         wallet.kick_points, 1,
         "the kicker holds what the grants left them"
+    );
+}
+
+/// The path `LEDGER_HISTORY` drives when the statement is longer than one page:
+/// page two continues after page one's last line, and walking five seeded grants
+/// in pages of two returns each line once, newest first. The position handed
+/// between pages is the same `LedgerPosition` the handler decodes from and
+/// encodes into the wire cursor, so this walks exactly the walk a paging client
+/// takes.
+#[tokio::test]
+async fn ledger_history_pages_by_position_without_repeating_or_dropping() {
+    const MINUTE: i64 = 60_000;
+    let (svc, store) = harness();
+    seed_account(&store, 1, "spender").await;
+    for n in 0..5i64 {
+        svc.grant(Grant {
+            account_id: Id::from(1u128),
+            currency: Currency::Coins,
+            amount: 10,
+            reason: Reason::Grant,
+            ref_id: None,
+            idempotency_key: format!("spec:page:{n}"),
+            created_by: None,
+            at: Timestamp::from_millis(NOW + n * MINUTE),
+        })
+        .await
+        .expect("grant succeeds");
+    }
+
+    let reader = caller(1, 101);
+    let mut seen: Vec<i64> = Vec::new();
+    let mut after: Option<LedgerPosition> = None;
+    for _ in 0..5 {
+        let page = svc
+            .statement(&reader, Currency::Coins, 2, after)
+            .await
+            .expect("the statement reads");
+        if page.is_empty() {
+            // The last full page still carried a cursor, so one request past
+            // the end comes back empty — that is how the walk stops, not a bug.
+            break;
+        }
+        seen.extend(page.iter().map(|entry| entry.at.as_millis()));
+        let last = page.last().expect("a non-empty page has a last row");
+        after = Some(LedgerPosition {
+            created_at: last.at,
+            tx_id: last.tx_id,
+        });
+    }
+    let expected: Vec<i64> = (0..5).rev().map(|n| NOW + n * MINUTE).collect();
+    assert_eq!(
+        seen, expected,
+        "five lines, newest first, each exactly once"
+    );
+}
+
+/// The path `ENTITLEMENTS` drives when the shelf is longer than one page: five
+/// purchases a minute apart, walked in pages of two, come back oldest first with
+/// each item once. The position is the same `EntitlementPosition` the handler
+/// decodes from and encodes into the wire cursor.
+#[tokio::test]
+async fn entitlements_page_by_position_without_repeating_or_dropping() {
+    const MINUTE: i64 = 60_000;
+    let (svc, store) = harness();
+    seed_account(&store, 1, "collector").await;
+    grant(&svc, 1, 10_000).await;
+    let slugs = [
+        "gift.rose",
+        "gift.heart",
+        "gift.cake",
+        "gift.star",
+        "gift.diamond",
+    ];
+    for (n, slug) in slugs.iter().enumerate() {
+        // Each purchase posts at its own instant — the caller's `now` is the
+        // posting time — so the five acquired times are distinct and the walk
+        // is decided by the data, not by a tie broken on the sku.
+        let mut buyer = caller(1, 101);
+        buyer.now = Timestamp::from_millis(NOW + n as i64 * MINUTE);
+        let sku = migo_economy::Sku::parse(slug).expect("the default catalogue prices it");
+        svc.purchase(&buyer, &sku, &format!("spec:shelf:{n}"), None)
+            .await
+            .expect("purchase succeeds");
+    }
+
+    let buyer = caller(1, 101);
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<EntitlementPosition> = None;
+    for _ in 0..5 {
+        let page = svc
+            .entitlements(&buyer, 2, after)
+            .await
+            .expect("the shelf reads");
+        if page.is_empty() {
+            break;
+        }
+        seen.extend(page.iter().map(|held| held.sku.clone()));
+        let last = page.last().expect("a non-empty page has a last row");
+        after = Some(EntitlementPosition {
+            acquired_at: last.acquired_at,
+            sku: last.sku.clone(),
+        });
+    }
+    assert_eq!(
+        seen,
+        slugs.map(str::to_string),
+        "five items, oldest first, each exactly once"
     );
 }

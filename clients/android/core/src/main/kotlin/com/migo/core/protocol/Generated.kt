@@ -6634,19 +6634,27 @@ data class GiftCatalogueResponse(
     }
 }
 
-/** Reads the caller's statement. */
+/** Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned. */
 data class LedgerReq(
     val limit: Long? = null,
+    val cursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         var present = 0
         if (limit != null) present++
+        if (cursor != null) present++
         w.u32(present)
         if (limit != null) {
             val value = limit
             w.optional(1) { w ->
                 w.u32(value)
+            }
+        }
+        if (cursor != null) {
+            val value = cursor
+            w.optional(2) { w ->
+                w.str(value)
             }
         }
         w.leave()
@@ -6656,16 +6664,18 @@ data class LedgerReq(
         fun decode(r: Reader): LedgerReq {
             r.enter()
             var limit: Long? = null
+            var cursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> limit = sub.u32()
+                    2L -> cursor = sub.str()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return LedgerReq(limit)
+            return LedgerReq(limit, cursor)
         }
     }
 }
@@ -6722,15 +6732,24 @@ data class LedgerEntryWire(
     }
 }
 
-/** A page of the caller's statement. */
+/** A page of the caller's statement, with the cursor of the next page whenever this one was full. */
 data class LedgerResponse(
     val entries: List<LedgerEntryWire>,
+    val nextCursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(entries.size)
         for (item in entries) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -6738,12 +6757,17 @@ data class LedgerResponse(
         fun decode(r: Reader): LedgerResponse {
             r.enter()
             val entries = run { val n = r.listLen(); val acc = ArrayList<LedgerEntryWire>(n); for (i in 0 until n) acc.add(LedgerEntryWire.decode(r)); acc }
+            var nextCursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return LedgerResponse(entries)
+            return LedgerResponse(entries, nextCursor)
         }
     }
 }
@@ -8353,24 +8377,48 @@ data class KickPointsBuyResult(
     }
 }
 
-/** Empty; the caller's own entitlements are the session's. */
-class EntitlementsReq(
+/** Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned. */
+data class EntitlementsReq(
+    val limit: Long? = null,
+    val cursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
-        w.u32(0)
+        var present = 0
+        if (limit != null) present++
+        if (cursor != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (cursor != null) {
+            val value = cursor
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
     companion object {
         fun decode(r: Reader): EntitlementsReq {
             r.enter()
+            var limit: Long? = null
+            var cursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    2L -> cursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return EntitlementsReq()
+            return EntitlementsReq(limit, cursor)
         }
     }
 }
@@ -8403,15 +8451,24 @@ data class Entitlement(
     }
 }
 
-/** Everything the caller owns, oldest first. */
+/** One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full. */
 data class EntitlementsResponse(
     val items: List<Entitlement>,
+    val nextCursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(items.size)
         for (item in items) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -8419,12 +8476,17 @@ data class EntitlementsResponse(
         fun decode(r: Reader): EntitlementsResponse {
             r.enter()
             val items = run { val n = r.listLen(); val acc = ArrayList<Entitlement>(n); for (i in 0 until n) acc.add(Entitlement.decode(r)); acc }
+            var nextCursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return EntitlementsResponse(items)
+            return EntitlementsResponse(items, nextCursor)
         }
     }
 }

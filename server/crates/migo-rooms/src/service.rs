@@ -1082,14 +1082,27 @@ where
                 return Err(fault::feature_disabled(&format!("room listing by {field}")));
             }
         }
-        // A cursor over an ordering that moves — member count — silently skips rows
-        // and repeats others as rooms shuffle past the cursor between pages. Paging a
-        // ranked browse needs a snapshot or a stable tiebreak carried in the token,
-        // and neither exists yet, so `next_cursor` is always absent and this refuses
-        // to pretend otherwise.
-        if request.cursor.is_some() {
-            return Err(fault::feature_disabled("room listing cursors"));
+        // A *query* carrying a cursor is refused first, for a different reason:
+        // a search pays for one bounded scan, and its results are a slice of
+        // that scan, not a listing with a tail. Handing back a cursor here
+        // would promise a continuation that does not exist, so the pair is
+        // refused rather than answered with `next_cursor: None` — a client
+        // that asked to continue must learn it cannot, not discover it by
+        // receiving the same first page again.
+        if request.cursor.is_some() && request.query.is_some() {
+            return Err(fault::feature_disabled("paging a room search"));
         }
+        // A cursor over an ordering that moves — member count — skips rooms whose
+        // rank rose past the position and repeats ones whose rank fell, which is
+        // the honest behaviour for a directory that re-ranks live: the keyset
+        // names the last row the client holds rather than a row number, so nothing
+        // is shown twice *within* the paging discipline and nothing is silently
+        // dropped the way an offset drops it.
+        let after = request
+            .cursor
+            .as_deref()
+            .map(crate::cursor::decode)
+            .transpose()?;
         if request
             .query
             .as_ref()
@@ -1120,7 +1133,7 @@ where
         // `None` and not `Some(Public)`: brief section 21 lists Managed rooms in
         // discovery and moderates the joining, so hiding them here would make a
         // Managed room unfindable by the people it is for.
-        let scanned = self.store.browse_rooms(None, scan).await?;
+        let scanned = self.store.browse_rooms(None, after, scan).await?;
         let rooms: Vec<RoomSummary> = scanned
             .iter()
             .filter(|room| match query.as_deref() {
@@ -1137,10 +1150,17 @@ where
             .map(|room| view::summary(room, None))
             .collect();
         self.meters.listing(rooms.len(), scanned.len());
-        Ok(RoomListResponse {
-            rooms,
-            next_cursor: None,
-        })
+        // A cursor only for the plain browse: a page that was full may continue,
+        // and the store's keyset resumes exactly after the last room the client
+        // holds. A search never gets one, per the refusal above.
+        let next_cursor = if query.is_none() && rooms.len() == limit as usize {
+            scanned
+                .last()
+                .map(|room| crate::cursor::encode(room.position()))
+        } else {
+            None
+        };
+        Ok(RoomListResponse { rooms, next_cursor })
     }
 
     async fn summary(&self, caller: &Caller, room_id: Id) -> Result<RoomSummary> {

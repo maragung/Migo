@@ -23,6 +23,7 @@
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::Platform;
+use migo_store::model::NotificationPosition;
 
 use crate::model::{Caller, Delivery, Event, Inbox, RawToken, Wakeup};
 
@@ -134,8 +135,18 @@ pub trait Notifier: Send + Sync {
     /// a failure on one does not stop the rest.
     async fn notify_many(&self, recipients: &[Id], event: Event) -> Result<Delivery>;
 
-    /// One page of the caller's inbox, newest first, with the unread count.
-    async fn inbox(&self, caller: &Caller, limit: u16) -> Result<Inbox>;
+    /// One keyset page of the caller's inbox, newest first, with the unread count.
+    ///
+    /// `after` is the position of the last row a previous page returned, as
+    /// [`crate::cursor::decode`] reads it; `None` starts from the top. The unread
+    /// count spans the whole inbox, not the page: the badge and the list must
+    /// never disagree about the same inbox.
+    async fn inbox(
+        &self,
+        caller: &Caller,
+        limit: u16,
+        after: Option<NotificationPosition>,
+    ) -> Result<Inbox>;
 
     /// The caller's unread count on its own.
     ///

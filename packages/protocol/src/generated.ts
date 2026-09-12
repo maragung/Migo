@@ -5248,17 +5248,20 @@ export function decodeGiftCatalogueResponse(r: Reader): GiftCatalogueResponse {
   return out;
 }
 
-/** Reads the caller's statement. */
+/** Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned. */
 export interface LedgerReq {
   limit?: number;
+  cursor?: string;
 }
 
 export function encodeLedgerReq(w: Writer, v: LedgerReq): void {
   w.enter();
   let present = 0;
   if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
   w.u32(present);
   if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5270,6 +5273,7 @@ export function decodeLedgerReq(r: Reader): LedgerReq {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -5322,15 +5326,19 @@ export function decodeLedgerEntryWire(r: Reader): LedgerEntryWire {
   return out;
 }
 
-/** A page of the caller's statement. */
+/** A page of the caller's statement, with the cursor of the next page whenever this one was full. */
 export interface LedgerResponse {
   entries: LedgerEntryWire[];
+  nextCursor?: string;
 }
 
 export function encodeLedgerResponse(w: Writer, v: LedgerResponse): void {
   w.enter();
   { w.listLen(v.entries.length); for (const item of v.entries) { encodeLedgerEntryWire(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5339,9 +5347,13 @@ export function decodeLedgerResponse(r: Reader): LedgerResponse {
   const entries = ((): LedgerEntryWire[] => { const n = r.listLen(); const v: LedgerEntryWire[] = []; for (let i = 0; i < n; i++) v.push(decodeLedgerEntryWire(r)); return v; })();
   const out: LedgerResponse = { entries } as LedgerResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6781,13 +6793,20 @@ export function decodeKickPointsBuyResult(r: Reader): KickPointsBuyResult {
   return out;
 }
 
-/** Empty; the caller's own entitlements are the session's. */
+/** Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned. */
 export interface EntitlementsReq {
+  limit?: number;
+  cursor?: string;
 }
 
-export function encodeEntitlementsReq(w: Writer, _v: EntitlementsReq): void {
+export function encodeEntitlementsReq(w: Writer, v: EntitlementsReq): void {
   w.enter();
-  w.u32(0);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6795,9 +6814,14 @@ export function decodeEntitlementsReq(r: Reader): EntitlementsReq {
   r.enter();
   const out: EntitlementsReq = {  } as EntitlementsReq;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6829,15 +6853,19 @@ export function decodeEntitlement(r: Reader): Entitlement {
   return out;
 }
 
-/** Everything the caller owns, oldest first. */
+/** One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full. */
 export interface EntitlementsResponse {
   items: Entitlement[];
+  nextCursor?: string;
 }
 
 export function encodeEntitlementsResponse(w: Writer, v: EntitlementsResponse): void {
   w.enter();
   { w.listLen(v.items.length); for (const item of v.items) { encodeEntitlement(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6846,9 +6874,13 @@ export function decodeEntitlementsResponse(r: Reader): EntitlementsResponse {
   const items = ((): Entitlement[] => { const n = r.listLen(); const v: Entitlement[] = []; for (let i = 0; i < n; i++) v.push(decodeEntitlement(r)); return v; })();
   const out: EntitlementsResponse = { items } as EntitlementsResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }

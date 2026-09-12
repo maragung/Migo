@@ -41,12 +41,13 @@ use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
     AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
     ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor, Device,
-    DeviceStatus, Entitlement, GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot,
-    NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
-    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
-    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
-    Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing,
+    DeviceStatus, Entitlement, EntitlementPosition, GameSession, GiftSent, GlobalAdmin,
+    IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerPosition,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
+    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
+    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
     StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
 };
 use crate::traits::{
@@ -1723,7 +1724,12 @@ impl RoomStore for MemoryStore {
         Ok(())
     }
 
-    async fn browse_rooms(&self, kind: Option<RoomKindFilter>, limit: u16) -> Result<Vec<Room>> {
+    async fn browse_rooms(
+        &self,
+        kind: Option<RoomKindFilter>,
+        after: Option<RoomPosition>,
+        limit: u16,
+    ) -> Result<Vec<Room>> {
         let limit = clamp_limit(limit);
         let s = self.state.read();
         let mut rooms: Vec<Room> = s
@@ -1735,6 +1741,9 @@ impl RoomStore for MemoryStore {
                 Some(RoomKindFilter::Public) => room.kind == migo_protocol::RoomKind::Public,
                 Some(RoomKindFilter::Managed) => room.kind == migo_protocol::RoomKind::Managed,
             })
+            // The keyset boundary from the one definition of the browse order, so
+            // a page continues exactly where the last one ended.
+            .filter(|room| after.as_ref().is_none_or(|at| at.precedes(room)))
             .cloned()
             .collect();
         rooms.sort_by(|a, b| {
@@ -2536,6 +2545,7 @@ impl EconomyStore for MemoryStore {
     async fn ledger_history(
         &self,
         ledger_account_id: Id,
+        after: Option<LedgerPosition>,
         limit: u16,
     ) -> Result<Vec<(LedgerTransaction, i64)>> {
         let limit = clamp_limit(limit);
@@ -2546,6 +2556,14 @@ impl EconomyStore for MemoryStore {
         Ok(entries
             .iter()
             .rev()
+            // The keyset boundary from the one definition of the order, so the
+            // page and the sort cannot disagree about which posting is next.
+            .filter(|(tx_id, _)| {
+                let Some(tx) = s.transactions.get(tx_id) else {
+                    return false;
+                };
+                after.as_ref().is_none_or(|at| at.precedes(tx))
+            })
             .take(limit)
             .filter_map(|(tx_id, amount)| s.transactions.get(tx_id).map(|tx| (tx.clone(), *amount)))
             .collect())
@@ -2616,12 +2634,21 @@ impl EconomyStore for MemoryStore {
         Ok(tally)
     }
 
-    async fn entitlements(&self, account_id: Id) -> Result<Vec<Entitlement>> {
+    async fn entitlements(
+        &self,
+        account_id: Id,
+        after: Option<EntitlementPosition>,
+        limit: u16,
+    ) -> Result<Vec<Entitlement>> {
+        let limit = clamp_limit(limit);
         let s = self.state.read();
         let mut owned: Vec<Entitlement> = s
             .entitlements
             .values()
             .filter(|held| held.account_id == account_id)
+            // The keyset boundary from the one definition of the order: oldest
+            // first, then by catalogue code.
+            .filter(|held| after.as_ref().is_none_or(|at| at.precedes(held)))
             .cloned()
             .collect();
         owned.sort_by(|left, right| {
@@ -2629,6 +2656,7 @@ impl EconomyStore for MemoryStore {
                 .cmp(&right.acquired_at)
                 .then_with(|| left.sku.cmp(&right.sku))
         });
+        owned.truncate(limit);
         Ok(owned)
     }
 
@@ -3401,7 +3429,12 @@ impl NotifyStore for MemoryStore {
         Ok(notification)
     }
 
-    async fn notifications(&self, account_id: Id, limit: u16) -> Result<Vec<Notification>> {
+    async fn notifications(
+        &self,
+        account_id: Id,
+        after: Option<NotificationPosition>,
+        limit: u16,
+    ) -> Result<Vec<Notification>> {
         let limit = clamp_limit(limit);
         let s = self.state.read();
         // Newest first, which is the opposite of the moderation queue and for the
@@ -3412,6 +3445,10 @@ impl NotifyStore for MemoryStore {
             .rev()
             .filter_map(|id| s.notifications.get(id))
             .filter(|n| n.account_id == account_id)
+            // The keyset boundary, straight from the one definition of the order:
+            // everything strictly after the position, so the row the cursor names
+            // is never served twice.
+            .filter(|n| after.as_ref().is_none_or(|at| at.precedes(n)))
             .take(limit)
             .cloned()
             .collect())

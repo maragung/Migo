@@ -24,8 +24,10 @@
 //! * the owner cannot be sanctioned, demoted, or overridden by anybody at any rank;
 //! * a refusal names which of `NOT_A_MEMBER`, `BANNED`, `MUTED`, and
 //!   `PERMISSION_DENIED` happened rather than collapsing four situations into one;
-//! * a filter, a cursor, an invite code, and an approval queue this build cannot
-//!   honour are refused rather than silently ignored.
+//! * a filter, a cursor on a search, an invite code, and an approval queue this
+//!   build cannot honour are refused rather than silently ignored;
+//! * the plain browse pages by a cursor the service itself issued, and a cursor
+//!   it would never issue is the client's fault, not the directory's.
 
 use std::sync::Arc;
 
@@ -1707,7 +1709,8 @@ async fn a_filter_this_build_cannot_apply_is_refused() {
             ..list_request(10)
         },
         RoomListRequest {
-            cursor: Some("page-2".to_string()),
+            query: Some("kopi".to_string()),
+            cursor: Some("v1.3.1700000000000.000000000000000000000001".to_string()),
             ..list_request(10)
         },
     ] {
@@ -1721,6 +1724,75 @@ async fn a_filter_this_build_cannot_apply_is_refused() {
         0,
         "a refused listing is not a listing served"
     );
+}
+
+/// A browse pages by the cursor the service itself issued: page two continues
+/// after page one's last room, and paging to the end with a limit of one walks
+/// every live room exactly once — no room repeated by a re-ranking, none dropped
+/// the way an offset drops the rows that move across a page boundary.
+#[tokio::test]
+async fn a_browse_pages_by_cursor_without_repeating_or_dropping() {
+    let harness = Harness::new();
+    let rooms = browsable(&harness).await;
+    let stranger = caller(STRANGER, STRANGER_PHONE, LATER);
+
+    let mut seen: Vec<Id> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = harness
+            .rooms
+            .list(
+                &stranger,
+                RoomListRequest {
+                    cursor,
+                    ..list_request(1)
+                },
+            )
+            .await
+            .expect("a cursor the service itself issued is honoured");
+        if page.rooms.is_empty() {
+            // The last full page still carried a cursor — the trade the
+            // conversation list makes — so one request past the end comes back
+            // empty and cursorless, and that is how the walk stops.
+            break;
+        }
+        seen.extend(page.rooms.iter().map(|room| room.room_id));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, vec![rooms[0], rooms[1], rooms[2]]);
+}
+
+/// A cursor the service would never issue — the wrong version, a missing field,
+/// a room that is not an identifier — is a client bug, and the client is told so
+/// (`VALIDATION_FAILED`) rather than handed a first page that quietly ignores it.
+#[tokio::test]
+async fn a_cursor_the_service_would_not_issue_is_the_clients_fault() {
+    let harness = Harness::new();
+    browsable(&harness).await;
+    for broken in [
+        "",
+        "page-2",
+        "v2.3.1700000000000.000000000000000000000001",
+        "v1.3.1700000000000",
+        "v1.3.notatime.000000000000000000000001",
+    ] {
+        expect_code(
+            harness
+                .rooms
+                .list(
+                    &caller(STRANGER, STRANGER_PHONE, LATER),
+                    RoomListRequest {
+                        cursor: Some(broken.to_string()),
+                        ..list_request(10)
+                    },
+                )
+                .await,
+            codes::VALIDATION_FAILED,
+        );
+    }
 }
 
 #[tokio::test]

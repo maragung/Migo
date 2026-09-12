@@ -45,8 +45,9 @@ use migo_core::{Id, OsRandom, Random, Result, Timestamp};
 use migo_protocol::{codes, fault, NotificationKind};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{
-    BadgeAward, Currency, Entitlement, GiftReceipt, GiftSent, LedgerAccountKind, LedgerLeg,
-    NewTransaction, NewXpAward, Posted, Receipt, Scope, XpCaps,
+    BadgeAward, Currency, Entitlement, EntitlementPosition, GiftReceipt, GiftSent,
+    LedgerAccountKind, LedgerLeg, LedgerPosition, NewTransaction, NewXpAward, Posted, Receipt,
+    Scope, XpCaps,
 };
 use migo_store::{SharedStore, Store, MAX_PAGE};
 
@@ -333,6 +334,7 @@ where
         caller: &Caller,
         currency: Currency,
         limit: u16,
+        after: Option<LedgerPosition>,
     ) -> Result<Vec<LedgerEntry>> {
         self.charge(caller, READ_COST).await?;
         let account = self
@@ -345,7 +347,7 @@ where
             .await?;
         let history = self
             .store
-            .ledger_history(account, Self::page(limit))
+            .ledger_history(account, after, Self::page(limit))
             .await?;
         Ok(history
             .into_iter()
@@ -576,9 +578,16 @@ where
         })
     }
 
-    async fn entitlements(&self, caller: &Caller) -> Result<Vec<Entitlement>> {
+    async fn entitlements(
+        &self,
+        caller: &Caller,
+        limit: u16,
+        after: Option<EntitlementPosition>,
+    ) -> Result<Vec<Entitlement>> {
         self.charge(caller, READ_COST).await?;
-        self.store.entitlements(caller.account_id).await
+        self.store
+            .entitlements(caller.account_id, after, Self::page(limit))
+            .await
     }
 
     async fn gifts_received(&self, caller: &Caller, limit: u16) -> Result<Vec<GiftSent>> {

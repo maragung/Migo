@@ -81,7 +81,7 @@ async fn ack_marks_seeded_inbox_read() {
     assert!(seeded.stored, "a gift becomes an inbox row");
 
     let inbox = svc
-        .inbox(&caller(1, 2, now), 20)
+        .inbox(&caller(1, 2, now), 20, None)
         .await
         .expect("inbox reads");
     assert_eq!(inbox.unread, 1);
@@ -94,7 +94,7 @@ async fn ack_marks_seeded_inbox_read() {
     assert_eq!(changed, 1);
 
     let after = svc
-        .inbox(&caller(1, 2, now), 20)
+        .inbox(&caller(1, 2, now), 20, None)
         .await
         .expect("inbox reads");
     assert_eq!(after.unread, 0);
@@ -105,7 +105,7 @@ async fn ack_marks_seeded_inbox_read() {
 async fn list_returns_empty_page_for_fresh_account() {
     let svc = in_memory().await;
     let inbox = svc
-        .inbox(&caller(1, 2, Timestamp::from_millis(1_000)), 50)
+        .inbox(&caller(1, 2, Timestamp::from_millis(1_000)), 50, None)
         .await
         .expect("inbox reads");
     assert!(inbox.items.is_empty());

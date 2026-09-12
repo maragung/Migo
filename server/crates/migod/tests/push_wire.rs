@@ -1,4 +1,4 @@
-//! PUSH_REGISTER and PUSH_UNREGISTER over a real TCP session.
+//! PUSH_REGISTER, PUSH_UNREGISTER, and NOTIFICATION_LIST over a real TCP session.
 //!
 //! The notify service's own suite proves `Notifier::register` and `Notifier::unregister`
 //! correct — sealing, hashing, dis-placement, the rate-limit charge — but it calls the
@@ -23,11 +23,11 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
-use migo_core::{Config, Secret};
-use migo_notify::MAX_TOKEN_LEN;
+use migo_core::{Config, Id, Secret, Timestamp};
+use migo_notify::{Event, Notifier, MAX_TOKEN_LEN};
 use migo_protocol::{
-    codes, from_frame, to_frame, Acknowledged, Encode, Frame, Hello, Opcode, Platform,
-    PushRegister, PushUnregister, Welcome, PROTOCOL_VERSION,
+    codes, from_frame, to_frame, Acknowledged, Encode, Frame, Hello, InboxReq, InboxResponse,
+    NotificationKind, Opcode, Platform, PushRegister, PushUnregister, Welcome, PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -401,5 +401,141 @@ async fn malformed_tokens_are_refused_as_validation_faults() {
         registrations(&app, "rejected"),
         2,
         "the service counted both refusals"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATION_LIST over the same socket: the cursor the reply carries is the
+// cursor the next request hands back, and a cursor this build would never issue
+// is the client's fault over the wire too.
+// ---------------------------------------------------------------------------
+
+/// Seeded through the notifier the dispatcher serves — the same `Notifier::notify`
+/// every other domain's announcer calls — and read back over the TCP transport, so
+/// the dispatch arm between the wire and the service is exercised end to end: the
+/// decode of the cursor, the emission of `next_cursor`, and the refusal of a cursor
+/// the service would never have issued.
+#[tokio::test]
+async fn a_notification_list_pages_by_cursor_over_the_socket() {
+    const SECOND: i64 = 1_000;
+    const BASE: i64 = 1_700_000_000 * SECOND;
+
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let grant = registered_grant(&app, "inboxowner").await;
+    let mut session = LiveSession::connect(addr, &grant).await;
+
+    let actor = Id::from(2u128);
+    for n in 0..5i64 {
+        let event = Event::new(
+            grant.account_id,
+            NotificationKind::Gift,
+            Timestamp::from_millis(BASE + n * SECOND),
+        )
+        .by(actor);
+        app.notify
+            .notify(event)
+            .await
+            .expect("the seeded gift lands");
+    }
+
+    // Page one: two rows, newest first, and a cursor because the page was full.
+    let frame = session
+        .ask_for_frame(
+            Opcode::NotificationList,
+            81,
+            &InboxReq {
+                limit: 2,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        !frame.header.is_error(),
+        "the first page is served: {:?}",
+        from_frame::<migo_protocol::Error>(&frame)
+    );
+    let first: InboxResponse = from_frame(&frame).expect("the page decodes");
+    assert_eq!(first.items.len(), 2, "the limit the client asked for");
+    assert_eq!(
+        first.items[0].at,
+        Timestamp::from_millis(BASE + 4 * SECOND),
+        "newest first, so a client woken mid-stream sees the newest thing first"
+    );
+    let cursor = first
+        .next_cursor
+        .expect("a full page carries a cursor, or the client would stop paging");
+
+    // A cursor the service would never issue is the client's fault, over the wire
+    // as much as in the service: `VALIDATION_FAILED`, not a silent first page.
+    let broken = session
+        .ask_for_frame(
+            Opcode::NotificationList,
+            82,
+            &InboxReq {
+                limit: 2,
+                cursor: Some("page-2".to_string()),
+            },
+        )
+        .await;
+    assert!(broken.header.is_error(), "a fabricated cursor is refused");
+    let refusal: migo_protocol::Error = from_frame(&broken).expect("the error frame decodes");
+    assert_eq!(refusal.code, codes::VALIDATION_FAILED, "{refusal:?}");
+
+    // Page two: two more rows, none of them the ones page one already returned.
+    let frame = session
+        .ask_for_frame(
+            Opcode::NotificationList,
+            83,
+            &InboxReq {
+                limit: 2,
+                cursor: Some(cursor),
+            },
+        )
+        .await;
+    assert!(
+        !frame.header.is_error(),
+        "the service's own cursor is honoured: {:?}",
+        from_frame::<migo_protocol::Error>(&frame)
+    );
+    let second: InboxResponse = from_frame(&frame).expect("the page decodes");
+    assert_eq!(second.items.len(), 2);
+    let seen: Vec<migo_core::Id> = first
+        .items
+        .iter()
+        .chain(second.items.iter())
+        .map(|item| item.id)
+        .collect();
+    let distinct: std::collections::HashSet<_> = seen.iter().collect();
+    assert_eq!(
+        seen.len(),
+        distinct.len(),
+        "a keyset page never repeats a row the client already holds"
+    );
+
+    // The last page: one row, and no cursor — a page that was not full is the end.
+    let tail = second
+        .next_cursor
+        .expect("the second page was full, so it carries one too");
+    let frame = session
+        .ask_for_frame(
+            Opcode::NotificationList,
+            84,
+            &InboxReq {
+                limit: 2,
+                cursor: Some(tail),
+            },
+        )
+        .await;
+    assert!(
+        !frame.header.is_error(),
+        "the final page is served: {:?}",
+        from_frame::<migo_protocol::Error>(&frame)
+    );
+    let third: InboxResponse = from_frame(&frame).expect("the page decodes");
+    assert_eq!(third.items.len(), 1, "five rows in pages of two leave one");
+    assert_eq!(
+        third.next_cursor, None,
+        "a page that was not full carries no cursor: this is the end"
     );
 }

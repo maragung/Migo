@@ -2941,13 +2941,19 @@
     },
     {
       "name": "LedgerReq",
-      "doc": "Reads the caller's statement.",
+      "doc": "Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned.",
       "fields": [
         {
           "name": "limit",
           "type": "u32",
           "optional": true,
           "id": 1
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "optional": true,
+          "id": 2
         }
       ]
     },
@@ -2986,11 +2992,17 @@
     },
     {
       "name": "LedgerResponse",
-      "doc": "A page of the caller's statement.",
+      "doc": "A page of the caller's statement, with the cursor of the next page whenever this one was full.",
       "fields": [
         {
           "name": "entries",
           "type": "list<LedgerEntryWire>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "string",
+          "optional": true,
+          "id": 1
         }
       ]
     },
@@ -3894,8 +3906,21 @@
     },
     {
       "name": "EntitlementsReq",
-      "doc": "Empty; the caller's own entitlements are the session's.",
-      "fields": []
+      "doc": "Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned.",
+      "fields": [
+        {
+          "name": "limit",
+          "type": "u32",
+          "optional": true,
+          "id": 1
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "optional": true,
+          "id": 2
+        }
+      ]
     },
     {
       "name": "Entitlement",
@@ -3913,11 +3938,17 @@
     },
     {
       "name": "EntitlementsResponse",
-      "doc": "Everything the caller owns, oldest first.",
+      "doc": "One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full.",
       "fields": [
         {
           "name": "items",
           "type": "list<Entitlement>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "string",
+          "optional": true,
+          "id": 1
         }
       ]
     }

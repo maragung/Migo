@@ -25,6 +25,7 @@
 //! session, never the frame.
 
 use migo_core::Error;
+use migo_economy::cursor;
 use migo_economy::{Caller as EconomyCaller, Gift, SendGift, SharedTreasurer, Sku};
 use migo_gateway::ClientContext;
 use migo_protocol::{
@@ -33,7 +34,8 @@ use migo_protocol::{
     NotificationKind, Opcode, StorePurchase, StorePurchaseResult, Topic, TopicKind, WalletReq,
     WalletView,
 };
-use migo_store::model::Currency;
+use migo_store::model::{Currency, EntitlementPosition};
+use migo_store::MAX_PAGE;
 
 /// Sends a gift from the session account to `GiftSend.recipient` and replies with the result.
 ///
@@ -238,17 +240,35 @@ pub(crate) async fn handle_entitlements(
         now: ctx.now(),
         request_id: None,
     };
-    let _request: EntitlementsReq = from_frame(frame).map_err(fault::from_wire)?;
-    let owned = svc.entitlements(&caller).await?;
-    ctx.reply(&EntitlementsResponse {
-        items: owned
-            .into_iter()
-            .map(|entitlement| Entitlement {
-                sku: entitlement.sku,
-                acquired_at: entitlement.acquired_at,
+    let request: EntitlementsReq = from_frame(frame).map_err(fault::from_wire)?;
+    let limit = request
+        .limit
+        .map_or(MAX_PAGE, |limit| limit.clamp(1, u32::from(MAX_PAGE)) as u16);
+    let after = match request.cursor.as_deref() {
+        Some(text) => Some(cursor::entitlements::decode(text)?),
+        None => None,
+    };
+    let owned = svc.entitlements(&caller, limit, after).await?;
+    let items: Vec<Entitlement> = owned
+        .into_iter()
+        .map(|entitlement| Entitlement {
+            sku: entitlement.sku,
+            acquired_at: entitlement.acquired_at,
+        })
+        .collect();
+    // A cursor whenever the page was full — the shelf may continue past it, and
+    // the client knows to ask again without requesting an empty page.
+    let next_cursor = (items.len() == usize::from(limit))
+        .then(|| {
+            items.last().map(|item| {
+                cursor::entitlements::encode(&EntitlementPosition {
+                    acquired_at: item.acquired_at,
+                    sku: item.sku.clone(),
+                })
             })
-            .collect(),
-    })
+        })
+        .flatten();
+    ctx.reply(&EntitlementsResponse { items, next_cursor })
 }
 
 /// Buys one Kick Point pack for the session account and replies with the new balance.

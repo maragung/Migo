@@ -8,10 +8,12 @@
 //!   marks every row at or before that instant, so the one id the client named and anything that
 //!   arrived before it both go quiet in one call. The body carries a single `id`, not a list, so
 //!   there is no per-id loop to race with a notification that lands mid-flight.
-//! - `NOTIFICATION_LIST` (146) — one page of the inbox, newest first. The domain owns no cursor, so
-//!   the requested `cursor` is accepted and then dropped: the service returns a single watermark page
-//!   and the client pages by re-asking with a higher limit, not by handing the server a bookmark it
-//!   would have to store. The reply's `next_cursor` is therefore always absent.
+//! - `NOTIFICATION_LIST` (146) — one keyset page of the inbox, newest first. The
+//!   requested `cursor` names the last row of the previous page, as
+//!   [`migo_notify::cursor`] renders it, and a cursor this build would never issue is
+//!   `VALIDATION_FAILED` — a client bug, not an attack, since the rows behind one are the
+//!   caller's own. The reply carries a `next_cursor` whenever the page was full, so the
+//!   client knows there is more without paying for an empty page to learn it.
 //! - `PUSH_REGISTER` (147) — the calling device hands over its push token. The token is sealed and
 //!   hashed inside the service and never seen by anything else, and re-registration replaces whatever
 //!   the device had, so a client can send this on every cold start without ceremony.
@@ -26,12 +28,13 @@
 
 use migo_core::Error;
 use migo_gateway::ClientContext;
-use migo_notify::{Caller as NotifyCaller, RawToken, SharedNotifier};
+use migo_notify::cursor;
+use migo_notify::{Caller as NotifyCaller, RawToken, SharedNotifier, MAX_INBOX_PAGE};
 use migo_protocol::{
     fault, from_frame, Acknowledged, Frame, InboxItem, InboxReq, InboxResponse, NotificationAck,
     PushRegister, PushUnregister,
 };
-use migo_store::model::{Device, PushProvider};
+use migo_store::model::{Device, NotificationPosition, PushProvider};
 use migo_store::SharedStore;
 
 /// Marks every notification up to the one the client named as read.
@@ -57,11 +60,14 @@ pub(crate) async fn handle_ack(
     ctx.reply(&Acknowledged { ok: true })
 }
 
-/// Returns one page of the caller's inbox, newest first.
+/// Returns one keyset page of the caller's inbox, newest first.
 ///
-/// The domain has no pagination, so `cursor` is read and ignored and `next_cursor` is always
-/// `None`. The `limit` is clamped to the service's own page ceiling inside
-/// [`Notifier::inbox`]; here it is only narrowed to `u16` to match that method's signature.
+/// The cursor is the position of the last row the previous page returned, as
+/// [`migo_notify::cursor`] renders it; `next_cursor` comes back whenever the page
+/// was full, so the client knows there is more without asking for an empty page.
+/// The `limit` is clamped to the service's own page ceiling inside
+/// [`Notifier::inbox`]; here it is only narrowed to `u16` to match that method's
+/// signature.
 pub(crate) async fn handle_list(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -74,8 +80,13 @@ pub(crate) async fn handle_list(
         ctx.now(),
     );
     let request: InboxReq = from_frame(frame).map_err(fault::from_wire)?;
-    let inbox = svc.inbox(&caller, request.limit as u16).await?;
-    let items = inbox
+    let after = match request.cursor.as_deref() {
+        Some(text) => Some(cursor::decode(text)?),
+        None => None,
+    };
+    let limit = request.limit as u16;
+    let inbox = svc.inbox(&caller, limit, after).await?;
+    let items: Vec<InboxItem> = inbox
         .items
         .iter()
         .map(|item| InboxItem {
@@ -89,10 +100,21 @@ pub(crate) async fn handle_list(
             actor_id: item.actor_id,
         })
         .collect();
-    ctx.reply(&InboxResponse {
-        items,
-        next_cursor: None,
-    })
+    // A cursor whenever the page was full — the same trade the conversation list
+    // makes: it may turn out to name the end of the inbox, which costs the client
+    // one request that comes back empty, rather than fetching one row past the
+    // page on every request to answer a question most callers never ask.
+    let next_cursor = (items.len() == usize::from(limit.min(MAX_INBOX_PAGE)))
+        .then(|| {
+            inbox.items.last().map(|item| {
+                cursor::encode(NotificationPosition {
+                    created_at: item.at,
+                    notification_id: item.notification_id,
+                })
+            })
+        })
+        .flatten();
+    ctx.reply(&InboxResponse { items, next_cursor })
 }
 
 /// Records the calling device's push registration.
