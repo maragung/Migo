@@ -2114,9 +2114,84 @@ fn a_compressed_subscribe_request_survives_the_round_trip() {
     );
     let bytes = frame.encode().expect("a compressed frame encodes");
     let decoded = Frame::decode(bytes).expect("the encoded frame decodes");
-    let restored: SubscribeRequest =
-        from_frame(&decoded).expect("the request inflates and decodes");
+    let restored: SubscribeRequest = match from_frame(&decoded) {
+        Ok(request) => request,
+        Err(error) => {
+            // DIAGNOSTIC — strip once the decoder defect is closed. The real
+            // decoder has just refused this frame; before letting the panic
+            // speak, replay inflate_raw's driving loop verbatim with a
+            // per-call trace, so the failure names the exact call sequence
+            // (flush, status, consumed, produced) instead of the variant
+            // alone. On a green run this never executes.
+            trace_inflate_calls(&decoded.payload);
+            panic!("the request inflates and decodes: {error}");
+        }
+    };
     assert_eq!(restored.topics, topics);
+}
+
+/// A verbatim replay of `migo_wire::compress::inflate_raw`'s driving loop,
+/// instrumented per call and printed to stderr (which `cargo test` shows for a
+/// failing test). Exists only for the diagnostic above; it must track the real
+/// loop's shape — chunk size, flush choice, end conditions — or its trace lies.
+fn trace_inflate_calls(compressed: &[u8]) {
+    use flate2::{Decompress, FlushDecompress, Status};
+
+    const CHUNK: usize = 8 * 1024;
+    let mut scratch = vec![0u8; CHUNK];
+    let mut inflater = Decompress::new(false);
+    let head = &compressed[..compressed.len().min(16)];
+    let tail = &compressed[compressed.len().saturating_sub(16)..];
+    eprintln!(
+        "DIAGNOSTIC inflate trace: compressed {} bytes, first16 {head:02x?}, last16 {tail:02x?}",
+        compressed.len()
+    );
+    for call in 0_u32.. {
+        let before_in = inflater.total_in() as usize;
+        let before_out = inflater.total_out() as usize;
+        let remaining = &compressed[before_in..];
+        let flush = if remaining.is_empty() {
+            FlushDecompress::Finish
+        } else {
+            FlushDecompress::None
+        };
+        let flush_name = if remaining.is_empty() {
+            "Finish"
+        } else {
+            "None"
+        };
+        match inflater.decompress(remaining, &mut scratch, flush) {
+            Ok(status) => {
+                let consumed = inflater.total_in() as usize - before_in;
+                let produced = inflater.total_out() as usize - before_out;
+                eprintln!(
+                    "DIAGNOSTIC call {call}: flush {flush_name}, in_len {}, status {status:?}, \
+                     consumed {consumed}, produced {produced}, total_in {}, total_out {}",
+                    remaining.len(),
+                    inflater.total_in(),
+                    inflater.total_out()
+                );
+                if status == Status::StreamEnd {
+                    eprintln!("DIAGNOSTIC loop ends: StreamEnd");
+                    return;
+                }
+                if consumed == 0 && produced == 0 {
+                    eprintln!("DIAGNOSTIC loop ends: no progress with the stream not ended");
+                    return;
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "DIAGNOSTIC call {call}: flush {flush_name}, in_len {}, Err({error}), \
+                     total_in {}, total_out {}",
+                    remaining.len(),
+                    inflater.total_in(),
+                    inflater.total_out()
+                );
+                return;
+            }
+        }
+    }
 }
 
 #[tokio::test]
