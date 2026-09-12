@@ -77,6 +77,31 @@ fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
 /// Fixed iteration count, not a duration: see the wire crate's fuzz suite.
 const RANDOM_CASES: u64 = 256;
 
+/// One hostile payload against one decoder, with the stronger half of the
+/// contract attached: success and failure are both acceptable answers, but
+/// whatever a decoder accepts must be canonical — re-encoding the accepted
+/// value and decoding again has to return it, or the value has two encodings,
+/// which is two valid signatures for one message (the crate docs' reason for
+/// strictness).
+///
+/// Generic per decoder rather than a loop over a list of results, because the
+/// five decoders return five different types and there is no honest common
+/// type to collect them into — a `Box<dyn Debug>` would check the re-encode
+/// half against `Debug` output instead of against the value.
+fn assert_canonical_if_accepted<T>(payload: &Bytes)
+where
+    T: migo_protocol::Decode + migo_protocol::Encode + PartialEq + std::fmt::Debug,
+{
+    if let Ok(value) = from_bytes::<T>(payload.clone()) {
+        let re_encoded = to_bytes(&value).expect("an accepted value re-encodes");
+        let re_decoded = from_bytes::<T>(re_encoded).expect("the re-encoding decodes");
+        assert_eq!(
+            re_decoded, value,
+            "the decoder accepted a non-canonical encoding"
+        );
+    }
+}
+
 #[test]
 fn seeded_random_payloads_never_panic_the_pre_auth_decoders() {
     let mut rng = SeededRandom::from_env();
@@ -85,27 +110,12 @@ fn seeded_random_payloads_never_panic_the_pre_auth_decoders() {
         let mut buffer = vec![0u8; len];
         rng.fill_bytes(&mut buffer);
         let payload = Bytes::from(buffer);
-        for decoded in [
-            from_bytes::<Hello>(payload.clone()).ok(),
-            from_bytes::<Authenticate>(payload.clone()).ok(),
-            from_bytes::<Pong>(payload.clone()).ok(),
-            from_bytes::<Ack>(payload.clone()).ok(),
-            from_bytes::<ResumeRequest>(payload.clone()).ok(),
-        ] {
-            let Some(value) = decoded else {
-                continue;
-            };
-            // The stronger half: whatever was accepted must be canonical, or
-            // re-encoding it and decoding again would not return the same
-            // value — and a value with two encodings is two valid signatures
-            // for one message (the crate docs' reason for strictness).
-            let re_encoded = to_bytes(&value).expect("an accepted value re-encodes");
-            let re_decoded = from_bytes(re_encoded).expect("the re-encoding decodes");
-            assert_eq!(
-                re_decoded, value,
-                "the decoder accepted a non-canonical encoding"
-            );
-        }
+        // The five payloads an unauthenticated stranger controls outright.
+        assert_canonical_if_accepted::<Hello>(&payload);
+        assert_canonical_if_accepted::<Authenticate>(&payload);
+        assert_canonical_if_accepted::<Pong>(&payload);
+        assert_canonical_if_accepted::<Ack>(&payload);
+        assert_canonical_if_accepted::<ResumeRequest>(&payload);
     }
 }
 
@@ -144,14 +154,7 @@ fn every_single_bit_flip_of_a_valid_hello_never_panics_the_decoder() {
             mutated[position] ^= 1 << bit;
             // Success or failure are both acceptable. Panicking is not: this
             // is the first struct a stranger's socket ever hands the server.
-            if let Ok(value) = from_bytes::<Hello>(Bytes::from(mutated)) {
-                let re_encoded = to_bytes(&value).expect("an accepted value re-encodes");
-                let re_decoded = from_bytes(re_encoded).expect("the re-encoding decodes");
-                assert_eq!(
-                    re_decoded, value,
-                    "the decoder accepted a non-canonical encoding"
-                );
-            }
+            assert_canonical_if_accepted::<Hello>(&Bytes::from(mutated));
         }
     }
 }

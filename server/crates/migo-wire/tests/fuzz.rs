@@ -206,9 +206,9 @@ fn a_batch_inside_a_batch_is_refused_both_ways() {
     // to produce, and the decoder must refuse it too.
     let mut payload = Vec::new();
     varint::encode_u64(1, &mut payload); // one element
-    let mut element = batched.encode().expect("a batched frame encodes alone");
+    let element = batched.encode().expect("a batched frame encodes alone");
     varint::encode_u64(element.len() as u64, &mut payload);
-    payload.append(&mut element);
+    payload.extend_from_slice(&element);
     let mut envelope_header = FrameHeader::new(0, 0);
     envelope_header.flags |= migo_wire::flags::BATCH;
     let envelope = Frame::new(envelope_header, Bytes::from(payload));
