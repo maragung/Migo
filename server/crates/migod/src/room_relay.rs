@@ -14,13 +14,21 @@
 //! - the **watch half**: the home node records which peer nodes hold
 //!   subscribers of which rooms, so a publish becomes one federated copy per
 //!   *node*, not per session and not per member;
-//! - the **forward half**: both of a room's publish paths — the request path
-//!   through `publish_room_fanout` and the out-of-band room-presence publisher
-//!   — hand their [`Fanout`](migo_rooms::Fanout) here, and the home node
-//!   enqueues one `FED_ROOM_EVENT` per watching node, the inner event frame
-//!   sealed exactly as a local session would have received it. The receiving
-//!   node's ingest path (`mesh::route_room_event`) publishes it into its own
-//!   hub, which is the fan-out the tier asks for.
+//! - the **forward half**: all of a room's publish paths — the request path
+//!   through `publish_room_fanout`, the out-of-band room-presence publisher,
+//!   and the messaging path that carries the room's own *chat*, because a
+//!   room's conversation is what its members actually talk in — hand their
+//!   fanout here, and the node that homes the room enqueues one
+//!   `FED_ROOM_EVENT` per watching node, the inner event frame sealed exactly
+//!   as a local session would have received it. The receiving node's ingest
+//!   path (`mesh::route_room_event`) publishes it into its own hub, which is
+//!   the fan-out the tier asks for, and passes it on in turn if the watch
+//!   table is there.
+//!
+//! Only the home node holds a watch table, so a publish on any other node is
+//! not a fan-out at all: it is one copy addressed to the home node, which does
+//! the tiering. `RoomRelay::to_owner` is that decision in one place, on all
+//! three publish paths and on the ingest side.
 //!
 //! # Ordering, redelivery, and the missing unsubscribe
 //!
@@ -44,14 +52,17 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::{FederatedEvent, PeerStatus};
 use migo_federation::SharedMesh;
+use migo_messaging::{Broadcast as MessageBroadcast, Fanout as MessageFanout};
 use migo_protocol::{
     fault, to_frame, Encode, FedRoomEvent, FedRouting, Frame, Opcode, RoomMemberEvent,
     RoomStateEvent, RoomVoteEvent,
 };
 use migo_rooms::{Broadcast as RoomBroadcast, Fanout as RoomFanout};
+use migo_store::model::Room;
 use migo_store::SharedStore;
 
 use crate::room_presence::RoomPublisher;
@@ -126,11 +137,7 @@ impl RoomRelay {
             // from this hub, and the watchers arrive as peers subscribe.
             return Ok(());
         }
-        let peers = self.mesh.peers(PEER_SCAN_LIMIT).await?;
-        let Some(home) = peers
-            .into_iter()
-            .find(|peer| peer.region == room.home_region && peer.status == PeerStatus::Allowed)
-        else {
+        let Some(home) = self.home_node(&room.home_region).await? else {
             // No allowed peer answers the region the room names. Unmarked, so
             // a later SUBSCRIBE — perhaps after the operator admits the home
             // node — asks again.
@@ -150,7 +157,7 @@ impl RoomRelay {
         self.mesh
             .enqueue(
                 FederatedEvent {
-                    target_node: home.node_id,
+                    target_node: home,
                     opcode: Opcode::FedRoomSubscribe.to_wire() as i32,
                     payload,
                 },
@@ -190,16 +197,11 @@ impl RoomRelay {
     /// `exclude_device` is deliberately not honoured: the excluded socket is
     /// on *this* node, and the far node's sessions — including the actor's
     /// other devices — are the audience the tier exists to reach.
+    ///
+    /// The event reaches the watch table only if this node holds it, which is
+    /// to say only if this node homes the room; anywhere else the copy goes to
+    /// the home node instead. See [`forward_message`](Self::forward_message).
     pub(crate) async fn forward(&self, fanout: &RoomFanout, now: Timestamp) -> Result<()> {
-        let targets = self
-            .watchers
-            .lock()
-            .get(&fanout.room_id)
-            .cloned()
-            .unwrap_or_default();
-        if targets.is_empty() {
-            return Ok(());
-        }
         let opcode = fanout.opcode();
         let inner = match &fanout.event {
             RoomBroadcast::Member(event) => to_frame(opcode.to_wire(), 0, event),
@@ -207,12 +209,141 @@ impl RoomRelay {
             RoomBroadcast::Vote(event) => to_frame(opcode.to_wire(), 0, event),
         }
         .map_err(fault::from_wire)?;
+        match self.store.room(fanout.room_id).await? {
+            Some(room) => self.to_owner(&room, inner, now).await,
+            // No row, so nothing names a home node. The event was published to
+            // this node's hub regardless, which is the whole of what a room
+            // with no row can be owed.
+            None => Ok(()),
+        }
+    }
+
+    /// The forward half's second producer: a room's *messages*.
+    ///
+    /// A room's chat is a conversation — the row the room names in
+    /// `conversation_id` — so its fanout arrives as a messaging [`Fanout`],
+    /// not a rooms one, and it used to stop at this node's own hub. That made
+    /// a room's text reach the members whose sockets happen to be here and
+    /// nobody else: with a store per node there is no row on the far node to
+    /// sync, so the message was not late for the rest of the room, it was
+    /// absent.
+    ///
+    /// Two hops, because the home node is the only node holding the watch
+    /// table — the division [`to_owner`](Self::to_owner) carries out, and the
+    /// same one `subscribe_to` already relies on. The room row is passed in
+    /// rather than read here because the caller had to look it up anyway: it
+    /// is `conversation_id` on the row that made the message a room's at all.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an encode or outbox failure. The caller logs rather than
+    /// fails: the local publish already happened, and refusing the send would
+    /// only cost the sender their message without undoing anything.
+    pub(crate) async fn forward_message(
+        &self,
+        room: &Room,
+        fanout: &MessageFanout,
+        now: Timestamp,
+    ) -> Result<()> {
+        let opcode = fanout.event.opcode();
+        let inner = match &fanout.event {
+            MessageBroadcast::Message(event) => to_frame(opcode.to_wire(), 0, event),
+            MessageBroadcast::Receipt(event) => to_frame(opcode.to_wire(), 0, event),
+            MessageBroadcast::Typing(event) => to_frame(opcode.to_wire(), 0, event),
+            MessageBroadcast::Member(event) => to_frame(opcode.to_wire(), 0, event),
+            MessageBroadcast::Vote(event) => to_frame(opcode.to_wire(), 0, event),
+            MessageBroadcast::State(event) => to_frame(opcode.to_wire(), 0, event),
+        }
+        .map_err(fault::from_wire)?;
+        self.to_owner(room, inner, now).await
+    }
+
+    /// One copy of an *ingested* event to every watching node but the one it
+    /// arrived from.
+    ///
+    /// The home node is the tier's only fan-out authority, so a room event a
+    /// peer forwarded here is owed onward to the other watchers. The origin is
+    /// excluded because it has already published the event to its own hub:
+    /// sending it back would deliver every local subscriber the same frame
+    /// twice, and the second copy is indistinguishable from a real one.
+    ///
+    /// The bytes are re-sealed as-is rather than re-encoded from the arriving
+    /// frame, so what the receiving node's clients see is byte-for-byte what
+    /// the origin's clients saw (section 145).
+    pub(crate) async fn fan_out_inbound(
+        &self,
+        room_id: Id,
+        origin: Id,
+        payload: &[u8],
+        now: Timestamp,
+    ) -> Result<()> {
+        let inner = Frame::decode(Bytes::copy_from_slice(payload)).map_err(fault::from_wire)?;
+        self.fan_out(room_id, inner, Some(origin), now).await
+    }
+
+    /// Whether this node homes the room, and so owns its fan-out.
+    ///
+    /// The ingest path's question. A `FED_ROOM_EVENT` arrives at a node
+    /// because some node put it there, and the two reasons are opposite: the
+    /// home node holds the watch table and owes the event onward, while a
+    /// watching node is the end of the line and owes nothing. Only the store
+    /// can tell them apart, and the row is read per event rather than cached
+    /// because a room's home can be moved by an operator and a cache here
+    /// would keep fanning a moved room out from the node that no longer owns
+    /// it.
+    pub(crate) async fn homes(&self, room_id: Id) -> bool {
+        matches!(
+            self.store.room(room_id).await,
+            Ok(Some(room)) if room.home_region == self.mesh.region()
+        )
+    }
+
+    /// Hands an event to the node that owns its fan-out: this one, or the home
+    /// node.
+    ///
+    /// The tier's division of labour in one place. A node that homes the room
+    /// holds the watch table, so it fans out directly — one copy per watching
+    /// node. A node that does not home it holds no table and cannot know who
+    /// is watching, so it owes the home node exactly one copy and lets the
+    /// table do the tiering. Routing a non-home node's publish anywhere else
+    /// would either drop it or duplicate it.
+    async fn to_owner(&self, room: &Room, inner: Frame, now: Timestamp) -> Result<()> {
+        if room.home_region == self.mesh.region() {
+            return self.fan_out(room.id, inner, None, now).await;
+        }
+        self.send_to_home(room.id, room.home_region.as_str(), inner, now)
+            .await
+    }
+
+    /// The fan-out itself: encode once, enqueue one copy per watching node.
+    ///
+    /// A room with no watchers is a plain no-op, which is the common case on
+    /// every node that is not the room's home node.
+    async fn fan_out(
+        &self,
+        room_id: Id,
+        inner: Frame,
+        exclude: Option<Id>,
+        now: Timestamp,
+    ) -> Result<()> {
+        let targets = self
+            .watchers
+            .lock()
+            .get(&room_id)
+            .cloned()
+            .unwrap_or_default();
+        if targets.is_empty() {
+            return Ok(());
+        }
         let envelope = FedRoomEvent {
-            room_id: fanout.room_id,
+            room_id,
             payload: inner.encode().map_err(fault::from_wire)?.to_vec(),
         };
         let payload = encode_envelope(Opcode::FedRoomEvent, &envelope)?;
         for node in targets {
+            if Some(node) == exclude {
+                continue;
+            }
             self.mesh
                 .enqueue(
                     FederatedEvent {
@@ -225,6 +356,54 @@ impl RoomRelay {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Enqueues one copy of an event for the node that homes it.
+    ///
+    /// Used by a node that does not home the room and so holds no watch table:
+    /// the home node is the only node that can tier the event, and one copy to
+    /// it is what makes a room's traffic cross node boundaries at all.
+    async fn send_to_home(
+        &self,
+        room_id: Id,
+        home_region: &str,
+        inner: Frame,
+        now: Timestamp,
+    ) -> Result<()> {
+        let Some(home) = self.home_node(home_region).await? else {
+            tracing::warn!(
+                room = %room_id.to_text(),
+                home = %home_region,
+                "no allowed mesh peer homes this room; its events stay local"
+            );
+            return Ok(());
+        };
+        let envelope = FedRoomEvent {
+            room_id,
+            payload: inner.encode().map_err(fault::from_wire)?.to_vec(),
+        };
+        let payload = encode_envelope(Opcode::FedRoomEvent, &envelope)?;
+        self.mesh
+            .enqueue(
+                FederatedEvent {
+                    target_node: home,
+                    opcode: Opcode::FedRoomEvent.to_wire() as i32,
+                    payload,
+                },
+                now,
+            )
+            .await
+    }
+
+    /// The allowed peer that homes a region, if the allow-list names one.
+    async fn home_node(&self, home_region: &str) -> Result<Option<Id>> {
+        Ok(self
+            .mesh
+            .peers(PEER_SCAN_LIMIT)
+            .await?
+            .into_iter()
+            .find(|peer| peer.region == home_region && peer.status == PeerStatus::Allowed)
+            .map(|peer| peer.node_id))
     }
 }
 
@@ -474,6 +653,69 @@ mod tests {
         assert!(
             relay.register_watcher(peer, &stale).is_err(),
             "a peer on a stale routing view is told so"
+        );
+    }
+
+    /// The forward half on a node that is *not* the room's home: one copy to the
+    /// home node, because the watch table is there and this node cannot tier.
+    ///
+    /// This is the difference between a room whose events reach its members and
+    /// one whose events reach whoever shares a node with the actor. A node with
+    /// no watchers of its own has nothing to fan out to, so routing the publish
+    /// through its own — empty — table would drop it in silence.
+    #[tokio::test]
+    async fn a_publish_on_a_non_home_node_goes_to_the_home_node_alone() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let room_id = Id::from(0x1111);
+        let store = store_with_room(room_id, "region-2").await;
+        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+
+        let member = RoomMemberEvent {
+            room_id,
+            user_id: Id::from(0x8888),
+            joined: true,
+            role: None,
+            member_count: Some(2),
+            change: None,
+        };
+        relay
+            .forward(
+                &RoomFanout {
+                    room_id,
+                    exclude_device: None,
+                    event: RoomBroadcast::Member(member),
+                },
+                Timestamp::from_millis(NOW),
+            )
+            .await
+            .expect("the home node resolves and the event enqueues");
+
+        let due = mesh
+            .due(Timestamp::from_millis(NOW + 60_000))
+            .await
+            .expect("the queue reads");
+        assert_eq!(due.len(), 1, "one copy, for the only node that can tier it");
+        assert_eq!(due[0].target_node, peer, "and it is the room's home node");
+
+        let outer = Frame::decode(Bytes::from(due[0].payload.clone()))
+            .expect("an outbox payload is an encoded frame");
+        assert_eq!(
+            Opcode::from_wire(outer.header.opcode),
+            Some(Opcode::FedRoomEvent),
+            "the copy is a room event envelope"
+        );
+        let envelope: FedRoomEvent =
+            migo_protocol::from_frame(&outer).expect("the envelope decodes");
+        assert_eq!(
+            envelope.room_id, room_id,
+            "and it names the room it speaks for, which is what the home node tiers by"
+        );
+        let inner = Frame::decode(Bytes::from(envelope.payload)).expect("the inner frame decodes");
+        assert_eq!(
+            Opcode::from_wire(inner.header.opcode),
+            Some(Opcode::RoomMemberEvent),
+            "carrying the member event itself, sealed as a local subscriber would have seen it"
         );
     }
 }

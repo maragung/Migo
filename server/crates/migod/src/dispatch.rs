@@ -326,7 +326,33 @@ impl AppDispatcher {
             _ => None,
         };
         let conversation_id = fanout.conversation_id;
+        // The federated half is captured before the local publish takes the fanout by
+        // value. A room's chat is its conversation, and every node keeps its own store:
+        // a message that stopped at this hub is not late on the other nodes, it is
+        // absent, because there is no row there for a member to sync (section 170).
+        let federated = fanout.clone();
         publish_message_fanout(context, user, fanout)?;
+        match self.store.room_by_conversation(conversation_id).await {
+            Ok(Some(room)) => {
+                if let Err(error) = self
+                    .room_relay
+                    .forward_message(&room, &federated, context.now())
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        room = %room.id.to_text(),
+                        "cannot enqueue the federated half of a room message"
+                    );
+                }
+            }
+            // Not a room's conversation: a direct or group chat, which no node homes
+            // and so nothing here can tier.
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cannot tell whether a conversation belongs to a room");
+            }
+        }
         if let Some(account_id) = removed {
             if let Some(gateway) = self.gateway.get() {
                 gateway.revoke_subscriptions(
@@ -1570,7 +1596,13 @@ fn publish_game(
 /// frames that should supersede one another — which a hash of the stream's identity (a subject, a
 /// room, or a conversation-and-author pair) gives. [`DefaultHasher`] is seeded deterministically,
 /// so the same identity yields the same key every time within a run.
-fn stream_key(identity: &impl Hash) -> u64 {
+///
+/// The mesh ingest path derives its keys the same way, for the same reason: a copy of a stream
+/// that arrives from a peer must collapse into the one local stream, or a subscriber watching
+/// both this node's publishers and the mesh would keep two. The keys need only agree within one
+/// node — coalescing never compares across nodes — so the ingest side hashing an `Option` where
+/// the request path hashes the plain id is the same stream, not a second one.
+pub(crate) fn stream_key(identity: &impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     identity.hash(&mut hasher);
     hasher.finish()

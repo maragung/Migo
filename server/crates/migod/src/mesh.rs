@@ -377,12 +377,13 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
 ///
 /// A room event is the one with a complete final mile: its subscribers are already in the
 /// gateway's hub, authorized once at subscribe time, so the event is published to the room
-/// topic exactly as a local session's would be. A room *subscribe* is the home-node half of
-/// tiered fanout (section 170): the authenticated peer is recorded as holding subscribers of
-/// the room, so this node's publishes forward it one federated copy. The others are real,
-/// validated frames whose final-mile crates do not yet expose an ingest port — presence
-/// aggregation and call signaling — and the honest treatment is count-and-log, not a pretend
-/// success deeper in.
+/// topic exactly as a local session's would be — and this node passes it on if the room's
+/// watch table is here, which is what makes a room's traffic reach the nodes that were not
+/// the origin. A room *subscribe* is the home-node half of tiered fanout (section 170): the
+/// authenticated peer is recorded as holding subscribers of the room, so this node's
+/// publishes forward it one federated copy. The others are real, validated frames whose
+/// final-mile crates do not yet expose an ingest port — presence aggregation and call
+/// signaling — and the honest treatment is count-and-log, not a pretend success deeper in.
 pub(crate) struct IngestRouter {
     gateway: Option<Arc<Gateway>>,
     relay: Option<Arc<crate::room_relay::RoomRelay>>,
@@ -424,14 +425,14 @@ impl IngestRouter {
         self.seen.lock().clone()
     }
 
-    fn ingest(&self, peer: Id, inner: Frame) -> Result<()> {
+    async fn ingest(&self, peer: Id, inner: Frame) -> Result<()> {
         let opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known federation event"))?;
         match opcode {
             Opcode::FedRoomEvent => {
                 let event: migo_protocol::FedRoomEvent =
                     from_frame(&inner).map_err(fault::from_wire)?;
-                self.route_room_event(event)
+                self.route_room_event(peer, event).await
             }
             Opcode::FedPresenceDigest => {
                 let digest: migo_protocol::FedPresenceDigest =
@@ -521,61 +522,206 @@ impl IngestRouter {
 
     /// Publishes a forwarded room event into the local hub.
     ///
-    /// The inner payload is itself an encoded frame — the event as the home region's
+    /// The inner payload is itself an encoded frame — the event as the origin node's
     /// session would have pushed it — so the routing question is only which topic it
-    /// belongs on, and the answer is the room the forward names. The coalescing mirrors
-    /// the home node's request path exactly (section 154): a member event is delivered
-    /// whole, because collapsing two joins would lose one arrival, while state and vote
-    /// events are keyed by room so a backed-up consumer keeps only the latest of each.
-    fn route_room_event(&self, event: migo_protocol::FedRoomEvent) -> Result<()> {
-        let inner = Frame::decode(Bytes::from(event.payload)).map_err(fault::from_wire)?;
+    /// belongs on, and the frame is handed to the hub exactly as it arrived rather than
+    /// decoded and re-encoded (section 145).
+    ///
+    /// Two kinds of event arrive this way, and they are told apart by their own opcode
+    /// rather than by asking the store:
+    ///
+    /// - a room *lifecycle* event — a member change, a title, a poll — belongs on the
+    ///   room topic, which is the topic the room's own members subscribe to;
+    /// - a *messaging* event, which is how a room's text arrives, belongs on the
+    ///   conversation the room's row names. It is a messaging event because a room's
+    ///   chat is a conversation, and every messaging event carries its own
+    ///   `conversation_id`, so the topic is read off the event and no store lookup is
+    ///   needed to place it.
+    ///
+    /// The coalescing mirrors the origin node's request path exactly (section 154), so a
+    /// subscriber that follows both this node's publishers and the mesh keeps one stream:
+    /// a message, a receipt and a join are delivered whole, because collapsing two of
+    /// them would lose an arrival, while typing, a poll tally and a state change are keyed
+    /// — by author for typing, by conversation for the other two — so a backed-up consumer
+    /// keeps only the latest of each.
+    ///
+    /// # The onward half
+    ///
+    /// A node receives a room event for one of two opposite reasons, and the store is what
+    /// tells them apart ([`RoomRelay::homes`](crate::room_relay::RoomRelay::homes)): the
+    /// *home* node holds the room's watch table and owes the event onward to the other
+    /// watchers, while a *watching* node is the end of the line and owes nothing. Without
+    /// this half a room spread over three nodes would deliver each event only to the
+    /// watchers the origin happened to be, which is to say not to the room.
+    async fn route_room_event(&self, peer: Id, event: migo_protocol::FedRoomEvent) -> Result<()> {
+        let inner =
+            Frame::decode(Bytes::copy_from_slice(&event.payload)).map_err(fault::from_wire)?;
         let inner_opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known room event"))?;
-        let topic = migo_protocol::Topic {
-            kind: migo_protocol::TopicKind::Room,
-            id: event.room_id,
-        };
+        let now = self.clock.now();
+        let placement = placement_of(inner_opcode, &inner, event.room_id)?;
         if let Some(gateway) = &self.gateway {
-            let now = self.clock.now();
-            match inner_opcode {
-                Opcode::RoomMemberEvent => {
-                    let event: migo_protocol::RoomMemberEvent =
-                        from_frame(&inner).map_err(fault::from_wire)?;
-                    gateway.broadcast_to_topic(&topic, Opcode::RoomMemberEvent, &event, now);
-                }
-                Opcode::RoomStateEvent => {
-                    let event: migo_protocol::RoomStateEvent =
-                        from_frame(&inner).map_err(fault::from_wire)?;
-                    gateway.broadcast_to_topic_coalesced(
-                        &topic,
-                        Opcode::RoomStateEvent,
-                        &event,
-                        crate::dispatch::coalesce_key_of(&topic.id),
-                        now,
+            gateway.broadcast_frame_to_topic(
+                &placement.topic,
+                inner_opcode,
+                &event.payload,
+                placement.coalesce,
+                now,
+            );
+            if let Some(topic) = &placement.also {
+                gateway.broadcast_frame_to_topic(topic, inner_opcode, &event.payload, None, now);
+            }
+        }
+        // The home node's second obligation: the event came from a peer that
+        // already delivered it locally, so the other watching nodes are the
+        // ones still owed a copy.
+        if let Some(relay) = &self.relay {
+            if relay.homes(event.room_id).await {
+                if let Err(error) = relay
+                    .fan_out_inbound(event.room_id, peer, &event.payload, now)
+                    .await
+                {
+                    // The local publish already happened and every subscriber
+                    // here has the event; a failure to pass it on costs the
+                    // other nodes their copy, which the sender's redelivery
+                    // may still make good, so it is logged, not raised.
+                    tracing::warn!(
+                        %error,
+                        room = %event.room_id.to_text(),
+                        "cannot pass an ingested room event on to the other nodes"
                     );
-                }
-                Opcode::RoomVoteEvent => {
-                    let event: migo_protocol::RoomVoteEvent =
-                        from_frame(&inner).map_err(fault::from_wire)?;
-                    gateway.broadcast_to_topic_coalesced(
-                        &topic,
-                        Opcode::RoomVoteEvent,
-                        &event,
-                        crate::dispatch::coalesce_key_of(&topic.id),
-                        now,
-                    );
-                }
-                _ => {
-                    return Err(fault::validation(
-                        "opcode",
-                        "not an event that belongs on a room topic",
-                    ))
                 }
             }
         }
         self.note(inner.header.opcode, inner.payload.len());
         self.meters.ingested();
         Ok(())
+    }
+}
+
+/// The room topic one room's subscribers are on.
+fn room_topic(room_id: Id) -> migo_protocol::Topic {
+    migo_protocol::Topic {
+        kind: migo_protocol::TopicKind::Room,
+        id: room_id,
+    }
+}
+
+/// The conversation topic one conversation's subscribers are on.
+fn conversation_topic(conversation_id: Id) -> migo_protocol::Topic {
+    migo_protocol::Topic {
+        kind: migo_protocol::TopicKind::Conversation,
+        id: conversation_id,
+    }
+}
+
+/// Where a forwarded room event belongs on the node that receives it.
+struct Placement {
+    /// The topic this node's subscribers of the event are on.
+    topic: migo_protocol::Topic,
+    /// The coalescing key the origin's own request path would have used, or
+    /// `None` for a stream that must be delivered whole.
+    coalesce: Option<u64>,
+    /// A second topic the same frame must also reach, if any.
+    also: Option<migo_protocol::Topic>,
+}
+
+/// Reads a forwarded event's opcode into the topic (or topics) it belongs on.
+///
+/// The whole of the routing decision, in one place, so the two kinds of event a room
+/// produces are visibly the same shape. The frame is decoded only to read the id that names
+/// its topic — every messaging event carries its own `conversation_id`, the same fact that
+/// lets the request path publish without a store lookup — and the *bytes* are what get
+/// published, so a well-formed event reaches subscribers exactly as the origin sent it.
+fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement> {
+    let room = room_topic(room_id);
+    match opcode {
+        // Room lifecycle: the room topic is the one the room's own members subscribe to.
+        Opcode::RoomMemberEvent => Ok(Placement {
+            topic: room,
+            coalesce: None,
+            also: None,
+        }),
+        Opcode::RoomStateEvent | Opcode::RoomVoteEvent => Ok(Placement {
+            topic: room,
+            coalesce: Some(crate::dispatch::coalesce_key_of(&room_id)),
+            also: None,
+        }),
+        // A room's chat is a conversation, so its text, receipts and conversation-level
+        // events arrive as messaging events and belong on the conversation topic.
+        Opcode::MessageEvent => Ok(Placement {
+            topic: conversation_topic(
+                from_frame::<migo_protocol::MessageEvent>(inner)
+                    .map_err(fault::from_wire)?
+                    .conversation_id,
+            ),
+            coalesce: None,
+            also: None,
+        }),
+        Opcode::MessageReceipt => Ok(Placement {
+            topic: conversation_topic(
+                from_frame::<migo_protocol::MessageReceipt>(inner)
+                    .map_err(fault::from_wire)?
+                    .conversation_id,
+            ),
+            coalesce: None,
+            also: None,
+        }),
+        Opcode::ConversationMemberEvent => {
+            let event: migo_protocol::ConversationMemberEvent =
+                from_frame(inner).map_err(fault::from_wire)?;
+            Ok(Placement {
+                topic: conversation_topic(event.conversation_id),
+                coalesce: None,
+                // The invite's other half, and it has to happen on *this* node
+                // too: a member who has just been added is not subscribed to a
+                // conversation they have never heard of, so the one frame that
+                // reaches them is the copy on their own user topic — and their
+                // session is here, on the node that did not accept the invite.
+                also: (event.change == migo_protocol::MemberChange::Joined).then(|| {
+                    migo_protocol::Topic {
+                        kind: migo_protocol::TopicKind::User,
+                        id: event.user_id,
+                    }
+                }),
+            })
+        }
+        Opcode::Typing => {
+            let event: migo_protocol::TypingEvent = from_frame(inner).map_err(fault::from_wire)?;
+            Ok(Placement {
+                topic: conversation_topic(event.conversation_id),
+                // Keyed by author, the same stream the origin's request path keys:
+                // a conversation can have several people typing at once and they
+                // are not each other's updates.
+                coalesce: Some(crate::dispatch::stream_key(&(
+                    event.conversation_id,
+                    event.user_id,
+                ))),
+                also: None,
+            })
+        }
+        Opcode::ConversationVoteEvent => {
+            let event: migo_protocol::ConversationVoteEvent =
+                from_frame(inner).map_err(fault::from_wire)?;
+            Ok(Placement {
+                topic: conversation_topic(event.conversation_id),
+                coalesce: Some(crate::dispatch::coalesce_key_of(&event.conversation_id)),
+                also: None,
+            })
+        }
+        Opcode::ConversationStateEvent => {
+            let event: migo_protocol::ConversationStateEvent =
+                from_frame(inner).map_err(fault::from_wire)?;
+            Ok(Placement {
+                topic: conversation_topic(event.conversation_id),
+                coalesce: Some(crate::dispatch::coalesce_key_of(&event.conversation_id)),
+                also: None,
+            })
+        }
+        _ => Err(fault::validation(
+            "opcode",
+            "not an event that belongs on a room topic",
+        )),
     }
 }
 
@@ -683,7 +829,7 @@ async fn serve_reads<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 }
                 let inner =
                     Frame::decode(Bytes::from(forward.payload)).map_err(fault::from_wire)?;
-                router.ingest(peer, inner)?;
+                router.ingest(peer, inner).await?;
                 *watermark = (*watermark).max(sequence);
                 write_frame(
                     io,
@@ -1061,13 +1207,42 @@ mod tests {
 
     use super::*;
     use migo_core::random::SeededRandom;
-    use migo_core::SystemClock;
+    use migo_core::{ManualClock, SystemClock};
     use migo_crypto::NodeSecret;
     use migo_federation::{MeshService, NewPeerSpec};
-    use migo_store::MemoryStore;
+    use migo_messaging::{Broadcast as MessageBroadcast, Fanout as MessageFanout};
+    use migo_protocol::{EncryptionMode, RoomKind};
+    use migo_store::model::NewRoom;
+    use migo_store::{MemoryStore, SharedStore};
     use tokio::io::duplex;
 
     const NOW: i64 = 1_700_000_000_000;
+
+    /// A store holding one room whose `home_region` is `home_region`.
+    ///
+    /// Every publish path now asks the store which node owns a room's fanout, so a relay
+    /// without the row is a relay that forwards nothing — which is the honest answer for a
+    /// room no node owns, and the wrong setup for a test about a room that is owned.
+    async fn store_with_room(room_id: Id, conversation_id: Id, home_region: &str) -> SharedStore {
+        let store: SharedStore = Arc::new(MemoryStore::new());
+        store
+            .create_room(NewRoom {
+                room_id,
+                conversation_id,
+                slug: format!("room-{}", room_id.to_text()),
+                name: "a room".to_string(),
+                topic: None,
+                kind: RoomKind::Public,
+                owner_id: Id::from(0x3333),
+                home_region: home_region.to_string(),
+                max_members: 100,
+                encryption: EncryptionMode::Transport,
+                created_at: Timestamp::from_millis(NOW),
+            })
+            .await
+            .expect("a fresh store creates the room");
+        store
+    }
 
     /// A node with its own store, key, and registry, and `peer` admitted to its allow-list.
     async fn node(name: u8, peer: Id, peer_key: &[u8]) -> SharedMesh {
@@ -1486,9 +1661,12 @@ mod tests {
         let (mesh_a, mesh_b, a_id, _b_id) = pair().await;
         let now = Timestamp::from_millis(NOW);
         let registry = registry();
+        let room_id = Id::from(0x7777);
+        // B homes the room — `node(2, ..)` is region-2 — so B is the node holding the
+        // watch table and the one a forward actually fans out from.
         let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
             mesh_b.clone(),
-            Arc::new(MemoryStore::new()),
+            store_with_room(room_id, Id::from(0x2222), "region-2").await,
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
@@ -1498,7 +1676,6 @@ mod tests {
             Arc::new(SystemClock),
         ));
 
-        let room_id = Id::from(0x7777);
         let routing = migo_protocol::FedRouting {
             epoch: mesh_b.epoch(),
             home_region: "region-2".to_string(),
@@ -1611,6 +1788,136 @@ mod tests {
                 (Opcode::RoomVoteEvent.to_wire(), vote_payload),
             ],
             "A ingested one member and one vote event, in publish order"
+        );
+    }
+
+    /// The gap section 170 left open, and the shape of the fix: a room's *text*.
+    ///
+    /// A's member says something in a room homed on B. A does not hold the room's watch
+    /// table — only the home node does — so A's publish is one copy addressed to B, not a
+    /// fan-out; and B, holding the table, hands it to the nodes that watch the room and not
+    /// back to A, which has already delivered it to its own subscribers. Without the first
+    /// half the message never left A's hub, and because every node keeps its own store
+    /// there was no row on B for the other members to sync: the message was not late for
+    /// the rest of the room, it was absent.
+    #[tokio::test]
+    async fn a_room_message_crosses_the_nodes_and_the_home_node_tiers_it() {
+        let (mesh_a, mesh_b, a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let later = Timestamp::from_millis(NOW + 60_000);
+        let registry = registry();
+
+        let room_id = Id::from(0x7777);
+        let conversation_id = Id::from(0x2222);
+        // Homed on B as both sides read it: A's row is what tells A it is not the home
+        // node, and B's row is what makes B the node that tiers.
+        let store_a = store_with_room(room_id, conversation_id, "region-2").await;
+        let store_b = store_with_room(room_id, conversation_id, "region-2").await;
+        let relay_a = Arc::new(crate::room_relay::RoomRelay::new(
+            mesh_a.clone(),
+            store_a.clone(),
+        ));
+        let relay_b = Arc::new(crate::room_relay::RoomRelay::new(mesh_b.clone(), store_b));
+        // B ingests on `later`, so the onward copy it enqueues is due at `later` — the
+        // ingest clock has to be the test's, or the copy lands in the real present and no
+        // assertion about this batch could see it.
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            Some(relay_b.clone()),
+            &registry,
+            Arc::new(ManualClock::new(later)),
+        ));
+
+        // B holds the watch table: A and a third node have subscribers of the room.
+        let third = Id::from(0x0303);
+        let routing = migo_protocol::FedRouting {
+            epoch: mesh_b.epoch(),
+            home_region: "region-2".to_string(),
+            room_id,
+        };
+        relay_b
+            .register_watcher(a_id, &routing)
+            .expect("a current epoch admits the watch");
+        relay_b
+            .register_watcher(third, &routing)
+            .expect("a second node may watch too");
+
+        let room = store_a
+            .room(room_id)
+            .await
+            .expect("the store reads")
+            .expect("the room exists");
+        let typing = migo_protocol::TypingEvent {
+            conversation_id,
+            state: migo_protocol::TypingState::Start,
+            user_id: Some(Id::from(0x9999)),
+        };
+        relay_a
+            .forward_message(
+                &room,
+                &MessageFanout {
+                    conversation_id,
+                    exclude_device: None,
+                    event: MessageBroadcast::Typing(typing.clone()),
+                },
+                now,
+            )
+            .await
+            .expect("the message forwards to the home node");
+
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            1,
+            "one copy to the home node, not one per watcher A cannot see"
+        );
+        assert_eq!(
+            due[0].target_node, b_id,
+            "and it is addressed to the node that homes the room"
+        );
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b.clone();
+        let server_router = transport_b.router_ref().clone();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, later).await
+        });
+        deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            later,
+        )
+        .await
+        .expect("the batch is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+
+        let payload = framed(Opcode::Typing, 0, &typing)
+            .expect("the typing event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_b.ingested(),
+            vec![(Opcode::Typing.to_wire(), payload)],
+            "B ingested the room's message onto its own hub"
+        );
+
+        let onward = mesh_b.due(later).await.expect("the queue reads");
+        assert_eq!(
+            onward.len(),
+            1,
+            "one copy onward, and none back to the origin"
+        );
+        assert_eq!(
+            onward[0].target_node, third,
+            "the other watching node, and only it"
         );
     }
 }
