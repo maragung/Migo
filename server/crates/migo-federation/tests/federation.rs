@@ -1725,7 +1725,9 @@ async fn a_degraded_peer_is_allowed_again_once_it_has_caught_up() {
     let h = degraded_harness(4);
     let slow = peer(43);
     h.admit(&slow).await;
-    let queued = queue_for(&h.mesh, slow.node_id, 5).await;
+    // Six owed, not five: the marking, the band, and the clear line below must each see a
+    // distinct depth — six past the watermark (4), three inside the band, two at half.
+    let queued = queue_for(&h.mesh, slow.node_id, 6).await;
     let view = h
         .mesh
         .observe_peer_lag(slow.node_id)
