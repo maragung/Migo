@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ContentType, ReceiptKind, TypingState } from '@migo/sdk';
-import type { Id, IncomingMessage, TextContent, TypingEvent } from '@migo/sdk';
+import type { Id, IncomingMessage, MigoClient, TextContent, TypingEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
 import { uploadDocumentAttachment, uploadImageAttachment } from './media.js';
@@ -155,6 +155,16 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
   const messagesRef = useRef<ThreadMessage[]>([]);
   messagesRef.current = messages;
   const earlierCursorRef = useRef(0);
+  /**
+   * The thread this hook's current state belongs to, by client and conversation identity.
+   *
+   * A session reset re-runs the effect on the same thread; comparing against this tells that run
+   * from a genuine thread switch, which is the difference between "sync the gap" and "start over".
+   */
+  const threadRef = useRef<{ client: MigoClient | null; conversationId: Id }>({
+    client: null,
+    conversationId: conversationId,
+  });
 
   const upsert = useCallback((incoming: IncomingMessage): void => {
     setMessages((prev) => {
@@ -193,19 +203,35 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
 
   // Subscribe to the decrypted stream, typing, deletions, and receipts, then replay history through
   // the same path.
+  //
+  // The effect re-runs for two reasons and treats them differently: a new thread (a different
+  // conversation or client) starts from an empty transcript, while a session reset on the same
+  // thread keeps everything already on screen and syncs *only the gap* — section 158 forbids the
+  // full resync that wiping here would force, because a reconnect that dropped and refetched a
+  // whole held conversation is indistinguishable, on the wire, from a client that had nothing.
   useEffect(() => {
     if (!client) {
       return;
     }
+    // The same client instance survives a reconnect (the transport reconnects in place), so
+    // identity here is "the same thread under the same session", which is exactly the case where
+    // the transcript stays.
+    const sameThread =
+      threadRef.current.client === client && threadRef.current.conversationId === conversationId;
+    threadRef.current = { client, conversationId };
     let cancelled = false;
-    setMessages([]);
-    setLoading(true);
-    setError(null);
+    if (!sameThread) {
+      setMessages([]);
+      setLoading(true);
+      setError(null);
+      setReadUpTo(0);
+      setHasEarlier(false);
+      lastReadSeqRef.current = 0;
+      earlierCursorRef.current = 0;
+    }
+    // Typing is a live signal, not history: a reset invalidates whatever indicator was on
+    // screen, because the typing that produced it predates the new session's stream.
     setTypingUser(null);
-    setReadUpTo(0);
-    setHasEarlier(false);
-    lastReadSeqRef.current = 0;
-    earlierCursorRef.current = 0;
 
     const offMessage = client.messaging.onMessage((message) => {
       if (message.conversationId !== conversationId) {
@@ -275,9 +301,20 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
     async function catchUp(): Promise<void> {
       try {
         await client!.watchConversation(conversationId);
-        let haveSeq = 0;
+        // A fresh thread replays from the beginning. A reset on a held thread starts from the
+        // watermark — the highest sequence the messaging domain ingested contiguously — so the
+        // fetch asks for exactly the messages the outage cost, which is section 158's "sync only
+        // the gap, never a full resync".
+        const held = sameThread ? client!.messaging.watermark(conversationId) : undefined;
+        let haveSeq = held !== undefined && messagesRef.current.length > 0 ? held : 0;
         let replayedAll = false;
         for (let page = 0; page < MAX_CATCHUP_PAGES; page += 1) {
+          // A hidden page parks here: the fetch in flight finishes (awaited above), the next one
+          // does not start until the page is visible again — stopped neatly, not abandoned.
+          await client!.whenVisible();
+          if (cancelled) {
+            return;
+          }
           const response = await client!.catchUp(conversationId, haveSeq, CATCHUP_PAGE);
           haveSeq = response.toSeq;
           if (!response.more) {
@@ -286,10 +323,19 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
           }
         }
         if (!cancelled) {
-          // The replay pages forward from the thread's first sequence, so only the page budget —
-          // never the server — can stop it short. A short replay means history above the held range
-          // exists; "Load earlier" is what reaches it, paging down from the newest.
-          setHasEarlier(!replayedAll);
+          if (sameThread) {
+            // The transcript already carries its own "is there older history" answer from the
+            // pages the user has loaded; only a budget-stopped walk can add the *newer* history
+            // marker, never clear what the walk below already established.
+            if (!replayedAll) {
+              setHasEarlier(true);
+            }
+          } else {
+            // The replay pages forward from the thread's first sequence, so only the page budget —
+            // never the server — can stop it short. A short replay means history above the held range
+            // exists; "Load earlier" is what reaches it, paging down from the newest.
+            setHasEarlier(!replayedAll);
+          }
         }
       } catch {
         if (!cancelled) {

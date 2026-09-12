@@ -581,7 +581,10 @@ function genTs() {
   out += `export const LIMITS = {\n${Object.entries(meta.limits)
     .map(([k, v]) => `  ${k}: ${v},`)
     .join('\n')}\n} as const;\n\n`;
-  out += `/** Frame flag bits. */\nexport const FLAG = {\n${meta.flags.map((f) => `  /** ${f.description} */\n  ${f.name}: ${1 << f.bit},`).join('\n')}\n} as const;\nexport const RESERVED_FLAG_MASK = FLAG.RESERVED_6 | FLAG.FLAGS_EXT;\n\n`;
+  out += `/** Frame flag bits. */\nexport const FLAG = {\n${meta.flags.map((f) => `  /** ${f.description} */\n  ${f.name}: ${1 << f.bit},`).join('\n')}\n} as const;\nexport const RESERVED_FLAG_MASK = ${meta.flags
+    .filter((f) => /^RESERVED_|^FLAGS_EXT$/.test(f.name))
+    .map((f) => `FLAG.${f.name}`)
+    .join(' | ')};\n\n`;
   out += `/** Negotiable feature bits (64-bit, hence bigint). */\nexport const FEATURE = {\n${meta.features.map((f) => `  /** ${f.description} */\n  ${f.name}: 1n << ${f.bit}n,`).join('\n')}\n} as const;\nexport const ALL_FEATURES = ${meta.features.map((f) => `FEATURE.${f.name}`).join(' | ')};\n\n`;
   out += `/** Stable protocol error codes. */\nexport const CODE = {\n${errorsDoc.errors.map((e) => `${e.doc ? `  /** ${e.doc} */\n` : ''}  ${e.symbol}: ${e.code},`).join('\n')}\n} as const;\nexport type ErrorCode = (typeof CODE)[keyof typeof CODE];\n\n`;
   out += `export const ERROR_SYMBOLS: Record<number, string> = {\n${errorsDoc.errors.map((e) => `  ${e.code}: '${e.symbol}',`).join('\n')}\n};\n\n`;

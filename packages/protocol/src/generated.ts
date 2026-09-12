@@ -43,12 +43,12 @@ export const FLAG = {
   ACK_REQUIRED: 16,
   /** varint index, varint total follow; payload is a slice */
   FRAGMENT: 32,
-  /** Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected. */
-  RESERVED_6: 64,
+  /** varint frame_seq, varint sent_at_delta, and optional varint payload_len precede the payload (section 141) */
+  METADATA: 64,
   /** A second flags byte follows (reserved for MWP/2) */
   FLAGS_EXT: 128,
 } as const;
-export const RESERVED_FLAG_MASK = FLAG.RESERVED_6 | FLAG.FLAGS_EXT;
+export const RESERVED_FLAG_MASK = FLAG.FLAGS_EXT;
 
 /** Negotiable feature bits (64-bit, hence bigint). */
 export const FEATURE = {

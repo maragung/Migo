@@ -1931,7 +1931,7 @@ async fn the_same_ticket_committed_twice_is_one_object() {
     harness.push_bytes(&payload(PNG, 1_024));
     let commit = Commit {
         byte_size: Some(1_024),
-        checksum: None,
+        checksum: Some(vec![7u8; 32]),
     };
 
     let first = harness
@@ -1949,6 +1949,52 @@ async fn the_same_ticket_committed_twice_is_one_object() {
         .expect("a retry is idempotent");
     assert_eq!(first.media_id, second.media_id);
     assert_eq!(first.created_at, second.created_at);
+}
+
+/// Section 153's other half: a retry of the commit that carries a different
+/// checksum is a different payload under the same upload id, and is answered
+/// IDEMPOTENCY_MISMATCH rather than handed the first commit's answer — which would
+/// teach the client its bytes hash to something they do not.
+#[tokio::test]
+async fn a_committed_ticket_retried_with_a_different_checksum_is_refused() {
+    let harness = Harness::new();
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    let ticket = harness
+        .media
+        .begin(&alice, avatar())
+        .await
+        .expect("alice begins an upload");
+    harness.push_bytes(&payload(PNG, 1_024));
+
+    harness
+        .media
+        .commit(
+            &alice,
+            ticket.media_id,
+            Commit {
+                byte_size: Some(1_024),
+                checksum: Some(vec![7u8; 32]),
+            },
+        )
+        .await
+        .expect("the upload commits");
+
+    expect_code(
+        harness
+            .media
+            .commit(
+                &alice,
+                ticket.media_id,
+                Commit {
+                    byte_size: Some(1_024),
+                    checksum: Some(vec![9u8; 32]),
+                },
+            )
+            .await,
+        codes::IDEMPOTENCY_MISMATCH,
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ import {
   type FrameHeader,
   type Fragment,
   type Id,
+  type MetadataBlock,
   type TraceContext,
 } from '../src/index.js';
 
@@ -234,6 +235,20 @@ function headerFromCase(spec: Case): FrameHeader {
     fragment = { index: small(entry, 'index'), total: small(entry, 'total') };
   }
 
+  const rawMetadata = spec.metadata;
+  let metadata: MetadataBlock | null = null;
+  if (rawMetadata !== null && typeof rawMetadata === 'object') {
+    const entry = rawMetadata as Case;
+    metadata = {
+      frameSeq: small(entry, 'frame_seq'),
+      sentAtDelta: small(entry, 'sent_at_delta'),
+      payloadLen:
+        entry.payload_len !== null && entry.payload_len !== undefined
+          ? small(entry, 'payload_len')
+          : null,
+    };
+  }
+
   return {
     version: small(spec, 'version'),
     flags: small(spec, 'flags'),
@@ -241,6 +256,7 @@ function headerFromCase(spec: Case): FrameHeader {
     correlation: small(spec, 'correlation'),
     trace,
     fragment,
+    metadata,
   };
 }
 
