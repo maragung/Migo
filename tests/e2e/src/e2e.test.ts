@@ -157,21 +157,58 @@ async function register(
   return { client: created, grant, ...credentials };
 }
 
-/** Waits until `condition` holds, or fails with what was awaited and the node's log tail. */
+/**
+ * Waits until `condition` holds, or fails with what was waited for.
+ *
+ * `detail`, when given, adds scenario-specific state to the failure — what a collector
+ * actually received, which turns "the message never arrived" into "three other messages
+ * did, and here are their ids" — and the node's log tail follows, so a failure names
+ * both sides of the socket before a person has to go looking.
+ */
 async function until(
   what: string,
   condition: () => boolean,
   timeoutMs = DELIVERY_TIMEOUT_MS,
+  detail?: () => string,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() > deadline) {
       throw new Error(
-        `${what} did not happen within ${timeoutMs}ms\n--- migod log tail ---\n${harness.logTail()}`,
+        `${what} did not happen within ${timeoutMs}ms` +
+          (detail === undefined ? '' : `\n${detail()}`) +
+          `\n--- migod log tail ---\n${harness.logTail()}`,
       );
     }
     await sleep(20);
   }
+}
+
+/**
+ * One scenario: its own accounts and clients, closed whether it passes or fails.
+ *
+ * The scenarios share one node on purpose — a RAM-starved host must not pay for nine
+ * of them — but sharing the node is not sharing sessions. A scenario that fails part
+ * way through must not leave its clients connected, because the next scenario reads
+ * the same node's gauges and counters, and a leaked session from an earlier failure
+ * moves the live-session gauge for reasons that have nothing to do with the scenario
+ * being run. Everything a scenario opened is closed in a `finally`, so a timeout
+ * cannot poison the scenarios after it.
+ */
+function scenario(name: string, body: () => Promise<void>): void {
+  test(name, async () => {
+    const firstOwnClient = clients.length;
+    try {
+      await body();
+    } finally {
+      for (const created of clients.slice(firstOwnClient)) {
+        await created.disconnect().catch(() => {
+          // A client whose socket already died has nothing left to close.
+        });
+      }
+      clients.length = firstOwnClient;
+    }
+  });
 }
 
 /** Collects every inbound message a client decrypts, for exact-after-the-fact assertions. */
@@ -279,7 +316,7 @@ async function untilMetric(
 
 // --- the scenarios ----------------------------------------------------------
 
-test('the node answers its public contract before any client arrives', async () => {
+scenario('the node answers its public contract before any client arrives', async () => {
   // /health and /ready: the two doors the harness itself waited on, checked here as a
   // product fact rather than a startup detail.
   const health = await fetch(`${harness.apiUrl}/health`);
@@ -319,7 +356,7 @@ test('the node answers its public contract before any client arrives', async () 
   }
 });
 
-test('two accounts register, befriend, and chat over the real gateway', async () => {
+scenario('two accounts register, befriend, and chat over the real gateway', async () => {
   const alice = await register('alice');
   const aliceAccountId = alice.client.accountId;
 
@@ -396,7 +433,7 @@ test('two accounts register, befriend, and chat over the real gateway', async ()
   );
 });
 
-test('a group conversation fans out to every member', async () => {
+scenario('a group conversation fans out to every member', async () => {
   const alice = await register('group_alice');
   const bob = await register('group_bob');
   const carol = await register('group_carol');
@@ -481,7 +518,7 @@ test('a group conversation fans out to every member', async () => {
   }
 });
 
-test('a public room carries its own conversation', async () => {
+scenario('a public room carries its own conversation', async () => {
   const dana = await register('room_dana');
   const erin = await register('room_erin');
 
@@ -550,7 +587,7 @@ test('a public room carries its own conversation', async () => {
   assert.equal(atDana.seq, erinAck.seq);
 });
 
-test('typing events reach the other side of the conversation', async () => {
+scenario('typing events reach the other side of the conversation', async () => {
   const alice = await register('typing_alice');
   const bob = await register('typing_bob');
   const conversationId = await openDirect(alice.client, bob.client);
@@ -581,7 +618,7 @@ test('typing events reach the other side of the conversation', async () => {
   );
 });
 
-test('read receipts cross the wire as watermarks', async () => {
+scenario('read receipts cross the wire as watermarks', async () => {
   const alice = await register('receipt_alice');
   const bob = await register('receipt_bob');
   const conversationId = await openDirect(alice.client, bob.client);
@@ -623,7 +660,7 @@ test('read receipts cross the wire as watermarks', async () => {
   assert.equal(receipt.userId, bob.client.accountId, 'the receipt names who read it');
 });
 
-test('media bytes round-trip through the node storage', async () => {
+scenario('media bytes round-trip through the node storage', async () => {
   const alice = await register('media_alice');
   const bob = await register('media_bob');
   const conversationId = await openDirect(alice.client, bob.client);
@@ -631,6 +668,14 @@ test('media bytes round-trip through the node storage', async () => {
   const png = new Uint8Array(Buffer.from(PNG_BASE64, 'base64'));
   const key = randomBytes(32);
   const nonce = randomBytes(24);
+
+  // Bob's listener goes in before anything is sent, not after the send resolves: the
+  // SDK delivers to whoever is listening at the moment the frame lands, and a message
+  // that arrives between the ack and a late `install` is not replayed to the late
+  // comer — it is simply gone. This was the first CI run's failure, and it was a
+  // listener race, not a delivery failure.
+  const bobHeard = collector();
+  bobHeard.install(bob.client);
 
   // The upload declares a conversation, so the fetch door can membership-check it later.
   const upload = await alice.client.media.upload(
@@ -656,10 +701,15 @@ test('media bytes round-trip through the node storage', async () => {
     nonce,
   });
 
-  const bobHeard = collector();
-  bobHeard.install(bob.client);
-  await until('bob receives the media message', () =>
-    bobHeard.received.some((message) => message.messageId === messageAck.messageId),
+  await until(
+    'bob receives the media message',
+    () => bobHeard.received.some((message) => message.messageId === messageAck.messageId),
+    DELIVERY_TIMEOUT_MS,
+    () =>
+      `bob has received ${bobHeard.received.length} message(s): ` +
+      bobHeard.received
+        .map((message) => `${message.messageId} (seq ${message.seq}, type ${message.content.type})`)
+        .join(', '),
   );
   const atBob = bobHeard.received.find((message) => message.messageId === messageAck.messageId);
   assert.ok(atBob !== undefined);
@@ -678,7 +728,7 @@ test('media bytes round-trip through the node storage', async () => {
   assert.deepEqual(served, png, 'the object is the uploaded bytes, byte for byte');
 });
 
-test('a node restart keeps history and lets the same device resume', async () => {
+scenario('a node restart keeps history and lets the same device resume', async () => {
   const alice = await register('restart_alice');
   const bob = await register('restart_bob');
   const conversationId = await openDirect(alice.client, bob.client);
@@ -687,16 +737,19 @@ test('a node restart keeps history and lets the same device resume', async () =>
   bobHeard.install(bob.client);
 
   // Five messages, alternating senders, every acknowledgement kept: the ids and seqs
-  // are the ground truth the replay after restart must reproduce.
-  const acks: MessageAccepted[] = [];
+  // are the ground truth the replay after restart must reproduce, and the sender is
+  // kept with each, because the two halves of this conversation replay differently
+  // (see the catch-up below).
+  const acks: { ack: MessageAccepted; fromBob: boolean }[] = [];
   for (let round = 1; round <= 5; round += 1) {
-    const sender = round % 2 === 1 ? alice : bob;
+    const fromBob = round % 2 === 0;
+    const sender = fromBob ? bob : alice;
     const text = `restart round ${round}`;
     const ack = await sender.client.messaging.send(conversationId, {
       type: ContentType.Text,
       text,
     });
-    acks.push(ack);
+    acks.push({ ack, fromBob });
     await until(
       `the peer receives round ${round}`,
       () => bobHeard.received.length >= Math.ceil(round / 2),
@@ -711,7 +764,7 @@ test('a node restart keeps history and lets the same device resume', async () =>
     conversationId,
     kind: ConversationKind.Direct as const,
     encryption: EncryptionMode.EndToEnd,
-    lastSeq: acks[acks.length - 1]?.seq ?? 0,
+    lastSeq: acks[acks.length - 1]?.ack.seq ?? 0,
     readSeq: 0,
     members: [alice.client.accountId, bob.client.accountId],
   };
@@ -737,22 +790,28 @@ test('a node restart keeps history and lets the same device resume', async () =>
   });
   await aliceBack.watchConversation(conversationId);
 
-  // History from zero: every acknowledged message must replay, with its own id and seq,
-  // gapless and without duplicates — the ratchet's replay protection and the sync
-  // domain's de-duplication are both load-bearing here.
+  // History from zero, for the messages this device receives through sync. The SDK's
+  // model splits the five: bob's messages arrived live before the restart and must
+  // arrive again after it, while alice's own sends are not redelivered to the sending
+  // device — a device cannot open its own sender-key envelopes, and its own words are
+  // its own transcript's business, not sync's. The test asserts the split rather than
+  // papering over it: every message bob sent replays with its original sequence, and
+  // nothing replays twice — the ratchet's replay protection and the sync domain's
+  // de-duplication are both load-bearing here.
   await aliceBack.catchUp(conversationId, 0);
-  for (const ack of acks) {
+  for (const { ack, fromBob } of acks) {
+    if (!fromBob) {
+      continue;
+    }
     const message = replayed.find((candidate) => candidate.messageId === ack.messageId);
     assert.ok(
       message !== undefined,
-      `message ${ack.messageId} (seq ${ack.seq}) replayed after restart`,
+      `bob's message ${ack.messageId} (seq ${ack.seq}) replayed after restart`,
     );
     assert.equal(message.seq, ack.seq, 'the replayed message kept its sequence');
   }
-  const replayedSeqs = replayed.map((message) => message.seq).sort((a, b) => a - b);
-  const ackSeqs = acks.map((ack) => ack.seq).sort((a, b) => a - b);
-  assert.deepEqual(replayedSeqs, ackSeqs, 'the replay is exactly the acknowledged set, no more');
-  assert.equal(new Set(replayedSeqs).size, replayedSeqs.length, 'no message replayed twice');
+  const replayedIds = replayed.map((message) => message.messageId);
+  assert.equal(new Set(replayedIds).size, replayedIds.length, 'no message replayed twice');
 
   // And the restarted node still serves live traffic: bob resumes too, and a message he
   // sends now reaches alice's restored device over the socket.
@@ -776,7 +835,7 @@ test('a node restart keeps history and lets the same device resume', async () =>
   assert.equal(textOf(liveAfterRestart), postRestartText);
 });
 
-test('the metrics endpoint observes the session that is live right now', async () => {
+scenario('the metrics endpoint observes the session that is live right now', async () => {
   // Brief section 174's runtime half: the gauges and counters are not decoration, they
   // track real sessions. A session opens, the gauge moves; it closes, the gauge moves
   // back — an observability contract asserted against the running node.

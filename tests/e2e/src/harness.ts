@@ -294,7 +294,18 @@ export class NodeHarness {
     // rate limits and a one-token registration cost, because the production defaults
     // are tuned for the public internet and would lock a localhost suite out after its
     // first request. Everything else stays at the development defaults.
+    //
+    // The signing key is the one non-default a restart demands. Without it the node
+    // derives an ephemeral secret, warns that tokens will not survive a restart, and
+    // means it: after a restart every grant ever issued is unsigned-by-the-new-key and
+    // the resume path the durability scenario asserts cannot exist. Production
+    // configures a real key; this run generates its own — random per run, so a key
+    // never leaves the run directory it was born in, but stable across the restart,
+    // which is the property under test.
     const config = [
+      '[node]',
+      `signing_key = "${randomBytes(32).toString('base64')}"`,
+      '',
       '[rate_limit]',
       'user_burst = 1000',
       'user_refill_per_second = 500',
