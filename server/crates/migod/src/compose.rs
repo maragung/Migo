@@ -907,8 +907,9 @@ pub async fn apply_mesh_peers(
         })?;
         if node_id == own_node_id {
             bail!(
-                "federation.peers names this node itself ({peer.node_id}): a node does not \
-                 federate with itself, point the entry at another node"
+                "federation.peers names this node itself ({}): a node does not \
+                 federate with itself, point the entry at another node",
+                peer.node_id
             );
         }
         let public_key = decode_key_material(peer.public_key.trim());
