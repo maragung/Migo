@@ -36,6 +36,9 @@ MAX_BYTES_LEN = 131072
 MAX_LIST_ITEMS = 4096
 MAX_NESTING_DEPTH = 16
 MAX_VARINT_BYTES = 10
+MAX_BATCH_ITEMS = 256
+COMPRESS_MIN_BYTES = 512
+COMPRESS_MIN_GAIN_PERCENT = 10
 
 PROTOCOL_VERSION = 1
 
@@ -145,6 +148,215 @@ def encode_frame(frame: dict) -> bytes:
         out += leb128(metadata.get("payload_len", 0))
     out += bytes.fromhex(frame["payload"])
     return bytes(out)
+
+
+def frame_spec(
+    flags: int = 0,
+    opcode: int = 0,
+    correlation: int = 0,
+    trace: dict | None = None,
+    fragment: dict | None = None,
+    metadata: dict | None = None,
+    payload: bytes = b"",
+) -> tuple[dict, bytes]:
+    """Builds one frame for a batch element, returning its case spec and its bytes.
+
+    The spec's `flags` is what a decoder reports — the derived bits set — so the
+    runner can rebuild the frame from the spec and compare headers after a round
+    trip through the envelope, exactly the way `frames_file` cases work.
+    """
+    frame = {
+        "version": PROTOCOL_VERSION,
+        "flags": flags,
+        "opcode": opcode,
+        "correlation": correlation,
+        "trace": trace,
+        "fragment": fragment,
+        "metadata": metadata,
+        "payload": payload.hex(),
+    }
+    encoded = encode_frame(frame)
+    spec = dict(frame)
+    spec["flags"] = encoded[1]
+    return spec, encoded
+
+
+def batch_payload(elements: list[bytes]) -> bytes:
+    """The payload of a BATCH envelope: varint count, then length-prefixed frames."""
+    out = bytearray(leb128(len(elements)))
+    for encoded in elements:
+        out += leb128(len(encoded))
+        out += encoded
+    return bytes(out)
+
+
+def envelope_spec(payload: bytes, flags: int) -> tuple[dict, bytes]:
+    """Builds the BATCH envelope frame around `payload`, as a case spec and bytes."""
+    frame = {
+        "version": PROTOCOL_VERSION,
+        "flags": flags,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": None,
+        "fragment": None,
+        "metadata": None,
+        "payload": payload.hex(),
+    }
+    encoded = encode_frame(frame)
+    spec = dict(frame)
+    spec["flags"] = encoded[1]
+    return spec, encoded
+
+
+# --- raw DEFLATE (RFC 1951) -------------------------------------------------
+#
+# The COMPRESSED vectors need streams whose bytes cannot drift with a compressor
+# version or its tuning, so every stream is authored here at the bit level from
+# the RFC's own tables and then self-checked against zlib's *inflater* before
+# emission. zlib's compressor is never asked for a single byte: decoding is
+# specified exactly, compressing is not, and only the specified half belongs in
+# a committed vector file.
+
+
+class DeflateBits:
+    """A bit-level DEFLATE writer: data elements LSB-first, Huffman codes MSB-first."""
+
+    def __init__(self) -> None:
+        self._out = bytearray()
+        self._accumulator = 0
+        self._count = 0
+
+    def data(self, value: int, bits: int) -> None:
+        """A non-Huffman element, packed starting from its least-significant bit."""
+        assert 0 <= value < (1 << bits), f"{value} does not fit {bits} bits"
+        self._accumulator |= value << self._count
+        self._count += bits
+        while self._count >= 8:
+            self._out.append(self._accumulator & 0xFF)
+            self._accumulator >>= 8
+            self._count -= 8
+
+    def code(self, value: int, bits: int) -> None:
+        """A Huffman code, packed starting from its most-significant bit."""
+        for shift in range(bits - 1, -1, -1):
+            self.data((value >> shift) & 1, 1)
+
+    def finish(self) -> bytes:
+        if self._count:
+            self._out.append(self._accumulator & 0xFF)
+        return bytes(self._out)
+
+
+def fixed_literal(bits: DeflateBits, symbol: int) -> None:
+    """The fixed-Huffman literal/length code for `symbol`, RFC 1951 section 3.2.6."""
+    if symbol <= 143:
+        bits.code(0x30 + symbol, 8)
+    elif symbol <= 255:
+        bits.code(0x190 + symbol - 144, 9)
+    elif symbol <= 279:
+        bits.code(symbol - 256, 7)
+    else:
+        assert symbol <= 287
+        bits.code(0xC0 + symbol - 280, 8)
+
+
+# (symbol, base length, extra bits) — RFC 1951 section 3.2.5.
+LENGTH_CODES = [
+    (257, 3, 0), (258, 4, 0), (259, 5, 0), (260, 6, 0), (261, 7, 0), (262, 8, 0),
+    (263, 9, 0), (264, 10, 0), (265, 11, 1), (266, 13, 1), (267, 15, 1), (268, 17, 1),
+    (269, 19, 2), (270, 23, 2), (271, 27, 2), (272, 31, 2), (273, 35, 3), (274, 43, 3),
+    (275, 51, 3), (276, 59, 3), (277, 67, 4), (278, 83, 4), (279, 99, 4), (280, 115, 4),
+    (281, 131, 5), (282, 163, 5), (283, 195, 5), (284, 227, 5), (285, 258, 0),
+]
+
+# (symbol, base distance, extra bits) — RFC 1951 section 3.2.5, read as the
+# fixed 5-bit distance code plus its extra bits.
+DISTANCE_CODES = [
+    (0, 1, 0), (1, 2, 0), (2, 3, 0), (3, 4, 0), (4, 5, 1), (5, 7, 1), (6, 9, 2),
+    (7, 13, 2), (8, 17, 3), (9, 25, 3), (10, 33, 4), (11, 49, 4), (12, 65, 5),
+    (13, 97, 5), (14, 129, 6), (15, 193, 6), (16, 257, 7), (17, 385, 7), (18, 513, 8),
+    (19, 769, 8), (20, 1025, 9), (21, 1537, 9), (22, 2049, 10), (23, 3073, 10),
+    (24, 4097, 11), (25, 6145, 11), (26, 8193, 12), (27, 12289, 12), (28, 16385, 13),
+    (29, 24577, 13),
+]
+
+
+def _covering(table: list[tuple[int, int, int]], value: int) -> tuple[int, int, int]:
+    """The first table entry whose range covers `value`."""
+    for symbol, base, extra in table:
+        if base <= value < base + (1 << extra):
+            return symbol, base, extra
+    raise ValueError(f"no code covers {value}")
+
+
+def deflate_stored(blocks: list[tuple[bytes, bool]]) -> bytes:
+    """Stored blocks: each is (data, final). No compression, but a real DEFLATE stream."""
+    out = bytearray()
+    for data, final in blocks:
+        assert len(data) <= 0xFFFF, "a stored block holds at most 65535 bytes"
+        out.append(1 if final else 0)  # BFINAL, then BTYPE=00 and zero padding
+        out += len(data).to_bytes(2, "little")
+        out += (~len(data) & 0xFFFF).to_bytes(2, "little")
+        out += data
+    return bytes(out)
+
+
+def deflate_fixed(program: list[tuple, ...], final: bool = True) -> bytes:
+    """A fixed-Huffman block from a program of ("lit", byte) and ("match", len, dist)."""
+    bits = DeflateBits()
+    bits.data(1 if final else 0, 1)  # BFINAL
+    bits.data(1, 2)  # BTYPE=01, fixed Huffman
+    for item in program:
+        if item[0] == "lit":
+            fixed_literal(bits, item[1])
+        else:
+            _, length, distance = item
+            symbol, base, extra = _covering(LENGTH_CODES, length)
+            fixed_literal(bits, symbol)
+            if extra:
+                bits.data(length - base, extra)
+            dsymbol, dbase, dextra = _covering(DISTANCE_CODES, distance)
+            bits.code(dsymbol, 5)
+            if dextra:
+                bits.data(distance - dbase, dextra)
+    fixed_literal(bits, 256)  # end of block
+    return bits.finish()
+
+
+def deflate_runs(data: bytes) -> bytes:
+    """A fixed-Huffman block for `data`: literals, with runs of one byte as matches.
+
+    A whole general-purpose LZ77 is more machinery than a vector file needs. This
+    spelling is enough to exercise both the literal and the match paths of a
+    decoder, including multi-match inputs, while staying obvious to read.
+    """
+    program: list[tuple, ...] = []
+    i = 0
+    while i < len(data):
+        run = 1
+        while i + run < len(data) and data[i + run] == data[i] and run < 259:
+            run += 1
+        if run >= 4:
+            program.append(("lit", data[i]))
+            program.append(("match", run - 1, 1))
+        else:
+            program.extend(("lit", data[i + j]) for j in range(run))
+        i += run
+    return deflate_fixed(program)
+
+
+def inflate_check(name: str, stream: bytes, plain: bytes) -> None:
+    """Self-check: what was authored must inflate, and to exactly `plain`.
+
+    zlib's inflater is the RFC's reference implementation in practice, and this
+    check is what turns 'hand-written bits' into 'hand-written bits that a second
+    implementation agrees are DEFLATE'. zlib's compressor stays out of it, so the
+    committed bytes never depend on a zlib version.
+    """
+    import zlib
+
+    restored = zlib.decompress(stream, wbits=-15)
+    assert restored == plain, f"{name}: authored stream inflates to the wrong bytes"
 
 
 # --- case lists (hand-chosen) ----------------------------------------------
@@ -773,6 +985,13 @@ def mse_file() -> dict:
             "error": "DepthExceeded",
             "why": f"MAX_NESTING_DEPTH is {MAX_NESTING_DEPTH}; deeper recursion is a stack attack",
         },
+        {
+            "name": "u32_past_the_field_width",
+            "hex": leb128(1 << 32).hex(),
+            "read_ops": [{"op": "u32"}],
+            "error": "LengthOverflow",
+            "why": "varints decode as u64 and are then narrowed; a u32 field that does not fit is refused, not wrapped",
+        },
     ]
 
     return {
@@ -784,12 +1003,352 @@ def mse_file() -> dict:
     }
 
 
+# --- BATCH and COMPRESSED ---------------------------------------------------
+
+
+def batch_file() -> dict:
+    """The BATCH envelope: packing, unpacking, and the hostile payloads it refuses."""
+    cases = []
+
+    def packed_case(name: str, specs: list[dict], encoded: list[bytes]) -> None:
+        spec, envelope = envelope_spec(batch_payload(encoded), FLAG_BATCH)
+        cases.append({"name": name, "elements": specs, "frame": spec, "hex": envelope.hex()})
+
+    empty = batch_payload([])
+    packed_case("empty_batch", [], [])
+    minimal_a, minimal_a_bytes = frame_spec(opcode=0x30, payload=b"a")
+    minimal_b, minimal_b_bytes = frame_spec(opcode=0x31, correlation=1, payload=b"bc")
+    # A real inner envelope, since the packer refuses to produce one itself: the
+    # element below is a well-formed frame whose own flags carry BATCH.
+    inner_payload = batch_payload([minimal_a_bytes, minimal_b_bytes])
+    _, inner_envelope = envelope_spec(inner_payload, FLAG_BATCH)
+    packed_case(
+        "two_small_frames",
+        [minimal_a, minimal_b],
+        [minimal_a_bytes, minimal_b_bytes],
+    )
+    error_spec, error_bytes = frame_spec(flags=FLAG_ERROR, opcode=2, correlation=7)
+    ack_spec, ack_bytes = frame_spec(
+        flags=FLAG_ACK_REQUIRED, opcode=16, correlation=1, payload=b"\x01"
+    )
+    packed_case(
+        "elements_keep_their_own_flags",
+        [error_spec, ack_spec],
+        [error_bytes, ack_bytes],
+    )
+    traced_spec, traced_bytes = frame_spec(
+        opcode=1, trace={"trace_id": TRACE_ID, "span_id": SPAN_ID}
+    )
+    fragmented_spec, fragmented_bytes = frame_spec(
+        opcode=5, correlation=9, fragment={"index": 1, "total": 3}, payload=b"\xaa"
+    )
+    packed_case(
+        "traced_and_fragmented_elements",
+        [traced_spec, fragmented_spec],
+        [traced_bytes, fragmented_bytes],
+    )
+    metadata_spec, metadata_bytes = frame_spec(
+        opcode=40,
+        correlation=12,
+        metadata={"frame_seq": 7, "sent_at_delta": 300},
+        payload=b"\x00\x11",
+    )
+    packed_case(
+        "a_metadata_element_rides_along",
+        [metadata_spec, minimal_a],
+        [metadata_bytes, minimal_a_bytes],
+    )
+    # The item cap is a boundary, so both sides of it are pinned: 256 here, 257 in
+    # `invalid`. Distinct correlations mean a decoder that reorders or drops an
+    # element cannot pass by accident.
+    limit_specs = []
+    limit_bytes = []
+    for i in range(MAX_BATCH_ITEMS):
+        spec, encoded = frame_spec(opcode=0x40, correlation=i)
+        limit_specs.append(spec)
+        limit_bytes.append(encoded)
+    packed_case("count_at_the_item_limit", limit_specs, limit_bytes)
+
+    # A lone frame is sent bare: wrapping it would add bytes and buy nothing.
+    lone_spec, lone_bytes = frame_spec(opcode=0x30, correlation=0, payload=b"solo")
+    cases.append(
+        {
+            "name": "a_lone_frame_is_sent_bare",
+            "elements": [lone_spec],
+            "frame": lone_spec,
+            "hex": lone_bytes.hex(),
+        }
+    )
+
+    # A compressed envelope. The elements share vocabulary, so the payload is
+    # deflated as a whole; the runner decodes this case rather than re-encoding
+    # it, because two conforming DEFLATE encoders may emit different bytes.
+    run_elements = [
+        frame_spec(opcode=0x30, payload=b"a" * 40),
+        frame_spec(opcode=0x31, correlation=1, payload=b"b" * 40),
+        frame_spec(flags=FLAG_ACK_REQUIRED, opcode=16, correlation=2, payload=b"\x01" * 40),
+    ]
+    run_specs = [spec for spec, _ in run_elements]
+    run_bytes = [encoded for _, encoded in run_elements]
+    run_payload = batch_payload(run_bytes)
+    run_stream = deflate_runs(run_payload)
+    inflate_check("compressed_batch_of_run_payloads", run_stream, run_payload)
+    run_spec, run_envelope = envelope_spec(run_stream, FLAG_BATCH | FLAG_COMPRESSED)
+    compressed_cases = [
+        {
+            "name": "compressed_batch_of_run_payloads",
+            "elements": run_specs,
+            "frame": run_spec,
+            "hex": run_envelope.hex(),
+        }
+    ]
+
+    invalid = [
+        {
+            "name": "count_over_the_item_limit",
+            "hex": envelope_spec(leb128(MAX_BATCH_ITEMS + 1) + b"\x00" * 6, FLAG_BATCH)[1].hex(),
+            "error": "BatchTooLarge",
+            "why": f"MAX_BATCH_ITEMS is {MAX_BATCH_ITEMS}; the count is a batch, not a suggestion",
+        },
+        {
+            "name": "a_lying_count_cannot_force_an_allocation",
+            "hex": envelope_spec(leb128(200) + b"\x00" * 6, FLAG_BATCH)[1].hex(),
+            "error": "BatchTooLarge",
+            "why": "every element costs at least five bytes, so 200 items cannot fit in six",
+        },
+        {
+            "name": "nested_batch_is_refused",
+            "hex": envelope_spec(
+                leb128(1) + leb128(len(inner_envelope)) + inner_envelope, FLAG_BATCH
+            )[1].hex(),
+            "error": "NestedBatch",
+            "why": "a batch inside a batch is an exponential expansion in a small frame",
+        },
+        # The three cases below pad their payloads past the plausibility check
+        # (`a_lying_count_cannot_force_an_allocation`) on purpose, so that the
+        # error each one names is the one a conforming decoder reports and not
+        # BatchTooLarge: an element length over the frame budget, a declared
+        # element of zero bytes, and a length varint cut off mid-byte.
+        {
+            "name": "element_length_over_the_frame_budget",
+            "hex": envelope_spec(
+                leb128(1) + leb128(MAX_FRAME_BYTES + 1) + b"\x00\x00", FLAG_BATCH
+            )[1].hex(),
+            "error": "FrameTooLarge",
+            "why": f"an element is a frame, and a frame over MAX_FRAME_BYTES ({MAX_FRAME_BYTES}) is refused before buffering; the two padding bytes exist so the count pre-check lets the length varint be read at all",
+        },
+        {
+            "name": "element_of_zero_bytes",
+            "hex": envelope_spec(leb128(1) + leb128(0) + b"\x00" * 4, FLAG_BATCH)[1].hex(),
+            "error": "UnexpectedEnd",
+            "why": "a frame is at least two bytes, so an element of length zero is truncated; the padding exists so the count pre-check lets the zero-length element be reached at all",
+        },
+        {
+            "name": "element_length_varint_truncated",
+            "hex": envelope_spec(leb128(1) + b"\x80" * 5, FLAG_BATCH)[1].hex(),
+            "error": "UnexpectedEnd",
+            "why": "the continuation bit keeps promising a length byte that never arrives; the payload is long enough that the count pre-check cannot answer first",
+        },
+        {
+            "name": "truncated_element",
+            "hex": envelope_spec(
+                leb128(1) + leb128(len(lone_bytes)) + lone_bytes[:-4], FLAG_BATCH
+            )[1].hex(),
+            "error": "UnexpectedEnd",
+            "why": f"the element's length varint says {len(lone_bytes)} bytes and {len(lone_bytes) - 4} are present",
+        },
+        {
+            "name": "trailing_bytes_after_the_last_element",
+            "hex": envelope_spec(
+                batch_payload([minimal_a_bytes, minimal_b_bytes]) + b"junk", FLAG_BATCH
+            )[1].hex(),
+            "error": "TrailingBytes",
+            "why": "the count is the whole truth: bytes after the last element mean the sender disagrees",
+        },
+        {
+            "name": "non_minimal_count",
+            "hex": envelope_spec(b"\x80\x00", FLAG_BATCH)[1].hex(),
+            "error": "NonMinimalVarint",
+            "why": "canonicality applies to the count, not only to MSE fields",
+        },
+        {
+            "name": "count_varint_truncated",
+            "hex": envelope_spec(b"\x80", FLAG_BATCH)[1].hex(),
+            "error": "UnexpectedEnd",
+            "why": "the envelope promises a count and cuts it mid-byte",
+        },
+        {
+            "name": "empty_payload",
+            "hex": envelope_spec(b"", FLAG_BATCH)[1].hex(),
+            "error": "UnexpectedEnd",
+            "why": "a batch payload is at least the count varint",
+        },
+    ]
+
+    return {
+        "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, and the hostile payloads a receiver must refuse.",
+        "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE stream in `compressed_cases` is written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
+        "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope.",
+        "cases": cases,
+        "compressed_cases": compressed_cases,
+        "invalid": invalid,
+    }
+
+
+def _xorshift_bytes(count: int, seed: int) -> bytes:
+    """Pseudo-random bytes from xorshift64: deterministic, and incompressible in practice."""
+    state = seed
+    out = bytearray()
+    for _ in range(count):
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        out.append((state >> 24) & 0xFF)
+    return bytes(out)
+
+
+def compress_file() -> dict:
+    """Raw DEFLATE: the streams a COMPRESSED frame carries, the policy, and the refusals."""
+
+    # --- streams, decode-direction pinned -----------------------------------
+
+    empty_stream = deflate_fixed([])
+    inflate_check("empty_stream", empty_stream, b"")
+    stored_plain = bytes([0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF, 0x41, 0x42, 0x43, 0x44])
+    stored_stream = deflate_stored([(stored_plain, True)])
+    inflate_check("stored_block", stored_stream, stored_plain)
+    literal_plain = b"halo dunia"
+    literal_stream = deflate_runs(literal_plain)
+    inflate_check("fixed_block_of_literals", literal_stream, literal_plain)
+    match_stream = deflate_fixed(
+        [("lit", 0x61), ("lit", 0x62), ("match", 46, 2)]
+    )
+    match_plain = b"ab" * 24
+    inflate_check("fixed_block_with_a_match", match_stream, match_plain)
+    two_block_plain = b"s" * 50 + b"end"
+    two_block_stream = deflate_stored([(b"s" * 50, False)]) + deflate_runs(b"end")
+    inflate_check("stored_then_fixed_blocks", two_block_stream, two_block_plain)
+    run_plain = b"\x00" * 1000
+    run_stream = deflate_runs(run_plain)
+    inflate_check("run_of_a_thousand_zeros", run_stream, run_plain)
+
+    cases = [
+        {"name": "empty_stream", "plain_hex": "", "compressed_hex": empty_stream.hex()},
+        {"name": "stored_block", "plain_hex": stored_plain.hex(), "compressed_hex": stored_stream.hex()},
+        {"name": "fixed_block_of_literals", "plain_hex": literal_plain.hex(), "compressed_hex": literal_stream.hex()},
+        {"name": "fixed_block_with_a_match", "plain_hex": match_plain.hex(), "compressed_hex": match_stream.hex()},
+        {"name": "stored_then_fixed_blocks", "plain_hex": two_block_plain.hex(), "compressed_hex": two_block_stream.hex()},
+        {"name": "run_of_a_thousand_zeros", "plain_hex": run_plain.hex(), "compressed_hex": run_stream.hex()},
+    ]
+
+    # --- whole frames with the COMPRESSED flag -------------------------------
+
+    frame_plain = b"payload-" * 72
+    frame_stream = deflate_runs(frame_plain)
+    inflate_check("compressed_frame", frame_stream, frame_plain)
+    spec, encoded = frame_spec(
+        flags=FLAG_COMPRESSED, opcode=0x21, correlation=5, payload=frame_stream
+    )
+    frames = [
+        {
+            "name": "compressed_frame_inflates_to_its_payload",
+            "frame": spec,
+            "hex": encoded.hex(),
+            "plain_hex": frame_plain.hex(),
+        }
+    ]
+
+    # --- the policy: when a sender may compress ------------------------------
+
+    floor_incompressible = _xorshift_bytes(COMPRESS_MIN_BYTES, 0x2545F4914F6CDD1D)
+    above_floor_incompressible = _xorshift_bytes(COMPRESS_MIN_BYTES * 4, 0x9E3779B97F4A7C15)
+    policy = [
+        {
+            "name": "below_the_floor_is_never_compressed",
+            "plain_hex": (b"a" * (COMPRESS_MIN_BYTES - 1)).hex(),
+            "compresses": False,
+            "why": "the header costs more than the saving on a small payload",
+        },
+        {
+            "name": "at_the_floor_and_compressible",
+            "plain_hex": (b"a" * COMPRESS_MIN_BYTES).hex(),
+            "compresses": True,
+            "why": "highly redundant input at exactly COMPRESS_MIN_BYTES",
+        },
+        {
+            "name": "at_the_floor_and_incompressible",
+            "plain_hex": floor_incompressible.hex(),
+            "compresses": False,
+            "why": "random bytes have no redundancy; sending them larger helps nobody",
+        },
+        {
+            "name": "well_above_the_floor_and_incompressible",
+            "plain_hex": above_floor_incompressible.hex(),
+            "compresses": False,
+            "why": "size alone does not earn compression; the gain must",
+        },
+    ]
+
+    # --- refusals -------------------------------------------------------------
+
+    bomb_plain = b"B" * (MAX_FRAME_BYTES + 1)
+    bomb_program: list[tuple, ...] = [("lit", 0x42)]
+    remaining = len(bomb_plain) - 1
+    while remaining >= 3:
+        take = min(remaining, 258)
+        bomb_program.append(("match", take, 1))
+        remaining -= take
+    for _ in range(remaining):
+        bomb_program.append(("lit", 0x42))
+    bomb_stream = deflate_fixed(bomb_program)
+
+    invalid = [
+        {
+            "name": "not_deflate_at_all",
+            "hex": "ffffffff",
+            "error": "DecompressFailed",
+            "why": "no DEFLATE block starts with those bits",
+        },
+        {
+            "name": "truncated_fixed_block",
+            "hex": match_stream[:-1].hex(),
+            "error": "DecompressFailed",
+            "why": "the final block is cut mid-code; a truncated stream is not a short one",
+        },
+        {
+            "name": "stored_block_shorter_than_it_claims",
+            "hex": deflate_stored([(stored_plain, True)])[: 5 + 6].hex(),
+            "error": "DecompressFailed",
+            "why": "LEN says ten bytes of data and the stream ends after six",
+        },
+        {
+            "name": "decompression_bomb",
+            "hex": bomb_stream.hex(),
+            "error": "DecompressedTooLarge",
+            "why": f"inflates past the {MAX_FRAME_BYTES} byte frame limit; bounded inflation is not optional",
+            "expands_to": str(len(bomb_plain)),
+        },
+    ]
+
+    return {
+        "$comment": "Raw DEFLATE payloads: the streams a COMPRESSED frame carries, the policy that decides whether to compress, and the malformed streams a receiver must refuse.",
+        "provenance": "case list hand-chosen; every DEFLATE stream is written bit by bit from RFC 1951 by tools/vectors/generate_wire_vectors.py and self-checked against zlib's inflater before emission — no compressor output is pinned anywhere, so the files cannot drift with a zlib version",
+        "note": "Two conforming DEFLATE encoders may emit different bytes for the same input, so `cases` pin the decode direction only: `compressed_hex` must inflate to `plain_hex`. The encode direction is asserted by each runner as its own deflate-then-inflate round trip, and `policy` pins the decision (floor and gain), never the bytes. `frames` are complete MWP/1 frames whose COMPRESSED payload must inflate to `plain_hex`.",
+        "cases": cases,
+        "frames": frames,
+        "policy": policy,
+        "invalid": invalid,
+    }
+
+
 # --- driver -----------------------------------------------------------------
 
 FILES = {
     "varint.json": varint_file,
     "frames.json": frames_file,
     "mse.json": mse_file,
+    "batch.json": batch_file,
+    "compress.json": compress_file,
 }
 
 
