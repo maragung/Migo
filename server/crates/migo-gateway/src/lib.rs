@@ -465,7 +465,7 @@ impl Gateway {
         &self,
         topic: &migo_protocol::Topic,
         opcode: migo_protocol::Opcode,
-        frame: &[u8],
+        frame: &bytes::Bytes,
         coalesce_key: Option<u64>,
         now: migo_core::Timestamp,
     ) {

@@ -554,40 +554,41 @@ impl IngestRouter {
     /// this half a room spread over three nodes would deliver each event only to the
     /// watchers the origin happened to be, which is to say not to the room.
     async fn route_room_event(&self, peer: Id, event: migo_protocol::FedRoomEvent) -> Result<()> {
-        let inner =
-            Frame::decode(Bytes::copy_from_slice(&event.payload)).map_err(fault::from_wire)?;
+        let migo_protocol::FedRoomEvent { room_id, payload } = event;
+        // One refcounted buffer for the whole ingest: the hub hands the same bytes to every
+        // subscriber, and the onward copy re-seals them, so a room's event is copied once on
+        // the way in rather than once per reader.
+        let payload = Bytes::from(payload);
+        let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
         let inner_opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known room event"))?;
         let now = self.clock.now();
-        let placement = placement_of(inner_opcode, &inner, event.room_id)?;
+        let placement = placement_of(inner_opcode, &inner, room_id)?;
         if let Some(gateway) = &self.gateway {
             gateway.broadcast_frame_to_topic(
                 &placement.topic,
                 inner_opcode,
-                &event.payload,
+                &payload,
                 placement.coalesce,
                 now,
             );
             if let Some(topic) = &placement.also {
-                gateway.broadcast_frame_to_topic(topic, inner_opcode, &event.payload, None, now);
+                gateway.broadcast_frame_to_topic(topic, inner_opcode, &payload, None, now);
             }
         }
         // The home node's second obligation: the event came from a peer that
         // already delivered it locally, so the other watching nodes are the
         // ones still owed a copy.
         if let Some(relay) = &self.relay {
-            if relay.homes(event.room_id).await {
-                if let Err(error) = relay
-                    .fan_out_inbound(event.room_id, peer, &event.payload, now)
-                    .await
-                {
+            if relay.homes(room_id).await {
+                if let Err(error) = relay.fan_out_inbound(room_id, peer, &payload, now).await {
                     // The local publish already happened and every subscriber
                     // here has the event; a failure to pass it on costs the
                     // other nodes their copy, which the sender's redelivery
                     // may still make good, so it is logged, not raised.
                     tracing::warn!(
                         %error,
-                        room = %event.room_id.to_text(),
+                        room = %room_id.to_text(),
                         "cannot pass an ingested room event on to the other nodes"
                     );
                 }
