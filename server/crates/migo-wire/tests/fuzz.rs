@@ -59,7 +59,7 @@ fn a_non_canonical_varint_in_the_header_is_refused() {
 fn an_eleven_byte_varint_is_refused_at_ten() {
     // Eleven continuation bytes: the decoder must stop at MAX_VARINT_BYTES
     // rather than spin, and must not read past the buffer to find an end.
-    let bytes = header_bytes(0, &[0x80u8; 11].as_slice(), &[0x01]);
+    let bytes = header_bytes(0, [0x80u8; 11].as_slice(), &[0x01]);
     assert_eq!(
         Frame::decode(Bytes::from(bytes)),
         Err(WireError::VarintTooLong { offset: 2, max: 10 })

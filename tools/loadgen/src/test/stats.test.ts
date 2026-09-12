@@ -174,10 +174,12 @@ test('Metrics keeps the first sample per error class for the report', () => {
 });
 
 test('describeError leads with the field a server refusal blamed', () => {
+  // Constructed the way the SDK does: the constructor itself prepends the symbol to
+  // the message, so what is passed here is the server's public message, bare.
   const refusal = new RemoteError(
     1605,
     'VALIDATION_FAILED',
-    'VALIDATION_FAILED: username may contain only letters, digits, dots, and underscores',
+    'username may contain only letters, digits, dots, and underscores',
     undefined,
     'username',
   );
