@@ -658,6 +658,182 @@ async fn admitting_a_key_already_claimed_by_another_node_is_refused() {
     expect_code(h.mesh.add_peer(clash, ts(NOW)).await, codes::ALREADY_EXISTS);
 }
 
+// --- Config-driven admission: the restart path. ----------------------------
+//
+// `add_peer` is the programmatic join; `apply_peer` is what the composition root runs
+// once per `federation.peers` entry on every boot. The contract those boots rely on:
+// absent means admit, identical means write nothing, changed means converge — and a
+// runtime status is never part of the reconciliation, because pausing and blocking are
+// operator decisions that must survive a restart.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn applying_an_absent_peer_admits_it_as_add_peer_would() {
+    let h = Harness::new();
+    let p = peer(1);
+    let view = h
+        .mesh
+        .apply_peer(spec_of(&p), ts(NOW))
+        .await
+        .expect("a fresh entry is admitted");
+    assert_eq!(view.node_id, p.node_id);
+    assert_eq!(view.status, PeerStatus::Allowed);
+    assert_eq!(h.plain("migo_federation_peers_added_total"), 1);
+}
+
+#[tokio::test]
+async fn applying_an_unchanged_entry_again_writes_nothing() {
+    let h = Harness::new();
+    let p = peer(1);
+    let first = h
+        .mesh
+        .apply_peer(spec_of(&p), ts(NOW))
+        .await
+        .expect("the first boot admits the peer");
+    // The next boot applies the very same entry: the row is untouched, not re-added,
+    // so a restart converges instead of failing with ALREADY_EXISTS.
+    let second = h
+        .mesh
+        .apply_peer(spec_of(&p), ts(NOW + 60_000))
+        .await
+        .expect("an identical entry is a no-op");
+    assert_eq!(
+        second.added_at, first.added_at,
+        "a restart must not re-stamp when the peer was admitted"
+    );
+    assert_eq!(h.plain("migo_federation_peers_added_total"), 1);
+}
+
+#[tokio::test]
+async fn applying_a_changed_address_and_region_converges_the_row() {
+    let h = Harness::new();
+    let p = peer(1);
+    h.mesh
+        .apply_peer(spec_of(&p), ts(NOW))
+        .await
+        .expect("the peer is admitted first");
+    let moved = NewPeerSpec {
+        node_id: p.node_id,
+        public_key: p.public_key.clone(),
+        base_url: "https://peer-1-relocated.example".to_string(),
+        region: "region-1-relocated".to_string(),
+    };
+    let view = h
+        .mesh
+        .apply_peer(moved, ts(NOW + 60_000))
+        .await
+        .expect("a changed entry converges");
+    assert_eq!(view.base_url, "https://peer-1-relocated.example");
+    assert_eq!(view.region, "region-1-relocated");
+}
+
+#[tokio::test]
+async fn applying_a_rotated_key_replaces_it_and_releases_the_old_one() {
+    let h = Harness::new();
+    let p = peer(1);
+    let before = h
+        .mesh
+        .apply_peer(spec_of(&p), ts(NOW))
+        .await
+        .expect("the peer is admitted under its first key");
+    // A key no other row holds — peer 9 was never admitted.
+    let rotated = NewPeerSpec {
+        node_id: p.node_id,
+        public_key: peer(9).public_key,
+        base_url: p.base_url.clone(),
+        region: p.region.clone(),
+    };
+    let after = h
+        .mesh
+        .apply_peer(rotated, ts(NOW + 60_000))
+        .await
+        .expect("a rotated key converges");
+    assert_ne!(after.fingerprint, before.fingerprint);
+    // The old key is no longer claimed: another node may now be admitted under it.
+    let claimant = NewPeerSpec {
+        node_id: id(2),
+        public_key: p.public_key.clone(),
+        base_url: "https://claimant.example".to_string(),
+        region: "claimant".to_string(),
+    };
+    h.mesh
+        .add_peer(claimant, ts(NOW + 90_000))
+        .await
+        .expect("the released key is claimable again");
+}
+
+#[tokio::test]
+async fn applying_an_unchanged_entry_keeps_a_runtime_status() {
+    let h = Harness::new();
+    let p = peer(1);
+    h.admit(&p).await;
+    h.mesh
+        .set_peer_status(p.node_id, PeerStatus::Paused)
+        .await
+        .expect("an admitted peer's status can be set");
+    let view = h
+        .mesh
+        .apply_peer(spec_of(&p), ts(NOW + 60_000))
+        .await
+        .expect("the same entry still applies");
+    assert_eq!(
+        view.status,
+        PeerStatus::Paused,
+        "reconciliation never touches a runtime status"
+    );
+}
+
+#[tokio::test]
+async fn applying_a_key_claimed_by_another_peer_is_refused() {
+    // One key, one node: if the configuration tried to hand node 1 the key node 2
+    // already presents, the boot fails rather than silently re-pointing an identity.
+    let h = Harness::new();
+    let one = peer(1);
+    let two = peer(2);
+    h.admit(&one).await;
+    h.admit(&two).await;
+    let takeover = NewPeerSpec {
+        node_id: one.node_id,
+        public_key: two.public_key.clone(),
+        base_url: one.base_url.clone(),
+        region: one.region.clone(),
+    };
+    expect_code(
+        h.mesh.apply_peer(takeover, ts(NOW)).await,
+        codes::ALREADY_EXISTS,
+    );
+    // Both rows are intact: the refused application wrote nothing.
+    assert!(h.peer_view(one.node_id).await.is_some());
+    assert!(h.peer_view(two.node_id).await.is_some());
+}
+
+#[tokio::test]
+async fn applying_an_entry_validates_exactly_as_add_peer_does() {
+    let h = Harness::new();
+    let mut bad_key = spec_of(&peer(1));
+    bad_key.public_key = vec![1, 2, 3];
+    expect_code(
+        h.mesh.apply_peer(bad_key, ts(NOW)).await,
+        codes::VALIDATION_FAILED,
+    );
+    let mut bad_url = spec_of(&peer(1));
+    bad_url.base_url = "http://insecure.example".to_string();
+    expect_code(
+        h.mesh.apply_peer(bad_url, ts(NOW)).await,
+        codes::VALIDATION_FAILED,
+    );
+    let mut bad_region = spec_of(&peer(1));
+    bad_region.region = "   ".to_string();
+    expect_code(
+        h.mesh.apply_peer(bad_region, ts(NOW)).await,
+        codes::FIELD_REQUIRED,
+    );
+    assert!(
+        h.peer_view(peer(1).node_id).await.is_none(),
+        "a refused entry admits nothing"
+    );
+}
+
 #[tokio::test]
 async fn an_enqueued_event_id_is_minted_locally_and_time_ordered() {
     // The producer hands over a target, an opcode, and a payload — never an id. The service

@@ -1314,6 +1314,25 @@ pub trait FederationStore: Send + Sync {
     /// is not something a second `add_peer` may quietly replace.
     async fn add_peer(&self, new: NewPeer) -> Result<PeerRecord>;
 
+    /// Updates a peer's public key, base URL, and region, returning the updated
+    /// row, or `Ok(None)` if the peer is not in the allow-list.
+    ///
+    /// The reconciliation half of configuration-driven admission: identity and
+    /// addressing are the configuration's to set, so a changed entry lands here
+    /// rather than failing the boot on the row a previous boot wrote. Status,
+    /// `added_at`, and `last_seen_at` are untouched — a paused or blocked peer is
+    /// an operator's runtime decision an address change must not quietly reverse.
+    /// A public key another peer already claims fails with
+    /// [`fault::already_exists`], exactly as `add_peer` would, because the key —
+    /// not the id — is what a handshake is checked against.
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>>;
+
     /// Reads one peer by node id, or `None` if it is not in the allow-list.
     ///
     /// The lookup a handshake makes before anything else. A `None` here is a node the
