@@ -127,6 +127,12 @@ pub struct ProfilePatch {
     pub display_name: Option<String>,
     /// New bio, or absent to leave it.
     pub bio: Option<String>,
+    /// New custom status, or absent to leave it. The wire's own semantics: an empty string
+    /// sets an empty status, exactly like the bio — the field's absence is the only "keep".
+    ///
+    /// Only joins a save on a session that negotiated RICH_PRESENCE; the pane gates the edit
+    /// on the bit, and a patch from a session without it would be answered with a refusal.
+    pub custom_status: Option<String>,
     /// New birth year, or absent.
     pub birth_year: Option<u32>,
     /// New last-seen visibility: absent is "leave as-is", because the server never sends the
@@ -328,11 +334,6 @@ pub enum Command {
     /// is a delta, not a replacement — so a save that changes a display name does not also have
     /// to know (and re-send) the privacy settings.
     SaveProfile(ProfilePatch),
-    /// Publish the custom status line. It rides the presence wire, not the profile patch, so
-    /// the worker re-publishes the account's last-known presence state beside it and saving a
-    /// status never flips the account online or offline as a side effect. An empty string
-    /// clears the line.
-    SaveStatus { status: String },
     /// Upload a local image as the account's new avatar and point the profile at it.
     ///
     /// The path is read here, in the worker, because reading a file is I/O the UI thread must
@@ -573,6 +574,15 @@ pub enum AdminsAnswer {
 pub enum Event {
     /// The connection state changed.
     Connection(Connection),
+    /// The session's negotiated RICH_PRESENCE bit, exactly as WELCOME stated it.
+    ///
+    /// Sent on every successful connect, reconnects included, because the negotiated set is
+    /// per-session: a node that drops the bit (a kill switch, an older server behind the same
+    /// address) must not leave a pane offering an edit the new session would refuse. The one
+    /// consumer today is the profile pane's status field, which is editable only when the bit
+    /// is in the intersection — the brief's own rule that a feature nobody negotiated is not
+    /// asked for at all.
+    RichPresence(bool),
     /// A vault exists on disk, so the first screen should offer to unlock it.
     ///
     /// Carries nothing: the account name and the server address are inside the sealed body, so there
@@ -1116,13 +1126,6 @@ struct Signed {
     /// reconnect; cleared when the gateway reconnects, because subscriptions live and die with
     /// the session that held them.
     watched: HashSet<Id>,
-    /// The account's presence state as the last profile card or presence event stated it.
-    ///
-    /// The custom status publishes beside a state, and a status save must not invent one: this
-    /// is the last state the account was known to stand in, so saving a status re-publishes
-    /// exactly that. Seeded `Online` — the same default a session announces itself with — so a
-    /// status saved before any card arrives says the same thing the connect path already did.
-    profile_presence: Option<migo_protocol::PresenceState>,
     /// Which conversations are end-to-end encrypted, filed from every list read and create
     /// answer because the summary is the one wire moment that states it.
     ///
@@ -1856,7 +1859,6 @@ impl Worker {
             }
             Command::OwnProfile => self.fetch_own_profile().await,
             Command::SaveProfile(patch) => self.save_profile(patch).await,
-            Command::SaveStatus { status } => self.save_status(status).await,
             Command::ChangeAvatar { path } => self.change_avatar(path).await,
             Command::Admins => self.fetch_admins().await,
             Command::GrantAdmin { username } => self.grant_admin(username).await,
@@ -2301,7 +2303,6 @@ impl Worker {
             rooms_watched: HashSet::new(),
             room_conversations: HashMap::new(),
             watched: HashSet::new(),
-            profile_presence: None,
             e2e: HashSet::new(),
             media_keys: HashMap::new(),
         });
@@ -2360,12 +2361,16 @@ impl Worker {
             },
             // Only what this client actually implements. Claiming a feature it cannot honour would
             // make the server send frames it then ignores, and the user would see silence rather than
-            // an error. BATCHING is honoured since inbound envelopes are unpacked in `on_record`.
+            // an error. BATCHING is honoured since inbound envelopes are unpacked in `on_record`;
+            // RICH_PRESENCE is honoured since the profile pane's status field saves through
+            // PROFILE_UPDATE.custom_status — and only draws as an editable field on sessions whose
+            // WELCOME put the bit in the intersection.
             features: features::E2E_V1
                 | features::PRESENCE
                 | features::TYPING
                 | features::COMPRESSION
-                | features::BATCHING,
+                | features::BATCHING
+                | features::RICH_PRESENCE,
             locale: "en".to_owned(),
             bandwidth_mode: migo_protocol::BandwidthMode::Auto,
             access_token: Some(signed.access_token.clone()),
@@ -2446,6 +2451,11 @@ impl Worker {
                 // resting state — never meets the two-interval deadline. Re-armed here on
                 // every connect, and disarmed in `on_disconnect`.
                 self.heartbeat = Some(heartbeat_interval(welcome.limits.heartbeat_ms));
+                // The negotiated set is per-session, so the pane's status gate is re-stated on
+                // every connect: a node that stopped carrying the bit between two sessions must
+                // not leave an editable field on screen that this session would only refuse.
+                let rich_presence = welcome.features & features::RICH_PRESENCE != 0;
+                self.sink.send(Event::RichPresence(rich_presence));
                 if fell_back {
                     self.sink
                         .send(Event::Connection(Connection::Fallback(fallback_reason)));
@@ -2801,6 +2811,11 @@ impl Worker {
     /// this server is per-device and client-reported, so a client that never speaks PRESENCE_SET
     /// reads as unobserved to everyone watching. Best effort — a set that fails costs one green
     /// dot, and the reconnect path will try again anyway.
+    ///
+    /// The custom status stays absent, and this is the only PRESENCE_SET this client sends: the
+    /// server refuses one on this wire (`FEATURE_DISABLED` — a status is meant to outlive a
+    /// disconnect, which a presence entry does not), and a frame the sender knows will be
+    /// refused is a frame that is not sent.
     async fn announce_presence(&mut self) {
         let message = migo_protocol::PresenceUpdate {
             state: migo_protocol::PresenceState::Online,
@@ -2924,9 +2939,12 @@ impl Worker {
     /// Patches the caller's own profile and files the refreshed card with the pane.
     ///
     /// The wire's patch semantics are the form's: an absent field is "leave it", so the
-    /// command carries `None` for every control the user did not touch. The reply is the
-    /// caller's own card read back through the same path a fetch takes, which makes it the
-    /// authoritative copy — the pane replaces its profile from it rather than re-reading.
+    /// command carries `None` for every control the user did not touch. The custom status
+    /// rides this patch too — the RICH_PRESENCE bit's own field (section 148) — and no longer
+    /// rides the presence wire at all, where the server refuses it: a status is meant to
+    /// outlive a disconnect, which a presence entry is not. The reply is the caller's own
+    /// card read back through the same path a fetch takes, which makes it the authoritative
+    /// copy — the pane replaces its profile from it rather than re-reading.
     async fn save_profile(&mut self, patch: crate::net::ProfilePatch) {
         let message = migo_protocol::ProfileUpdate {
             display_name: patch.display_name,
@@ -2937,32 +2955,9 @@ impl Worker {
             who_can_message: patch.who_can_message,
             who_can_add: patch.who_can_add,
             searchable: patch.searchable,
-            // The profile form carries no status control, so this patch never touches the
-            // column: an absent field is "leave it alone", which is exactly the intent.
-            custom_status: None,
+            custom_status: patch.custom_status,
         };
         self.request(Opcode::ProfileUpdate, &message).await;
-    }
-
-    /// Publishes the custom status beside the account's last-known presence state.
-    ///
-    /// The status rides the presence wire, not the profile patch: republishing it here means
-    /// saving a status never flips the account's presence as a side effect. The profile's
-    /// card is the best seed for "where the account stood" — a `None` presence (the server
-    /// this build talks to does not put one on profile cards) falls back to `Online`, the
-    /// same choice the web client makes for the same reason.
-    async fn save_status(&mut self, status: String) {
-        let Some(signed) = self.signed.as_ref() else {
-            return;
-        };
-        let state = signed
-            .profile_presence
-            .unwrap_or(migo_protocol::PresenceState::Online);
-        let message = migo_protocol::PresenceUpdate {
-            state,
-            custom_status: Some(status).filter(|status| !status.is_empty()),
-        };
-        self.request(Opcode::PresenceSet, &message).await;
     }
 
     /// Uploads a local image as the account's avatar and patches the profile to point at it.
@@ -6720,9 +6715,6 @@ impl Worker {
             // self fetch asked for exactly this id, so a card that does not carry it is a
             // card the pane was never asking for.
             if Some(profile.user_id) == me {
-                if let Some(signed) = self.signed.as_mut() {
-                    signed.profile_presence = profile.presence;
-                }
                 let own = Self::own_profile_from_wire(profile);
                 self.sink.send(Event::OwnProfile(Ok(own)));
             }
@@ -6732,8 +6724,7 @@ impl Worker {
     }
 
     /// The reply a PROFILE_UPDATE carries: the caller's own card, read back through the same
-    /// path a fetch takes. It refreshes the pane's copy — and the seed the status save
-    /// republishes beside — before the pane hears about it as a saved fact.
+    /// path a fetch takes, so the pane hears about it as a saved fact.
     fn on_profile_saved(&mut self, frame: &migo_protocol::Frame) {
         let Ok(profile) = gateway::decode::<migo_protocol::UserProfile>(frame) else {
             return;
@@ -6744,9 +6735,6 @@ impl Worker {
             // stranger's profile as this account's save would draw somebody else's name in the
             // pane's form. Drop it rather than guess.
             return;
-        }
-        if let Some(signed) = self.signed.as_mut() {
-            signed.profile_presence = profile.presence;
         }
         let own = Self::own_profile_from_wire(&profile);
         self.sink.toast("Profile saved", ToastKind::Success);
@@ -6821,15 +6809,6 @@ impl Worker {
         let state = model::Presence::from_wire(event.state.to_wire());
         if state == model::Presence::Unknown {
             return;
-        }
-        // The self seed the status save republishes beside: an event about this account is
-        // fresher than any profile card, so it takes over as the last-known state.
-        if let Some(signed) = self.signed.as_ref() {
-            if event.user_id == signed.account.account_id {
-                if let Some(signed) = self.signed.as_mut() {
-                    signed.profile_presence = Some(event.state);
-                }
-            }
         }
         self.sink.send(Event::PresenceChanged {
             user_id: event.user_id,

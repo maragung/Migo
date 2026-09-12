@@ -49,6 +49,11 @@ pub struct App {
     /// size, stacking — is egui's, keyed by the window ids [`crate::ui::desktop`] mints.
     desktop: Desktop,
     connection: Connection,
+    /// Whether this session negotiated RICH_PRESENCE, filed from the worker's connect event.
+    ///
+    /// Session-scoped like [`App::connection`]: false until a WELCOME grants the bit, and
+    /// reset on sign-out, so a pane can never offer an edit a session would refuse.
+    rich_presence: bool,
     account: Option<Account>,
     auth: AuthState,
     chat: ChatState,
@@ -128,6 +133,7 @@ impl App {
             screen: Screen::Opening,
             desktop: Desktop::default(),
             connection: Connection::Offline,
+            rich_presence: false,
             account: None,
             auth,
             chat: ChatState::default(),
@@ -176,6 +182,13 @@ impl App {
                         self.auth.clear_secrets();
                     }
                     self.connection = state;
+                }
+                Event::RichPresence(negotiated) => {
+                    // The session's own answer, re-stated on every connect: the profile pane
+                    // draws its status field editable only while the bit is in the
+                    // intersection, so a node that dropped it between two sessions cannot
+                    // leave an edit on screen that the new session would refuse.
+                    self.rich_presence = negotiated;
                 }
                 Event::VaultFound => {
                     if self.account.is_none() {
@@ -248,6 +261,10 @@ impl App {
                 }
                 Event::SignedOut => {
                     self.account = None;
+                    // The negotiated bits went with the session that negotiated them: the next
+                    // sign-in's WELCOME re-states them, and until it does no pane may offer an
+                    // edit on a bit no session has granted.
+                    self.rich_presence = false;
                     self.auth.busy = false;
                     self.auth.clear_secrets();
                     self.auth.captcha.reset();
@@ -1268,6 +1285,7 @@ impl App {
                 account: self.account.as_ref(),
                 server: &self.auth.server,
                 commands: &mut self.commands,
+                rich_presence: self.rich_presence,
                 chat_log_auto_save: self.settings.auto_save_chat_logs,
                 chat_log: &mut self.chat_log_actions,
                 navigate,
@@ -1337,6 +1355,7 @@ impl App {
             account: self.account.as_ref(),
             server: &self.auth.server,
             commands: &mut self.commands,
+            rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut self.chat_log_actions,
             navigate,
@@ -1418,6 +1437,7 @@ impl App {
             account: self.account.as_ref(),
             server: &server,
             commands: &mut commands,
+            rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut chat_log_actions,
             navigate: &mut navigate,
@@ -1707,6 +1727,7 @@ impl eframe::App for App {
                         account: self.account.as_ref(),
                         server: &server,
                         commands: &mut self.commands,
+                        rich_presence: self.rich_presence,
                         chat_log_auto_save: self.settings.auto_save_chat_logs,
                         chat_log: &mut self.chat_log_actions,
                         navigate: &mut navigate,
