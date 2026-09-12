@@ -28,7 +28,15 @@
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +46,14 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const HEALTH_TIMEOUT_MS = 30_000;
 /** How long a SIGTERM'd migod has to exit on its own before the harness escalates. */
 const SHUTDOWN_GRACE_MS = 15_000;
+
+/**
+ * How much of the node's stderr the harness keeps in memory for failure messages.
+ *
+ * Enough for an anyhow error chain with its causes; the log file keeps everything,
+ * so the buffer only has to hold what a person needs to see first.
+ */
+const STDERR_TAIL_BYTES = 16 * 1024;
 
 /** The one port this suite binds. See the module doc for why this number. */
 const DEFAULT_HTTP_PORT = 29180;
@@ -170,6 +186,7 @@ export class NodeHarness {
   #child: ChildProcess | null = null;
   #logFd: number | null = null;
   #spawnError: Error | null = null;
+  #stderrTail = '';
 
   private constructor(options: {
     nodeId: string;
@@ -190,7 +207,7 @@ export class NodeHarness {
     this.#databaseName = options.databaseName;
     this.#target = options.target;
     this.#env = {
-      ...process.env,
+      ...this.#inheritedEnvWithoutMigoKeys(),
       MIGO_CONFIG: this.#configPath,
       MIGO_NODE__ID: options.nodeId,
       MIGO_NODE__REGION: 'e2e',
@@ -218,6 +235,31 @@ export class NodeHarness {
       this.#child?.kill('SIGKILL');
     };
     process.once('exit', kill);
+  }
+
+  /**
+   * The process environment minus every `MIGO_*` key, for handing to the node.
+   *
+   * migod's `Config::load()` does not pick variables by name: it reads the whole
+   * environment and turns every `MIGO_*` key into a config path (`MIGO_SECTION__FIELD`).
+   * CI hands this suite `MIGO_TEST_DATABASE_URL`, `MIGO_TEST_REDIS_URL`, and
+   * `MIGO_TEST_REQUIRE_BACKENDS`, which that grammar reads as a `test.database.url`
+   * table the schema does not have — and every config section is
+   * `deny_unknown_fields`, so the process exits 1 before it logs anything else. The
+   * same trap catches any future `MIGO_TEST_*` or `MIGO_WHATEVER` the runner grows,
+   * so nothing with the prefix is inherited at all: the node's own configuration is
+   * set explicitly by the assignment that makes this call, and ambient `MIGO_` keys
+   * are never configuration.
+   */
+  #inheritedEnvWithoutMigoKeys(): NodeJS.ProcessEnv {
+    const inherited: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key.startsWith('MIGO_')) {
+        continue;
+      }
+      inherited[key] = value;
+    }
+    return inherited;
   }
 
   /**
@@ -288,9 +330,15 @@ export class NodeHarness {
     }
     await checkPortFree(this.httpPort);
     this.#logFd = openSync(this.#logPath, 'a');
+    this.#stderrTail = '';
     const child = spawn(this.#migodBin, [], {
       env: this.#env,
-      stdio: ['ignore', this.#logFd, this.#logFd],
+      // Stdout goes straight to the log file; stderr is piped so the harness can both
+      // tee it into the same log and keep the last of it in memory. The in-memory copy
+      // is what a startup failure quotes: when migod refuses its configuration it says
+      // so on stderr and exits before anything else, and a failure message that carries
+      // only an exit code sends every future config regression back to CI to be seen.
+      stdio: ['ignore', this.#logFd, 'pipe'],
     });
     this.#child = child;
     this.#spawnError = null;
@@ -298,6 +346,17 @@ export class NodeHarness {
     // event that would kill the test process before it could name the cause.
     child.once('error', (error: Error) => {
       this.#spawnError = error;
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      this.#stderrTail = (this.#stderrTail + text).slice(-STDERR_TAIL_BYTES);
+      if (this.#logFd !== null) {
+        try {
+          writeSync(this.#logFd, chunk);
+        } catch {
+          // The log file is best-effort; the in-memory tail still holds the bytes.
+        }
+      }
     });
     child.once('exit', () => {
       if (this.#child === child) {
@@ -352,7 +411,8 @@ export class NodeHarness {
       }
       if (child !== null && child.exitCode !== null) {
         throw new Error(
-          `migod exited with code ${child.exitCode} during startup\n${this.logTail()}`,
+          `migod exited with code ${child.exitCode} during startup\n` +
+            `--- migod stderr ---\n${this.stderrTail()}\n--- migod log tail ---\n${this.logTail()}`,
         );
       }
       try {
@@ -365,11 +425,24 @@ export class NodeHarness {
       }
       if (Date.now() > deadline) {
         throw new Error(
-          `migod did not answer /health on ${this.apiUrl} within ${HEALTH_TIMEOUT_MS}ms\n${this.logTail()}`,
+          `migod did not answer /health on ${this.apiUrl} within ${HEALTH_TIMEOUT_MS}ms\n` +
+            `--- migod stderr ---\n${this.stderrTail()}\n--- migod log tail ---\n${this.logTail()}`,
         );
       }
       await sleep(200);
     }
+  }
+
+  /**
+   * The last of what the node wrote to stderr, verbatim.
+   *
+   * This, not the log file, is the authoritative failure text: a refused configuration
+   * is printed by the process before it has emitted a single log line, and the pipe the
+   * harness holds delivers those bytes straight into memory, where no read-back race
+   * can lose them.
+   */
+  stderrTail(): string {
+    return this.#stderrTail === '' ? '(migod wrote nothing to stderr)' : this.#stderrTail.trimEnd();
   }
 
   /** The last 40 lines of the node's log, for failure messages a person can act on. */
