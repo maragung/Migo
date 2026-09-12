@@ -88,6 +88,15 @@ export const MEMORY_KIB = 64 * 1024;
 export const TIME_COST = 3;
 /** Argon2id lanes for new containers. */
 export const LANES = 1;
+/**
+ * The memory costs {@link sealContainer} walks down, full strength first. The floor is the
+ * validator's minimum, so every rung seals a container any reader — this port, the Rust crate,
+ * the Kotlin port — can open. A device that cannot allocate 64 MiB for the WASM hash (a browser
+ * tab on a low-memory phone) is the rung ladder's whole reason; the ladder lives in
+ * {@link sealContainer}, not in the deterministic {@link sealContainerWith}, so the conformance
+ * vectors' byte-pinned seals are untouched.
+ */
+const SEAL_MEMORY_LADDER_KIB = [64 * 1024, 32 * 1024, 16 * 1024, 8 * 1024];
 
 /** Shortest recovery credential accepted (bytes). Length is the rule; composition rules push people towards dictionary words. */
 export const MIN_CREDENTIAL_BYTES = 8;
@@ -367,13 +376,42 @@ export class AccountFile {
 /**
  * Seals an account into container bytes with fresh salt and nonce.
  *
+ * The full-cost seal runs first, and a device that cannot allocate that much memory at once —
+ * a browser tab on a low-memory phone, where the Argon2id WASM allocation simply fails — gets
+ * the same account at a lower rung rather than no file at all. Every reader derives its key
+ * from the parameters in the container's own header, so a lower rung costs strength, never
+ * compatibility. A credential outside the accepted byte range still throws before any hashing.
+ *
  * @throws {AccountError} `BadLength` if the credential is outside the accepted byte range, and
- * whatever {@link sealContainerWith} reports otherwise.
+ * `OpenFailed` if Argon2id could not run at any memory cost this device can allocate.
  */
 export async function sealContainer(credential: string, file: AccountFile): Promise<Uint8Array> {
-  const salt = randomBytes(SALT_LEN);
-  const nonce = randomBytes(NONCE_LEN);
-  return sealContainerWith(credential, file, ContainerParams.current(), salt, nonce);
+  let failure: AccountError = AccountError.openFailed();
+  for (const memoryKib of SEAL_MEMORY_LADDER_KIB) {
+    const salt = randomBytes(SALT_LEN);
+    const nonce = randomBytes(NONCE_LEN);
+    try {
+      return await sealContainerWith(
+        credential,
+        file,
+        new ContainerParams(memoryKib, TIME_COST, LANES),
+        salt,
+        nonce,
+      );
+    } catch (cause) {
+      // In the seal direction `OpenFailed` can only mean Argon2id itself could not run — the
+      // memory allocation the device refused — because nothing has been opened yet and the
+      // AEAD never runs on this path. Any other failure is real and propagates unchanged.
+      if (!(cause instanceof AccountError) || cause.kind !== 'OpenFailed') {
+        throw cause;
+      }
+      failure = cause;
+    }
+  }
+  throw new AccountError(
+    'OpenFailed',
+    'the container could not be sealed: Argon2id failed at every memory cost this device offers',
+  );
 }
 
 /**

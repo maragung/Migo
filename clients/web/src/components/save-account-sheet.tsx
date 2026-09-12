@@ -16,8 +16,10 @@
  * offered with the same bytes, no second Argon2id run, and stays re-pressable: a download the
  * browser swallowed silently is not a saved file. "Go to sign-in" ends the registration the way
  * every later visit begins — the account's owner signs in with this file and the passphrase
- * themselves — so the button waits for the seal, and declining the download is an honest choice
- * too: the lead line says what declining means.
+ * themselves — so the button waits out the seal attempt, and a seal that fails still leaves it
+ * clickable: finishRegistration judges by the key-file store, so a failed seal ends in the app
+ * signed in, never at a door with no key. Declining the download is an honest choice too: the
+ * lead line says what declining means.
  */
 
 import { useEffect, useState } from 'react';
@@ -52,21 +54,26 @@ export function SaveAccountSheet({
   onDone: () => void;
 }): ReactNode {
   const [sealed, setSealed] = useState<Uint8Array | null>(null);
+  const [sealing, setSealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const fileName = containerFileName(username);
 
-  // Seal once as the sheet opens, then remember the bytes: the browser save and the offered
+  // Seal as the sheet opens, then remember the bytes: the browser save and the offered
   // download are the same container, and the account lands on the login screen's list before
   // the user answers either button. The root is only in memory while registration is this
   // fresh — waiting for a button press is the version where a dismissed sheet means a file
-  // that never existed.
+  // that never existed. A failed seal is a failed promise, not a dead end: the attempt counter
+  // re-runs this effect, and the buttons below keep working (or offer the retry) either way.
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (root === null) {
       return;
     }
     let cancelled = false;
+    setSealing(true);
+    setError(null);
     void (async (): Promise<void> => {
       try {
         const file = account.AccountFile.forRoot(
@@ -92,14 +99,19 @@ export function SaveAccountSheet({
             cause instanceof Error ? cause.message : 'The account file could not be sealed.',
           );
         }
+      } finally {
+        if (!cancelled) {
+          setSealing(false);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-    // The seal runs once per sheet; the passphrase and root are fixed the moment it opens.
+    // The seal runs once per sheet and once per retry; the passphrase and root are fixed the
+    // moment it opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [attempt]);
 
   /** Offers the already-sealed bytes as a download. */
   function download(): void {
@@ -148,19 +160,35 @@ export function SaveAccountSheet({
         <p className="save-account-done">Key file downloaded — keep it somewhere safe.</p>
       ) : null}
       <div className="form-actions">
-        <button type="button" className="btn btn-ghost" onClick={onDone} disabled={sealed === null}>
-          {sealed === null ? <Spinner /> : null}
+        {/* "Go to sign-in" waits out the seal attempt, not its success: finishRegistration
+            judges by the key-file store, so a sheet whose seal failed ends in the app signed
+            in rather than at a door with no key. The spinner is the attempt in flight — an
+            error leaves this button clickable. */}
+        <button type="button" className="btn btn-ghost" onClick={onDone} disabled={sealing}>
+          {sealing ? <Spinner /> : null}
           Go to sign-in
         </button>
-        <button
-          type="button"
-          className="btn btn-primary"
-          disabled={sealed === null}
-          onClick={download}
-        >
-          {sealed === null ? <Spinner /> : <Icon name="download" size={20} />}
-          Download key file
-        </button>
+        {error === null ? (
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={sealing || sealed === null}
+            onClick={download}
+          >
+            {sealing || sealed === null ? <Spinner /> : <Icon name="download" size={20} />}
+            Download key file
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={sealing}
+            onClick={() => setAttempt((count) => count + 1)}
+          >
+            {sealing ? <Spinner /> : <Icon name="download" size={20} />}
+            Try sealing again
+          </button>
+        )}
       </div>
     </div>
   );
