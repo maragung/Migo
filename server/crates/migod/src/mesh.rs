@@ -679,12 +679,12 @@ fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement>
                 // conversation they have never heard of, so the one frame that
                 // reaches them is the copy on their own user topic — and their
                 // session is here, on the node that did not accept the invite.
-                also: (event.change == migo_protocol::MemberChange::Joined).then(|| {
+                also: (event.change == migo_protocol::MemberChange::Joined).then_some(
                     migo_protocol::Topic {
                         kind: migo_protocol::TopicKind::User,
                         id: event.user_id,
-                    }
-                }),
+                    },
+                ),
             })
         }
         Opcode::Typing => {
