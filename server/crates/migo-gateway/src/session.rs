@@ -97,4 +97,12 @@ impl SessionHandle {
     pub(crate) fn features(&self) -> u64 {
         self.features
     }
+
+    /// The intervals this session runs at (brief section 159), read from the mailbox that
+    /// enforces them so the driver's `WELCOME` and liveness deadline can never disagree with
+    /// the queue's pacing. The heartbeat inside it is mode-adjusted — the number a
+    /// `LowData` or `UltraLowData` session was actually told to beat at.
+    pub(crate) fn cadence(&self) -> migo_protocol::Cadence {
+        self.outbound.cadence()
+    }
 }

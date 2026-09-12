@@ -263,6 +263,12 @@ export interface ConfigLimits {
 /** The runtime configuration document read once at startup. */
 export interface ServerConfig {
   node: NodeConfig;
+  /**
+   * Every node a client may connect to, this one first (§170). A single-node deployment lists
+   * itself alone, so the list is never empty. A server that predates the field is treated the
+   * same way — the node entry beside it stands in for the missing list.
+   */
+  nodes: NodeConfig[];
   features: bigint;
   limits: ConfigLimits;
 }
@@ -929,13 +935,29 @@ export class BootstrapClient {
     const body = (await this.#get('/v1/config')) as Record<string, unknown>;
     const node = (body['node'] ?? {}) as Record<string, unknown>;
     const limits = (body['limits'] ?? {}) as Record<string, unknown>;
+    const selfNode: NodeConfig = {
+      id: String(node['id']),
+      region: String(node['region']),
+      country: String(node['country']),
+      publicUrl: String(node['public_url']),
+    };
+    // An older server has no `nodes` list; the node entry it does carry is the whole
+    // list as far as that server knows.
+    const nodesRaw = body['nodes'];
+    const nodes = Array.isArray(nodesRaw)
+      ? nodesRaw.map((row) => {
+          const entry = (row ?? {}) as Record<string, unknown>;
+          return {
+            id: String(entry['id']),
+            region: String(entry['region']),
+            country: String(entry['country']),
+            publicUrl: String(entry['public_url']),
+          };
+        })
+      : [selfNode];
     return {
-      node: {
-        id: String(node['id']),
-        region: String(node['region']),
-        country: String(node['country']),
-        publicUrl: String(node['public_url']),
-      },
+      node: selfNode,
+      nodes,
       features: asBigInt(body['features']),
       limits: {
         allowRegistration: Boolean(limits['allow_registration']),

@@ -246,7 +246,9 @@
    "auth": "User",
    "cost": 1,
    "class": "Coalescable",
-   "coalesce_key": "conversation_id"
+   "coalesce_key": "conversation_id",
+   "suppress_on": ["UltraLowData"],
+   "doc": "Typing start/stop marks. Never delivered to a session on a mode in suppress_on (brief 159: typing is off entirely on UltraLowData), so the gateway drops the frame at the mailbox rather than spending the bytes."
   },
   {
    "name": "MESSAGE_EDIT",
@@ -398,7 +400,9 @@
    "auth": "User",
    "cost": 0,
    "class": "Coalescable",
-   "coalesce_key": "user_id"
+   "coalesce_key": "user_id",
+   "paced": true,
+   "doc": "Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost."
   },
   {
    "name": "ROOM_JOIN",

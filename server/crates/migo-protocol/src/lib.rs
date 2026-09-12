@@ -48,7 +48,11 @@
 //! `migo-wire` for the codec and on `migo-core` for [`migo_core::Id`] and
 //! [`migo_core::Timestamp`], and on nothing else — no tokio, no database, no
 //! HTTP. Every layer above can therefore speak about protocol messages without
-//! pulling in a runtime.
+//! pulling in a runtime. The two hand-written exceptions are [`fault`], which
+//! builds errors from the registry, and [`cadence`], the interval table of
+//! brief section 159 — a pure function shared by `migo-presence` (which stores
+//! presence) and the gateway (whose coalescing queue enforces the interval),
+//! two crates that may not depend on each other and so read it from here.
 //!
 //! ```
 //! use migo_protocol::{codes, Opcode};
@@ -68,9 +72,11 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
 
+pub mod cadence;
 pub mod fault;
 pub mod generated;
 
+pub use crate::cadence::{cadence_for, Cadence, PresenceScope, MAX_HEARTBEAT_MS, MIN_HEARTBEAT_MS};
 pub use crate::fault::{error as fault_error, kind_of as error_kind_of};
 pub use crate::generated::*;
 

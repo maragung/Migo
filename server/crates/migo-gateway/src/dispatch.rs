@@ -244,6 +244,7 @@ impl<'a> ClientContext<'a> {
         self.hub.broadcast(
             topic,
             &encoded,
+            opcode,
             opcode.class(),
             coalesce_key,
             self.now,
@@ -254,26 +255,32 @@ impl<'a> ClientContext<'a> {
 
     /// Pushes a frame into the requester's own mailbox, counting a drop if backpressure discards it.
     fn send_to_self(&self, encoded: Bytes, class: DeliveryClass, coalesce_key: Option<u64>) {
-        let outcome = self
-            .session
-            .outbound()
-            .push(encoded, class, coalesce_key, self.now);
+        let outcome =
+            self.session
+                .outbound()
+                .push(encoded, class, self.opcode, coalesce_key, self.now);
         if let PushOutcome::Dropped(dropped) = outcome {
             self.meters.frame_dropped(dropped);
         }
     }
 }
 
-/// Everything a [`Dispatcher`] is told about one `SUBSCRIBE`: who is asking, on which session, and
-/// when.
+/// Everything a [`Dispatcher`] is told about one `SUBSCRIBE`: who is asking, on which session,
+/// in which bandwidth mode, and when.
 ///
 /// Deliberately not a [`ClientContext`]. An authorization decision has no business replying to the
 /// caller or publishing to a topic, and a type that cannot do either cannot do it by accident. The
 /// topics themselves are passed alongside this, as a slice, because the answer has to be a batch:
 /// one round trip per topic would put 512 domain reads behind a single frame.
+///
+/// The bandwidth mode is here because one authorization is mode-dependent (section 159): a
+/// session that narrowed its presence scope to the conversations it has open may not add a
+/// peer's presence stream, and "which streams a low-bandwidth session may hold" is a domain
+/// question asked in domain terms — the transport supplies the mode and forgets it.
 pub struct TopicRequest<'a> {
     identity: &'a Identity,
     session_id: Id,
+    mode: BandwidthMode,
     now: Timestamp,
 }
 
@@ -283,10 +290,16 @@ impl<'a> TopicRequest<'a> {
     /// Called by the connection driver on every `SUBSCRIBE`, and by the composition root's
     /// integration harness when it drives a dispatcher directly against a built graph.
     #[must_use]
-    pub fn new(identity: &'a Identity, session_id: Id, now: Timestamp) -> Self {
+    pub fn new(
+        identity: &'a Identity,
+        session_id: Id,
+        mode: BandwidthMode,
+        now: Timestamp,
+    ) -> Self {
         Self {
             identity,
             session_id,
+            mode,
             now,
         }
     }
@@ -301,6 +314,17 @@ impl<'a> TopicRequest<'a> {
     #[must_use]
     pub fn session_id(&self) -> Id {
         self.session_id
+    }
+
+    /// The bandwidth mode the session negotiated in its `HELLO`.
+    ///
+    /// The one knob of section 75 an authorization may need: section 159 narrows what a
+    /// low-bandwidth session is delivered, and the narrowing happens here rather than in the
+    /// fan-out, because refusing a subscription costs nothing while filtering a broadcast
+    /// costs a check per subscriber per frame.
+    #[must_use]
+    pub fn bandwidth_mode(&self) -> BandwidthMode {
+        self.mode
     }
 
     /// The server's notion of now, sampled once when the frame arrived.

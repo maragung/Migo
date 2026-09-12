@@ -8,6 +8,17 @@
  * with backoff and resumes the session so in-flight requests are answered by the replay rather than
  * lost.
  *
+ * # Failing over between nodes
+ *
+ * When a `failoverServers` list is supplied (§170), the handshake that fails because the node is
+ * unreachable advances to the next untried candidate under the same promise: a caller waiting on
+ * `connect()` never learns a node died mid-connect, and a reconnect that cannot reach its node
+ * lands on a neighbour instead. A session does not follow the failover — session state lives on
+ * the node that minted it — so the fresh node's WELCOME is a fresh session and the reset path
+ * (`onReset`) hands the app a resubscribe-and-resync, exactly as a resume that found nothing
+ * would. A node that *answers* with a refusal is never failed over: the refusal came from a
+ * working node, and every other node would repeat it.
+ *
  * # The sequencing contract
  *
  * The server assigns a `frame_seq` to a server→client frame iff it is Critical and it left through
@@ -114,6 +125,18 @@ export interface TransportOptions {
    * so tests can stub the socket without going through a real network.
    */
   server: ServerEndpoint;
+  /**
+   * Other nodes this transport may connect to when `server` cannot be reached (§170). The first
+   * connect starts at `server`; a handshake that fails because the node is unreachable — refused,
+   * dropped, never answered — advances to the next untried candidate before giving up. A server
+   * that *answered* with a refusal (a rejected token, an unsupported version) is not failed over:
+   * it spoke, and every other node would say the same thing. Once connected, the transport stays
+   * on that node until it drops, then tries it again first (a blip deserves a same-node retry)
+   * before advancing. The list comes from the config document's `nodes` field — the node-router
+   * module builds it — and a missing list means the single-node posture, where this
+   * transport behaves exactly as it did before the field existed.
+   */
+  failoverServers?: ServerEndpoint[];
   /** The handshake parameters. */
   hello: HelloParams;
   /** The WebSocket factory; defaults to the global `WebSocket`. */
@@ -179,6 +202,13 @@ export class GatewayTransport {
   readonly #maxReconnectDelayMs: number;
   readonly #makeSocket: WebSocketFactory;
 
+  /** The candidate nodes, the user's `server` first (§170). One entry when no failover list. */
+  readonly #servers: ServerEndpoint[];
+  /** Which candidate a socket is being opened against. */
+  #serverIndex = 0;
+  /** How many candidates this connection cycle has already advanced past. */
+  #failoversThisCycle = 0;
+
   #ws: WebSocket | null = null;
   #state: ConnectionState = 'idle';
   #session: SessionInfo | null = null;
@@ -221,11 +251,19 @@ export class GatewayTransport {
     this.#deviceId = options.hello.deviceId;
     const factory = options.webSocketFactory ?? defaultWebSocketFactory();
     this.#makeSocket = factory;
+    this.#servers = [options.server, ...(options.failoverServers ?? [])];
   }
 
   /** The current lifecycle state. */
   get state(): ConnectionState {
     return this.#state;
+  }
+
+  /** The node a socket is open (or being opened) against — the failover machinery's position. */
+  get currentServer(): ServerEndpoint {
+    // The list always carries at least the configured server; the fallbacks only satisfy the
+    // compiler's view of an indexed array.
+    return this.#servers[this.#serverIndex] ?? this.#servers[0] ?? this.#options.server;
   }
 
   /** The negotiated session, or null before the first WELCOME. */
@@ -247,6 +285,7 @@ export class GatewayTransport {
   connect(): Promise<void> {
     this.#shouldReconnect = true;
     this.#isReconnect = false;
+    this.#failoversThisCycle = 0;
     return this.#open();
   }
 
@@ -287,6 +326,7 @@ export class GatewayTransport {
     clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = null;
     this.#reconnectAttempt = 0;
+    this.#failoversThisCycle = 0;
     this.#open().catch(() => {
       // A failed reconnect closes the socket, whose onclose schedules the next attempt; unless
       // the failure was a terminal handshake rejection, which cleared #shouldReconnect.
@@ -390,34 +430,46 @@ export class GatewayTransport {
 
   // --- connection lifecycle -------------------------------------------------------------------
 
-  /** Opens a socket and settles when the handshake reaches Ready. */
+  /** Opens a socket against the current candidate and settles when the handshake reaches Ready. */
   #open(): Promise<void> {
     this.#setState(this.#isReconnect ? 'reconnecting' : 'connecting');
     return new Promise<void>((resolve, reject) => {
       this.#handshake = { resolve, reject };
-      let ws: WebSocket;
-      try {
-        ws = this.#makeSocket(gatewayUrl(this.#options.server));
-      } catch (cause) {
-        this.#handshake = null;
-        reject(new TransportError(`failed to open socket: ${String(cause)}`));
-        return;
-      }
-      ws.binaryType = 'arraybuffer';
-      this.#ws = ws;
-      ws.onopen = () => {
-        void this.#sendHello();
-      };
-      ws.onmessage = (event: MessageEvent) => {
-        this.#onMessage(event.data);
-      };
-      ws.onerror = () => {
-        // `onclose` always follows and carries the actionable outcome; nothing to do here.
-      };
-      ws.onclose = (event: CloseEvent) => {
-        this.#onClose(event.code, event.reason);
-      };
+      this.#openSocket();
     });
+  }
+
+  /**
+   * Creates the socket for the current candidate and wires its handlers.
+   *
+   * Split from {@link #open} because the handshake's promise outlives one socket: when a node is
+   * unreachable, {@link #failHandshake} advances to the next candidate and calls this again under
+   * the *same* promise — the caller waiting on `connect()` never learns a node died mid-connect.
+   * A construction failure goes to {@link #failHandshake} like every other handshake failure, so
+   * it gets the same failover chance.
+   */
+  #openSocket(): void {
+    let ws: WebSocket;
+    try {
+      ws = this.#makeSocket(gatewayUrl(this.currentServer));
+    } catch (cause) {
+      this.#failHandshake(new TransportError(`failed to open socket: ${String(cause)}`));
+      return;
+    }
+    ws.binaryType = 'arraybuffer';
+    this.#ws = ws;
+    ws.onopen = () => {
+      void this.#sendHello();
+    };
+    ws.onmessage = (event: MessageEvent) => {
+      this.#onMessage(event.data);
+    };
+    ws.onerror = () => {
+      // `onclose` always follows and carries the actionable outcome; nothing to do here.
+    };
+    ws.onclose = (event: CloseEvent) => {
+      this.#onClose(event.code, event.reason);
+    };
   }
 
   /** Builds and sends the HELLO frame, with a resume request when reconnecting. */
@@ -581,6 +633,7 @@ export class GatewayTransport {
   /** Marks the session Ready, settling the handshake and starting the heartbeat. */
   #onReady(): void {
     this.#reconnectAttempt = 0;
+    this.#failoversThisCycle = 0;
     this.#setState('ready');
     this.#startHeartbeat();
     const settle = this.#handshake;
@@ -594,13 +647,24 @@ export class GatewayTransport {
     }
   }
 
-  /** Fails the in-flight handshake and closes the socket. */
+  /** Fails the in-flight handshake, advancing to another node when the failure is a dead link. */
   #failHandshake(error: Error): void {
     const settle = this.#handshake;
-    this.#handshake = null;
     this.#awaitingWelcome = false;
-    // A handshake rejection is terminal for this attempt; do not auto-reconnect a refused token or
-    // an unsupported version, which would just be refused again.
+    // A handshake rejection is terminal for this attempt — unless the node never answered at
+    // all. A TransportError or a TimeoutError means the link is gone (refused, dropped, or
+    // silent), and §170's answer is the next node: keep the promise alive and try the next
+    // untried candidate. A RemoteError is a node that answered and refused — a rejected token
+    // is rejected by every node, so failing over would only spread the refusal around. Each
+    // cycle advances at most once per candidate, so one connect() tries each node at most once
+    // and then rejects with the last failure.
+    if (settle !== null && !(error instanceof RemoteError) && this.#tryAdvanceServer()) {
+      this.#detachSocket();
+      this.#handshake = settle;
+      this.#openSocket();
+      return;
+    }
+    this.#handshake = null;
     this.#shouldReconnect = false;
     if (this.#ws !== null) {
       try {
@@ -612,6 +676,40 @@ export class GatewayTransport {
     }
     this.#setState('closed');
     settle?.reject(error);
+  }
+
+  /**
+   * Advances to the next candidate node, or returns false when this cycle has already tried them
+   * all.
+   */
+  #tryAdvanceServer(): boolean {
+    if (this.#failoversThisCycle >= this.#servers.length - 1) {
+      return false;
+    }
+    this.#serverIndex = (this.#serverIndex + 1) % this.#servers.length;
+    this.#failoversThisCycle += 1;
+    return true;
+  }
+
+  /** Detaches and closes the current socket so its handlers cannot touch the transport again. */
+  #detachSocket(): void {
+    const stale = this.#ws;
+    if (stale === null) {
+      return;
+    }
+    // Null every handler before closing: the old socket's onclose must not run #onClose (the
+    // failover branch re-opens under the same handshake promise), and a late message must not
+    // be dispatched as though this transport still owned the socket.
+    stale.onopen = () => {};
+    stale.onmessage = () => {};
+    stale.onerror = () => {};
+    stale.onclose = () => {};
+    try {
+      stale.close();
+    } catch {
+      // A close on an already-closing socket is harmless.
+    }
+    this.#ws = null;
   }
 
   /** Handles socket closure: reconnect with backoff unless the close was intentional. */
@@ -636,6 +734,9 @@ export class GatewayTransport {
   #scheduleReconnect(): void {
     this.#setState('reconnecting');
     this.#isReconnect = true;
+    // A fresh backoff round gets a fresh sweep of the candidates: this round may fail over to
+    // each untried node once, exactly like a first connect would.
+    this.#failoversThisCycle = 0;
     const exponential = RECONNECT_BASE_MS * 2 ** this.#reconnectAttempt;
     const capped = Math.min(this.#maxReconnectDelayMs, exponential);
     const jittered = capped * (0.5 + Math.random() * 0.5);

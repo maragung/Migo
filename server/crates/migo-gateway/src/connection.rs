@@ -180,10 +180,19 @@ impl<T: Transport> Connection<'_, T> {
 
         // The slot is now held. The only exits below are a failed WELCOME (which releases it and
         // returns None) and success (which hands it to the session, released in teardown).
+        //
+        // The mailbox is built from the mode the client declared, so the cadence it derives
+        // (section 159) — the heartbeat this WELCOME advertises, the presence floor its queue
+        // enforces, the typing suppression it applies — is a fact of the session from its first
+        // frame rather than something the writer re-derives later.
+        let heartbeat_base_ms =
+            u32::try_from(self.gateway.settings.heartbeat.as_millis()).unwrap_or(u32::MAX);
         let outbound = Arc::new(Outbound::new(
             self.gateway.settings.queue_capacity,
             self.gateway.settings.resume_buffer_frames,
             self.gateway.settings.resume_window_ms,
+            hello.bandwidth_mode,
+            heartbeat_base_ms,
         ));
         let (resumed, resume_from_seq) = match &plan {
             Plan::Resume {
@@ -221,6 +230,7 @@ impl<T: Transport> Connection<'_, T> {
                 resumed,
                 resume_from_seq,
                 identity.as_ref(),
+                outbound.cadence(),
             )
             .await
         {
@@ -458,6 +468,7 @@ impl<T: Transport> Connection<'_, T> {
         resumed: Option<bool>,
         resume_from_seq: Option<u64>,
         identity: Option<&Identity>,
+        cadence: migo_protocol::Cadence,
     ) -> bool {
         let gateway = self.gateway;
         let welcome = Welcome {
@@ -471,8 +482,13 @@ impl<T: Transport> Connection<'_, T> {
                 max_batch_items: u32::try_from(migo_wire::limits::MAX_BATCH_ITEMS)
                     .unwrap_or(u32::MAX),
                 max_subscriptions: u32::try_from(MAX_SUBSCRIPTIONS).unwrap_or(u32::MAX),
-                heartbeat_ms: u32::try_from(gateway.settings.heartbeat.as_millis())
-                    .unwrap_or(u32::MAX),
+                // The mode-adjusted heartbeat of section 159, not the node's base one: a
+                // LowData session is told to beat half as often and an UltraLowData one a
+                // quarter as often, and every deadline derived from what was advertised —
+                // the liveness deadline below, the presence TTL in the domain — reads this
+                // same cadence, so a client obeying its WELCOME is never judged by a number
+                // it was never given.
+                heartbeat_ms: cadence.heartbeat_ms,
             },
             resumed,
             resume_from_seq,
@@ -509,9 +525,13 @@ impl<T: Transport> Connection<'_, T> {
     async fn ready_loop(&mut self, established: &mut Established) -> Closed {
         let shutdown = self.gateway.shutdown.clone();
         let outbound = Arc::clone(&established.outbound);
-        let heartbeat_deadline_ms = u64::try_from(self.gateway.settings.heartbeat.as_millis())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(2);
+        // Two missed heartbeats closes the session — counted in the heartbeat this session
+        // was actually told to send (section 159), not the node's base one. An UltraLowData
+        // session beating four times more slowly must not be pronounced dead between two
+        // punctual beats, and the number it was told is the one in its mailbox's cadence,
+        // the same number the WELCOME carried.
+        let heartbeat_deadline_ms =
+            u64::from(established.handle.cadence().heartbeat_ms).saturating_mul(2);
         let lagging_deadline_ms = self.gateway.settings.lagging_deadline_ms;
         // The hard bound on one drain attempt (section 160). A drain that completes but took
         // longer than `lagging_deadline_ms` is judged at the loop head below; a drain that never
@@ -741,7 +761,7 @@ impl<T: Transport> Connection<'_, T> {
     /// bytes and buys nothing. Order is the mailbox's order throughout, so nothing a client could
     /// notice is reordered.
     async fn flush(&mut self, outbound: &Outbound) -> bool {
-        let mut ready = outbound.take_ready();
+        let mut ready = outbound.take_ready(self.gateway.now());
         if !self.batching {
             if ready.is_empty() {
                 return true;
@@ -770,7 +790,7 @@ impl<T: Transport> Connection<'_, T> {
             tokio::select! {
                 () = &mut linger => break,
                 () = outbound.wait() => {
-                    let more = outbound.take_ready();
+                    let more = outbound.take_ready(self.gateway.now());
                     if more.is_empty() && outbound.is_closed() {
                         break;
                     }
@@ -1203,7 +1223,12 @@ impl<T: Transport> Connection<'_, T> {
             .gateway
             .dispatcher
             .authorize_topics(
-                &TopicRequest::new(identity, established.session_id, now),
+                &TopicRequest::new(
+                    identity,
+                    established.session_id,
+                    established.handle.bandwidth_mode(),
+                    now,
+                ),
                 asked,
             )
             .await;
@@ -1538,7 +1563,7 @@ fn push_message<M: Encode>(
 ) {
     match encode_message(opcode.to_wire(), correlation, message, compression) {
         Ok(bytes) => {
-            if let PushOutcome::Dropped(dropped) = outbound.push(bytes, class, None, now) {
+            if let PushOutcome::Dropped(dropped) = outbound.push(bytes, class, opcode, None, now) {
                 meters.frame_dropped(dropped);
             }
         }
@@ -1554,6 +1579,10 @@ fn push_message<M: Encode>(
 
 /// Encodes an error and pushes it into a mailbox as a Critical frame — a client that asked for
 /// something is owed the verdict, so an error reply is never dropped.
+///
+/// The wire opcode is echoed from the request it answers; the metadata the mailbox consults is
+/// that of the reply, and a reply is neither paced nor suppressed, so the fallback for an
+/// unknown wire value is the one opcode that is neither.
 fn push_error(
     outbound: &Outbound,
     meters: &Meters,
@@ -1563,10 +1592,11 @@ fn push_error(
     now: Timestamp,
     compression: bool,
 ) {
-    match encode_error(opcode, correlation, error, compression) {
+    let opcode = Opcode::from_wire(opcode).unwrap_or(Opcode::Error);
+    match encode_error(opcode.to_wire(), correlation, error, compression) {
         Ok(bytes) => {
             if let PushOutcome::Dropped(dropped) =
-                outbound.push(bytes, DeliveryClass::Critical, None, now)
+                outbound.push(bytes, DeliveryClass::Critical, opcode, None, now)
             {
                 meters.frame_dropped(dropped);
             }

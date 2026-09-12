@@ -578,6 +578,27 @@ impl Default for GatewayConfig {
     }
 }
 
+/// One peer node a client may be directed to, as `/v1/config` reports it.
+///
+/// The mesh's own allow-list names peers by node id alone, because a peer's
+/// address is the operator's business. This entry carries the client-facing
+/// half the allow-list cannot: the public URL a client reaches the node at.
+/// The two lists are written by the same operator but gate different doors —
+/// the allow-list admits server-to-server links, this one names where a
+/// client may be sent — so an entry here is not required to be a mesh peer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClientPeer {
+    /// The peer's node id, as the mesh allow-list names it.
+    pub node_id: String,
+    /// The node's region label, carried straight from its own identity.
+    pub region: String,
+    /// The node's country label, for display.
+    pub country: String,
+    /// The base URL a client reaches the node at, e.g. `https://node-b.example`.
+    pub public_url: String,
+}
+
 /// Server-to-server mesh.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -587,6 +608,11 @@ pub struct FederationConfig {
     /// Explicit allow-list of peer node ids. Empty means accept none.
     #[serde(deserialize_with = "comma_separated_strings")]
     pub allowed_peers: Vec<String>,
+    /// Peer nodes the config document offers to clients, so a client can
+    /// measure latency per node and fail over between them (section 170).
+    /// Empty — the single-node posture — means the document lists this node
+    /// alone and clients have nowhere else to go.
+    pub client_peers: Vec<ClientPeer>,
     /// Rejection threshold for handshake clock skew.
     pub max_clock_skew_seconds: u64,
     /// Per-peer outbound queue depth.
@@ -598,6 +624,7 @@ impl Default for FederationConfig {
         Self {
             enabled: false,
             allowed_peers: Vec::new(),
+            client_peers: Vec::new(),
             max_clock_skew_seconds: 60,
             peer_queue_capacity: 4096,
         }
@@ -1008,6 +1035,37 @@ impl Config {
                 "federation.max_clock_skew_seconds above 300 makes replay protection meaningless"
                     .to_string(),
             );
+        }
+        for peer in &self.federation.client_peers {
+            if peer.node_id.trim().is_empty() {
+                problems
+                    .push("federation.client_peers has an entry with an empty node_id".to_string());
+            }
+            if peer.public_url.trim().is_empty() {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} has an empty public_url",
+                    peer.node_id
+                ));
+                continue;
+            }
+            let scheme = peer
+                .public_url
+                .split("://")
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if peer.public_url.contains("://") && scheme != "http" && scheme != "https" {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} public_url must be http(s), not {:?}",
+                    peer.node_id, scheme
+                ));
+            }
+            if !peer.public_url.contains("://") {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} public_url must be an absolute URL",
+                    peer.node_id
+                ));
+            }
         }
 
         // --- safety checks that only apply outside development ---
@@ -1598,6 +1656,52 @@ mod tests {
         let rendered = config.validate().expect_err("must refuse").to_string();
         assert!(
             rendered.contains("federation.enabled is false"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn client_peers_round_trip_and_a_valid_list_passes() {
+        let config = Config::from_toml_str(
+            "[federation]\nenabled = true\n\
+             [[federation.client_peers]]\nnode_id = \"node-b\"\nregion = \"eu-central\"\n\
+             country = \"DE\"\npublic_url = \"https://node-b.example\"\n",
+            &[],
+        )
+        .expect("builds");
+        config.validate().expect("a well-formed peer list is valid");
+        let peer = &config.federation.client_peers[0];
+        assert_eq!(peer.node_id, "node-b");
+        assert_eq!(peer.public_url, "https://node-b.example");
+    }
+
+    #[test]
+    fn client_peer_entries_are_shape_checked() {
+        let config = Config::from_toml_str(
+            "[[federation.client_peers]]\nnode_id = \"\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"https://ok.example\"\n\
+             [[federation.client_peers]]\nnode_id = \"no-url\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"\"\n\
+             [[federation.client_peers]]\nnode_id = \"ftp-node\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"ftp://files.example\"\n\
+             [[federation.client_peers]]\nnode_id = \"relative\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"node-d.example:8443\"\n",
+            &[],
+        )
+        .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("empty node_id"), "{rendered}");
+        assert!(
+            rendered.contains(r#"client_peers entry "no-url" has an empty public_url"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"client_peers entry "ftp-node" public_url must be http(s)"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains(r#"client_peers entry "relative" public_url must be an absolute URL"#),
             "{rendered}"
         );
     }
