@@ -326,9 +326,10 @@ pub struct Found {
 ///
 /// # Why this is not `migo_protocol::UserProfile`
 ///
-/// The wire struct has thirteen fields and this crate can honestly fill eight of them.
-/// `level` belongs to progression, `presence` to presence, and `badges` and `verified` to
-/// moderation. Returning the wire struct from here would mean returning it with those
+/// The wire struct has fifteen fields and this crate can honestly fill ten of them.
+/// `level` belongs to progression, `presence` to presence, `badges` and `verified` to
+/// moderation, and `avatar_url` to the media service that mints the signed link.
+/// Returning the wire struct from here would mean returning it with those
 /// fields defaulted, and a defaulted `verified: false` on a verified account is not a
 /// missing field, it is a wrong answer that looks like an answer. The composition root
 /// joins the other domains in and leaves absent what is absent.
