@@ -7303,6 +7303,18 @@ data class CallStateEvent(
     val state: Long,
     /** Present when state is Ended. */
     val reason: Long? = null,
+    /** SFU events: the conversation the group call belongs to. */
+    val conversationId: Id? = null,
+    /** SFU events: the participant the event names - who joined, or who left. */
+    val userId: Id? = null,
+    /** SFU events: the device that participant joined with. */
+    val deviceId: Id? = null,
+    /** SFU events: the call's size after the change. */
+    val participantCount: Long? = null,
+    /** SFU join announcements: the joiner's sealed media description, passed through unopened. */
+    val sealedOffer: ByteArray? = null,
+    /** SFU roster events: the full participant list, sent to a joiner's own topic. */
+    val participants: List<CallSfuParticipant>? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -7310,11 +7322,54 @@ data class CallStateEvent(
         w.u32(state)
         var present = 0
         if (reason != null) present++
+        if (conversationId != null) present++
+        if (userId != null) present++
+        if (deviceId != null) present++
+        if (participantCount != null) present++
+        if (sealedOffer != null) present++
+        if (participants != null) present++
         w.u32(present)
         if (reason != null) {
             val value = reason
             w.optional(1) { w ->
                 w.u32(value)
+            }
+        }
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(2) { w ->
+                w.id(value)
+            }
+        }
+        if (userId != null) {
+            val value = userId
+            w.optional(3) { w ->
+                w.id(value)
+            }
+        }
+        if (deviceId != null) {
+            val value = deviceId
+            w.optional(4) { w ->
+                w.id(value)
+            }
+        }
+        if (participantCount != null) {
+            val value = participantCount
+            w.optional(5) { w ->
+                w.u32(value)
+            }
+        }
+        if (sealedOffer != null) {
+            val value = sealedOffer
+            w.optional(6) { w ->
+                w.bytes(value)
+            }
+        }
+        if (participants != null) {
+            val value = participants
+            w.optional(7) { w ->
+                w.listLen(value.size)
+                for (item in value) { item.encode(w) }
             }
         }
         w.leave()
@@ -7326,16 +7381,65 @@ data class CallStateEvent(
             val callId = r.id()
             val state = r.u32()
             var reason: Long? = null
+            var conversationId: Id? = null
+            var userId: Id? = null
+            var deviceId: Id? = null
+            var participantCount: Long? = null
+            var sealedOffer: ByteArray? = null
+            var participants: List<CallSfuParticipant>? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> reason = sub.u32()
+                    2L -> conversationId = sub.id()
+                    3L -> userId = sub.id()
+                    4L -> deviceId = sub.id()
+                    5L -> participantCount = sub.u32()
+                    6L -> sealedOffer = sub.bytes()
+                    7L -> participants = run { val n = sub.listLen(); val acc = ArrayList<CallSfuParticipant>(n); for (i in 0 until n) acc.add(CallSfuParticipant.decode(sub)); acc }
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return CallStateEvent(callId, state, reason)
+            return CallStateEvent(callId, state, reason, conversationId, userId, deviceId, participantCount, sealedOffer, participants)
+        }
+    }
+}
+
+/** One participant in an SFU group call, as a joining client's roster line carries them. The sealed offer is the participant's own media description, sealed for the call's members; the server stores and re-serves it without ever opening it. */
+data class CallSfuParticipant(
+    /** The participant's account. */
+    val userId: Id,
+    /** The device they joined with; relays target it. */
+    val deviceId: Id,
+    val joinedAt: Long,
+    /** E2E-sealed media description; the server never reads it. */
+    val sealedOffer: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.id(deviceId)
+        w.timestamp(joinedAt)
+        w.bytes(sealedOffer)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallSfuParticipant {
+            r.enter()
+            val userId = r.id()
+            val deviceId = r.id()
+            val joinedAt = r.timestamp()
+            val sealedOffer = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallSfuParticipant(userId, deviceId, joinedAt, sealedOffer)
         }
     }
 }

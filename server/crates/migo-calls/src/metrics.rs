@@ -148,6 +148,53 @@ impl RelayKind {
     }
 }
 
+/// How a group-call join ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupJoinKind {
+    /// Seated; the roster hears the announcement.
+    Joined,
+    /// The same seat again: the roster is served, nobody is told.
+    Duplicate,
+    /// The roster is at the ceiling.
+    Full,
+    /// Membership or the conversation's call policy said no.
+    Blocked,
+    /// The id was reused for a different conversation's call.
+    Conflict,
+    /// Refused on shape before anything was read.
+    Invalid,
+    /// Refused by the rate limiter.
+    RateLimited,
+}
+
+impl GroupJoinKind {
+    const ALL: [Self; 7] = [
+        Self::Joined,
+        Self::Duplicate,
+        Self::Full,
+        Self::Blocked,
+        Self::Conflict,
+        Self::Invalid,
+        Self::RateLimited,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::Duplicate => "duplicate",
+            Self::Full => "full",
+            Self::Blocked => "blocked",
+            Self::Conflict => "conflict",
+            Self::Invalid => "invalid",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// The series, resolved once at construction.
 pub(crate) struct Meters {
     invite: Vec<Arc<Counter>>,
@@ -156,6 +203,9 @@ pub(crate) struct Meters {
     relayed: Vec<Arc<Counter>>,
     connected: Arc<Counter>,
     expired: Arc<Counter>,
+    group_join: Vec<Arc<Counter>>,
+    group_left: Arc<Counter>,
+    group_relayed: Arc<Counter>,
 }
 
 impl Meters {
@@ -220,6 +270,26 @@ impl Meters {
                 "Invites retired by the expiry sweep or on answer.",
                 &[],
             ),
+            group_join: GroupJoinKind::ALL
+                .iter()
+                .map(|outcome| {
+                    registry.counter(
+                        "migo_calls_group_join_total",
+                        "Group-call joins, by outcome.",
+                        &[("outcome", outcome.label())],
+                    )
+                })
+                .collect(),
+            group_left: registry.counter(
+                "migo_calls_group_left_total",
+                "Group-call seats vacated, by leave or replacement.",
+                &[],
+            ),
+            group_relayed: registry.counter(
+                "migo_calls_group_relayed_total",
+                "Sealed payloads relayed between group-call devices.",
+                &[],
+            ),
         }
     }
 
@@ -259,6 +329,20 @@ impl Meters {
         if let Some(counter) = self.ended.get(EndReason::NoAnswer.to_wire() as usize) {
             counter.add(count as u64);
         }
+    }
+
+    pub(crate) fn group_join(&self, outcome: GroupJoinKind) {
+        if let Some(counter) = self.group_join.get(outcome.index()) {
+            counter.inc();
+        }
+    }
+
+    pub(crate) fn group_left(&self) {
+        self.group_left.inc();
+    }
+
+    pub(crate) fn group_relayed(&self) {
+        self.group_relayed.inc();
     }
 }
 

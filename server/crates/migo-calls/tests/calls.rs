@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use migo_cache::MemoryCache;
 use migo_calls::model::{
     invite_status, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig,
-    EndReason, RING_TTL_MS,
+    EndReason, GroupJoinOutcome, MAX_GROUP_PARTICIPANTS, RING_TTL_MS,
 };
 use migo_calls::store::{CallStore, MemoryCallStore};
 use migo_calls::traits::{CallGate, Callkeeper};
@@ -131,6 +131,18 @@ impl TestGate {
             members: HashMap::new(),
             blocked: Vec::new(),
             unreachable: Vec::new(),
+        }
+    }
+
+    /// The same, admitting enough distinct members to fill a roster to its
+    /// ceiling and still name one more — the seats are per account, so the
+    /// ceiling test needs accounts, not devices.
+    fn wide() -> Self {
+        let mut members = vec![id(ALICE), id(BOB), id(CAROL)];
+        members.extend((200..200 + MAX_GROUP_PARTICIPANTS as u128 + 1).map(id));
+        Self {
+            members: HashMap::from([(id(CONVERSATION), members)]),
+            ..Self::open()
         }
     }
 }
@@ -1098,6 +1110,438 @@ async fn every_series_is_registered_at_zero() {
         "migo_calls_relayed_total",
         "migo_calls_connected_total",
         "migo_calls_expired_total",
+    ] {
+        assert!(
+            rendered.contains(series),
+            "{series} must exist before anything happens"
+        );
+    }
+}
+// --- the group call, as this node forwards it ---------------------------------
+//
+// The SFU's questions, asked where the answers are invisible when wrong:
+// who gets a seat, who hears about it, what a retry costs (nothing), and
+// what the relay refuses to move.
+
+const GROUP_CALL: u128 = 70;
+
+#[allow(dead_code)]
+fn group_join_frame(call_id: u128, sealed: &[u8]) -> CallInviteWire {
+    CallInviteWire {
+        call_id: id(call_id),
+        conversation_id: id(CONVERSATION),
+        callee_id: id(BOB), // ignored by the group path; the roster is the audience
+        media_kind: 0,
+        caller_device: id(ALICE_PHONE),
+        capabilities: 0,
+        sealed_offer: sealed.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn a_group_join_seats_the_roster_and_announces_it() {
+    let harness = Harness::new();
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Joined);
+    assert_eq!(call.participants.len(), 1);
+    assert_eq!(call.participants[0].account_id, id(ALICE));
+    // The announcement names the joiner and the size after the change.
+    assert_eq!(events.len(), 1, "a first join announces itself once");
+    let event = &events[0];
+    assert_eq!(event.user_id, Some(id(ALICE)));
+    assert_eq!(event.participant_count, Some(1));
+    assert_eq!(
+        event.sealed_offer.as_deref(),
+        Some(b"alice-sealed".as_ref())
+    );
+}
+
+#[tokio::test]
+async fn a_retried_group_join_is_the_same_seat() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Duplicate);
+    assert_eq!(call.participants.len(), 1, "no second seat for one device");
+    assert!(events.is_empty(), "nobody is told about a retry");
+}
+
+#[tokio::test]
+async fn two_members_join_and_each_roster_holds_both() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &bob(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Joined);
+    assert_eq!(call.participants.len(), 2);
+    assert_eq!(
+        events
+            .last()
+            .expect("the second join announces")
+            .participant_count,
+        Some(2)
+    );
+    assert_eq!(call.participants[0].account_id, id(ALICE));
+    assert_eq!(call.participants[1].account_id, id(BOB));
+    // The roster preserves each participant's sealed offer untouched.
+    assert_eq!(call.participants[0].sealed_offer, b"alice-sealed");
+    assert_eq!(call.participants[1].sealed_offer, b"bob-sealed");
+}
+
+#[tokio::test]
+async fn a_stranger_cannot_join_the_call() {
+    let harness = Harness::closed();
+    let error = harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_new_device_replaces_the_seat_and_the_roster_hears_both_halves() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"phone-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    let laptop = caller(ALICE, BOB_LAPTOP, NOW);
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &laptop,
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"laptop-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Joined);
+    assert_eq!(call.participants.len(), 1, "one account holds one seat");
+    assert_eq!(call.participants[0].device_id, id(BOB_LAPTOP));
+    // The replacement is two facts in order: the departure of the seat the
+    // account held, then the arrival of the new one. The old device's clients
+    // act on the departure; everyone else renders the arrival.
+    assert_eq!(
+        events.len(),
+        2,
+        "a replacement is a departure and an arrival"
+    );
+    assert_eq!(events[0].state, migo_calls::group_store::GROUP_STATE_ENDED);
+    assert_eq!(events[0].user_id, Some(id(ALICE)));
+    assert_eq!(events[0].device_id, Some(id(ALICE_PHONE)));
+    assert_eq!(events[0].participant_count, Some(0));
+    assert_eq!(
+        events[1].state,
+        migo_calls::group_store::GROUP_STATE_CONNECTED
+    );
+    assert_eq!(events[1].user_id, Some(id(ALICE)));
+    assert_eq!(events[1].device_id, Some(id(BOB_LAPTOP)));
+    assert_eq!(events[1].participant_count, Some(1));
+}
+
+#[tokio::test]
+async fn the_roster_ceiling_is_refused_not_silently_dropped() {
+    let harness = Harness::gated(TestGate::wide());
+    // Fill the roster to the ceiling with one seat per account — the seat is
+    // the account's, so cycling devices of a few accounts would only ever
+    // replace seats, never fill them.
+    let mut account: u128 = 200;
+    for _ in 0..MAX_GROUP_PARTICIPANTS {
+        let who = caller(account, account + 1000, NOW);
+        let sealed = format!("seat-{account}").into_bytes();
+        harness
+            .calls
+            .group_join(&who, id(GROUP_CALL), id(CONVERSATION), 0, sealed)
+            .await
+            .unwrap();
+        account += 1;
+    }
+    // An account that holds no seat now finds the roster full.
+    let who = caller(account, account + 1000, NOW);
+    let error = harness
+        .calls
+        .group_join(&who, id(GROUP_CALL), id(CONVERSATION), 0, b"x".to_vec())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::VALIDATION_FAILED);
+    // A seated account's replacement still fits: one account holds one seat,
+    // and a replacement does not grow the roster.
+    let seated = caller(200, 9000, NOW);
+    let (outcome, call, _) = harness
+        .calls
+        .group_join(
+            &seated,
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"replacement-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Joined);
+    assert_eq!(call.participants.len(), MAX_GROUP_PARTICIPANTS);
+}
+
+#[tokio::test]
+async fn a_leave_empties_the_seat_and_the_last_leave_retires_the_call() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_join(
+            &bob(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    let event = harness
+        .calls
+        .group_leave(&alice(NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap()
+        .expect("the departure is announced");
+    assert_eq!(event.user_id, Some(id(ALICE)));
+    assert_eq!(event.participant_count, Some(1));
+    // The last leave retires the call: the id is spent, and a later leave
+    // under it finds no call at all.
+    let event = harness
+        .calls
+        .group_leave(&bob(NOW + 2 * SECOND), id(GROUP_CALL))
+        .await
+        .unwrap()
+        .expect("the last departure is announced");
+    assert_eq!(event.participant_count, Some(0));
+    let error = harness
+        .calls
+        .group_leave(&bob(NOW + 3 * SECOND), id(GROUP_CALL))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_stranger_s_leave_changes_nothing_and_is_told_so() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    // Bob is a member of the conversation but holds no seat.
+    let event = harness
+        .calls
+        .group_leave(&bob(NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+    assert!(event.is_none(), "a seat nobody holds cannot leave");
+    // And the call is untouched.
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(call.participants.len(), 1);
+}
+
+#[tokio::test]
+async fn the_id_is_spent_on_the_conversation_it_was_minted_for() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    let error = harness
+        .calls
+        .group_join(&bob(NOW), id(GROUP_CALL), id(51), 0, b"bob-sealed".to_vec())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::IDEMPOTENCY_MISMATCH);
+}
+
+#[tokio::test]
+async fn a_group_relay_moves_only_between_seated_devices() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_join(
+            &bob(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    // Alice's device may relay toward Bob's.
+    let call = harness
+        .calls
+        .group_relay(
+            &alice(NOW + SECOND),
+            id(GROUP_CALL),
+            id(ALICE_PHONE),
+            id(BOB_PHONE),
+            b"sealed-sdp",
+        )
+        .await
+        .unwrap();
+    assert_eq!(call.participants.len(), 2);
+    // A device that holds no seat cannot relay.
+    let error = harness
+        .calls
+        .group_relay(
+            &bob(NOW + SECOND),
+            id(GROUP_CALL),
+            id(CAROL_PHONE),
+            id(BOB_PHONE),
+            b"sealed-sdp",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::PERMISSION_DENIED);
+    // And nobody may relay to a device outside the roster.
+    let error = harness
+        .calls
+        .group_relay(
+            &alice(NOW + SECOND),
+            id(GROUP_CALL),
+            id(ALICE_PHONE),
+            id(BOB_LAPTOP),
+            b"sealed-sdp",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::PERMISSION_DENIED);
+    // Nor to themselves.
+    let error = harness
+        .calls
+        .group_relay(
+            &alice(NOW + SECOND),
+            id(GROUP_CALL),
+            id(ALICE_PHONE),
+            id(ALICE_PHONE),
+            b"sealed-sdp",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn every_group_series_is_registered_at_zero() {
+    let harness = Harness::new();
+    let rendered = harness.registry.render();
+    for series in [
+        "migo_calls_group_join_total",
+        "migo_calls_group_left_total",
+        "migo_calls_group_relayed_total",
     ] {
         assert!(
             rendered.contains(series),

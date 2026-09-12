@@ -36,7 +36,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 
-use crate::model::{Call, CallIceWire, CallInviteWire, CallSdpWire, Caller, TurnServerWire};
+use crate::model::{
+    Call, CallIceWire, CallInviteWire, CallSdpWire, Caller, GroupCall, GroupJoinOutcome,
+    TurnServerWire,
+};
 
 /// The questions the call service must ask another domain, answered by the
 /// composition root.
@@ -254,6 +257,75 @@ pub trait Callkeeper: Send + Sync {
     /// a probe for which calls exist. Not rate limited, because it rides
     /// paths that already paid.
     async fn call(&self, caller: &Caller, call_id: Id) -> Result<Call>;
+
+    // --- the group call ---------------------------------------------------
+    //
+    // The SFU's half: seating a roster, telling it about itself, and moving
+    // sealed bytes between its devices. Events are return values for the same
+    // reason every 1:1 event is — only the dispatcher knows who is connected
+    // and which topic reaches them.
+
+    /// Joins (or re-joins) a group call bound to a conversation.
+    ///
+    /// Validates shape, charges the caller, and asks the gate in the 1:1
+    /// order: membership first, then blocks against the conversation's other
+    /// members are not asked pairwise — a group call's gate is membership and
+    /// the conversation's own call policy, because the roster is the
+    /// conversation's members, not a pair. A retried join from the same
+    /// device is the same seat: the same roster, no second announcement. A
+    /// join from a new device of a seated account replaces the seat and
+    /// announces the replacement as a departure and an arrival. The first
+    /// join mints the call; a later join under the same id naming a
+    /// *different* conversation is `IDEMPOTENCY_MISMATCH`.
+    ///
+    /// Returns the outcome, the roster as it stands after the join (the
+    /// joiner's own screen renders it directly), and the announcements the
+    /// *other* participants should hear, in order — a seat replacement is a
+    /// departure followed by an arrival, and a duplicate is an empty vec,
+    /// which changed nothing.
+    async fn group_join(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+        conversation_id: Id,
+        media_kind: u32,
+        sealed_offer: Vec<u8>,
+    ) -> Result<(
+        GroupJoinOutcome,
+        GroupCall,
+        Vec<migo_protocol::CallStateEvent>,
+    )>;
+
+    /// Leaves a group call.
+    ///
+    /// The leaving account is the caller's own; a stranger's leave changes
+    /// nothing and is told `NOT_FOUND`. Returns the departure event for the
+    /// remaining roster, and `None` when the caller held no seat (a retried
+    /// leave, or a leave that raced a replacement). The call whose last seat
+    /// emptied is retired by the store.
+    async fn group_leave(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+    ) -> Result<Option<migo_protocol::CallStateEvent>>;
+
+    /// Relays a sealed frame between two devices on a group call's roster.
+    ///
+    /// Same promise as the 1:1 relay, read against the roster instead of the
+    /// two named parties: the sender must be a seated device, the target must
+    /// be a *different* seated device, and the payload is returned exactly as
+    /// it arrived. Used by the dispatcher for `CALL_SDP`, `CALL_ICE`,
+    /// `CALL_RENEGOTIATE`, and `CALL_KEY_UPDATE` frames that name a group
+    /// call — the one relay method serves both, because the checks are the
+    /// same question asked of a different roster.
+    async fn group_relay(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+        from_device: Id,
+        to_device: Id,
+        sealed: &[u8],
+    ) -> Result<GroupCall>;
 }
 
 /// The call service, shared.

@@ -30,9 +30,11 @@
 //!
 //! # What this crate is not
 //!
-//! *Not an SFU.* Group calls are a separate deployment; the opcodes for them
-//! are answered `FEATURE_DISABLED` upstream and nothing here knows they
-//! exist.
+//! *Not a media plane.* The group call this node serves is the brief's SFU in
+//! its *forwarding* sense (section 166): a roster, its events, and sealed
+//! descriptions moved between seated devices. No media flows through this
+//! crate, no frame is ever opened, and an MCU's transcoding — forbidden for an
+//! E2E call — has no code to live in.
 //!
 //! *Not a TURN service.* Credentials come from operator configuration;
 //! [`Callkeeper::turn_servers`] returns what was configured and nothing
@@ -45,15 +47,21 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod group_store;
 mod metrics;
 pub mod model;
 pub mod service;
 pub mod store;
 pub mod traits;
 
+pub use group_store::{
+    participant_wire, roster_wire, GroupCallStore, GroupParticipantWire, MemoryGroupCallStore,
+    SharedGroupCallStore,
+};
 pub use model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig, EndReason,
-    InviteOutcome, TurnServerWire, MAX_SEALED_LEN, MEDIA_AUDIO, MEDIA_VIDEO, RING_TTL_MS,
+    GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome, TurnServerWire, MAX_SEALED_LEN,
+    MEDIA_AUDIO, MEDIA_VIDEO, RING_TTL_MS,
 };
 pub use service::{open, Calls};
 pub use store::{CallStore, MemoryCallStore, SharedCallStore};

@@ -5876,6 +5876,18 @@ export interface CallStateEvent {
   state: number;
   /** Present when state is Ended. */
   reason?: number;
+  /** SFU events: the conversation the group call belongs to. */
+  conversationId?: Id;
+  /** SFU events: the participant the event names - who joined, or who left. */
+  userId?: Id;
+  /** SFU events: the device that participant joined with. */
+  deviceId?: Id;
+  /** SFU events: the call's size after the change. */
+  participantCount?: number;
+  /** SFU join announcements: the joiner's sealed media description, passed through unopened. */
+  sealedOffer?: Uint8Array;
+  /** SFU roster events: the full participant list, sent to a joiner's own topic. */
+  participants?: CallSfuParticipant[];
 }
 
 export function encodeCallStateEvent(w: Writer, v: CallStateEvent): void {
@@ -5884,8 +5896,20 @@ export function encodeCallStateEvent(w: Writer, v: CallStateEvent): void {
   w.u32(v.state);
   let present = 0;
   if (v.reason !== undefined) present++;
+  if (v.conversationId !== undefined) present++;
+  if (v.userId !== undefined) present++;
+  if (v.deviceId !== undefined) present++;
+  if (v.participantCount !== undefined) present++;
+  if (v.sealedOffer !== undefined) present++;
+  if (v.participants !== undefined) present++;
   w.u32(present);
   if (v.reason !== undefined) { const value = v.reason; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(2, (w) => { w.id(value); }); }
+  if (v.userId !== undefined) { const value = v.userId; w.optional(3, (w) => { w.id(value); }); }
+  if (v.deviceId !== undefined) { const value = v.deviceId; w.optional(4, (w) => { w.id(value); }); }
+  if (v.participantCount !== undefined) { const value = v.participantCount; w.optional(5, (w) => { w.u32(value); }); }
+  if (v.sealedOffer !== undefined) { const value = v.sealedOffer; w.optional(6, (w) => { w.bytes(value); }); }
+  if (v.participants !== undefined) { const value = v.participants; w.optional(7, (w) => { { w.listLen(value.length); for (const item of value) { encodeCallSfuParticipant(w, item); } } }); }
   w.leave();
 }
 
@@ -5899,9 +5923,51 @@ export function decodeCallStateEvent(r: Reader): CallStateEvent {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.reason = sub.u32(); break;
+      case 2: out.conversationId = sub.id(); break;
+      case 3: out.userId = sub.id(); break;
+      case 4: out.deviceId = sub.id(); break;
+      case 5: out.participantCount = sub.u32(); break;
+      case 6: out.sealedOffer = sub.bytes(); break;
+      case 7: out.participants = ((): CallSfuParticipant[] => { const n = sub.listLen(); const v: CallSfuParticipant[] = []; for (let i = 0; i < n; i++) v.push(decodeCallSfuParticipant(sub)); return v; })(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
+  r.leave();
+  return out;
+}
+
+/** One participant in an SFU group call, as a joining client's roster line carries them. The sealed offer is the participant's own media description, sealed for the call's members; the server stores and re-serves it without ever opening it. */
+export interface CallSfuParticipant {
+  /** The participant's account. */
+  userId: Id;
+  /** The device they joined with; relays target it. */
+  deviceId: Id;
+  joinedAt: number;
+  /** E2E-sealed media description; the server never reads it. */
+  sealedOffer: Uint8Array;
+}
+
+export function encodeCallSfuParticipant(w: Writer, v: CallSfuParticipant): void {
+  w.enter();
+  w.id(v.userId);
+  w.id(v.deviceId);
+  w.timestamp(v.joinedAt);
+  w.bytes(v.sealedOffer);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallSfuParticipant(r: Reader): CallSfuParticipant {
+  r.enter();
+  const userId = r.id();
+  const deviceId = r.id();
+  const joinedAt = r.timestamp();
+  const sealedOffer = r.bytes();
+  const out: CallSfuParticipant = { userId, deviceId, joinedAt, sealedOffer } as CallSfuParticipant;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
   r.leave();
   return out;
 }

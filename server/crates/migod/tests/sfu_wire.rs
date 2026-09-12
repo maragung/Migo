@@ -1,0 +1,496 @@
+//! The group call answered on the wire: the frames a joining member cannot
+//! hear through the conversation topic alone.
+//!
+//! The SFU this node serves is a *forwarding* one (brief section 166): the
+//! roster, its events, and sealed descriptions moved between seated devices.
+//! The three tests here drive real TCP sessions against a bound migod and pin
+//! the properties the service's own tests cannot see:
+//!
+//! * **The joiner hears their roster.** The reply frame is a TURN list (the
+//!   shape the registry froze for the opcode), so the roster itself arrives
+//!   as a `CALL_SFU_EVENT` on the joiner's *own user topic* — the one topic
+//!   every session holds from its handshake, and the only one a client that
+//!   has not yet loaded the conversation is listening on.
+//! * **The roster hears the join.** A second member's join is published on
+//!   the conversation's topic, naming the joiner and the size after the
+//!   change; a session subscribed to the conversation receives it.
+//! * **A stranger's join is refused.** An account that is not a member of
+//!   the conversation gets `NOT_FOUND`, not a ring and not a hint about
+//!   which conversations hold calls — and the refusal is no longer the
+//!   `FEATURE_DISABLED` the opcode used to answer.
+//!
+//! Each test uses the reply rule as its clock: every frame waited for is one
+//! the server owes somebody, so the timeout is the assertion.
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use base64::Engine as _;
+use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
+use migo_core::{Clock, Config, Secret};
+use migo_protocol::{
+    from_frame, to_frame, CallInvite, CallStateEvent, ConversationCreateRequest, ConversationKind,
+    Encode, Frame, Hello, Opcode, Platform, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
+    Welcome, PROTOCOL_VERSION,
+};
+use migod::App;
+
+/// How long any single exchange may take before the test declares the server
+/// stuck — silence being the bug class these tests exist to catch.
+const STEP: Duration = Duration::from_secs(5);
+
+fn valid_token_key() -> String {
+    base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+}
+
+/// A development app with the TCP listener bound, as the listener tests build it.
+async fn build_app() -> App {
+    let config = Config::from_sources(
+        &[],
+        &[
+            ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
+            ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+        ],
+    )
+    .expect("configuration should parse");
+    App::build(&config)
+        .await
+        .expect("a development configuration must build against in-memory backends")
+}
+
+/// Registers one account through the front door, stamped with the node's own clock.
+async fn registered_grant(app: &App, username: &str) -> Grant {
+    app.auth
+        .register(
+            Registration {
+                username: username.to_string(),
+                email: None,
+                phone: None,
+                passphrase: Secret::new("correct-horse-battery-staple"),
+                locale: "en-US".to_string(),
+                country: None,
+                gender: None,
+                device: DeviceClaim::new(Platform::Web, "sfu wire test"),
+                captcha: None,
+                server: None,
+                identity_public_key: None,
+            },
+            &RequestContext::at(app.clock.now()),
+        )
+        .await
+        .expect("a development app registers an account")
+}
+
+/// Sends one request frame as a length-prefixed record.
+async fn send<M: Encode>(
+    stream: &mut tokio::net::TcpStream,
+    opcode: Opcode,
+    correlation: u32,
+    message: &M,
+) {
+    let frame = to_frame(opcode.to_wire(), correlation, message)
+        .expect("a scripted client message must encode");
+    let wire = frame.encode_length_prefixed().expect("the record encodes");
+    tokio::time::timeout(STEP, stream.write_all(&wire))
+        .await
+        .expect("writing does not stall")
+        .expect("the frame is written");
+}
+
+/// Reads one length-prefixed frame, allowing `limit` for it to arrive.
+async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Frame {
+    let body = tokio::time::timeout(limit, async {
+        let mut head = [0u8; 4];
+        stream
+            .read_exact(&mut head)
+            .await
+            .expect("the length arrives");
+        let len = u32::from_be_bytes(head) as usize;
+        let mut body = vec![0u8; len];
+        stream
+            .read_exact(&mut body)
+            .await
+            .expect("the body arrives");
+        body
+    })
+    .await
+    .expect("the frame does not stall — silence here is the bug these tests exist to catch");
+    Frame::decode(Bytes::from(body)).expect("the frame decodes")
+}
+
+/// A live authenticated TCP session on its own user topic, plus whichever
+/// conversation topics the test subscribes it to.
+struct LiveSession {
+    stream: tokio::net::TcpStream,
+}
+
+impl LiveSession {
+    async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connecting does not stall")
+            .expect("the connection is accepted");
+
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION,
+            access_token: Some(grant.access_token.clone()),
+            device_id: Some(grant.device_id),
+            ..Default::default()
+        };
+        send(&mut stream, Opcode::Hello, 1, &hello).await;
+
+        let welcome_frame = recv_within(&mut stream, STEP).await;
+        assert_eq!(
+            Opcode::from_wire(welcome_frame.header.opcode),
+            Some(Opcode::Hello),
+            "the handshake is answered with a WELCOME"
+        );
+        assert!(
+            !welcome_frame.header.is_error(),
+            "the handshake is not refused: {:?}",
+            from_frame::<migo_protocol::Error>(&welcome_frame)
+        );
+        let welcome: Welcome = from_frame(&welcome_frame).expect("the WELCOME decodes");
+        assert_eq!(welcome.authenticated_user, Some(grant.account_id));
+
+        send(
+            &mut stream,
+            Opcode::Subscribe,
+            2,
+            &SubscribeRequest {
+                topics: vec![Topic {
+                    kind: TopicKind::User,
+                    id: grant.account_id,
+                }],
+            },
+        )
+        .await;
+        loop {
+            let frame = recv_within(&mut stream, STEP).await;
+            if frame.header.correlation == 2 {
+                assert!(
+                    !frame.header.is_error(),
+                    "the self-subscription is accepted: {:?}",
+                    from_frame::<migo_protocol::Error>(&frame)
+                );
+                let confirmation: SubscribeResponse =
+                    from_frame(&frame).expect("the SUBSCRIBE reply decodes");
+                assert_eq!(
+                    confirmation.accepted.len(),
+                    1,
+                    "the own user topic is accepted"
+                );
+                return Self { stream };
+            }
+        }
+    }
+
+    /// Subscribes to a conversation's topic, as a member's client does once
+    /// it has loaded the conversation.
+    async fn subscribe_conversation(&mut self, conversation: migo_core::Id, correlation: u32) {
+        send(
+            &mut self.stream,
+            Opcode::Subscribe,
+            correlation,
+            &SubscribeRequest {
+                topics: vec![Topic {
+                    kind: TopicKind::Conversation,
+                    id: conversation,
+                }],
+            },
+        )
+        .await;
+        loop {
+            let frame = recv_within(&mut self.stream, STEP).await;
+            if frame.header.correlation == correlation {
+                assert!(
+                    !frame.header.is_error(),
+                    "the conversation subscription is accepted: {:?}",
+                    from_frame::<migo_protocol::Error>(&frame)
+                );
+                return;
+            }
+        }
+    }
+
+    /// Sends a request that must succeed, returning the decoded reply.
+    async fn ask<M: Encode, R: migo_protocol::Decode>(
+        &mut self,
+        opcode: Opcode,
+        correlation: u32,
+        message: &M,
+    ) -> R {
+        send(&mut self.stream, opcode, correlation, message).await;
+        loop {
+            let frame = recv_within(&mut self.stream, STEP).await;
+            if frame.header.correlation == correlation {
+                assert!(
+                    !frame.header.is_error(),
+                    "the request was refused: {:?}",
+                    from_frame::<migo_protocol::Error>(&frame)
+                );
+                return from_frame(&frame).expect("the reply decodes");
+            }
+        }
+    }
+
+    /// Sends a request that must fail, returning the error frame.
+    async fn ask_error<M: Encode>(
+        &mut self,
+        opcode: Opcode,
+        correlation: u32,
+        message: &M,
+    ) -> migo_protocol::Error {
+        send(&mut self.stream, opcode, correlation, message).await;
+        loop {
+            let frame = recv_within(&mut self.stream, STEP).await;
+            if frame.header.correlation == correlation {
+                assert!(frame.header.is_error(), "the request was expected to fail");
+                return from_frame(&frame).expect("the error decodes");
+            }
+        }
+    }
+}
+
+/// Reads from a session until a frame of the wanted opcode arrives, skipping
+/// the unrelated events a subscribed session receives.
+async fn next_event_of(stream: &mut tokio::net::TcpStream, want: Opcode) -> Frame {
+    loop {
+        let frame = recv_within(stream, STEP).await;
+        if Opcode::from_wire(frame.header.opcode) == Some(want) {
+            return frame;
+        }
+    }
+}
+
+/// The join frame a scripted client sends: the `CallInvite` shape the registry
+/// froze for the opcode, with group semantics — the roster is the audience,
+/// so `callee_id` is a placeholder the server never reads.
+fn sfu_join(call_id: migo_core::Id, conversation_id: migo_core::Id) -> CallInvite {
+    CallInvite {
+        call_id,
+        conversation_id,
+        callee_id: migo_core::Id::from(0u128),
+        media_kind: 0,
+        caller_device: migo_core::Id::from(0u128),
+        capabilities: 0,
+        sealed_offer: b"sealed-group-offer".to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn a_joiner_receives_the_roster_on_their_own_topic() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfufounder").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: Vec::new(),
+                title: Some("The SFU Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // The join: the reply is the TURN list (empty in a dev app), and the
+    // roster arrives as a CALL_SFU_EVENT on the founder's own user topic.
+    let call_id = migo_core::Id::from(0x5f00u128);
+    let reply: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 12, &sfu_join(call_id, conversation_id))
+        .await;
+    assert!(reply.servers.is_empty());
+
+    let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the roster event decodes");
+    assert_eq!(event.call_id, call_id);
+    assert_eq!(event.conversation_id, Some(conversation_id));
+    assert_eq!(event.user_id, Some(founder.account_id));
+    assert_eq!(event.participant_count, Some(1));
+    let roster = event.participants.expect("the roster is attached");
+    assert_eq!(roster.len(), 1);
+    assert_eq!(roster[0].user_id, founder.account_id);
+    assert_eq!(roster[0].device_id, founder.device_id);
+    assert_eq!(roster[0].sealed_offer, b"sealed-group-offer");
+}
+
+#[tokio::test]
+async fn the_roster_hears_the_second_join_on_the_conversation_topic() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfurosterfounder").await;
+    let second = registered_grant(&app, "sfurostersecond").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![second.account_id],
+                title: Some("The Roster Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // The founder joins, and the second member subscribes to the conversation
+    // the way a client that has loaded it does.
+    let call_id = migo_core::Id::from(0x5f01u128);
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 12, &sfu_join(call_id, conversation_id))
+        .await;
+    // Drain the founder's own roster event so it cannot be mistaken for the
+    // announcement below.
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    second_session
+        .subscribe_conversation(conversation_id, 13)
+        .await;
+
+    // The second member joins; the founder — subscribed to the conversation
+    // — hears the announcement naming the joiner.
+    let _: migo_protocol::CallTurnResponse = second_session
+        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .await;
+
+    let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the announcement decodes");
+    assert_eq!(event.call_id, call_id);
+    assert_eq!(event.user_id, Some(second.account_id));
+    assert_eq!(event.device_id, Some(second.device_id));
+    assert_eq!(event.participant_count, Some(2));
+    assert_eq!(
+        event.sealed_offer.as_deref(),
+        Some(b"sealed-group-offer".as_ref()),
+        "the joiner's sealed offer rides the announcement, unopened"
+    );
+
+    // And the second member's own roster event names both seats.
+    let frame = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the roster decodes");
+    let roster = event.participants.expect("the roster is attached");
+    assert_eq!(roster.len(), 2);
+    assert!(roster.iter().any(|p| p.user_id == founder.account_id));
+    assert!(roster.iter().any(|p| p.user_id == second.account_id));
+}
+
+#[tokio::test]
+async fn a_stranger_s_join_is_refused_not_disabled() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfuclosedfounder").await;
+    let stranger = registered_grant(&app, "sfuoutsider").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut stranger_session = LiveSession::connect(addr, &stranger).await;
+
+    // A direct conversation between founder and nobody: the stranger is not
+    // a member of it, which is the gate under test.
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: Vec::new(),
+                title: Some("The Closed Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    let error = stranger_session
+        .ask_error(
+            Opcode::CallSfuJoin,
+            12,
+            &sfu_join(migo_core::Id::from(0x5f02u128), conversation_id),
+        )
+        .await;
+    // NOT_FOUND, the same answer a missing conversation gives — and crucially
+    // not FEATURE_DISABLED, which was this opcode's whole answer before.
+    assert_eq!(error.code, migo_protocol::codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_leave_tells_the_roster_and_the_last_leave_retires_the_call() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfuleavefounder").await;
+    let second = registered_grant(&app, "sfuleavesecond").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![second.account_id],
+                title: Some("The Leaving Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    let call_id = migo_core::Id::from(0x5f03u128);
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 12, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    second_session
+        .subscribe_conversation(conversation_id, 13)
+        .await;
+    let _: migo_protocol::CallTurnResponse = second_session
+        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .await;
+    // Drain each session's own roster event.
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let _ = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
+
+    // The second member leaves; the founder hears the departure on the
+    // conversation topic.
+    let _: migo_protocol::Acknowledged = second_session
+        .ask(
+            Opcode::CallEnd,
+            15,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+
+    let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the departure decodes");
+    assert_eq!(event.user_id, Some(second.account_id));
+    assert_eq!(event.participant_count, Some(1));
+
+    // The founder leaves last; the call retires, and a further leave under
+    // the same id is NOT_FOUND — the call is gone, not merely empty.
+    let _: migo_protocol::Acknowledged = founder_session
+        .ask(
+            Opcode::CallEnd,
+            16,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+    let error = founder_session
+        .ask_error(
+            Opcode::CallEnd,
+            17,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+    assert_eq!(error.code, migo_protocol::codes::NOT_FOUND);
+}

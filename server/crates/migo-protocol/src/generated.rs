@@ -9020,6 +9020,18 @@ pub struct CallStateEvent {
     pub state: u32,
     /// Present when state is Ended.
     pub reason: Option<u32>,
+    /// SFU events: the conversation the group call belongs to.
+    pub conversation_id: Option<Id>,
+    /// SFU events: the participant the event names - who joined, or who left.
+    pub user_id: Option<Id>,
+    /// SFU events: the device that participant joined with.
+    pub device_id: Option<Id>,
+    /// SFU events: the call's size after the change.
+    pub participant_count: Option<u32>,
+    /// SFU join announcements: the joiner's sealed media description, passed through unopened.
+    pub sealed_offer: Option<Vec<u8>>,
+    /// SFU roster events: the full participant list, sent to a joiner's own topic.
+    pub participants: Option<Vec<CallSfuParticipant>>,
 }
 
 impl Encode for CallStateEvent {
@@ -9027,11 +9039,58 @@ impl Encode for CallStateEvent {
         w.enter()?;
         w.write_id(&self.call_id);
         w.write_u32(self.state);
-        let present = usize::from(self.reason.is_some());
+        let present = usize::from(self.reason.is_some())
+            + usize::from(self.conversation_id.is_some())
+            + usize::from(self.user_id.is_some())
+            + usize::from(self.device_id.is_some())
+            + usize::from(self.participant_count.is_some())
+            + usize::from(self.sealed_offer.is_some())
+            + usize::from(self.participants.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.reason {
             w.optional(1, |w| {
                 w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.conversation_id {
+            w.optional(2, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.user_id {
+            w.optional(3, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.device_id {
+            w.optional(4, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.participant_count {
+            w.optional(5, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.sealed_offer {
+            w.optional(6, |w| {
+                w.write_bytes(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.participants {
+            w.optional(7, |w| {
+                {
+                    w.list_len(v.len())?;
+                    for item in v.iter() {
+                        item.encode(w)?;
+                    }
+                }
                 Ok(())
             })?;
         }
@@ -9052,8 +9111,67 @@ impl Decode for CallStateEvent {
             let sub = &mut owned;
             match field_id {
                 1 => out.reason = Some(sub.read_u32()?),
+                2 => out.conversation_id = Some(sub.read_id()?),
+                3 => out.user_id = Some(sub.read_id()?),
+                4 => out.device_id = Some(sub.read_id()?),
+                5 => out.participant_count = Some(sub.read_u32()?),
+                6 => out.sealed_offer = Some(sub.read_bytes()?),
+                7 => {
+                    out.participants = Some({
+                        let n = sub.read_list_len()?;
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(CallSfuParticipant::decode(sub)?);
+                        }
+                        v
+                    })
+                }
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One participant in an SFU group call, as a joining client's roster line carries them. The sealed offer is the participant's own media description, sealed for the call's members; the server stores and re-serves it without ever opening it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallSfuParticipant {
+    /// The participant's account.
+    pub user_id: Id,
+    /// The device they joined with; relays target it.
+    pub device_id: Id,
+    pub joined_at: Timestamp,
+    /// E2E-sealed media description; the server never reads it.
+    pub sealed_offer: Vec<u8>,
+}
+
+impl Encode for CallSfuParticipant {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_id(&self.device_id);
+        w.write_timestamp(self.joined_at);
+        w.write_bytes(&self.sealed_offer)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallSfuParticipant {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        out.device_id = r.read_id()?;
+        out.joined_at = r.read_timestamp()?;
+        out.sealed_offer = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
         }
         r.leave();
         Ok(out)

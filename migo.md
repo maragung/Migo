@@ -4202,7 +4202,7 @@ Biaya harga kick. Opcode 47 dan 48 di atas adalah biaya rate-limit ADR-0006, buk
 
 Opcode store ditempatkan di kepala range reserved, bukan di range economy, karena range economy 160 sampai 175 sudah terisi penuh oleh opcode yang lebih dulu; nomor 239 dan 240 terkirim bersama v0.16.4 sehingga tidak dinomori ulang.
 
-Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238. STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. STATUS: SPEC untuk SFU group call penuh yang membutuhkan deployment terpisah. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
+Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238 (SFU join 237 kini berjalan; lihat section 165). STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
 Messaging:
 
@@ -4902,7 +4902,7 @@ Perubahan identity key peer memunculkan peringatan, tidak diterima diam-diam
 
 165. CALL SIGNALING PROTOCOL
 
-STATUS: BUILT untuk panggilan 1-on-1, yaitu opcode 224 sampai 238 di migo-calls dan dispatch-nya dengan data plane HTTP di migo-api, serta sisi web yang menjalankan siklus ring penuh dengan kunci panggilan tersegel; requirement produknya ada di section 180. STATUS: SPEC untuk SFU group call yang membutuhkan deployment terpisah dan dijawab FEATURE_DISABLED oleh node ini.
+STATUS: BUILT untuk panggilan 1-on-1, yaitu opcode 224 sampai 238 di migo-calls dan dispatch-nya dengan data plane HTTP di migo-api, serta sisi web yang menjalankan siklus ring penuh dengan kunci panggilan tersegel; requirement produknya ada di section 180. STATUS: BUILT untuk SFU group call pada node ini dalam arti forwarding dalam pesan (roster, event keanggotaan, dan blob tersegel antar device di roster, tanpa bidang media dan tanpa akses plaintext; lihat migo-calls di bawah), sedangkan sisi client-nya tetap SPEC.
 
 Seluruh signaling memakai binary MWP/1 dengan opcode range calls, 224 sampai 239. JSON TIDAK BOLEH dipakai untuk signaling.
 
@@ -5554,7 +5554,18 @@ server hanya membaca header routing tanpa pernah membuka byte tersegel, gate pan
 (keanggotaan conversation dan status block dari store, gagal ke arah menolak), sweep invite
 kedaluwarsa yang dijalankan di dalam invite sehingga tidak butuh background task, dan
 metrik per-state. Store in-memory; TURN dari config (daftar kosong untuk sekarang).
-SFU group call (237-238) dijawab FEATURE_DISABLED sampai deployment SFU tersedia.
+SFU group call (237-238) sudah BUILT pada node ini sebagai SFU forwarding dalam pesan: CALL_SFU_JOIN
+memasukkan caller ke roster group call yang terikat pada conversation (gate keanggotaan,
+jawaban NOT_FOUND untuk bukan anggota), join yang di-idempotensi-kan per device
+(retry = roster yang sama, device baru akun yang sama menggantikan kursi), plafon 25 peserta
+yang dijawab VALIDATION_FAILED, roster penuh dikirim ke user topic joiner sebagai CALL_SFU_EVENT,
+pengumuman join dan leave diterbitkan ke topic conversation, CALL_END pada id group call
+diteruskan ke group_leave yang memensiunkan panggilan saat kursi terakhir kosong, dan
+group_relay yang memindahkan blob tersegel hanya antar device yang duduk di roster tanpa
+pernah membukanya — janji mail-slot relay 1-on-1 yang diperluas dari dua device bernama
+menjadi satu roster. Tidak ada bidang media yang melintasi crate ini dan tidak ada byte
+tersegel yang dibaca; MCU/transcoding tetap terlarang dan tidak punya kode untuk hidup di
+dalamnya. Client-side SFU (roster UI dan kunci frame antar peserta) tetap SPEC.
 21 test yang menutup siklus hidup penuh, idempotensi, relay, gate, dan sweep.
 
 tools/protocol-codegen, yaitu generator dan pemeriksa staleness
