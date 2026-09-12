@@ -674,6 +674,19 @@ where
                 // If it ever does, it is a collision, not an idempotent retry.
                 return Err(fault::already_exists("media object"));
             }
+            // Section 153's other half: the retry must carry the payload the first
+            // commit carried. The checksum is the one field of a commit the server
+            // never measures itself — it is the client's claim about the client's
+            // plaintext — so it is the one field a reused ticket could otherwise
+            // smuggle a different claim through. Everything else on this path was
+            // either fixed at begin (the claim) or checked against storage (the
+            // bytes) before this point.
+            if commit.checksum != existing.checksum {
+                return Err(fault::error(
+                    codes::IDEMPOTENCY_MISMATCH,
+                    "this upload was committed with a different checksum",
+                ));
+            }
             return Ok(project(&existing));
         }
 
