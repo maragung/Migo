@@ -3,7 +3,7 @@
 //!
 //! The SFU this node serves is a *forwarding* one (brief section 166): the
 //! roster, its events, and sealed descriptions moved between seated devices.
-//! The three tests here drive real TCP sessions against a bound migod and pin
+//! The five tests here drive real TCP sessions against a bound migod and pin
 //! the properties the service's own tests cannot see:
 //!
 //! * **The joiner hears their roster.** The reply frame is a TURN list (the
@@ -18,6 +18,10 @@
 //!   the conversation gets `NOT_FOUND`, not a ring and not a hint about
 //!   which conversations hold calls — and the refusal is no longer the
 //!   `FEATURE_DISABLED` the opcode used to answer.
+//! * **A leave with no seat is answered.** A retried leave after a seat
+//!   replacement, and the leave of a member who never joined, both find
+//!   the call alive with nothing to remove — the acknowledgement is owed
+//!   either way, and silence was the bug.
 //!
 //! Each test uses the reply rule as its clock: every frame waited for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -514,4 +518,95 @@ async fn a_leave_tells_the_roster_and_the_last_leave_retires_the_call() {
         )
         .await;
     assert_eq!(error.code, migo_protocol::codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_seatless_leave_is_acknowledged_not_silent() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfuseatfounder").await;
+    let second = registered_grant(&app, "sfuseatsecond").await;
+    let bystander = registered_grant(&app, "sfuseatbystander").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+    let mut bystander_session = LiveSession::connect(addr, &bystander).await;
+
+    // A group conversation whose third member never joins the call: their
+    // leave below finds the call alive with no seat of theirs to vacate, and
+    // the reply rule still owes them an answer.
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![second.account_id, bystander.account_id],
+                title: Some("The Seatless Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    founder_session
+        .subscribe_conversation(conversation_id, 12)
+        .await;
+
+    let call_id = migo_core::Id::from(0x5f04u128);
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 13, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    second_session
+        .subscribe_conversation(conversation_id, 14)
+        .await;
+    let _: migo_protocol::CallTurnResponse = second_session
+        .ask(Opcode::CallSfuJoin, 15, &sfu_join(call_id, conversation_id))
+        .await;
+    // Drain each session's own roster event.
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let _ = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
+
+    // The second member leaves, then retries the leave: the call is still
+    // alive (the founder holds a seat), but the retry has no seat to vacate.
+    let _: migo_protocol::Acknowledged = second_session
+        .ask(
+            Opcode::CallEnd,
+            16,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+    let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the departure decodes");
+    assert_eq!(event.user_id, Some(second.account_id));
+    assert_eq!(event.participant_count, Some(1));
+
+    // The retry is acknowledged as the idempotent no-op it is: before the
+    // fix this exchange hung until the client's request timer fired, and the
+    // timeout inside `ask` is the assertion.
+    let retry: migo_protocol::Acknowledged = second_session
+        .ask(
+            Opcode::CallEnd,
+            17,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+    assert!(
+        retry.ok,
+        "a retried leave of a seat already vacated is a success"
+    );
+
+    // And the member who never joined: the call is not theirs to leave, but
+    // the state they ask for already holds, so the frame is answered too.
+    let bystander_leave: migo_protocol::Acknowledged = bystander_session
+        .ask(
+            Opcode::CallEnd,
+            18,
+            &migo_protocol::CallEnd { call_id, reason: 0 },
+        )
+        .await;
+    assert!(
+        bystander_leave.ok,
+        "a leave from a member with no seat is a success"
+    );
 }

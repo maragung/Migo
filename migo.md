@@ -5560,7 +5560,10 @@ jawaban NOT_FOUND untuk bukan anggota), join yang di-idempotensi-kan per device
 (retry = roster yang sama, device baru akun yang sama menggantikan kursi), plafon 25 peserta
 yang dijawab VALIDATION_FAILED, roster penuh dikirim ke user topic joiner sebagai CALL_SFU_EVENT,
 pengumuman join dan leave diterbitkan ke topic conversation, CALL_END pada id group call
-diteruskan ke group_leave yang memensiunkan panggilan saat kursi terakhir kosong, dan
+diteruskan ke group_leave yang memensiunkan panggilan saat kursi terakhir kosong, leave yang
+tidak menemukan kursi milik caller (retry setelah kursi digantikan, atau anggota yang tidak
+pernah join) tetap dijawab Acknowledged sebagai no-op idempoten persis seperti ROOM_LEAVE,
+dan
 group_relay yang memindahkan blob tersegel hanya antar device yang duduk di roster tanpa
 pernah membukanya — janji mail-slot relay 1-on-1 yang diperluas dari dua device bernama
 menjadi satu roster. Tidak ada bidang media yang melintasi crate ini dan tidak ada byte
