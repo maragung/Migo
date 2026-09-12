@@ -3,7 +3,7 @@
 //!
 //! The SFU this node serves is a *forwarding* one (brief section 166): the
 //! roster, its events, and sealed descriptions moved between seated devices.
-//! The seven tests here drive real TCP sessions against a bound migod and pin
+//! The eight tests here drive real TCP sessions against a bound migod and pin
 //! the properties the service's own tests cannot see:
 //!
 //! * **The joiner hears their roster.** The reply frame is a TURN list (the
@@ -30,6 +30,13 @@
 //!   call routes through the group store and lands on the named device's
 //!   account, while a device that holds no seat is refused rather than
 //!   silently dropped.
+//! * **A mid-call joiner's first key reaches them sealed.** A participant
+//!   joining a call in progress receives the current epoch's key sealed
+//!   under their own pairwise session with the distributor; the blob rides
+//!   the addressed roster relay unchanged, opens the call's current media,
+//!   refuses the media from before the join, and the joiner rides the next
+//!   rotation like every other seat (section 163's "sealed for them at
+//!   join", as code rather than convention).
 //!
 //! Each test uses the reply rule as its clock: every frame waited for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -778,4 +785,164 @@ async fn a_group_relay_lands_on_the_named_seat_and_refuses_a_stranger() {
         .ask_error(Opcode::CallSdp, 18, &stranger)
         .await;
     assert_eq!(error.code, migo_protocol::codes::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn a_mid_call_joiner_receives_the_current_key_sealed_for_them() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "sfujoinkeyfounder").await;
+    let second = registered_grant(&app, "sfujoinkeysecond").await;
+    let joiner = registered_grant(&app, "sfujoinkeyjoiner").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+    let mut joiner_session = LiveSession::connect(addr, &joiner).await;
+
+    // A group conversation whose third member starts the test outside the
+    // call: they join it mid-progress below, which is the whole finding.
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![second.account_id, joiner.account_id],
+                title: Some("The Joined-Late Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    founder_session
+        .subscribe_conversation(conversation_id, 12)
+        .await;
+    second_session
+        .subscribe_conversation(conversation_id, 13)
+        .await;
+
+    let call_id = migo_core::Id::from(0x5f07u128);
+
+    // The call's key as the founder's device holds it: derived from the
+    // pairwise session it shares with the second seat, already rotated once,
+    // with media on the wire under epoch 1. The joiner's pairwise session with
+    // the founder is a *different* secret — that is what seals the joiner's
+    // first key for them and nobody else, server included.
+    let founder_second_secret = [0x0au8; 32];
+    let founder_joiner_secret = [0x0bu8; 32];
+    let mut random = migo_core::SeededRandom::new(7);
+    let mut call_key = migo_crypto::CallKeyState::from_session(&founder_second_secret, call_id);
+    call_key.rotate(&mut random).expect("the call rotates");
+    let pre_join = call_key
+        .seal_frame(b"media from before the join", &mut random)
+        .expect("seals");
+
+    // The call in progress: two seats.
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let _: migo_protocol::CallTurnResponse = second_session
+        .ask(Opcode::CallSfuJoin, 15, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+
+    // The join, mid-call. The joiner's roster snapshot lands on their own user
+    // topic; the founder hears the announcement on the conversation topic —
+    // the announcement is the last fact the join produces, so waiting for it
+    // is what makes the seat-recorded relay below deterministic.
+    let _: migo_protocol::CallTurnResponse = joiner_session
+        .ask(Opcode::CallSfuJoin, 16, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut joiner_session.stream, Opcode::CallSfuEvent).await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+
+    // The founder rotates on the join — the joiner's first key must be one
+    // that did not exist while they were outside the call — and seals the
+    // epoch-2 key under the joiner's own pairwise session. The blob rides the
+    // addressed relay the roster already provides, in a `CallSdp`'s sealed
+    // payload: the server routes it seat to seat and never opens it.
+    call_key.rotate(&mut random).expect("the join rotates");
+    let sealed = call_key
+        .sealed_join_distribution(&founder_joiner_secret, &mut random)
+        .expect("the join distribution seals");
+    let relay = migo_protocol::CallSdp {
+        call_id,
+        from_device: founder.device_id,
+        to_device: joiner.device_id,
+        sealed_sdp: sealed.clone(),
+    };
+    let ack: migo_protocol::Acknowledged = founder_session.ask(Opcode::CallSdp, 17, &relay).await;
+    assert!(ack.ok, "the sealed first key is relayed");
+
+    // The joiner receives the bytes unchanged and opens them into epoch 2:
+    // current media opens, pre-join media does not, and neither the second
+    // seat's session secret nor anyone else's opens the joiner's blob.
+    let frame = next_event_of(&mut joiner_session.stream, Opcode::CallSdp).await;
+    let heard: migo_protocol::CallSdp = from_frame(&frame).expect("the joiner's key frame decodes");
+    assert_eq!(
+        heard.sealed_sdp, sealed,
+        "the sealed first key arrives byte for byte"
+    );
+
+    let mut joiner_key = migo_crypto::CallKeyState::from_join_distribution(
+        &founder_joiner_secret,
+        call_id,
+        &heard.sealed_sdp,
+    )
+    .expect("the joiner's own session opens their first key");
+    assert_eq!(joiner_key.epoch(), 2);
+    let current = call_key
+        .seal_frame(b"media after the join", &mut random)
+        .expect("seals");
+    assert_eq!(
+        joiner_key
+            .open_frame(&current)
+            .expect("the joiner hears the call they joined"),
+        b"media after the join"
+    );
+    assert_eq!(
+        joiner_key.open_frame(&pre_join),
+        Err(migo_crypto::error::CryptoError::DecryptionFailed),
+        "the joiner opened media from before they joined"
+    );
+    assert!(
+        migo_crypto::CallKeyState::from_join_distribution(
+            &founder_second_secret,
+            call_id,
+            &heard.sealed_sdp
+        )
+        .is_err(),
+        "a device with a different session opened the joiner's first key"
+    );
+
+    // And the joiner rides the rotations like every other seat: the founder's
+    // next `CALL_KEY_UPDATE` — routed by roster to each account once — is
+    // adopted, not a second first-key exchange.
+    let update_material = call_key.rotate(&mut random).expect("the third epoch seals");
+    let update = migo_protocol::CallKeyUpdate {
+        call_id,
+        epoch: 3,
+        sealed_key_material: update_material.clone(),
+    };
+    let ack: migo_protocol::Acknowledged = founder_session
+        .ask(Opcode::CallKeyUpdate, 18, &update)
+        .await;
+    assert!(ack.ok, "the rotation is acknowledged");
+
+    let frame = next_event_of(&mut joiner_session.stream, Opcode::CallKeyUpdate).await;
+    let heard: migo_protocol::CallKeyUpdate =
+        from_frame(&frame).expect("the relayed rotation decodes");
+    joiner_key
+        .adopt(heard.epoch, &heard.sealed_key_material)
+        .expect("the joiner adopts the rotation");
+    assert_eq!(joiner_key.epoch(), 3);
+    let third = call_key
+        .seal_frame(b"third epoch media", &mut random)
+        .expect("seals");
+    assert_eq!(
+        joiner_key.open_frame(&third).expect("opens"),
+        b"third epoch media"
+    );
 }

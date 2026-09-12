@@ -3,6 +3,7 @@ package com.migo.core.session
 import com.migo.core.crypto.AEAD_TAG_LEN
 import com.migo.core.crypto.CHAIN_KEY_LEN
 import com.migo.core.crypto.CryptoError
+import com.migo.core.crypto.CryptoErrorKind
 import com.migo.core.crypto.Csprng
 import com.migo.core.crypto.Cursor
 import com.migo.core.crypto.ENVELOPE_VERSION
@@ -123,7 +124,7 @@ class GroupCrypto(
      */
     fun distributionFor(conversationId: Id): ByteArray = lock.withLock {
         val entry = ensureSendingLocked(conversationId)
-        val distribution = entry.state.distribution(keys.identity())
+        val distribution = entry.state.distribution(entry.epoch, keys.identity())
         try {
             serializeDistribution(distribution)
         } finally {
@@ -173,23 +174,44 @@ class GroupCrypto(
     /**
      * Accepts a sender-key distribution from a remote device, so its later messages can be opened.
      *
-     * A newer distribution for the same sender replaces the older one, and that is how a rotation is
-     * adopted: the sender rotates, re-distributes, and this overwrites the state that can no longer
-     * open anything.
+     * The first distribution from a sender is the baseline every later one is measured against. A
+     * later distribution must advance the epoch the receiver holds: one that does not is refused
+     * with the current chain kept, so a member re-sending an old distribution cannot strand this
+     * device on a chain that no longer seals anything -- and a genuine rotation is still adopted,
+     * because its epoch is higher.
      */
     fun acceptDistribution(conversationId: Id, senderDeviceId: Id, distributionBytes: ByteArray) {
         val distribution = parseDistribution(distributionBytes)
         try {
-            val state = ReceiverKeyState.accept(distribution)
             lock.withLock {
                 val key = receiverKey(conversationId, senderDeviceId)
-                // Zero the chain key of what is being replaced rather than waiting for a collector
-                // that may never run.
-                receiving.put(key, state)?.destroy()
-                persistence.saveReceiver(conversationId, senderDeviceId, state)
+                val existing = receiving[key]
+                    ?: persistence.loadReceiver(conversationId, senderDeviceId)
+                if (existing == null) {
+                    val state = ReceiverKeyState.accept(distribution)
+                    // Zero the chain key of what is being replaced rather than waiting for a
+                    // collector that may never run.
+                    receiving.put(key, state)?.destroy()
+                    persistence.saveReceiver(conversationId, senderDeviceId, state)
+                    return@withLock
+                }
+                receiving[key] = existing
+                try {
+                    existing.adopt(distribution)
+                } catch (refused: CryptoError) {
+                    if (refused.kind != CryptoErrorKind.KeyAlreadyUsed) throw refused
+                    // The refusal is the mechanism, not a failure to surface: the receiver keeps
+                    // its current chain and re-syncs forward when a genuinely newer distribution
+                    // arrives. Nothing changed, so nothing is persisted.
+                    return@withLock
+                }
+                // The adoption moved the receiver to a new chain; the state on disk is now behind
+                // the state in memory.
+                persistence.saveReceiver(conversationId, senderDeviceId, existing)
             }
         } finally {
-            // `accept` copied the chain key into its own state, so this zeroes the parsed copy.
+            // `accept` and `adopt` copied the chain key into their own state, so this zeroes the
+            // parsed copy.
             distribution.destroy()
         }
     }
@@ -397,9 +419,17 @@ private fun randomChainId(): Long {
     return value
 }
 
-/** Serialises a distribution: chain id, message number, the chain key, the sender's identity. */
+/**
+ * Serialises a distribution: the epoch, chain id, message number, the chain key, the sender's
+ * identity.
+ *
+ * The epoch leads, so a receiver can refuse a stale distribution before any key material moves.
+ * The layout matches `packages/sdk/src/group-crypto.ts` and the desktop's `group.rs` byte for
+ * byte.
+ */
 private fun serializeDistribution(distribution: SenderKeyDistribution): ByteArray {
-    val out = ByteAccumulator(10 + CHAIN_KEY_LEN + IDENTITY_PUBLIC_LEN)
+    val out = ByteAccumulator(15 + CHAIN_KEY_LEN + IDENTITY_PUBLIC_LEN)
+    Varint.encodeU64(distribution.groupKeyEpoch, out)
     Varint.encodeU64(distribution.chainId, out)
     Varint.encodeU64(distribution.messageNumber, out)
     out.append(distribution.exposeChainKey())
@@ -416,6 +446,7 @@ private fun serializeDistribution(distribution: SenderKeyDistribution): ByteArra
  */
 private fun parseDistribution(bytes: ByteArray): SenderKeyDistribution {
     val cursor = Cursor(bytes)
+    val groupKeyEpoch = cursor.varintU32()
     val chainId = cursor.varintU32()
     val messageNumber = cursor.varintU32()
     val chainKey = cursor.take(CHAIN_KEY_LEN)
@@ -427,7 +458,7 @@ private fun parseDistribution(bytes: ByteArray): SenderKeyDistribution {
     // Constructed bare: `varintU32` has already narrowed both ids to `u32` and `take` returned
     // exactly CHAIN_KEY_LEN bytes, so the constructor's own length checks cannot fire here. A catch
     // for a branch that cannot be taken would describe a failure mode that does not exist.
-    return SenderKeyDistribution(chainId, messageNumber, chainKey, identity)
+    return SenderKeyDistribution(groupKeyEpoch, chainId, messageNumber, chainKey, identity)
 }
 
 /** Assembles the section 11 group envelope from a sealed sender-key message. */
