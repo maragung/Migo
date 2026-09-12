@@ -187,7 +187,10 @@ fun downsampleWaveform(samples: IntArray, barCount: Int = WAVEFORM_BARS): ByteAr
         val value = samples[i]
         val clamped = if (value in 0..255) value else 0
         val barIndex = minOf(barCount - 1, i / bucketSize)
-        if (clamped > bars[barIndex]) {
+        // The stored bar reads back signed — a 200 is a -56 as a Byte — so the comparison
+        // unwraps it to its unsigned value first; compared raw, the tail's quiet samples would
+        // overwrite every peak above 127 the fold had already kept.
+        if (clamped > (bars[barIndex].toInt() and 0xFF)) {
             bars[barIndex] = clamped.toByte()
         }
     }
