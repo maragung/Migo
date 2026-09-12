@@ -83,6 +83,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
         None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn migo_core::Clock>,
+        migo_core::config::DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ));
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
@@ -118,6 +119,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
         None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn migo_core::Clock>,
+        migo_core::config::DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ));
     transport_b.spawn_runner(Arc::new(SystemClock) as Arc<dyn migo_core::Clock>);
 

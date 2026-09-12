@@ -783,6 +783,7 @@ impl App {
             Some(Arc::clone(&room_relay)),
             &registry,
             clock.clone(),
+            config.federation.handshake_timeout_ms,
         ));
         if let Some(bind) = config.node.mesh_bind.as_deref() {
             let bound = mesh_transport

@@ -601,6 +601,12 @@ pub struct ClientPeer {
     pub public_url: String,
 }
 
+/// The mesh handshake budget, in milliseconds: how long the whole exchange — both
+/// hellos, both proofs — may take before the attempt fails into the delivery backoff.
+/// A peer that accepts the TCP connection but never speaks would otherwise park a
+/// drain forever (brief section 173).
+pub const DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+
 /// Server-to-server mesh.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -610,6 +616,12 @@ pub struct FederationConfig {
     /// Explicit allow-list of peer node ids. Empty means accept none.
     #[serde(deserialize_with = "comma_separated_strings")]
     pub allowed_peers: Vec<String>,
+    /// How long a mesh handshake may take, in milliseconds, measured on the node's
+    /// injected clock: the whole exchange — both hellos, both proofs — must finish
+    /// inside it. A peer that accepts the TCP connection but never speaks is failed
+    /// at the deadline and enters the same backoff a refused connection does, so one
+    /// silent node cannot hang a drain (brief section 173).
+    pub handshake_timeout_ms: u64,
     /// Peer nodes the config document offers to clients, so a client can
     /// measure latency per node and fail over between them (section 170).
     /// Empty — the single-node posture — means the document lists this node
@@ -626,6 +638,7 @@ impl Default for FederationConfig {
         Self {
             enabled: false,
             allowed_peers: Vec::new(),
+            handshake_timeout_ms: DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
             client_peers: Vec::new(),
             max_clock_skew_seconds: 60,
             peer_queue_capacity: 4096,
@@ -1057,6 +1070,13 @@ impl Config {
         if self.federation.enabled && self.federation.max_clock_skew_seconds > 300 {
             problems.push(
                 "federation.max_clock_skew_seconds above 300 makes replay protection meaningless"
+                    .to_string(),
+            );
+        }
+        if self.federation.handshake_timeout_ms == 0 {
+            problems.push(
+                "federation.handshake_timeout_ms must be greater than zero: a zero budget \
+                 fails every handshake"
                     .to_string(),
             );
         }

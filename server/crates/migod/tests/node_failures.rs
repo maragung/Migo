@@ -24,6 +24,12 @@
 //!   the events are rescheduled on the doubling backoff, nothing piles up beyond one
 //!   bounded batch, and the redelivery after the link recovers is the at-least-once
 //!   semantics section 153 promises.
+//! * **the handshake budget (section 173's closing gap)** — a peer that accepts the TCP
+//!   connection but never speaks fails exactly when `federation.handshake_timeout_ms`
+//!   runs out, measured on the node's injected clock: still waiting one millisecond
+//!   inside the deadline, settled into the ordinary backoff one millisecond past it,
+//!   and the drain proceeds to the next peer. The test advances a `ManualClock` past
+//!   the deadline rather than sleeping the wait out.
 //! * **7 (clock skew)** — a proof signed sixty-one seconds behind the listener's own
 //!   clock is refused on the wire, while the same handshake stamped in-window succeeds
 //!   — the control that makes the refusal mean the skew and only the skew.
@@ -41,9 +47,9 @@
 //! storage-unavailable and outbox idempotency in `migo-federation`'s suite, cache loss
 //! in `migo-cache`'s contracts, media unavailability in `migo-media`'s. The gaps this
 //! file cannot close — the unused `ROOM_READ_ONLY_PARTITION` code, the missing
-//! degraded-peer marking, the absent handshake timeout, no automatic directory refetch
-//! on a stale epoch, and no `RECONNECT_HINT` to members of a rebalanced room — are
-//! recorded in the brief rather than papered over here.
+//! degraded-peer marking, no automatic directory refetch on a stale epoch, and no
+//! `RECONNECT_HINT` to members of a rebalanced room — are recorded in the brief rather
+//! than papered over here.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +57,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use migo_core::config::DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Id, ManualClock, SystemClock, Timestamp};
 use migo_crypto::node::{self, NodeHello, NodeProof, NodeSecret, MAX_CLOCK_SKEW_MS};
@@ -130,6 +137,7 @@ fn transport(mesh: &SharedMesh) -> Arc<MeshTransport> {
         None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn Clock>,
+        DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ))
 }
 
@@ -633,6 +641,164 @@ async fn a_peer_that_never_acks_fails_the_batch_backs_off_and_loses_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// The handshake budget — a peer that accepts but never speaks
+// ---------------------------------------------------------------------------
+
+/// Binds a peer that accepts TCP connections and then says nothing, ever. Every
+/// accepted stream is held for the task's lifetime — never read, never written, never
+/// dropped — because dropping one would close it, and a close is a clean EOF the
+/// handshake already treats as an ordinary failure. The peer this is exists to be the
+/// other thing: connected, silent, and so a hang for any handshake without a budget.
+///
+/// The watch channel counts accepts, so a test can wait until the drain's connection
+/// has genuinely landed before it moves the clock.
+async fn spawn_silent_peer() -> (SocketAddr, tokio::sync::watch::Receiver<u32>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the silent peer binds");
+    let bound = listener
+        .local_addr()
+        .expect("the silent peer knows its address");
+    let (accepted_tx, accepted_rx) = tokio::sync::watch::channel(0_u32);
+    tokio::spawn(async move {
+        let mut held: Vec<TcpStream> = Vec::new();
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            held.push(stream);
+            let count = u32::try_from(held.len()).expect("a test accepts few connections");
+            let _ = accepted_tx.send(count);
+        }
+    });
+    (bound, accepted_rx)
+}
+
+/// Section 173's closing gap, closed: the handshake runs under
+/// `federation.handshake_timeout_ms`, so a peer that accepts the connection but never
+/// sends its hello fails at the deadline — not before, not meaningfully after — and
+/// the failure takes the ordinary backoff a refused connection takes, so the drain
+/// proceeds instead of hanging on one silent socket.
+///
+/// The budget is measured on the node's injected clock, gateway-liveness style, so the
+/// test never sleeps the wait out: it runs under tokio's paused clock and walks a
+/// `ManualClock` to the last millisecond inside the deadline (the handshake must still
+/// be waiting there), then one millisecond past it (the next budget tick must settle
+/// the failure). The deadline is anchored to the drain's own timestamp, which is what
+/// makes the choreography independent of when the loopback dial completes.
+#[tokio::test(start_paused = true)]
+async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_on() {
+    const NOW_MS: i64 = 1_700_000_000_000;
+    let now = Timestamp::from_millis(NOW_MS);
+    let deadline = Timestamp::from_millis(NOW_MS + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64);
+
+    let (mesh_b, _) = node(2, "region-b").await;
+    let (silent_addr, accepted_rx) = spawn_silent_peer().await;
+    admit(
+        &mesh_b,
+        node_id(3),
+        &key_bytes(3),
+        format!("wss://{silent_addr}"),
+        "region-c",
+    )
+    .await;
+    let clock = Arc::new(ManualClock::new(now));
+    let transport_b = Arc::new(MeshTransport::new(
+        Arc::clone(&mesh_b),
+        None,
+        None,
+        &Registry::new(),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+        DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+    ));
+
+    for note_len in 0..3usize {
+        queue(&mesh_b, node_id(3), note_len, now).await;
+    }
+
+    // The drain runs concurrently with a driver that owns the clock. The flag is the
+    // driver's only view of the drain: while the clock is inside the deadline the flag
+    // must stay down (the handshake is waiting, not failed), and once the clock passes
+    // the deadline it must go up within a few budget ticks (the failure is settled,
+    // not lingering).
+    let drain_done = Arc::new(AtomicBool::new(false));
+    let done_for_driver = Arc::clone(&drain_done);
+    let drain = {
+        let transport = Arc::clone(&transport_b);
+        let done = Arc::clone(&drain_done);
+        async move {
+            let result = transport.drain_once(now).await;
+            done.store(true, Ordering::SeqCst);
+            result
+        }
+    };
+    let driver = async move {
+        let mut accepted_rx = accepted_rx;
+        // Hold still until the silent peer has actually accepted the drain's
+        // connection: the budget may only start being spent on a handshake in flight.
+        accepted_rx
+            .changed()
+            .await
+            .expect("the silent peer reports its accept");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The last millisecond inside the budget, held across four budget ticks: the
+        // handshake must still be waiting — a peer is never cut off early.
+        clock.set(Timestamp::from_millis(deadline.as_millis() - 1));
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(
+            *accepted_rx.borrow_and_update(),
+            1,
+            "the drain dialed the silent peer once and only once"
+        );
+        assert!(
+            !done_for_driver.load(Ordering::SeqCst),
+            "the handshake was still waiting one millisecond inside the deadline"
+        );
+        // One millisecond past the deadline: the next budget tick fails the attempt,
+        // and within a few more the drain has settled it and moved on.
+        clock.set(deadline.saturating_add_millis(1));
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            done_for_driver.load(Ordering::SeqCst),
+            "the drain settled the failed handshake within a few budget ticks of the deadline"
+        );
+        assert_eq!(
+            *accepted_rx.borrow_and_update(),
+            1,
+            "the failed handshake did not redial: the retry belongs to the backoff, not the drain"
+        );
+    };
+
+    let (drain, ()) = tokio::join!(drain, driver);
+    drain.expect("a silent peer is a settled failure, not a drain error");
+
+    // The failure entered exactly the backoff a refused connection takes: nothing due
+    // before one backoff base, everything due at it, each event failed exactly once.
+    assert!(
+        mesh_b
+            .due(now.saturating_add_millis(999))
+            .await
+            .expect("the outbox reads")
+            .is_empty(),
+        "the retry is at least one backoff base away"
+    );
+    let retry: Vec<_> = mesh_b
+        .due(now.saturating_add_millis(1_000))
+        .await
+        .expect("the outbox reads");
+    assert_eq!(retry.len(), 3, "every event is still owed");
+    assert!(
+        retry.iter().all(|event| event.attempts == 1),
+        "each event failed exactly once into the backoff: {:?}",
+        retry.iter().map(|event| event.attempts).collect::<Vec<_>>()
+    );
+    assert!(
+        everything_owed(&mesh_b).await.is_empty(),
+        "nothing was delivered, and nothing was lost"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Scenario 7 — clock skew between nodes
 // ---------------------------------------------------------------------------
 
@@ -710,6 +876,7 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
         None,
         &Registry::new(),
         Arc::new(ManualClock::new(now)) as Arc<dyn Clock>,
+        DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ));
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
