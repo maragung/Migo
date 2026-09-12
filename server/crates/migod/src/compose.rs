@@ -109,6 +109,7 @@ fn feature_bit(name: &str) -> Option<u64> {
 /// sessions, decided by a deterministic bucket of the account id (the session id for a
 /// greeting that carried no token), so the same account lands in the same bucket on every
 /// node running this build and across its own reconnects.
+#[derive(Debug)]
 struct StagedRollout {
     /// `(bit, percent)` for every feature running below 100 percent.
     staged: Vec<(u64, u8)>,
@@ -908,6 +909,7 @@ mod tests {
     use super::{
         advertised_features, captcha_gate_for_test, StagedRollout, DEFAULT_CAPTCHA_THRESHOLD,
     };
+    use migo_core::Id;
     use migo_protocol::codes;
 
     /// A threshold of `0` is a posture the gate's contract says means
