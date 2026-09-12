@@ -4,12 +4,20 @@
  * The hello reports the platform, app version, locale, and a bandwidth preference to the server. The
  * access token and device id are filled in by the client from the grant, so they are intentionally
  * absent from {@link ClientHello}.
+ *
+ * The feature set is the stock client's plus `GROUP_CALL`: the bit is opt-in by the SDK's own rule
+ * — a client that offers it should be one that has a group-call UI, and this client now does (the
+ * roster screen). The server does not gate the SFU opcodes on the bit, so offering it is a
+ * statement about this client, not a request the server must grant.
  */
 
-import { BandwidthMode, Platform } from '@migo/sdk';
+import { BandwidthMode, DEFAULT_CLIENT_FEATURES, Platform, protocol } from '@migo/sdk';
 import type { ClientHello } from '@migo/sdk';
 
 import { config } from '@/lib/config.js';
+
+/** The bits a browser session offers: the stock set, plus the group-call UI this client carries. */
+const WEB_FEATURES: bigint = DEFAULT_CLIENT_FEATURES | protocol.FEATURE.GROUP_CALL;
 
 /** The hello for a browser session, using the browser's locale and letting the server pace bandwidth. */
 export function webHello(): ClientHello {
@@ -19,6 +27,7 @@ export function webHello(): ClientHello {
     appVersion: config.appVersion,
     locale,
     bandwidthMode: BandwidthMode.Auto,
+    features: WEB_FEATURES,
   };
 }
 
