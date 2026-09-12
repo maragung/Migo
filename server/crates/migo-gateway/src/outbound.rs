@@ -6,10 +6,12 @@
 //! A frame carries a [`DeliveryClass`] (section 151), and that is the whole of what the queue
 //! needs to decide its fate when the client cannot keep up:
 //!
-//! - **Critical** is never dropped. If the queue is full the frame still goes in and the
-//!   session is marked *lagging*; if it stays full past the deadline the driver closes the
-//!   session so the client resumes, because dropping a Critical frame silently is far worse
-//!   than forcing a reconnect.
+//! - **Critical** is never dropped. If the queue is full the frame still goes in — the queue may
+//!   exceed capacity, because the alternative is losing a frame the client cannot recover — and
+//!   the writer's drain deadline (section 160: the session closes as lagging when frames cannot
+//!   be handed to the socket within `lagging_deadline_ms`) is what turns a client that cannot
+//!   keep up into a resume, because dropping a Critical frame silently is far worse than forcing
+//!   a reconnect.
 //! - **Coalescable** collapses: a newer value for the same coalescing key overwrites the older
 //!   one already queued, in place, so a burst of typing or presence updates costs one slot,
 //!   not a hundred. If none is queued to overwrite and the queue is full, the newest is
@@ -126,8 +128,6 @@ struct Inner {
     resume_window_ms: i64,
     /// The highest `frame_seq` the client has acknowledged.
     ack_watermark: u64,
-    /// When the queue first became full, if it still is; the anchor for the lagging deadline.
-    lagging_since: Option<Timestamp>,
     closed: bool,
 }
 
@@ -168,7 +168,6 @@ impl Outbound {
                 ring_cap,
                 resume_window_ms,
                 ack_watermark: 0,
-                lagging_since: None,
                 closed: false,
             }),
             notify: Notify::new(),
@@ -192,9 +191,6 @@ impl Outbound {
             DeliveryClass::Critical => {
                 let seq = inner.next_seq;
                 inner.next_seq += 1;
-                if inner.queue.len() >= inner.capacity && inner.lagging_since.is_none() {
-                    inner.lagging_since = Some(now);
-                }
                 inner.queue.push_back(Queued {
                     bytes: bytes.clone(),
                     class,
@@ -250,28 +246,18 @@ impl Outbound {
 
     /// Takes every currently-queued frame's bytes, in order, for the writer to send.
     ///
-    /// Clears the lagging mark once the queue has drained back below capacity.
+    /// The writer measures the drain itself against the lagging deadline (section 160), because
+    /// fullness here is invisible once taken: this is the handoff point, and a client that
+    /// cannot keep up is one whose frames cannot cross it in time.
     pub(crate) fn take_ready(&self) -> Vec<Bytes> {
         let mut inner = self.inner.lock();
         let ready: Vec<Bytes> = inner.queue.drain(..).map(|q| q.bytes).collect();
-        if inner.queue.len() < inner.capacity {
-            inner.lagging_since = None;
-        }
         ready
     }
 
     /// Waits until there may be something to send, or the queue is closed.
     pub(crate) async fn wait(&self) {
         self.notify.notified().await;
-    }
-
-    /// Whether the queue has been full continuously for longer than `deadline_ms`.
-    pub(crate) fn lagging_expired(&self, now: Timestamp, deadline_ms: i64) -> bool {
-        let inner = self.inner.lock();
-        match inner.lagging_since {
-            Some(since) => now.as_unix_ms().saturating_sub(since.as_unix_ms()) > deadline_ms,
-            None => false,
-        }
     }
 
     /// Advances the cumulative ACK watermark and trims the ring of everything at or below it.
@@ -333,5 +319,41 @@ impl Outbound {
     /// Whether the queue has been closed.
     pub(crate) fn is_closed(&self) -> bool {
         self.inner.lock().closed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now() -> Timestamp {
+        Timestamp::from_millis(0)
+    }
+
+    #[test]
+    fn a_coalescable_frame_replaces_its_queued_older_value_at_capacity() {
+        // A one-slot queue, already holding an older value for a key: the situation
+        // every burst of presence or typing updates creates. The newer value must not
+        // be dropped — it replaces the older one in place, so the burst costs one slot
+        // no matter how long it runs (sections 151 and 160).
+        let outbound = Outbound::new(1, 8, 60_000);
+        let key = 7;
+        let older = Bytes::from_static(b"presence-v1");
+        assert_eq!(
+            outbound.push(older, DeliveryClass::Coalescable, Some(key), now()),
+            PushOutcome::Enqueued
+        );
+        let newer = Bytes::from_static(b"presence-v2");
+        assert_eq!(
+            outbound.push(newer.clone(), DeliveryClass::Coalescable, Some(key), now()),
+            PushOutcome::Coalesced,
+            "at capacity, a newer same-key value replaces the older one; it is never dropped"
+        );
+        let ready = outbound.take_ready();
+        assert_eq!(ready.len(), 1, "coalescing must not grow the queue");
+        assert_eq!(
+            ready[0], newer,
+            "the value the client sees is the newest one"
+        );
     }
 }

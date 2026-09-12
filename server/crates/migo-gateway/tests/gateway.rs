@@ -477,11 +477,18 @@ struct Wire {
     park_when_empty: bool,
     /// Whether the client side of this pipe has died: sends fail from here on.
     severed: bool,
+    /// Whether the client has stopped reading: sends park from here on (see
+    /// [`Pipe::stall_sends`]), and whether one is parked right now.
+    stalled: bool,
+    parked: bool,
 }
 
 #[derive(Clone, Default)]
 struct Pipe {
     wire: Arc<Mutex<Wire>>,
+    /// Wakes a send parked on a stalled pipe; a permit survives until the next waiter, so a
+    /// release can never race the park and be lost.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl Pipe {
@@ -524,6 +531,27 @@ impl Pipe {
     /// a clean hangup — is an involuntary close, so the resume buffer is retained (section 150).
     fn sever(&self) {
         self.lock().severed = true;
+    }
+
+    /// Makes every later `send` park until [`Pipe::release_sends`]: the shape of a client whose
+    /// socket is alive but is reading nothing — the slow consumer the lagging deadline exists to
+    /// judge. Unlike `sever` (a dead socket), a stalled pipe still receives; only the writer's
+    /// handoff to the client never completes.
+    fn stall_sends(&self) {
+        self.lock().stalled = true;
+    }
+
+    /// Lets parked sends through again, so a test can watch what the session does once the
+    /// client resumes reading.
+    fn release_sends(&self) {
+        self.lock().stalled = false;
+        self.wake.notify_one();
+    }
+
+    /// Whether a send is parked on the stall right now, so a script can wait for the writer to
+    /// be mid-drain before it moves the clock.
+    fn send_parked(&self) -> bool {
+        self.lock().parked
     }
 
     /// A transport handle sharing this pipe's buffers, to hand to [`Gateway::serve`].
@@ -573,12 +601,23 @@ impl Transport for Pipe {
     }
 
     async fn send(&mut self, frame: Bytes) -> Result<(), TransportError> {
-        let mut wire = self.lock();
-        if wire.severed {
-            return Err(TransportError::Io("the pipe was severed".to_string()));
+        loop {
+            {
+                let mut wire = self.lock();
+                if wire.severed {
+                    return Err(TransportError::Io("the pipe was severed".to_string()));
+                }
+                if !wire.stalled {
+                    wire.outbound.push(frame);
+                    return Ok(());
+                }
+                wire.parked = true;
+            }
+            // Mid-drain, exactly where a real writer meets a client that is not reading: the
+            // frames were accepted by the mailbox, the socket will not take them.
+            self.wake.notified().await;
+            self.lock().parked = false;
         }
-        wire.outbound.push(frame);
-        Ok(())
     }
 
     async fn close(&mut self) {
@@ -1961,9 +2000,13 @@ async fn a_subscribe_refuses_the_surplus_over_the_per_session_ceiling() {
 //
 // The first test below drives all three classes through the same session and
 // asserts the matrix: Droppable and Coalescable each have a non-zero drop
-// counter, Critical never appears under either label, and the session ends
-// closed as `session_lagging` because the Critical class filled the queue
-// past the deadline.
+// counter, Critical never appears under either label. The second pair of
+// tests drives the deadline itself: the queue cannot be the signal (the
+// writer drains it into the socket, so fullness never survives to a tick),
+// and the slow consumer is judged on the writer's handoff — a drain that
+// cannot complete within `lagging_deadline_ms` closes the session as
+// `session_lagging`, with the resume buffer retained, and a drain that
+// completes but outran the deadline tells the client why before the FIN.
 // ===========================================================================
 
 /// A dispatcher that, on every application opcode, publishes two Droppable
@@ -1971,8 +2014,8 @@ async fn a_subscribe_refuses_the_surplus_over_the_per_session_ceiling() {
 /// session has been told about. Combined with a one-slot outbound queue,
 /// the second Droppable on every dispatch meets a full queue and is
 /// counted, the Coalescable meets a full queue without a prior same-key
-/// entry and is counted, and the Critical is always enqueued (and would
-/// set the lagging mark if a tick had a chance to read it).
+/// entry and is counted, and the Critical is always enqueued, never dropped,
+/// by structural design.
 struct Flood {
     topic: Topic,
 }
@@ -2102,6 +2145,260 @@ async fn backpressure_drops_droppable_and_coalescable_but_never_critical() {
         ),
         "a Critical drop series must not exist; got:\n{rendered}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writer_that_never_hands_off_within_the_deadline_closes_the_session_as_lagging() {
+    // A one-second heartbeat means a quarter-second liveness tick, so a frame scripted
+    // after the session parked reaches its writer within a tick (a parked pipe wakes
+    // only on liveness ticks — see the heartbeat tests). The lagging deadline stays at
+    // the production five seconds: this test never advances the gateway's clock, only
+    // tokio's, because the drain bound the writer enforces is a tokio timeout.
+    let mut builder = HarnessBuilder::new();
+    builder.config.heartbeat_ms = 1_000;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.keep_open();
+
+    let stall = async {
+        // The WELCOME is written before the session parks, so it is proof the
+        // handshake finished before the stall begins.
+        for _ in 0..10_000 {
+            if !pipe.sent().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let frames = pipe.sent();
+        let _welcome = welcome_in(&frames);
+        // The socket stays alive but stops reading: the slow consumer of section 160.
+        pipe.stall_sends();
+        // A PING is the cheapest way to hand the writer something it must give the
+        // client: the PONG reply is Critical, so it is always queued, and the stalled
+        // send parks the drain with the frame in hand.
+        pipe.client(
+            Opcode::Ping,
+            7,
+            &Pong {
+                client_time: ts(NOW),
+                server_time: ts(NOW),
+            },
+        );
+        // Wait until the writer is parked mid-drain, then outlive the drain bound
+        // (twice the deadline): the only timers left are the liveness ticks and the
+        // bound, so the paused clock jumps straight to the bound firing.
+        for _ in 0..10_000 {
+            if pipe.send_parked() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            pipe.send_parked(),
+            "the writer must be parked mid-drain on the stall"
+        );
+        tokio::time::sleep(Duration::from_millis(11_000)).await;
+    };
+    tokio::join!(h.serve(&pipe), stall);
+
+    let frames = pipe.sent();
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.header.opcode == Opcode::ReconnectHint.to_wire()),
+        "a drain abandoned mid-record gets no hint: a send after a partial record would only \
+         corrupt the stream — the FIN and the retained resume buffer are the client's answer"
+    );
+    assert!(
+        errors_in(&frames).is_empty(),
+        "the abandoned-drain close is not a fault the client can read, so none is written"
+    );
+    assert_eq!(
+        h.sessions_closed("session_lagging"),
+        1,
+        "a socket that would not take a frame within the deadline closes as lagging"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the lagging close releases the session slot"
+    );
+    assert!(
+        pipe.was_closed(),
+        "the transport is closed on the lagging close"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lagging_close_hands_the_client_a_hint_before_the_fin() {
+    // The twin of the test above, on the other branch of the same check: the drain
+    // does complete — on a clean record boundary — but it outran the deadline. That
+    // boundary is what makes a hint safe here where the abandoned drain forbids one.
+    let mut builder = HarnessBuilder::new();
+    builder.config.heartbeat_ms = 1_000;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.keep_open();
+
+    let clock = Arc::clone(&h.clock);
+    let lag = async {
+        for _ in 0..10_000 {
+            if !pipe.sent().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let _welcome = welcome_in(&pipe.sent());
+        pipe.stall_sends();
+        pipe.client(
+            Opcode::Ping,
+            7,
+            &Pong {
+                client_time: ts(NOW),
+                server_time: ts(NOW),
+            },
+        );
+        for _ in 0..10_000 {
+            if pipe.send_parked() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            pipe.send_parked(),
+            "the writer must be parked mid-drain on the stall"
+        );
+        // The drain is measured on the gateway's clock (the one every other deadline
+        // reads), so advancing it while the writer is parked is exactly the elapsed
+        // time the loop head will compute when the drain completes.
+        clock.advance_millis(6_000);
+        // The client starts reading again: the parked send completes on a clean
+        // record boundary, the drain finishes, and the deadline has been outrun.
+        pipe.release_sends();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    tokio::join!(h.serve(&pipe), lag);
+
+    let frames = pipe.sent();
+    let hint = reconnect_hint_in(&frames);
+    assert_eq!(
+        hint.reason,
+        CloseReason::SessionLagging,
+        "the hint names the lagging close, so the client knows to resume rather than report \
+         a fault"
+    );
+    assert_eq!(
+        hint.after_ms, 0,
+        "a lagging close wants the client back now, not on a delay"
+    );
+    let hint_frame = frames
+        .iter()
+        .find(|frame| frame.header.opcode == Opcode::ReconnectHint.to_wire())
+        .expect("the hint frame is present");
+    assert_eq!(
+        hint_frame.header.correlation, 0,
+        "a server-initiated frame carries correlation 0"
+    );
+    assert_eq!(
+        frames.last().map(|frame| frame.header.opcode),
+        Some(Opcode::ReconnectHint.to_wire()),
+        "the hint is the last frame before the FIN, so a client reading to the end sees it"
+    );
+    assert_eq!(
+        h.sessions_closed("session_lagging"),
+        1,
+        "a drain that outran the deadline closes the session as lagging"
+    );
+    assert!(pipe.was_closed(), "the transport is closed after the hint");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_node_past_its_session_ceiling_answers_overloaded() {
+    // Section 160: a node past its ceiling answers OVERLOADED — a 1600-class fault,
+    // retry with backoff — rather than dropping the connection silently or lying
+    // with a session-specific code. The ceiling is one session, and the second
+    // connection is refused at the handshake, before any session-lifetime metric
+    // moves for it.
+    let mut builder = HarnessBuilder::new();
+    builder.config.max_sessions = 1;
+    let h = builder.build();
+
+    // The one session the ceiling allows. keep_open: only its own hangup below may
+    // end it, so the slot is held for the whole test.
+    let seated = Pipe::new();
+    seated.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    seated.keep_open();
+
+    // The refused connection. Its HELLO is scripted before it is served: a parked
+    // recv wakes only on a liveness tick, and this connection must not depend on
+    // one — its whole life is one handshake.
+    let refused = Pipe::new();
+    refused.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+
+    let drive = async {
+        // Wait for the seated WELCOME: it is sent after the admission slot was
+        // taken, so the ceiling is genuinely held before the second HELLO is served.
+        for _ in 0..10_000 {
+            if !seated.sent().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let _welcome = welcome_in(&seated.sent());
+        h.serve(&refused).await;
+        // End the seated session so the join can return: a clean hangup, so nothing
+        // about the refusal is entangled with how the seated session closed.
+        seated.hangup();
+    };
+    tokio::join!(h.serve(&seated), drive);
+
+    let error = sole_error(&refused.sent());
+    assert_eq!(
+        error.code,
+        codes::OVERLOADED,
+        "a node past its session ceiling answers OVERLOADED, the class that says retry with \
+         backoff"
+    );
+    assert_eq!(
+        error.message.as_deref(),
+        Some("server overloaded"),
+        "only the public hint crosses the wire"
+    );
+    assert_eq!(
+        h.handshake_rejected("overloaded"),
+        1,
+        "the refusal is metered under its own label, distinct from a protocol violation"
+    );
+    assert_eq!(
+        h.sessions_opened(),
+        1,
+        "the refused handshake opens no session, so it holds no slot"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the live-session gauge is balanced after both connections end"
+    );
+    assert!(refused.was_closed(), "the refused transport is closed");
+    assert!(seated.was_closed(), "the seated transport is closed");
 }
 
 // ===========================================================================
