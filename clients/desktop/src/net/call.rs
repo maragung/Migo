@@ -860,8 +860,11 @@ impl Worker {
         // The video slot the pump parks decoded frames in; the overlay reads it every repaint.
         // Allocated for every call — audio included — because which tracks arrive is not known
         // until the peer's description does, and a slot that might not exist is a video path
-        // that might not start.
+        // that might not start. The handler below is a move closure and takes its captures by
+        // value, so it gets a clone of its own here — the original stays with the builder and
+        // crosses out in the return as the overlay's share of the same frame store.
         let video_slot: call_video::VideoSlot = Arc::default();
+        let track_video_slot = video_slot.clone();
         // The peer connection crosses into the video pump by weak reference, not a clone: the
         // pump outlives this builder (it runs until the track closes), and a strong reference
         // held by a handler the closed connection never clears would keep the whole transport
@@ -870,7 +873,7 @@ impl Worker {
         let video_pc = Arc::downgrade(&pc);
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let speaker_tx = speaker_tx.clone();
-            let video_slot = video_slot.clone();
+            let video_slot = track_video_slot.clone();
             let video_pc = video_pc.clone();
             Box::pin(async move {
                 if track.kind() == RTPCodecType::Video {
@@ -912,11 +915,10 @@ impl Worker {
         // its drop at call end is the signal the whole capture chain unwinds on.
         let mic_frames = microphone.take_frames();
         spawn_capture_pump(mic_frames, microphone.rate, muted.clone(), sample_tx);
-        // The slot crosses into the on_track handler above (a move closure owns what it
-        // captures) and back out here as the caller's share of the same slot — one clone for
-        // two holders of one Arc, so the overlay and the pump read and write the same frame
-        // store the call through.
-        Ok((pc, microphone, speaker, muted, video_slot.clone()))
+        // The slot itself returns untouched: the handler's share was cloned off before the
+        // closure was built, so this is the same Arc the closure holds, not a borrow after a
+        // move.
+        Ok((pc, microphone, speaker, muted, video_slot))
     }
 
     /// The placement's second half, on the TURN answer or its timeout: media, offer, invite.
