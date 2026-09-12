@@ -7,7 +7,11 @@
 //! [`peers`](Mesh::peers), [`peer`](Mesh::peer) — the deliberate, approved joins section 170
 //! requires. The **transport layer** drives a link: it builds a [`hello`](Mesh::hello),
 //! signs a [`prove`](Mesh::prove), [`authenticate`](Mesh::authenticate)s the peer's proof,
-//! and runs every subsequent packet through [`check_sequence`](Mesh::check_sequence). And a
+//! and runs every subsequent packet through [`check_sequence`](Mesh::check_sequence),
+//! reporting what its connects discovered — [`note_link_down`](Mesh::note_link_down) when a
+//! peer could not be reached, [`note_link_up`](Mesh::note_link_up) when it was — so the
+//! layer above can ask [`link_reachable`](Mesh::link_reachable) before writing to a room
+//! whose home node sits behind that link (sections 170, 173). And a
 //! **producer** — the rooms or messaging layer with an event bound for another region — uses
 //! the outbox: [`enqueue`](Mesh::enqueue) to hand it over, then a drainer walks
 //! [`due`](Mesh::due), [`mark_delivered`](Mesh::mark_delivered),
@@ -183,4 +187,32 @@ pub trait Mesh: Send + Sync {
         now: Timestamp,
         error: &str,
     ) -> Result<()>;
+
+    /// Records that a delivery attempt to `node` could not even connect.
+    ///
+    /// The transport layer calls this from the one place a partition is actually
+    /// discovered: a drain whose TCP connect to the peer failed. This is the evidence
+    /// section 170's read-only rule runs on — a room whose home node sits behind a
+    /// link marked down is refused further writes with
+    /// [`room_read_only_partition`](migo_protocol::fault::room_read_only_partition)
+    /// rather than allowed to diverge (section 173, scenario 2). The mark stands until
+    /// [`note_link_up`](Mesh::note_link_up) contradicts it.
+    fn note_link_down(&self, node: Id);
+
+    /// Records that `node` was reached: a batch was delivered to it, or it completed an
+    /// inbound handshake.
+    ///
+    /// Either direction of the link proves the peer is back, so the rooms it homes may
+    /// be written to again — a partition that ends must not leave the room read-only
+    /// forever. Idempotent and harmless for a node never marked down.
+    fn note_link_up(&self, node: Id);
+
+    /// Whether `node` is believed reachable right now.
+    ///
+    /// `true` unless a failed connect is still standing uncontradicted. The unknown is
+    /// deliberately the permissive answer: the mesh remembers evidence, it does not
+    /// guess, so a peer it has never tried reads as reachable and a node this process
+    /// just booted beside reads as reachable until its first drain attempt says
+    /// otherwise.
+    fn link_reachable(&self, node: Id) -> bool;
 }

@@ -1,17 +1,23 @@
-//! Per-link sequence tracking: the rule that each packet on a link must carry a number one
-//! greater than the last.
+//! Per-link state: the sequence rule each packet must satisfy, and the
+//! reachability a partitioned node is remembered by.
 //!
 //! Section 169 requires a per-link sequence that strictly increases — a packet whose number
 //! does not advance is rejected — and section 152 adds that a *gap* in that sequence is a
-//! suspected replay or a lost segment and must reset the link. This module is the state
+//! suspected replay or a lost segment and must reset the link. [`LinkSequences`] is the state
 //! behind both rules and nothing more: it does not open or close a connection, it reports
 //! what the number means so the transport layer can.
 //!
 //! A link starts with no entry, which reads as "last seen 0", so the first packet of a fresh
 //! session must be sequence 1. A successful handshake [`reset`](LinkSequences::reset)s the
 //! link, because a new session numbers its packets from the start again.
+//!
+//! [`LinkHealth`] lives beside it because it is the same shape of fact — per peer, in-memory,
+//! written only by the transport that actually tried the link — and the opposite kind of
+//! evidence: a connect that failed marks a node down, a delivered batch or an inbound
+//! handshake marks it up, and the layer above reads the answer to decide whether a room
+//! whose home node sits behind that link may still be written (sections 170, 173).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parking_lot::Mutex;
 
@@ -62,5 +68,59 @@ impl LinkSequences {
     /// gap forces the link down.
     pub(crate) fn reset(&self, node: Id) {
         self.last.lock().remove(&node);
+    }
+}
+
+/// Whether each peer node is currently believed unreachable, keyed by peer node id.
+///
+/// This is the state behind scenario 2 of section 173's read-only half: section 170 says a
+/// room whose home node cannot be reached becomes read-only rather than silently diverging,
+/// and "cannot be reached" is not a guess the mesh makes about the future but evidence it
+/// remembers about the past. The only evidence that marks a link down is a delivery attempt
+/// that could not connect; the evidence that marks it up again is a delivered batch or a
+/// peer that completed an inbound handshake. A node with no entry reads as reachable —
+/// silence about a peer is never treated as a partition, because refusing a room's writes
+/// on a hunch would cost availability the spec does not ask to lose.
+///
+/// The state is in-memory and per-process by design: it describes *this* node's view of
+/// *this* moment's links, not a fact about the peer. A restart forgets everything, which
+/// reads as "all links reachable" until the next drain attempt says otherwise — the honest
+/// answer for a process that has not yet tried.
+pub(crate) struct LinkHealth {
+    down: Mutex<HashSet<Id>>,
+}
+
+impl LinkHealth {
+    /// A tracker that believes every peer reachable, because it has tried none.
+    pub(crate) fn new() -> Self {
+        Self {
+            down: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Marks `node` unreachable: a delivery attempt could not even connect.
+    ///
+    /// Idempotent — a link already down stays down, and the retries that keep failing
+    /// (on their exponential backoff) keep finding the same entry.
+    pub(crate) fn mark_down(&self, node: Id) {
+        self.down.lock().insert(node);
+    }
+
+    /// Marks `node` reachable again: a batch was delivered, or the node completed an
+    /// inbound handshake.
+    ///
+    /// Either direction of the link proves the peer is there, so the rooms it homes may
+    /// be written to again. Clearing an absent entry is a no-op.
+    pub(crate) fn mark_up(&self, node: Id) {
+        self.down.lock().remove(&node);
+    }
+
+    /// Whether `node` is believed reachable right now.
+    ///
+    /// `true` unless a failed delivery attempt is still standing uncontradicted — the
+    /// unknown is deliberately the permissive answer, per the module docs above.
+    #[must_use]
+    pub(crate) fn is_reachable(&self, node: Id) -> bool {
+        !self.down.lock().contains(&node)
     }
 }
