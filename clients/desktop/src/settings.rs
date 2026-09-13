@@ -24,6 +24,27 @@ use crate::theme::Theme;
 const SETTINGS_FILE: &str = "settings.json";
 pub const SETTINGS_VERSION: u32 = 1;
 
+/// How the `server` field was chosen.
+///
+/// `Manual` — the default and the behaviour of every file written before the field existed —
+/// means the `server` endpoint is exactly what the user accepted on the form, and the client
+/// keeps it as typed. `Auto` means the endpoint is auto mode's last resolution: the form's
+/// "Otomatis" choice probed the candidate list (see [`crate::config::server_candidates`]) and
+/// wrote the fastest responder here, and every launch re-resolves rather than trusting a
+/// resolution that may name a node that has since gone away.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerMode {
+    /// The user's own explicit choice. Also the reading of a file written before the field
+    /// existed: an old install's saved server is the user's saved server, not a stale
+    /// resolution this build is entitled to overwrite.
+    #[default]
+    Manual,
+    /// Auto: the endpoint is the fastest answering node of the candidate list, re-probed at
+    /// every startup.
+    Auto,
+}
+
 /// The on-disk settings record. Versioned so a future field that the older binary does not know
 /// about is at least an explicit migration rather than a silent misread.
 ///
@@ -34,8 +55,16 @@ pub const SETTINGS_VERSION: u32 = 1;
 pub struct Settings {
     /// The schema version. A reader that does not recognise the value refuses to load.
     pub version: u32,
-    /// The user-configured server.
+    /// The user-configured server. In [`ServerMode::Manual`] this is the endpoint exactly as
+    /// the user accepted it; in [`ServerMode::Auto`] it is the last resolution, re-probed at
+    /// every startup.
     pub server: ServerEndpoint,
+    /// How `server` was chosen: the user's hand, or auto mode's probe. Absent — a first run,
+    /// or a file written before the field existed — means manual, because an old install's
+    /// saved server is an explicit choice this build must keep honouring, never a stale
+    /// resolution it may silently overwrite.
+    #[serde(default)]
+    pub server_mode: ServerMode,
     /// The theme the user last chose with the toggle. Absent — a first run, or a file written
     /// before the field existed — means "follow the desktop's own preference".
     #[serde(default)]
@@ -66,6 +95,7 @@ impl Settings {
         Self {
             version: SETTINGS_VERSION,
             server: default_production_server_endpoint(),
+            server_mode: ServerMode::default(),
             theme: None,
             ui_scale: None,
             auto_save_chat_logs: false,
@@ -184,6 +214,7 @@ mod tests {
         let record = Settings {
             version: SETTINGS_VERSION,
             server: Settings::default_for_dev().server,
+            server_mode: ServerMode::Manual,
             theme: Some(Theme::Light),
             ui_scale: None,
             auto_save_chat_logs: false,
@@ -293,6 +324,7 @@ mod tests {
                 scheme: Scheme::Ws(WsScheme::Ws),
                 rest_scheme: RestScheme::Http,
             },
+            server_mode: ServerMode::Manual,
             theme: Some(Theme::Dark),
             ui_scale: None,
             auto_save_chat_logs: false,
@@ -320,10 +352,49 @@ mod tests {
                 scheme: Scheme::Ws(WsScheme::Ws),
                 rest_scheme: RestScheme::Http,
             },
+            server_mode: ServerMode::Manual,
             theme: None,
             ui_scale: None,
             auto_save_chat_logs: false,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
+    }
+
+    /// The server mode round-trips, and a file written before the field existed reads as manual:
+    /// an old install's saved server is the user's own explicit choice, which this build must
+    /// keep honouring rather than treating it as a stale auto resolution it may overwrite.
+    #[test]
+    fn server_mode_round_trips_and_defaults_to_manual() {
+        let path = std::env::temp_dir().join("migo-desktop-test-server-mode.json");
+        let record = Settings {
+            server_mode: ServerMode::Auto,
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.server_mode, ServerMode::Auto);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"server_mode\": \"auto\""));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(Settings::default_for_dev().server_mode, ServerMode::Manual);
+
+        let old_path = std::env::temp_dir().join("migo-desktop-test-server-mode-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&old_path, old.to_string()).expect("write");
+        let loaded = load(&old_path).expect("load");
+        assert_eq!(loaded.server_mode, ServerMode::Manual);
+        assert_eq!(loaded.server.host, "localhost");
+        let _ = fs::remove_file(&old_path);
     }
 }

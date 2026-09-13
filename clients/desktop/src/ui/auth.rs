@@ -22,7 +22,7 @@ use crate::config::ServerEndpoint;
 use crate::net::Command;
 use crate::theme::{palette, space};
 use crate::ui::captcha::{self, CaptchaState};
-use crate::ui::server_form::{self, ServerFormState};
+use crate::ui::server_form::{self, ServerChoiceState, ServerFormState};
 use crate::ui::{widgets, Context, Screen};
 
 /// What the three forms are holding.
@@ -46,6 +46,14 @@ pub struct AuthState {
     /// (held in egui's temp data so it does not reset on every frame), but the typed-but-not-yet
     /// accepted values live here so they survive a screen switch.
     pub server_form: ServerFormState,
+    /// The server mode choice's standing: what auto is doing, and the probe flag the shell
+    /// reads after the frame. The form never probes itself — nothing in `ui` is given a
+    /// socket — so the flag is the whole hand-off.
+    pub server_choice: ServerChoiceState,
+    /// The probe answer channel, held only while a probe the shell spawned is in flight. The
+    /// shell polls it with `try_recv` once per frame and clears it when the answer lands, so
+    /// the paint loop never waits on the network.
+    pub server_probe: Option<std::sync::mpsc::Receiver<Option<ServerEndpoint>>>,
     /// The restore form: where the `.migo` container is, and the recovery credential that opens it.
     ///
     /// The credential is as secret as a passphrase and is wiped with the rest; the path is not secret
@@ -80,6 +88,8 @@ impl Default for AuthState {
             busy: false,
             captcha: CaptchaState::default(),
             server_form,
+            server_choice: ServerChoiceState::default(),
+            server_probe: None,
             restore_path: String::new(),
             restore_credential: String::new(),
             restore_username: String::new(),
@@ -331,7 +341,13 @@ fn unlock(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
 /// where [`AuthState::apply_server`] persists the endpoint and re-seeds the form.
 fn draw_server_disclosure(ui: &mut Ui, context: &Context<'_>, state: &mut AuthState) {
     let theme = context.theme;
-    if let Some(endpoint) = server_form::show(ui, theme, &state.server, &mut state.server_form) {
+    if let Some(endpoint) = server_form::show(
+        ui,
+        theme,
+        &state.server,
+        &mut state.server_form,
+        &mut state.server_choice,
+    ) {
         state.apply_server(endpoint);
     }
 }
