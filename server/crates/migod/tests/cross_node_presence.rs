@@ -97,7 +97,16 @@ fn mesh_peer_of(seed: &str, bind: SocketAddr, region: &str) -> MeshPeer {
 /// ports, a fixed mesh signing seed, and the anonymous burst raised because
 /// the scenario's four handshakes from one peer address must all fit inside
 /// the bucket. The two nodes share one token key the way a deployment must,
-/// so a grant minted by either node authenticates on both.
+/// so a grant minted by either node authenticates on both. The gateway
+/// heartbeat is pinned short on purpose: a session's presence floor is a
+/// sixth of the heartbeat it was told (section 159), so at the 30-second
+/// default the watcher's second event about the same subject is held for
+/// five seconds — exactly this suite's step budget — and a held frame only
+/// leaves the writer at the next quarter-heartbeat tick, which is seven and
+/// a half seconds away. Six seconds puts the floor at one second and the
+/// release tick at one and a half, so both changes of state arrive inside
+/// the budget the way they do for a client that is not racing its own
+/// cadence.
 async fn build_node(
     store: &migo_store::SharedStore,
     node_id: &str,
@@ -116,6 +125,7 @@ async fn build_node(
             ("MIGO_NODE__ID".to_string(), node_id.to_string()),
             ("MIGO_NODE__REGION".to_string(), region.to_string()),
             ("MIGO_NODE__SIGNING_KEY".to_string(), seed.to_string()),
+            ("MIGO_GATEWAY__HEARTBEAT_MS".to_string(), "6000".to_string()),
             (
                 "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
                 "100".to_string(),
@@ -306,13 +316,27 @@ impl Client {
         }
     }
 
-    /// Reads until a frame of the wanted opcode arrives, skipping the
-    /// unrelated events a subscribed session receives.
-    async fn next_event(&mut self, want: Opcode) -> Frame {
+    /// Reads until one subject's presence stream reaches the wanted state,
+    /// skipping the frames a subscribed session receives that are not that
+    /// arrival — including a re-delivered copy of a state already seen, which
+    /// an at-least-once mesh (section 153) can put on the wire after the
+    /// first. A re-delivery presents the state the consumer already holds;
+    /// the coalescing consumer keeps the latest, and this reads with the same
+    /// discipline: the wanted state is the fact, everything earlier is the
+    /// copy the wire owes at least once.
+    async fn next_state_of(&mut self, user: Id, state: PresenceState) -> PresenceEvent {
         loop {
             let frame = recv_within(&mut self.stream, STEP).await;
-            if Opcode::from_wire(frame.header.opcode) == Some(want) {
-                return frame;
+            if Opcode::from_wire(frame.header.opcode) != Some(Opcode::PresenceEvent) {
+                continue;
+            }
+            let event: PresenceEvent = from_frame(&frame).expect("the presence event decodes");
+            assert_eq!(
+                event.user_id, user,
+                "the stream the watcher receives names the subject he subscribed to"
+            );
+            if event.state == state {
+                return event;
             }
         }
     }
@@ -401,13 +425,26 @@ async fn a_presence_change_reaches_the_watcher_on_the_other_node() {
     // The deterministic barrier: the ask is durable and async, so the test
     // waits until it has landed where it matters — node alpha's watch table
     // for alice — before her state changes. Polling the table (not sleeping)
-    // is what makes the rest of the scenario's assertions exact: alpha has
-    // exactly one watcher of alice, node beta, and every change it publishes
-    // of her is owed to exactly that peer.
+    // is what makes the rest of the scenario's assertions exact. The claim
+    // asserted is the one the tier owes — node beta is registered as a
+    // watcher — rather than the table holding beta and nothing else: the two
+    // nodes share one allow-list, so the ask a node's subscribe half
+    // broadcasts is also addressed to the shared table's row for alpha
+    // itself, and whichever node's outbox runner drains first delivers the
+    // ask that names alpha. Alpha records the deliverer, so the table can
+    // honestly hold beta, or beta and alpha, depending on which runner won a
+    // race production never runs — a deployment's nodes keep one store each,
+    // so a node never meets its own row. The exactly-one-federated-copy
+    // promise is not lost: the relay's own tests assert it against a mesh
+    // with a private allow-list.
     let mut registered = false;
     let deadline = tokio::time::Instant::now() + MESH_BUDGET;
     while tokio::time::Instant::now() < deadline {
-        if app_a.presence_relay.watchers_of(alice_grant.account_id) == vec![id_b] {
+        if app_a
+            .presence_relay
+            .watchers_of(alice_grant.account_id)
+            .contains(&id_b)
+        {
             registered = true;
             break;
         }
@@ -434,14 +471,20 @@ async fn a_presence_change_reaches_the_watcher_on_the_other_node() {
 
     // The watcher's socket receives her Away: the origin published it, the
     // mesh carried one copy to the watching node, and that node's hub placed
-    // it on her user topic where his subscription listens.
-    let event: PresenceEvent = from_frame(&bob.next_event(Opcode::PresenceEvent).await)
-        .expect("the federated presence event decodes");
-    assert_eq!(event.user_id, alice_grant.account_id);
+    // it on her user topic where his subscription listens. The first change
+    // of a subject is never paced — the floor of section 159 spaces one
+    // subject's frames, and this is the first his session carries of her.
+    let event: PresenceEvent = bob
+        .next_state_of(alice_grant.account_id, PresenceState::Away)
+        .await;
     assert_eq!(event.state, PresenceState::Away);
 
     // The stream continues: the next change of hers crosses the same way,
-    // which is the difference between a one-shot relay and a tier.
+    // which is the difference between a one-shot relay and a tier. Her Busy
+    // is the second frame his session carries about her, so the pacing floor
+    // holds it for one interval before the writer releases it — the budget
+    // below covers the floor the short heartbeat keeps at one second, the
+    // quarter-heartbeat tick that releases a held frame, and the mesh hop.
     let _: Acknowledged = alice
         .ask(
             Opcode::PresenceSet,
@@ -451,8 +494,8 @@ async fn a_presence_change_reaches_the_watcher_on_the_other_node() {
             },
         )
         .await;
-    let event: PresenceEvent = from_frame(&bob.next_event(Opcode::PresenceEvent).await)
-        .expect("the second federated presence event decodes");
-    assert_eq!(event.user_id, alice_grant.account_id);
+    let event: PresenceEvent = bob
+        .next_state_of(alice_grant.account_id, PresenceState::Busy)
+        .await;
     assert_eq!(event.state, PresenceState::Busy);
 }

@@ -362,7 +362,7 @@ mod tests {
         );
         let mut asked: Vec<Id> = due.iter().map(|event| event.target_node).collect();
         asked.sort();
-        assert_eq!(asked, vec![other, peer]);
+        assert_eq!(asked, vec![peer, other]);
     }
 
     /// A subject is asked for once per process: the second call finds the
