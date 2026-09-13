@@ -220,14 +220,19 @@ test('messaging: a detected gap asks the gap filler once, and a stalled ask wait
 test('messaging: a fill that made progress continues on its own when events arrive above its target', async () => {
   const asked: number[] = [];
   const pages: { land: (seqs: number[]) => void } = { land: () => {} };
-  let transport: RecordingTransport | undefined;
+  // The filler closes over `rigged` before that binding exists. That is safe — `land` only
+  // ever runs after `rig` has returned — and it keeps the capture a single `const` instead
+  // of a `let` declared apart from its one assignment.
   const filler: GapFiller = {
     fillGap(_conversationId, toSeq) {
       asked.push(toSeq);
       return new Promise<void>((resolve) => {
         pages.land = (seqs) => {
           for (const seq of seqs) {
-            transport?.emit(OP.MESSAGE_EVENT, encodeBody(encodeMessageEvent, pushedEvent(seq)));
+            rigged.transport.emit(
+              OP.MESSAGE_EVENT,
+              encodeBody(encodeMessageEvent, pushedEvent(seq)),
+            );
           }
           resolve();
         };
@@ -235,18 +240,16 @@ test('messaging: a fill that made progress continues on its own when events arri
     },
   };
   const rigged = rig(new Map(), filler);
-  transport = rigged.transport;
-  const messaging = rigged.messaging;
-  messaging.start();
+  rigged.messaging.start();
 
-  messaging.ingest(pushedEvent(1));
-  messaging.ingest(pushedEvent(2));
-  messaging.ingest(pushedEvent(3));
+  rigged.messaging.ingest(pushedEvent(1));
+  rigged.messaging.ingest(pushedEvent(2));
+  rigged.messaging.ingest(pushedEvent(3));
 
   // The fill is asked for the hole up to 7; while it runs, 8 arrives above its target.
-  messaging.ingest(pushedEvent(7));
+  rigged.messaging.ingest(pushedEvent(7));
   assert.deepEqual(asked, [7]);
-  messaging.ingest(pushedEvent(8));
+  rigged.messaging.ingest(pushedEvent(8));
 
   // The fill's pages land and move the watermark — only part of the way, but progress: no
   // stall is recorded, and the events that arrived above the target are a new hole the domain
@@ -254,11 +257,11 @@ test('messaging: a fill that made progress continues on its own when events arri
   pages.land([4, 5]);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(asked, [7, 8], 'the fill continued to the new top on its own');
-  assert.equal(messaging.watermark(CONVERSATION), 5);
+  assert.equal(rigged.messaging.watermark(CONVERSATION), 5);
 
   // The continuation closes what is left, and the accounting agrees.
   pages.land([6, 7, 8]);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(messaging.watermark(CONVERSATION), 8);
+  assert.equal(rigged.messaging.watermark(CONVERSATION), 8);
   assert.equal(asked.length, 2);
 });
