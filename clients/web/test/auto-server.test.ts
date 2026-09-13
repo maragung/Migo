@@ -133,6 +133,11 @@ test('a stored transport preference rides along onto the freshly probed node', a
     endpoint: { ...NODE_A, transport: 'Quic', scheme: 'Quic', restScheme: 'Http' },
   };
   const fetchImpl = plannedFetch({
+    // Both nodes get explicit plans: a server with no plan answers immediately in this
+    // double, so leaving NODE_A unplanned would make the *stored* node win the probe
+    // and the test would no longer prove anything about the winner carrying the
+    // transport over.
+    [healthUrl(NODE_A)]: { url: healthUrl(NODE_A), status: 200, delayMs: 40 },
     [healthUrl(NODE_B)]: { url: healthUrl(NODE_B), status: 200, delayMs: 1 },
   });
   const resolved = await resolveServerChoice(stored, LIST, { fetch: fetchImpl });
