@@ -962,6 +962,17 @@ mod tests {
         let owner = Id::from(0xAAAA);
         let regarding = Id::from(0xBBBB);
         let home = store_with_account(owner, "theowner").await;
+        // The edge the asker's gate will read: seeded on the owner's store so
+        // the answer carries it — the apply below must seat it on the asker.
+        home.put_relationship(Relationship {
+            account_id: owner,
+            other_id: regarding,
+            kind: RelationshipKind::Friend,
+            created_at: Timestamp::from_millis(NOW),
+            accepted_at: Some(Timestamp::from_millis(NOW + 1)),
+        })
+        .await
+        .expect("the friendship edge writes on the owner's store");
         let relay_home = ReplicationRelay::new(Arc::clone(&mesh), home);
         relay_home
             .answer_account(
