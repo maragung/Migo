@@ -3310,7 +3310,7 @@ mod tests {
             "nothing is left to expire"
         );
         assert!(
-            state.typing.get(&conversation).is_none(),
+            !state.typing.contains_key(&conversation),
             "a Start that was never followed by a Stop still ends"
         );
     }
@@ -3351,7 +3351,7 @@ mod tests {
         let typer = Id::from_bytes([0x22; 16]);
         state.note_typing(conversation, typer, true);
         state.note_typing(conversation, typer, false);
-        assert!(state.typing.get(&conversation).is_none());
+        assert!(!state.typing.contains_key(&conversation));
         assert!(
             state.typing_expires.is_empty(),
             "the Stop disarms the timeout too"

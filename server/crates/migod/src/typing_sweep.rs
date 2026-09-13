@@ -6,9 +6,9 @@
 //! because the only party that could end an indicator was the typer's own
 //! client — and the client that most needs to say "stop" is exactly the one
 //! that cannot: the app killed mid-word, the tab frozen, the phone in a tunnel
-//! past the last refresh. [`migo-messaging`] owns no timer (the same rule that
-//! keeps the message sweeper out of it — see
-//! [`Messaging::purge_expired`](migo_messaging::Messaging::purge_expired)), so
+//! past the last refresh. The `migo-messaging` crate owns no timer — the same
+//! rule that keeps the message sweeper out of it, see
+//! [`Messaging::purge_expired`](migo_messaging::Messaging::purge_expired) — so
 //! the composition root is where the task that watches the deadline belongs,
 //! in the same seat the call sweeper sits in and for the same reason: it must
 //! outlive every request and die with the node.
