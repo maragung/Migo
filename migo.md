@@ -2214,11 +2214,11 @@ Sumber kebenaran protocol adalah IDL di shared/protocol/schema. Kode Rust dan Ty
 
 72. FEATURE NEGOTIATION
 
-STATUS: SCHEMA. Bit assignment sudah ada di shared/protocol/schema/meta.json.
+STATUS: BUILT untuk negosiasi dan gerbangnya. Bit assignment hidup di shared/protocol/schema/meta.json, atribut feature pada opcode hidup di shared/protocol/schema/opcodes.json, dan gateway menegakkan irisan per sesi di dua arah seperti di bawah; section 148 memegang aturan protokolnya.
 
-Client dan server bertukar bitmask u64 pada HELLO dan Welcome. Session memakai irisan dari keduanya. Server TIDAK BOLEH mengirim frame untuk fitur yang tidak diiklankan client.
+Client dan server bertukar bitmask u64 pada HELLO dan Welcome. Session memakai irisan dari keduanya dan irisan itu tetap selama sesi (section 148). Server TIDAK BOLEH mengirim frame untuk fitur yang tidak diiklankan client, dan permintaan masuk untuk fitur yang tidak dinegosiasikan dijawab ERROR FEATURE_NOT_NEGOTIATED tanpa menutup koneksi.
 
-Bit yang sudah ditetapkan:
+Bit yang sudah ditetapkan, dan ini satu-satunya daftar yang mengikat — bit 16 sampai 21 sudah terpakai oleh VOICE_NOTE sampai TCP_TRANSPORT:
 
 0 COMPRESSION
 1 BATCHING
@@ -2243,13 +2243,19 @@ Bit yang sudah ditetapkan:
 20 RICH_PRESENCE
 21 TCP_TRANSPORT
 
-Bit yang direncanakan. STATUS: SPEC:
+Nama yang pernah direncanakan untuk bit 16 sampai 20 — CALL_V1, GROUP_CALL_SFU_V1, REACTIONS, DELTA_ROOM_STATE, MEDIA_RESUMABLE_UPLOAD — tidak pernah punya bit, dan daftar rencana lama itu sudah tidak berlaku karena nomornya terpakai. CALL_V1 dan GROUP_CALL_SFU_V1 adalah nama sebelum CALLS dan GROUP_CALL ditetapkan: panggilan 1-on-1 memakai CALLS dan panggilan grup memakai GROUP_CALL, jadi kedua nama lama itu usang dan bagian mana pun yang masih menyebutnya harus dibaca begitu. REACTIONS, DELTA_ROOM_STATE, dan MEDIA_RESUMABLE_UPLOAD tetap rencana tanpa nomor; ketika salah satunya ditetapkan, nomornya diambil dari yang belum terpakai mulai 22 ke atas, dan metric yang menunggunya menunggu tanpa nomor, bukan menunggu nomor 20.
 
-16 CALL_V1
-17 GROUP_CALL_SFU_V1
-18 REACTIONS
-19 DELTA_ROOM_STATE
-20 MEDIA_RESUMABLE_UPLOAD
+Cara setiap bit menegakkan dirinya pada node ini:
+
+PRESENCE, TYPING, ROOMS, GAMES, BOTS, ECONOMY, dan CALLS kini membawa atribut feature pada opcode keluarganya di registry, menyusul FEDERATION yang sudah lebih dulu pada opcode FED_*. Opcode ber-atribut dari session tanpa bitnya ditolak FEATURE_NOT_NEGOTIATED pada jalur masuk, dan pada jalur keluar hub tidak menyimpan frame opcode itu ke session yang irisannya tidak memuat bitnya, jadi frame fitur benar-benar tidak dikirim, bukan dikirim lalu diabaikan penerima. Node mengiklankan ketujuh keluarga itu supaya irisan bisa terbentuk; opcode SFU sengaja tidak diberi atribut, sesuai keputusan yang tercatat di section 165.
+
+COMPRESSION dan BATCHING adalah saklar level frame per sesi: payload hanya dikemas bila bitnya ada di irisan, jadi client yang tidak mengumumkan bitnya tidak pernah menerima frame berbentuk itu.
+
+QUIC dan TCP_TRANSPORT diiklankan hanya selama listenernya hidup, TRACING mengikuti kesepakatan trace per sesi, dan RESUME dihormati lewat permintaan resume di HELLO.
+
+RICH_PRESENCE meng-gate satu field miliknya, custom_status di PROFILE_UPDATE (section 148).
+
+E2E_V1, GROUP_E2E_V1, MEDIA_UPLOAD, VOICE_MESSAGE, dan VOICE_NOTE tidak meng-gate opcode karena keluarga opcodenya dipakai bersama: MESSAGE dan MEDIA tetap dilayani untuk client yang mengirimnya tanpa bit, sebagaimana voice note berjalan lewat MESSAGE_SEND kind Voice plus MEDIA dan avatar atau gambar tetap sampai ke client tanpa MEDIA_UPLOAD. Bit-bit itu adalah pernyataan kemampuan client, bukan saklar pengiriman. TRANSLATION belum punya keluarga opcode, jadi bitnya hari ini murni iklan.
 
 Aturan:
 
@@ -5240,7 +5246,7 @@ Private message tetap dapat dikirim saat node tujuan tidak terjangkau, karena pe
 
 171. BANDWIDTH TARGET AND BUDGET
 
-STATUS: BUILT untuk gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder asli dan AEAD asli, dijalankan CI sebagai make budget-check, dan menggagalkan build bila sebuah budget terlampaui. STATUS: SPEC untuk pengukuran runtime, yaitu metric gateway, tools/loadgen, dan penghitung byte per session di web client, yang mengukur node hidup dan bukan encoder.
+STATUS: BUILT untuk gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder asli dan AEAD asli, dijalankan CI sebagai make budget-check, dan menggagalkan build bila sebuah budget terlampaui. STATUS: BUILT juga untuk dua dari tiga bagian pengukuran runtime. Pertama, metric gateway: server/crates/migo-gateway/src/metrics.rs mengekspor migo_gateway_frames_in_total dan migo_gateway_frames_out_total tanpa label, migo_gateway_frames_dropped_total berlabel class, histogram migo_frame_bytes dengan bucket sengaja kasar dan tanpa label opcode agar aturan side channel section 174 tetap terjaga, plus migo_reconnect_total, migo_decode_errors_total, dan seri sesi hidup. Kedua, penghitung byte per session di web client: transport SDK (packages/sdk/src/transport.ts) menghitung WireBytes per transport, yaitu setiap byte yang berhasil ditulis ke socket dihitung pada ukuran kabelnya pasca kompresi (header frame termasuk, HELLO dan ACK termasuk), dan setiap pesan WebSocket masuk dihitung pada ukuran envelope luarnya; penghitungnya client-local tanpa label akun dan tanpa putaran ke server, tidak di-reset saat reconnect melainkan terus bertumbuh dan menghitung handshake reconnect itu sendiri karena byte itu biaya nyata yang dibayar client, dan hanya mulai dari nol saat transport baru dibangun pada login berikutnya, dibaca lewat client.wireBytes; web client menampilkannya pada mode development sebagai grup Diagnostik di panel Settings (clients/web/src/components/settings-panel.tsx) yang diperbarui tiap detik dan tidak pernah ikut build produksi; jalur ini dibuktikan test socket palsu di packages/sdk/test/transport.test.ts yang menuntut penghitung sama persis dengan jumlah byte yang benar-benar lewat kedua socket lintas reconnect, dan test render di clients/web/test/wire-bytes.test.tsx. STATUS: SPEC untuk bagian yang tersisa, yaitu tools/loadgen: harness-nya sudah ada dan CI sudah menjalankannya dengan jumlah virtual user dan error budget tetap yang menentukan exit code, tetapi loadgen hari ini tidak menghitung byte sama sekali, sehingga laporan byte per user per menit per skenario dan ambang kegagalan bila sebuah skenario melewati budget lebih dari 10 persen belum ada; pekerjaannya adalah instrumentasi byte pada virtual user loadgen dan ambang per skenario di report-nya, bukan membangun harness baru.
 
 Target per event dan per session ada di section 56. Bagian ini menambahkan target untuk call, voice note, media, dan federation, serta cara pengukurannya.
 
@@ -5304,8 +5310,8 @@ Cara pengukuran:
 
 Gate ukuran frame: server/crates/migo-protocol/tests/budgets.rs mengukur frame tipikal setiap opcode berbudget dengan encoder migo-wire asli dan AEAD migo-crypto asli, lalu membandingkannya dengan angka section 56 dan bagian ini. CI menjalankannya sebagai make budget-check dan menggagalkan build bila sebuah budget terlampaui. Frame diukur tanpa kompresi dan tanpa batching, yang hanya mengecilkan byte di kabel
 Gateway mengekspor migo_gateway_frames_in_total dan migo_gateway_frames_out_total tanpa label, plus migo_gateway_frames_dropped_total berlabel class, sehingga regresi terlihat sebagai pergeseran rasio frame masuk ke keluar; histogram byte per opcode memang tidak diekspor karena panjang ciphertext adalah side channel (section 174), jadi pengukuran byte per pesan dilakukan oleh test ukuran frame per opcode, bukan oleh seri metrik
-tools/loadgen melaporkan byte per user per menit untuk setiap skenario, dan CI menggagalkan job performa bila sebuah skenario melewati budget lebih dari 10 persen
-Web client mencatat penghitung byte per session pada mode development, sehingga biaya sebuah fitur terlihat saat fitur itu ditulis, bukan setelah diluncurkan
+tools/loadgen melaporkan byte per user per menit untuk setiap skenario, dan CI menggagalkan job performa bila sebuah skenario melewati budget lebih dari 10 persen; bagian ini yang masih SPEC karena loadgen hari ini hanya mengukur error budget, bukan byte
+Web client mencatat penghitung byte per session pada mode development, sehingga biaya sebuah fitur terlihat saat fitur itu ditulis, bukan setelah diluncurkan; dihitung oleh transport SDK sebagai WireBytes (ukuran kabel kedua arah, bertahan lintas reconnect) dan ditampilkan web client pada grup Diagnostik di panel Settings hanya pada build development
 Setiap penambahan opcode WAJIB disertai satu pengukuran ukuran frame tipikalnya di budgets.rs dan membandingkannya dengan budget
 
 

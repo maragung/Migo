@@ -103,6 +103,7 @@ export type {
   SessionInfo,
   TransportOptions,
   WebSocketFactory,
+  WireBytes,
 } from './transport.js';
 
 // --- the request/event bridge and per-slice domains ---

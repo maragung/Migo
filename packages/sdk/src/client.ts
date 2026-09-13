@@ -86,6 +86,7 @@ import type {
   HelloParams,
   TransportOptions,
   WebSocketFactory,
+  WireBytes,
 } from './transport.js';
 import { SdkError } from './errors.js';
 import { SessionCrypto } from './session-crypto.js';
@@ -324,6 +325,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /** The current connection state, or `'closed'` when not connected. */
   get connectionState(): ConnectionState {
     return this.#ctx?.transport.state ?? 'closed';
+  }
+
+  /**
+   * Wire bytes counted for the live session (§171's runtime measurement): everything the
+   * transport wrote to and read off the socket, client-local, never reported to the server.
+   * Zero in both directions while no session is established. The counters span the transport's
+   * lifetime — a reconnect keeps accumulating — and start over when a new session is
+   * established.
+   */
+  get wireBytes(): WireBytes {
+    return this.#ctx?.transport.wireBytes ?? { sent: 0, received: 0 };
   }
 
   /** Whether a session is currently established. */

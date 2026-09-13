@@ -229,12 +229,6 @@ impl<T: Transport> Connection<'_, T> {
             session_id,
         );
 
-        // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
-        // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
-        // writer never re-derives it and a session's frames keep one shape for its whole life.
-        self.batching = hello.features & migo_protocol::features::BATCHING != 0
-            && admitted & migo_protocol::features::BATCHING != 0;
-
         // Section 148: the session's feature set is the intersection of what the client asked
         // for and what this node advertised *to this session* — the rollout-trimmed `admitted`
         // set, so a session the staged rollout held back never negotiates what it withheld. It
@@ -242,6 +236,10 @@ impl<T: Transport> Connection<'_, T> {
         // handle, because the intersection is fixed for the session's lifetime and every later
         // frame's feature gate reads it rather than re-deriving it.
         let negotiated = hello.features & admitted;
+
+        // The frame-level switches — BATCHING (section 154) and COMPRESSION (section 72) —
+        // are cut from the same intersection; the helper says what that means for each.
+        self.settle_frame_switches(negotiated);
 
         if !self
             .send_welcome(
@@ -295,6 +293,22 @@ impl<T: Transport> Connection<'_, T> {
             identity,
             lifecycle_started,
         })
+    }
+
+    /// Cuts the frame-level switches — BATCHING (section 154) and COMPRESSION (section 72) —
+    /// from the intersection the session negotiated.
+    ///
+    /// Each is opt-in on both sides: an envelope or a deflate payload leaves this node only
+    /// for a client that asked for the bit and a node that offered it. BATCHING is the plain
+    /// intersection; COMPRESSION starts from the node-wide setting — the offer — so a node
+    /// with compression switched off never compresses, and a client that never announced the
+    /// bit is never handed a deflate payload it had no reason to be able to read. Decided
+    /// once, here, so the writer never re-derives it and a session's frames keep one shape
+    /// for their whole life.
+    fn settle_frame_switches(&mut self, negotiated: u64) {
+        self.batching = negotiated & migo_protocol::features::BATCHING != 0;
+        self.compression =
+            self.compression && negotiated & migo_protocol::features::COMPRESSION != 0;
     }
 
     /// Reads and validates the opening `HELLO`: decodes it, checks the opcode and protocol
@@ -1756,9 +1770,10 @@ fn push_error(
 /// answered on the connection, which continues, because a client asking for a feature it never
 /// negotiated is misinformed rather than hostile, and the next frame may be perfectly legal.
 ///
-/// The only tagged opcodes today are the FED_* range, which a client socket cannot reach at all
-/// (`AuthLevel::Server` is refused before this gate), so the gate is the enforcement the registry
-/// promises, held ready for the first client-facing opcode the registry ties to a bit.
+/// The tagged ranges today are the client-facing families (brief section 72: PRESENCE, TYPING,
+/// ROOMS, GAMES, BOTS, ECONOMY, CALLS) and the FED_* range. The FED_* codes are also refused
+/// earlier as `AuthLevel::Server` frames, so for them this gate is a second lock rather than
+/// the first; for the client-facing families it is the one enforcement a client meets.
 fn feature_refusal(opcode: Opcode, negotiated: u64) -> Option<CoreError> {
     let bit = opcode.feature()?;
     (negotiated & bit == 0).then(|| {
@@ -1797,6 +1812,15 @@ mod tests {
         let refusal = feature_refusal(Opcode::FedForward, features::BATCHING)
             .expect("FED_FORWARD carries a bit");
         assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+
+        // The client-facing families carry the same rule: a session that never asked for
+        // presence does not get to set it, and a session without the calls bit does not get
+        // to place a ring (brief section 72).
+        let refusal = feature_refusal(Opcode::PresenceSet, features::TYPING)
+            .expect("PRESENCE_SET carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+        let refusal = feature_refusal(Opcode::CallInvite, 0).expect("CALL_INVITE carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
     }
 
     #[test]
@@ -1807,5 +1831,10 @@ mod tests {
             features::FEDERATION | features::BATCHING
         )
         .is_none());
+        assert!(feature_refusal(Opcode::PresenceSet, features::PRESENCE).is_none());
+        assert!(feature_refusal(Opcode::RoomJoin, features::ROOMS | features::PRESENCE).is_none());
+        assert!(
+            feature_refusal(Opcode::CallInvite, features::CALLS | features::BATCHING).is_none()
+        );
     }
 }

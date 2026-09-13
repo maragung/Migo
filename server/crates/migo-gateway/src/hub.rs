@@ -233,6 +233,14 @@ impl Hub {
     /// of its own change (a domain fanout carries the sender's device for exactly this) while
     /// every other device on the topic, including the sender's own other connections, still
     /// does.
+    ///
+    /// The feature gate of brief section 72 lives here too, because this is the one funnel
+    /// every server-initiated event passes through: an opcode the registry ties to a feature
+    /// bit is not pushed to a session whose negotiated set lacks the bit. The frame is not
+    /// sent at all rather than sent and ignored by the receiver — the subscription stays (the
+    /// topic may carry untagged frames the same session is owed), only the feature-bearing
+    /// frame is withheld. Replies are not affected: they answer a request that already passed
+    /// the dispatcher's inbound half of the same gate.
     pub(crate) fn broadcast(
         &self,
         topic: &Topic,
@@ -253,6 +261,11 @@ impl Hub {
                 continue;
             }
             if let Some(handle) = self.sessions.get(&session_id) {
+                if let Some(bit) = opcode.feature() {
+                    if handle.features() & bit == 0 {
+                        continue;
+                    }
+                }
                 let outcome =
                     handle
                         .outbound()

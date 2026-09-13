@@ -169,6 +169,27 @@ export interface TransportOptions {
 export type ConnectionState =
   'idle' | 'connecting' | 'authenticating' | 'ready' | 'reconnecting' | 'closed';
 
+/**
+ * Wire bytes counted for one transport, both directions (§171's runtime measurement).
+ *
+ * The counters are client-local facts about the socket, never reported to the server and never
+ * labelled with an account. They count *wire* sizes: a sent frame is counted at the size handed
+ * to the socket (post-compression, since that is what the wire carries) and a received WebSocket
+ * message is counted at its full outer size (a BATCH envelope counts once, at its envelope size,
+ * not once per frame inside it).
+ *
+ * Reconnect boundaries do not split the counters: a transport that drops and resumes keeps
+ * accumulating, and the HELLO/WELCOME of every reconnect is counted too, because those bytes are
+ * a real cost the client paid. The counters span the transport's lifetime and start over only
+ * when a new transport is built (a fresh login), which is the session a person experiences.
+ */
+export interface WireBytes {
+  /** Every byte successfully written to the socket: HELLO, requests, notifies, ACKs, PINGs. */
+  sent: number;
+  /** Every byte read off the socket: WELCOME, replies, events, BATCH envelopes. */
+  received: number;
+}
+
 /** The negotiated session, as WELCOME described it. */
 export interface SessionInfo {
   sessionId: Id;
@@ -237,6 +258,10 @@ export class GatewayTransport {
   #lastAckedSeq = 0;
   #ackTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Wire bytes counted for this transport (§171): every byte written, every byte read. */
+  #bytesSent = 0;
+  #bytesReceived = 0;
+
   #heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectAttempt = 0;
@@ -284,6 +309,15 @@ export class GatewayTransport {
   /** The features the server confirmed, or 0 before the handshake. */
   get negotiatedFeatures(): bigint {
     return this.#session?.features ?? 0n;
+  }
+
+  /**
+   * Wire bytes counted for this transport (§171): a snapshot of sent and received, taken at call
+   * time. Fresh object every call, so a caller holding a previous reading cannot have it move
+   * under them — and cannot mutate the transport's counters either.
+   */
+  get wireBytes(): WireBytes {
+    return { sent: this.#bytesSent, received: this.#bytesReceived };
   }
 
   /**
@@ -382,7 +416,11 @@ export class GatewayTransport {
       }, this.#requestTimeoutMs);
       this.#pending.set(correlation, { resolve, reject, timer, opcode });
       try {
-        this.#ws?.send(bytes);
+        // The socket cannot be pulled between the guard and here, but the frame build awaited:
+        // re-read rather than trust the narrowing, and count only what actually went out.
+        if (this.#ws !== null) {
+          this.#sendOnSocket(this.#ws, bytes);
+        }
       } catch (cause) {
         clearTimeout(timer);
         this.#pending.delete(correlation);
@@ -402,7 +440,10 @@ export class GatewayTransport {
       throw new TransportError(`cannot send ${opcodeLabel(opcode)}: transport is ${this.#state}`);
     }
     const bytes = await this.#buildFrame(opcode, 0, body);
-    this.#ws.send(bytes);
+    const ws = this.#ws;
+    if (ws !== null) {
+      this.#sendOnSocket(ws, bytes);
+    }
   }
 
   /**
@@ -509,7 +550,9 @@ export class GatewayTransport {
         this.#allocateCorrelation(),
         encodeBody(encodeHello, hello),
       );
-      this.#ws?.send(bytes);
+      if (this.#ws !== null) {
+        this.#sendOnSocket(this.#ws, bytes);
+      }
     } catch (cause) {
       this.#failHandshake(new TransportError(`failed to send HELLO: ${String(cause)}`));
     }
@@ -770,10 +813,14 @@ export class GatewayTransport {
     if (bytes === null) {
       // A Blob (no arraybuffer binaryType) resolves asynchronously; dispatch when it lands.
       if (typeof Blob !== 'undefined' && data instanceof Blob) {
-        void data.arrayBuffer().then((buffer) => this.#dispatchBytes(new Uint8Array(buffer)));
+        void data.arrayBuffer().then((buffer) => {
+          this.#bytesReceived += buffer.byteLength;
+          this.#dispatchBytes(new Uint8Array(buffer));
+        });
       }
       return;
     }
+    this.#bytesReceived += bytes.byteLength;
     this.#dispatchBytes(bytes);
   }
 
@@ -892,7 +939,10 @@ export class GatewayTransport {
         0,
         encodeBody(encodeAck, { frameSeq: watermark }),
       );
-      this.#ws.send(bytes);
+      const ws = this.#ws;
+      if (ws !== null) {
+        this.#sendOnSocket(ws, bytes);
+      }
       this.#lastAckedSeq = watermark;
     } catch {
       // A failed ACK is advisory; the next ACK-required frame reschedules one.
@@ -943,6 +993,16 @@ export class GatewayTransport {
   }
 
   // --- helpers --------------------------------------------------------------------------------
+
+  /**
+   * Writes a built frame to the socket and adds its wire size to the session's sent-bytes
+   * counter (§171). Only a successful write counts: the counter is a fact about the wire, not
+   * about attempts, so a `send` that throws adds nothing.
+   */
+  #sendOnSocket(ws: WebSocket, bytes: Uint8Array): void {
+    ws.send(bytes);
+    this.#bytesSent += bytes.byteLength;
+  }
 
   /** Builds a wire frame, compressing the payload when the server negotiated compression. */
   async #buildFrame(opcode: number, correlation: number, body: Uint8Array): Promise<Uint8Array> {

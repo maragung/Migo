@@ -192,10 +192,22 @@ fn bucket_admits(key: Id, bit: u64, percent: u8) -> bool {
 ///
 /// `disabled` can only remove bits: a feature the build does not advertise cannot be switched on
 /// by configuration.
+///
+/// PRESENCE, TYPING, ROOMS, GAMES, BOTS, and ECONOMY are opcode-gated families (brief
+/// section 72): the registry ties their opcodes to the bit, the gateway refuses a request the
+/// session did not negotiate with FEATURE_NOT_NEGOTIATED, and the hub withholds the family's
+/// events from a subscriber without the bit. A bit like that must be advertised or no client
+/// could ever negotiate it — the advertised set is the whole truth about what a HELLO may ask
+/// for, so a bit that gates frames but is never offered would be a switch welded shut.
+///
+/// COMPRESSION follows the same rule at the frame level: the node offers it exactly while the
+/// gateway setting has it on, and the connection compresses only for sessions that negotiated
+/// the bit (brief section 72 — the frame-level twin of the BATCHING decision).
 fn advertised_features(
     quic_enabled: bool,
     tcp_enabled: bool,
     mesh_enabled: bool,
+    compression_enabled: bool,
     disabled: &[String],
 ) -> anyhow::Result<u64> {
     let mut features = FEATURES;
@@ -207,6 +219,16 @@ fn advertised_features(
     features |= migo_protocol::features::VOICE_NOTE
         | migo_protocol::features::GROUP_CALL
         | migo_protocol::features::RICH_PRESENCE;
+    // The opcode-gated families this build serves in full (brief section 72).
+    features |= migo_protocol::features::PRESENCE
+        | migo_protocol::features::TYPING
+        | migo_protocol::features::ROOMS
+        | migo_protocol::features::GAMES
+        | migo_protocol::features::BOTS
+        | migo_protocol::features::ECONOMY;
+    if compression_enabled {
+        features |= migo_protocol::features::COMPRESSION;
+    }
     if quic_enabled {
         features |= migo_protocol::features::QUIC;
     }
@@ -791,6 +813,7 @@ impl App {
             config.quic.bind.is_some(),
             config.tcp.bind.is_some(),
             config.node.mesh_bind.is_some(),
+            config.gateway.compression_enabled,
             &config.features.disabled,
         )
         .context("features: the advertised set cannot be built")?;
@@ -1171,15 +1194,15 @@ mod tests {
     #[test]
     fn the_kill_switch_removes_named_bits_and_refuses_unknown_names() {
         use migo_protocol::features;
-        let base = advertised_features(true, true, true, &[]).expect("no kill switch builds");
+        let base = advertised_features(true, true, true, true, &[]).expect("no kill switch builds");
         assert!(base & features::QUIC != 0, "the QUIC listener is on");
         assert!(base & features::BATCHING != 0);
 
-        let killed = advertised_features(true, true, true, &["quic".into(), "calls".into()])
+        let killed = advertised_features(true, true, true, true, &["quic".into(), "calls".into()])
             .expect("known names build");
         assert_eq!(killed, base & !features::QUIC & !features::CALLS);
 
-        let error = advertised_features(true, true, true, &["teapot".into()])
+        let error = advertised_features(true, true, true, true, &["teapot".into()])
             .expect_err("an unknown name must stop the node");
         assert!(
             error.to_string().contains("teapot"),

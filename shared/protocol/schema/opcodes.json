@@ -244,6 +244,7 @@
    "direction": "both",
    "payload": "TypingEvent",
    "auth": "User",
+   "feature": "TYPING",
    "cost": 1,
    "class": "Coalescable",
    "coalesce_key": "conversation_id",
@@ -400,6 +401,7 @@
    "payload": "PresenceUpdate",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "PRESENCE",
    "cost": 1,
    "class": "Coalescable"
   },
@@ -409,6 +411,7 @@
    "direction": "server_to_client",
    "payload": "PresenceEvent",
    "auth": "User",
+   "feature": "PRESENCE",
    "cost": 0,
    "class": "Coalescable",
    "coalesce_key": "user_id",
@@ -422,6 +425,7 @@
    "payload": "RoomJoinRequest",
    "response": "RoomJoinResponse",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 20,
    "class": "Critical"
   },
@@ -432,6 +436,7 @@
    "payload": "RoomLeaveRequest",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical"
   },
@@ -442,6 +447,7 @@
    "payload": "RoomListRequest",
    "response": "RoomListResponse",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical"
   },
@@ -451,6 +457,7 @@
    "direction": "server_to_client",
    "payload": "RoomMemberEvent",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 0,
    "class": "Critical",
    "doc": "A room's membership moved, member by member. A join, a leave, a kick, a role change: each is a discrete fact the roster is rebuilt from, not a latest-state stream — Critical, never dropped, retained in the resume ring."
@@ -461,6 +468,7 @@
    "direction": "server_to_client",
    "payload": "RoomStateEvent",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 0,
    "class": "Coalescable",
    "coalesce_key": "room_id"
@@ -472,6 +480,7 @@
    "payload": "RoomCreate",
    "response": "RoomJoinResponse",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 20,
    "class": "Critical",
    "doc": "Creates a room; the caller becomes its Owner."
@@ -483,6 +492,7 @@
    "payload": "RosterReq",
    "response": "RosterResponse",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 3,
    "class": "Critical",
    "doc": "Reads a room's roster, highest role first."
@@ -494,6 +504,7 @@
    "payload": "RoomRoleSet",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical",
    "doc": "Changes a member's role."
@@ -505,6 +516,7 @@
    "payload": "RoomUpdate",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical",
    "doc": "Updates a room's settings."
@@ -516,6 +528,7 @@
    "payload": "RoomArchive",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical",
    "doc": "Archives a room."
@@ -527,6 +540,7 @@
    "payload": "RoomVoteKick",
    "response": "RoomVoteKickResponse",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 5,
    "class": "Critical",
    "doc": "Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members."
@@ -537,6 +551,7 @@
    "direction": "server_to_client",
    "payload": "RoomVoteEvent",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 0,
    "class": "Coalescable",
    "coalesce_key": "room_id",
@@ -549,6 +564,7 @@
    "payload": "RoomSanction",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "ROOMS",
    "cost": 10,
    "class": "Critical",
    "doc": "Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank."
@@ -774,6 +790,7 @@
    "payload": "GiftSend",
    "response": "GiftSendResult",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 20,
    "class": "Critical"
   },
@@ -784,6 +801,7 @@
    "payload": "WalletReq",
    "response": "WalletView",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 3,
    "class": "Critical"
   },
@@ -793,6 +811,7 @@
    "direction": "server_to_client",
    "payload": "EconomyEvent",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 0,
    "class": "Critical"
   },
@@ -803,6 +822,7 @@
    "payload": "GiftCatalogueReq",
    "response": "GiftCatalogueResponse",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 1,
    "class": "Critical",
    "doc": "Lists the gift catalogue."
@@ -814,6 +834,7 @@
    "payload": "LedgerReq",
    "response": "LedgerResponse",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 3,
    "class": "Critical",
    "doc": "Reads the caller's statement."
@@ -825,6 +846,7 @@
    "payload": "ProgressionReq",
    "response": "ProgressionWire",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 2,
    "class": "Critical",
    "doc": "Reads one account's XP and level."
@@ -836,6 +858,7 @@
    "payload": "BadgesReq",
    "response": "BadgesResponse",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 2,
    "class": "Critical",
    "doc": "Reads one account's badges."
@@ -847,6 +870,7 @@
    "payload": "LeaderboardReq",
    "response": "LeaderboardResponse",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 5,
    "class": "Critical",
    "doc": "Reads a leaderboard."
@@ -858,6 +882,7 @@
    "payload": "GameAction",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 2,
    "class": "Critical"
   },
@@ -867,6 +892,7 @@
    "direction": "server_to_client",
    "payload": "GameEvent",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 0,
    "class": "Critical"
   },
@@ -877,6 +903,7 @@
    "payload": "BotCommand",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "BOTS",
    "cost": 2,
    "class": "Critical"
   },
@@ -886,6 +913,7 @@
    "direction": "server_to_client",
    "payload": "BotEvent",
    "auth": "User",
+   "feature": "BOTS",
    "cost": 0,
    "class": "Critical"
   },
@@ -896,6 +924,7 @@
    "payload": "BotRegister",
    "response": "BotView",
    "auth": "Bot",
+   "feature": "BOTS",
    "cost": 20,
    "class": "Critical"
   },
@@ -906,6 +935,7 @@
    "payload": "GameStart",
    "response": "GameViewWire",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 5,
    "class": "Critical",
    "doc": "Starts a game in a conversation."
@@ -917,6 +947,7 @@
    "payload": "GameId",
    "response": "GameViewWire",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 2,
    "class": "Critical",
    "doc": "Reads a game's state as the caller sees it."
@@ -928,6 +959,7 @@
    "payload": "GameId",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 2,
    "class": "Critical",
    "doc": "Abandons an open game."
@@ -939,6 +971,7 @@
    "payload": "GiftCatalogueReq",
    "response": "GameCatalogueResponse",
    "auth": "User",
+   "feature": "GAMES",
    "cost": 1,
    "class": "Critical",
    "doc": "Lists the games this node can play."
@@ -1182,6 +1215,7 @@
    "payload": "CallInvite",
    "response": "CallInviteResult",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 20,
    "class": "Critical",
    "doc": "Invites a callee to a call."
@@ -1193,6 +1227,7 @@
    "payload": "CallInviteEvent",
    "response": null,
    "auth": "User",
+   "feature": "CALLS",
    "cost": 0,
    "class": "Critical",
    "doc": "Tells the callee a call is ringing."
@@ -1204,6 +1239,7 @@
    "payload": "CallAnswer",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 5,
    "class": "Critical",
    "doc": "The callee answers."
@@ -1215,6 +1251,7 @@
    "payload": "CallDecline",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 5,
    "class": "Critical",
    "doc": "The callee declines."
@@ -1226,6 +1263,7 @@
    "payload": "CallCancel",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 5,
    "class": "Critical",
    "doc": "The caller cancels before an answer."
@@ -1237,6 +1275,7 @@
    "payload": "CallEnd",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 2,
    "class": "Critical",
    "doc": "Ends a call; always with a reason."
@@ -1248,6 +1287,7 @@
    "payload": "CallSdp",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 3,
    "class": "Critical",
    "doc": "Relays a sealed SDP offer or answer."
@@ -1259,6 +1299,7 @@
    "payload": "CallIce",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 1,
    "class": "Critical",
    "doc": "Relays a batch of sealed ICE candidates."
@@ -1270,6 +1311,7 @@
    "payload": "CallStateEvent",
    "response": null,
    "auth": "User",
+   "feature": "CALLS",
    "cost": 0,
    "class": "Critical",
    "doc": "A call's state change."
@@ -1281,6 +1323,7 @@
    "payload": "CallRenegotiate",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 3,
    "class": "Critical",
    "doc": "Renegotiates mid-call."
@@ -1292,6 +1335,7 @@
    "payload": "CallKeyUpdate",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 3,
    "class": "Critical",
    "doc": "Re-keys call media."
@@ -1303,6 +1347,7 @@
    "payload": "CallStats",
    "response": "Acknowledged",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 1,
    "class": "Droppable",
    "doc": "Aggregate quality numbers."
@@ -1314,6 +1359,7 @@
    "payload": "CallTurnFetch",
    "response": "CallTurnResponse",
    "auth": "User",
+   "feature": "CALLS",
    "cost": 10,
    "class": "Critical",
    "doc": "Requests TURN credentials."
@@ -1359,6 +1405,7 @@
    "payload": "StorePurchase",
    "response": "StorePurchaseResult",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 5,
    "class": "Critical",
    "doc": "Buys a store item for the caller; the ledger and the entitlement are written together."
@@ -1370,6 +1417,7 @@
    "payload": "EntitlementsReq",
    "response": "EntitlementsResponse",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 1,
    "class": "Droppable",
    "doc": "Everything the caller owns, oldest first."
@@ -1381,6 +1429,7 @@
    "payload": "KickPointsBuy",
    "response": "KickPointsBuyResult",
    "auth": "User",
+   "feature": "ECONOMY",
    "cost": 5,
    "class": "Critical"
   }
