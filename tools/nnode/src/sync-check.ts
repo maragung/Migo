@@ -15,13 +15,15 @@
  *     4. a 1:1 direct message crosses the link both ways — demanded when the
  *        running binary carries the conversation tier (the conversation row's
  *        home_region is stamped at creation), which is how the harness tells
- *        a release that has the tier from one that does not.
+ *        a release that has the tier from one that does not;
+ *     5. a presence change on node 1 reaches a watcher on node 2 — demanded
+ *        by the same version tell, since the user-topic tier shipped in the
+ *        same release as the conversation tier.
  *
- *   REPORTED (expected NOT to cross until a release carries the tier; the
- *   report is the point, not a failure):
- *     5. presence does not federate — user topics stay local;
- *     6. direct messages do not federate either, when the running binary
- *        predates the conversation tier (no home_region column).
+ *   REPORTED (expected NOT to cross when the running binary predates the
+ *   tiers; the report is the point, not a failure):
+ *     6. direct messages and presence changes do not federate when the
+ *        running binary predates the tier-bearing release (no home_region).
  *
  * Accounts, devices, key bundles, and room membership rows do not replicate
  * across nodes today. To keep the proof about the *link* and the tiered
@@ -71,8 +73,6 @@ const APP_VERSION = '0.1.0';
 const LOCALE = 'en-US';
 /** How long one cross-node delivery has to land before the check fails. */
 const DELIVERY_TIMEOUT_MS = 30_000;
-/** How long the known-gap checks wait before declaring "did not cross". */
-const GAP_TIMEOUT_MS = 10_000;
 
 function ts(): string {
   return new Date().toISOString();
@@ -346,19 +346,24 @@ async function main(): Promise<void> {
   insertJson(PG.db1, 'room_member', membershipRow(bobUuid, RoomRole.Member));
   insertJson(PG.db2, 'room_member', membershipRow(aliceUuid, RoomRole.Owner));
 
-  // A friendship on node 1 so the direct-message check is refused by neither
-  // privacy policy — it then measures federation, not permissions.
+  // A friendship on BOTH nodes so the direct-message check is refused by
+  // neither privacy policy — it then measures federation, not permissions.
+  // The far node's gate is fail-closed: it answers bob's reply from its own
+  // rows, and without the edges there it can only refuse PRIVACY_RESTRICTED —
+  // the same refusal dm_federation's e2e lifted by crossing the edges.
   for (const [a, b] of [
     [aliceUuid, bobUuid],
     [bobUuid, aliceUuid],
   ]) {
-    insertJson(PG.db1, 'relationship', {
-      account_id: a,
-      other_id: b,
-      kind: RelationshipKind.Friend,
-      created_at: now,
-      accepted_at: now,
-    });
+    for (const db of [PG.db1, PG.db2]) {
+      insertJson(db, 'relationship', {
+        account_id: a,
+        other_id: b,
+        kind: RelationshipKind.Friend,
+        created_at: now,
+        accepted_at: now,
+      });
+    }
   }
   log('fixture', 'room membership and friendship rows written on both nodes');
 
@@ -488,9 +493,9 @@ async function main(): Promise<void> {
 
   // CHECK 4: the 1:1 direct message, both directions. Alice opens a direct
   // conversation with bob on node 1 — node 1 becomes the conversation's home,
-  // stamped into the row's home_region at creation — and the row plus bob's
-  // membership are fixtured into node 2 the same way the room's were. Bob
-  // watches it on node 2, which is the conversation tier's subscribe half:
+  // stamped into the row's home_region at creation — and the row plus the
+  // whole membership are fixtured into node 2 the same way the room's were.
+  // Bob learns it from his conversation list there and watches it, which is the conversation tier's subscribe half:
   // node 2 asks node 1 to watch the conversation. Alice's sealed message then
   // rides the tiered fan-out (one federated copy per watching node), and
   // bob's reply is handed by node 2 to the home node, which publishes it to
@@ -531,16 +536,32 @@ async function main(): Promise<void> {
       );
     }
     insertJson(PG.db2, 'conversation', directRow);
-    insertJson(
-      PG.db2,
-      'conversation_member',
-      mustRow<Record<string, unknown>>(
-        PG.db1,
-        `select row_to_json(t) from conversation_member t
-          where conversation_id = '${directUuid}' and account_id = '${bobUuid}'`,
-        "bob's direct conversation membership",
-      ),
+    // The whole membership crosses, not bob's row alone: node 2's store
+    // answers the roster read his client makes when it chooses the reply's
+    // audience, and an audience without alice is an envelope alice can never
+    // open. The dm_federation e2e crosses the same rows for the same reason.
+    const directMembers = rowsJson<Record<string, unknown>>(
+      PG.db1,
+      `select * from conversation_member t where conversation_id = '${directUuid}'`,
     );
+    if (directMembers.length !== 2) {
+      fail(
+        'check-4',
+        `a direct conversation seats exactly two, found ${directMembers.length} member rows`,
+      );
+    }
+    for (const member of directMembers) {
+      insertJson(PG.db2, 'conversation_member', member);
+    }
+    // Bob's client learns the conversation the way a real client on the far
+    // node does: his conversation list. That both proves node 2 serves a
+    // conversation homed on node 1 and primes his membership cache, without
+    // which his reply bails with "membership is unknown" before it is sealed.
+    const bobList = await bob.loadConversations(50);
+    if (!bobList.conversations.some((c) => c.conversationId === direct.conversationId)) {
+      fail('check-4', 'node 2 does not serve bob the direct conversation homed on node 1');
+    }
+    log('check-4', "bob's conversation list on node 2 serves the direct conversation");
     await bob.watchConversation(direct.conversationId);
     log(
       'check-4',
@@ -597,13 +618,24 @@ async function main(): Promise<void> {
     log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
   }
 
-  // KNOWN GAP A: presence. The tree carries the user-topic tier
-  // (presence_relay, FED_USER_SUBSCRIBE / FED_USER_EVENT), but this harness
-  // runs released binaries, so until a release carries the tier the honest
-  // observation is that the event does not cross. Bob's watch of alice's user
-  // topic on node 2 is authorized by the fixtured account row; alice then
-  // changes presence on node 1. If it crosses, that is a release note, not a
-  // failure — the demand flip is the release follow-up.
+  // CHECK 5: a presence change crosses to a watcher on the peer node. Bob's
+  // watch of alice's user topic on node 2 is authorized by the fixtured
+  // account row; the granted watch is the user-topic tier's subscribe half —
+  // node 2 asks its peers to watch alice — and alice then changes presence on
+  // node 1, whose forward half carries one federated copy per watching node.
+  //
+  // Both tiers (user-topic presence, conversation) shipped in the same
+  // release, so the DM check's home_region stamp is this check's version tell
+  // too: a binary that stamps it carries both tiers and must carry the
+  // presence change across (a miss is a real failure, exit non-zero); a
+  // binary that predates them reports the gap honestly, the same stance the
+  // DM check takes.
+  //
+  // The drain matters more here than anywhere else: presence is an edge of a
+  // session, not a stored event — a change is never re-published, so a change
+  // that publishes before node 1 has recorded node 2's ask is lost, not
+  // retried. The ask gets the same drain the conversation tier's subscribe
+  // gets before the first send.
   const presenceHeard: { userId: Id; state: PresenceState }[] = [];
   bob.presence.onPresence((event) => {
     presenceHeard.push({ userId: event.userId, state: event.state });
@@ -613,25 +645,35 @@ async function main(): Promise<void> {
   const watchGranted = subscribeResponse.accepted.some(
     (topic) => topic.kind === TopicKind.User && topic.id === aliceId,
   );
-  log('gap-presence', `bob's watch of alice's user topic on node 2: granted=${watchGranted}`);
+  log('check-5', `bob's watch of alice's user topic on node 2: granted=${watchGranted}`);
   if (!watchGranted) {
+    fail(
+      'check-5',
+      "node 2 refused bob the watch of alice's user topic, so the presence crossing cannot be observed",
+    );
+  }
+  await sleep(3_000);
+  await alice.presence.setPresence(PresenceState.Away);
+  log('check-5', 'alice set presence Away on node 1');
+  const check5 = await waitFor(
+    () => presenceHeard.some((e) => e.userId === aliceId && e.state === PresenceState.Away),
+    DELIVERY_TIMEOUT_MS,
+  );
+  let presenceReported = false;
+  if (homeRegion === '') {
     log(
       'gap-presence',
-      'the watch was not granted, so the presence gap cannot be observed as a federation fact',
+      'CONFIRMED GAP: presence did not cross the link (the user-topic tier ships with the release that stamps home_region)',
+    );
+    presenceReported = true;
+  } else if (!check5) {
+    fail(
+      'check-5',
+      `the presence change did not cross the mesh link; bob observed: ${JSON.stringify(presenceHeard)}`,
     );
   } else {
-    await alice.presence.setPresence(PresenceState.Away);
-    log('gap-presence', 'alice set presence Away on node 1; waiting to see if node 2 hears it');
-    await sleep(GAP_TIMEOUT_MS);
-    const crossed = presenceHeard.some(
-      (event) => event.userId === aliceId && event.state === PresenceState.Away,
-    );
-    log(
-      'gap-presence',
-      crossed
-        ? 'NOTE: a presence event crossed the link — the released binaries carry the user-topic tier; flip this check to demand it'
-        : 'CONFIRMED GAP: presence did not cross the link (the user-topic tier is in the tree but not in the released binaries yet)',
-    );
+    proved.push('presence change: node 1 → node 2');
+    log('check-5', 'PROVED: bob, watching alice from node 2, saw her presence change to Away');
   }
 
   // 6. What the link itself did, straight off both nodes' /metrics.
@@ -654,9 +696,11 @@ async function main(): Promise<void> {
   for (const line of proved) {
     console.log(`  PROVED   ${line}`);
   }
-  console.log(
-    '  REPORTED presence does not cross the link (the user-topic tier is in the tree, not in the released binaries yet)',
-  );
+  if (presenceReported) {
+    console.log(
+      '  REPORTED presence does not cross the link (the user-topic tier ships with the release that stamps home_region)',
+    );
+  }
   if (dmReported) {
     console.log(
       '  REPORTED direct messages do not cross the link (the conversation tier is in the tree, not in the released binaries yet)',

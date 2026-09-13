@@ -83,53 +83,61 @@ non-zero and prints everything observed, including both nodes' logs and
 5. **A 1:1 direct message crosses the link, both directions, and decrypts —
    when the running binary carries the conversation tier.** alice opens a
    direct conversation with bob on node 1 — node 1 is its home, stamped into
-   the row's `home_region` at creation — and the row plus bob's membership are
-   fixtured into node 2 the way the room's were. bob watches the conversation
-   on node 2 (the conversation tier's subscribe half: node 2 asks the home
-   node to watch it), and each side's sealed message reaches and decrypts on
-   the other: alice's via the home node's tiered fan-out, bob's reply handed
-   by node 2 to the home node and served from its own hub. The stamp is also
-   the harness's version tell: a binary that stamps `home_region` must also
+   the row's `home_region` at creation — and the row plus the whole
+   membership are fixtured into node 2 the way the room's were. bob learns
+   the conversation from his conversation list on node 2 (which proves the
+   far node serves a conversation homed elsewhere) and watches it there (the
+   conversation tier's subscribe half: node 2 asks the home node to watch
+   it), and each side's sealed message reaches and decrypts on the other:
+   alice's via the home node's tiered fan-out, bob's reply handed by node 2
+   to the home node and served from its own hub. The stamp is also the
+   harness's version tell: a binary that stamps `home_region` must also
    carry the messages (a failure there fails the run), while a binary that
    predates the tier writes no stamp and the check reports the gap instead —
    the same stance the presence tier's check takes.
+
+6. **A presence change crosses the link — when the running binary carries the
+   user-topic tier.** bob subscribes to alice's user topic on node 2; the
+   granted watch is the tier's subscribe half, which asks every allowed peer
+   to watch her, and alice's change on node 1 is then forwarded as one
+   federated copy per watching node. Presence is an edge of a session, never
+   re-published, so the check gives the subscribe the same drain the
+   conversation tier's subscribe gets before it changes presence: a change
+   that publishes before the home node recorded the watcher is lost, not
+   retried. Both tiers shipped in the same release, so the DM check's
+   `home_region` stamp is this check's version tell too — stamped, and the
+   crossing is demanded; absent, and the gap is reported.
 
 ## What it does not prove — reported, not hidden
 
 These are reported by the sync check as known gaps, and they are the design
 today, not harness limitations:
 
-- **Presence does not federate — in the released binaries this harness
-  runs.** The server tree now carries the user-topic tier (FED_USER_SUBSCRIBE
-  / FED_USER_EVENT): bob's watch of alice's user topic on node 2 asks the
-  peers to watch her, and her presence change on node 1 is forwarded as one
-  copy per watching node, proven in-process by
-  `server/crates/migod/tests/cross_node_presence.rs`. The sync check here
-  runs against released `migod` binaries, so it keeps reporting the gap until
-  a release carries the tier; flipping the check to demand it is the release
-  follow-up.
-
-- **Direct messages do not federate either — in the released binaries.** The
-  server tree now carries the conversation tier (FED_CONVERSATION_SUBSCRIBE
-  / FED_CONVERSATION_EVENT): a direct conversation's home node fans its
-  sealed message events out to every node whose participant subscribed,
-  proven in-process by `server/crates/migod/tests/dm_federation.rs`. The
-  sync check runs against released `migod` binaries, so until a release
-  carries the tier it reports the gap; the check flips to demanding the
-  crossing the moment the running binary stamps `home_region` on the
-  conversation row, which is the release follow-up.
+- **Neither tier's crossings are demanded of a binary that predates the
+  tier-bearing release.** The server tree carries both the user-topic
+  presence tier (FED_USER_SUBSCRIBE / FED_USER_EVENT, proven in-process by
+  `server/crates/migod/tests/cross_node_presence.rs`) and the conversation
+  tier (FED_CONVERSATION_SUBSCRIBE / FED_CONVERSATION_EVENT, proven by
+  `dm_federation.rs`). The sync check here runs released `migod` binaries,
+  and it cannot know a release's feature set beyond what the binary itself
+  shows: the conversation row's `home_region` stamp is the tell both checks
+  share. A binary that stamps it (v0.24.10 and later) must carry the direct
+  message and the presence change across — both crossings are demanded and a
+  miss fails the run. A binary that predates the release writes no stamp,
+  and both checks report the gaps honestly instead of failing.
 
 The harness also stands in, deliberately, for replication that does not exist
-yet: accounts, devices, key bundles, room and conversation rows, and
-membership rows do not replicate across nodes, so the sync check copies the
-counterpart rows directly in PostgreSQL (verbatim copies of what the
-registering node already holds, plus the membership rows a join or a
-conversation create on that node would have written). Without those fixtures
-the cross-node paths would fail on missing rows before they ever reached the
-mesh. A future replication layer replaces the fixtures; until then the check
-proves exactly the part that exists: the configuration-formed link and the
-tiered room fan-out over it (and the conversation fan-out, once a release
-carries the tier).
+yet: accounts, devices, key bundles, room and conversation rows, membership
+rows, and friendship edges do not replicate across nodes, so the sync check
+copies the counterpart rows directly in PostgreSQL (verbatim copies of what
+the registering node already holds, plus the membership rows a join or a
+conversation create on that node would have written, and the friendship
+edges on both nodes because the far node's fail-closed privacy gate answers
+a direct send from its own rows). Without those fixtures the cross-node
+paths would fail on missing rows before they ever reached the mesh. A future
+replication layer replaces the fixtures; until then the check proves exactly
+the part that exists: the configuration-formed link and the tiered room,
+conversation, and presence fan-out over it.
 
 ## Files
 
