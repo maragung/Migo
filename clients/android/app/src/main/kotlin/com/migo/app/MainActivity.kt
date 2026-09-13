@@ -216,7 +216,9 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
 
                     is AppState.SignedOut -> SignInScreen(
                         form = current,
+                        servers = model.serverChoices,
                         onServerEndpoint = model::setServerEndpoint,
+                        onServerMode = model::setServerMode,
                         onIdentifier = model::setIdentifier,
                         onSubmit = model::signIn,
                         onRestore = model::restoreFromBackup,

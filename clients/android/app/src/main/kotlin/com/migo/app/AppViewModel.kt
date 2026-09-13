@@ -84,6 +84,7 @@ import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.CaptchaProof
 import com.migo.core.net.ChainClient
+import com.migo.core.net.HttpServerHealthProbe
 import com.migo.core.net.Rest
 import com.migo.core.net.RestError
 import com.migo.core.net.TrackOptions
@@ -117,6 +118,8 @@ import com.migo.core.protocol.UserProfile
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.ServerEndpoint
+import com.migo.core.store.ServerPicker
+import com.migo.core.store.ServerSelectionMode
 import com.migo.core.store.Settings
 import com.migo.core.store.ThemeChoice
 import com.migo.core.store.TxRecord
@@ -173,6 +176,23 @@ import org.webrtc.VideoTrack
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val settings = Settings.open(application)
+
+    /**
+     * The servers this build knows: the `migoServers` Gradle property's comma-separated origins,
+     * parsed into structured endpoints, with the public deployment's endpoint when the property
+     * yields nothing usable.
+     *
+     * A build-time fact rather than a setting: the list is the operator's answer to "which nodes
+     * exist", and the sign-in form's mode control renders it (one explicit pick per server) and
+     * the auto mode probes it. A person who wants a server not on the list uses the manual door,
+     * which is exactly the choice the control offers.
+     */
+    val serverChoices: List<ServerEndpoint> = ServerPicker
+        .parseServers(BuildConfig.MIGO_SERVERS)
+        .ifEmpty { listOf(ServerEndpoint.publicDeploymentDefault()) }
+
+    /** Guards the auto resolution against re-entry while one probe round is in flight. */
+    private var autoResolveInFlight = false
 
     private val _state = MutableStateFlow<AppState>(AppState.Starting)
 
@@ -433,16 +453,86 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     // --- authentication ---
 
     /**
-     * Replaces the working endpoint. Called by the form's "Use this server" button
-     * after validation.
+     * Replaces the working endpoint. Called by the form's "Use this server" button after
+     * validation, and by an explicit pick of one of the known servers on the mode control.
      *
-     * The form holds the typed text in its own `rememberSaveable` state and only
-     * calls this once the user has clicked "Use this server". A keystroke never
-     * reaches the view model -- a partial host (one that does not yet satisfy the
-     * `ServerEndpoint.init` check) is never constructed.
+     * The form holds the typed text in its own `rememberSaveable` state and only calls this once
+     * the user has clicked "Use this server". A keystroke never reaches the view model -- a
+     * partial host (one that does not yet satisfy the `ServerEndpoint.init` check) is never
+     * constructed.
+     *
+     * A commit through this door is a manual act by definition: the mode flips to Manual and both
+     * facts persist immediately, so the next launch shows the same endpoint and never lets a
+     * background probe rewrite what the person just chose. (The endpoint itself used to persist
+     * only on a successful sign-in; the picker made the choice a first-class setting, and a
+     * setting the store never sees until sign-in succeeds is one a failed sign-in silently
+     * forgets.)
      */
-    fun setServerEndpoint(endpoint: ServerEndpoint) = signedOut {
-        it.copy(serverEndpoint = endpoint, failure = null)
+    fun setServerEndpoint(endpoint: ServerEndpoint) {
+        signedOut {
+            it.copy(serverEndpoint = endpoint, serverMode = ServerSelectionMode.Manual, failure = null)
+        }
+        viewModelScope.launch {
+            settings.update {
+                it.copy(serverEndpoint = endpoint, serverSelectionMode = ServerSelectionMode.Manual)
+            }
+        }
+    }
+
+    /**
+     * Switches how the server is chosen: "Otomatis" probes the known list, anything else keeps
+     * the endpoint exactly as it stands.
+     *
+     * The mode persists the moment it is picked, not on sign-in: it is a statement about how the
+     * endpoint field is to be treated on every future launch (a fact to re-resolve, or a record
+     * to leave alone), and a choice that only landed on successful sign-in would leave an
+     * abandoned form guessing. Choosing Auto starts a resolution immediately -- the person should
+     * see which node auto picked before they are asked to trust it -- and choosing Manual leaves
+     * the current endpoint in place for the form's own fields to edit.
+     */
+    fun setServerMode(mode: ServerSelectionMode) {
+        val form = _state.value as? AppState.SignedOut ?: return
+        if (form.serverMode == mode) return
+        signedOut { it.copy(serverMode = mode, failure = null) }
+        viewModelScope.launch {
+            settings.update { it.copy(serverSelectionMode = mode) }
+        }
+        if (mode == ServerSelectionMode.Auto) resolveAutoServer()
+    }
+
+    /**
+     * Resolves the auto mode's server: every known node probed in parallel, fastest 2xx on
+     * `GET /health` wins, and the winner lands on both the form and the settings.
+     *
+     * On no responder the mode stays Auto and the endpoint stays whatever it was -- the last
+     * resolution, or the deployment default -- and the form's own failure line says so. That is
+     * deliberate: silently pinning the first list entry would turn "every node is down" into
+     * "this address is broken", and the honest next step (a sign-in attempt against the standing
+     * endpoint) already has an error path of its own.
+     */
+    private fun resolveAutoServer() {
+        if (autoResolveInFlight) return
+        autoResolveInFlight = true
+        signedOut { it.copy(autoResolving = true) }
+        viewModelScope.launch {
+            try {
+                val picked = ServerPicker.resolveAuto(serverChoices, HttpServerHealthProbe)
+                if (picked != null) {
+                    settings.update { it.copy(serverEndpoint = picked) }
+                    signedOut { it.copy(serverEndpoint = picked, autoResolving = false, failure = null) }
+                } else {
+                    signedOut {
+                        it.copy(
+                            autoResolving = false,
+                            failure = "Tidak ada server yang menjawab. Alamat terakhir tetap dipakai; " +
+                                "coba lagi atau pilih server secara manual.",
+                        )
+                    }
+                }
+            } finally {
+                autoResolveInFlight = false
+            }
+        }
     }
 
     /** Records what was typed in the account field. */
@@ -794,7 +884,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pendingDocumentSave = null
         _state.value = AppState.Starting
         viewModelScope.launch {
-            val endpoint = settings.current().serverEndpoint
+            val stored = settings.current()
+            val endpoint = stored.serverEndpoint
             try {
                 leaving.signOut()
             } catch (cancelled: CancellationException) {
@@ -820,7 +911,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: Exception) {
                 // Best effort is all a directory delete can be; the vault is gone regardless.
             }
-            _state.value = AppState.SignedOut(endpoint)
+            _state.value = AppState.SignedOut(endpoint, serverMode = stored.serverSelectionMode)
+            if (stored.serverSelectionMode == ServerSelectionMode.Auto) resolveAutoServer()
         }
     }
 
@@ -4474,14 +4566,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val resumed = MigoSession.resumeStored(getApplication(), BuildConfig.VERSION_NAME, hooks())
             if (resumed == null) {
-                _state.value = AppState.SignedOut(fallback)
+                _state.value = AppState.SignedOut(fallback, serverMode = stored.serverSelectionMode)
+                // Auto mode re-resolves on every start: the persisted endpoint is the last
+                // resolution, not a promise, and the node that was fastest at the last launch is
+                // not guaranteed to be the fastest now.
+                if (stored.serverSelectionMode == ServerSelectionMode.Auto) resolveAutoServer()
             } else {
                 attach(resumed)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            _state.value = AppState.SignedOut(fallback, failure = readable(failure))
+            _state.value = AppState.SignedOut(
+                fallback,
+                serverMode = stored.serverSelectionMode,
+                failure = readable(failure),
+            )
         }
     }
 

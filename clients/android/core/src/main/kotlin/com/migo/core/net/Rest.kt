@@ -405,6 +405,18 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     }
 
     /**
+     * Whether this server answers `GET /health`: any 2xx means up.
+     *
+     * The operational tier's liveness route, answered as long as the process can serve a request
+     * at all. It exists for the one question the sign-in form's auto mode asks of a server list --
+     * "who is there, and who answers first?" -- and for nothing else: it carries no account
+     * knowledge, no readiness detail, and no body this client needs to read. The server-picker's
+     * [HttpServerHealthProbe] wraps it with a short-deadline client and a clock; a caller holding
+     * an ordinary [Rest] gets the same answer at this client's own (longer) timeouts.
+     */
+    suspend fun health(): Boolean = send("GET", "/health", null).use { it.isSuccessful }
+
+    /**
      * The gateway URL for this server: the same host, `ws`/`wss`, path `/ws`.
      *
      * Derived rather than configured separately so a user who typed one address cannot end up with a

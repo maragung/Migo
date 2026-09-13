@@ -59,6 +59,7 @@ import com.migo.core.net.CaptchaChallenge
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
 import com.migo.core.store.ServerEndpoint
+import com.migo.core.store.ServerSelectionMode
 import com.migo.core.store.Transport
 import java.util.Base64
 
@@ -107,7 +108,9 @@ import java.util.Base64
 @Composable
 fun SignInScreen(
     form: AppState.SignedOut,
+    servers: List<ServerEndpoint>,
     onServerEndpoint: (ServerEndpoint) -> Unit,
+    onServerMode: (ServerSelectionMode) -> Unit,
     onIdentifier: (String) -> Unit,
     onSubmit: (passphrase: String, create: Boolean, captchaAnswer: String?) -> Unit,
     onRestore: (container: Uri, credential: String) -> Unit,
@@ -198,8 +201,12 @@ fun SignInScreen(
                     Column(modifier = Modifier.padding(20.dp)) {
                         ServerDisclosure(
                             value = form.serverEndpoint,
+                            mode = form.serverMode,
+                            autoResolving = form.autoResolving,
+                            servers = servers,
                             enabled = !form.busy,
                             onCommit = onServerEndpoint,
+                            onMode = onServerMode,
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
@@ -576,7 +583,14 @@ private fun authFieldColors() = OutlinedTextFieldDefaults.colors(
 /**
  * The "Server" disclosure, mirroring `clients/web/src/components/server-form.tsx`.
  *
- * A user who has never opened it sees a single summary line ("localhost:18080", say),
+ * The mode control on top is the multi-node answer: "Otomatis" (the default) probes every known
+ * server in parallel and takes the fastest responder, each known server is an explicit pick, and
+ * "Manual…" opens the structured form. A user who has never touched it sees the auto mode's
+ * resolved endpoint in one line -- which node auto chose is a fact the person can see before they
+ * are asked to trust it -- and a self-hoster picks "Manual…" and types `migo.example.com:8443`
+ * with the same fields every other client's form offers.
+ *
+ * A user who opens the manual panel sees a single summary line ("localhost:18080", say),
  * a chevron, and the always-visible transport picker; opening it reveals the structured
  * fields. The form's working state stays local until "Use this server" is clicked -- so
  * a half-typed entry is not pushed into the bootstrap, and a failed sign-in does not
@@ -591,8 +605,12 @@ private fun authFieldColors() = OutlinedTextFieldDefaults.colors(
 @Composable
 private fun ServerDisclosure(
     value: ServerEndpoint,
+    mode: ServerSelectionMode,
+    autoResolving: Boolean,
+    servers: List<ServerEndpoint>,
     enabled: Boolean,
     onCommit: (ServerEndpoint) -> Unit,
+    onMode: (ServerSelectionMode) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     // A local draft so partial edits are not pushed to the view model until the
@@ -610,25 +628,55 @@ private fun ServerDisclosure(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
     ) {
-        TextButton(
-            onClick = { open = !open },
+        ServerModeChoice(
+            value = value,
+            mode = mode,
+            servers = servers,
             enabled = enabled,
-            colors = ButtonDefaults.textButtonColors(
-                contentColor = Color.White,
-                disabledContentColor = Color.White.copy(alpha = 0.6f),
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(text = if (open) "▾" else "▸")
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "Server")
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = serverSummary(host, port, gatewayPort, transport),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.82f),
-                )
+            onAuto = { onMode(ServerSelectionMode.Auto) },
+            onServer = onCommit,
+            onManual = {
+                onMode(ServerSelectionMode.Manual)
+                // Picking the manual door opens it: the choice and the fields it exposes are one
+                // gesture, and a "Manual…" that stayed collapsed would look like a no-op.
+                open = true
+            },
+        )
+        if (mode == ServerSelectionMode.Auto) {
+            // The resolved endpoint, said out loud: auto mode is a choice the person can see the
+            // result of, not a black box. While the probes are out the line says so, because an
+            // endpoint that has not been picked yet is not the last one silently standing in.
+            Text(
+                text = if (autoResolving) {
+                    "Mencari server tercepat…"
+                } else {
+                    "Otomatis memilih: ${value.host}:${value.port}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.82f),
+            )
+        }
+        if (mode == ServerSelectionMode.Manual) {
+            TextButton(
+                onClick = { open = !open },
+                enabled = enabled,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = Color.White,
+                    disabledContentColor = Color.White.copy(alpha = 0.6f),
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = if (open) "▾" else "▸")
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = "Server")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = serverSummary(host, port, gatewayPort, transport),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.82f),
+                    )
+                }
             }
         }
         // The transport is the one server choice that is not behind the disclosure: the picker
@@ -704,7 +752,7 @@ private fun ServerDisclosure(
                 color = Color.White.copy(alpha = 0.82f),
             )
         }
-        if (open) {
+        if (open && mode == ServerSelectionMode.Manual) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
             ) {
@@ -813,6 +861,85 @@ private fun ServerDisclosure(
                 }
             }
         }
+    }
+}
+
+/**
+ * The server mode control: "Otomatis" (the default), one explicit pick per known server, and
+ * "Manual…" for the structured form.
+ *
+ * The rows are the transport picker's own shape -- radio, label, one tap to commit -- because the
+ * two controls ask the same kind of question ("which of these?") and a front door that drew them
+ * differently would be teaching two grammars for one sentence. The auto row's label carries the
+ * mode's whole promise in one word, and the resolved endpoint is said in the line under the
+ * control (in [ServerDisclosure]) rather than in the label, so the label stays the choice and the
+ * line stays the consequence.
+ *
+ * A known server is selected exactly when the committed endpoint equals it; a manual record that
+ * happens to name a known server with different fields (another transport, say) selects
+ * "Manual…", because what the person picked was the record, not the row.
+ */
+@Composable
+private fun ServerModeChoice(
+    value: ServerEndpoint,
+    mode: ServerSelectionMode,
+    servers: List<ServerEndpoint>,
+    enabled: Boolean,
+    onAuto: () -> Unit,
+    onServer: (ServerEndpoint) -> Unit,
+    onManual: () -> Unit,
+) {
+    Column {
+        Text(
+            text = "Pilihan server",
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White.copy(alpha = 0.82f),
+        )
+        ModeRow(
+            label = "Otomatis",
+            selected = mode == ServerSelectionMode.Auto,
+            enabled = enabled,
+            onClick = onAuto,
+        )
+        servers.forEach { server ->
+            ModeRow(
+                label = "${server.host}:${server.port}",
+                selected = mode == ServerSelectionMode.Manual && value == server,
+                enabled = enabled,
+                onClick = { onServer(server) },
+            )
+        }
+        ModeRow(
+            label = "Manual…",
+            selected = mode == ServerSelectionMode.Manual && servers.none { it == value },
+            enabled = enabled,
+            onClick = onManual,
+        )
+    }
+}
+
+/** One row of [ServerModeChoice], the transport picker's radio shape. */
+@Composable
+private fun ModeRow(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(end = 16.dp),
+    ) {
+        androidx.compose.material3.RadioButton(
+            selected = selected,
+            onClick = { if (enabled) onClick() },
+            enabled = enabled,
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White.copy(alpha = 0.9f),
+        )
     }
 }
 

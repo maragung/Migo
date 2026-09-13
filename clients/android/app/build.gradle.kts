@@ -20,6 +20,17 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // The known Migo servers, as one comma-separated string of REST origins, baked into
+        // BuildConfig for the sign-in form's "Otomatis" mode and its explicit picks. Sourced from
+        // the `migoServers` Gradle property so an operator building their own APK points it at
+        // their own nodes; the default is this deployment's public node, matching
+        // ServerEndpoint.publicDeploymentDefault. `ServerPicker.parseServers` does the parsing —
+        // the field carries the raw string, not a list, because BuildConfig has no list literal
+        // and a hand-built `joinToString` here would be a second parser to keep in step.
+        val migoServers = ((findProperty("migoServers") as? String) ?: "").trim()
+            .ifBlank { "http://152.53.102.150:8080" }
+        buildConfigField("String", "MIGO_SERVERS", "\"$migoServers\"")
     }
 
     buildFeatures {
