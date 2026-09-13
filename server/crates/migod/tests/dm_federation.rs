@@ -250,23 +250,7 @@ async fn befriend(app: &App, requester: &Grant, accepter: &Grant) {
 /// verifies anywhere because both nodes share the token key, the way a
 /// deployment must.
 async fn copy_identity_to(from: &SharedStore, to: &SharedStore, grant: &Grant) {
-    let account = from
-        .account_by_id(grant.account_id)
-        .await
-        .expect("the source store reads")
-        .expect("the account exists on the node that registered it");
-    to.create_account(NewAccount {
-        account_id: account.account_id,
-        username: account.username,
-        email: account.email,
-        phone: account.phone,
-        passphrase_hash: account.passphrase_hash,
-        locale: account.locale,
-        country: account.country,
-        created_at: account.created_at,
-    })
-    .await
-    .expect("the far store takes the account row verbatim");
+    copy_account_to(from, to, grant.account_id).await;
 
     let device = from
         .device_by_id(grant.device_id)
@@ -335,6 +319,30 @@ async fn copy_conversation_to(from: &SharedStore, to: &SharedStore, conversation
     .expect("the far store takes the conversation verbatim, label included");
 }
 
+/// Copies one account row verbatim — the root every other row the stand-in
+/// carries hangs from. The profile's foreign key resolves to it, and the far
+/// store refuses a profile whose account it does not hold, so this crosses
+/// first wherever a profile follows.
+async fn copy_account_to(from: &SharedStore, to: &SharedStore, account_id: Id) {
+    let account = from
+        .account_by_id(account_id)
+        .await
+        .expect("the source store reads")
+        .expect("the account exists on the node that registered it");
+    to.create_account(NewAccount {
+        account_id: account.account_id,
+        username: account.username,
+        email: account.email,
+        phone: account.phone,
+        passphrase_hash: account.passphrase_hash,
+        locale: account.locale,
+        country: account.country,
+        created_at: account.created_at,
+    })
+    .await
+    .expect("the far store takes the account row verbatim");
+}
+
 /// Copies the social rows the far node's privacy gate reads for a direct
 /// send: both profiles, and the friendship's two edges, verbatim.
 ///
@@ -351,8 +359,22 @@ async fn copy_conversation_to(from: &SharedStore, to: &SharedStore, conversation
 /// the shape the store keeps — a friendship is two edges or it is the "we are
 /// friends but you are not in my list" bug the store's own acceptance path
 /// refuses to write.
+///
+/// The account row crosses ahead of the profile, in the store's dependency
+/// order: the profile's foreign key must resolve on the far side before the
+/// profile can land. Bob's account is already there — his identity crossed
+/// when he did — so only alice's is written, and the check keeps the helper
+/// idempotent rather than assuming the caller remembers who crossed first.
 async fn copy_friendship_to(from: &SharedStore, to: &SharedStore, left: Id, right: Id) {
     for account_id in [left, right] {
+        if to
+            .account_by_id(account_id)
+            .await
+            .expect("the far store reads")
+            .is_none()
+        {
+            copy_account_to(from, to, account_id).await;
+        }
         let profile = from
             .profile(account_id)
             .await
