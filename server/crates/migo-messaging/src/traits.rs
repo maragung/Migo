@@ -31,8 +31,8 @@ use migo_protocol::{
     ConversationLeaveRequest, ConversationListRequest, ConversationListResponse,
     ConversationMuteRequest, ConversationRosterRequest, ConversationRosterResponse,
     ConversationSummary, ConversationUpdateRequest, ConversationVoteKickRequest,
-    ConversationVoteKickResponse, MessageAccepted, MessageDelete, MessageReceipt, MessageSend,
-    SyncRequest, SyncResponse, TypingEvent,
+    ConversationVoteKickResponse, GroupKeyDistribution, MessageAccepted, MessageDelete,
+    MessageReceipt, MessageSend, SyncRequest, SyncResponse, TypingEvent,
 };
 
 use crate::fanout::Fanout;
@@ -256,6 +256,25 @@ pub trait Messaging: Send + Sync {
         caller: &Caller,
         request: ConversationVoteKickRequest,
     ) -> Result<(ConversationVoteKickResponse, Vec<Fanout>)>;
+
+    /// Accepts one member's sealed sender-key distribution for one member
+    /// device, and hands the frame back to the transport for publishing to the
+    /// target's user topic (brief section 163).
+    ///
+    /// The service's half of the relay is authorization, never content: the
+    /// envelope is sealed for the target device's pairwise session with the
+    /// distributor and this node cannot open it, cannot check what generation
+    /// it carries, and cannot tell a redistribution from a resend. What it
+    /// *can* check — and does — is that the distributor is an active member
+    /// speaking from their own device, and that the target is still a member:
+    /// a distribution aimed at somebody a removal already dropped is refused
+    /// with `PERMISSION_DENIED`, which is the wire's whole contribution to
+    /// "the departed hold nothing further".
+    ///
+    /// Not idempotent and not deduplicated: a member may re-send a
+    /// distribution a target missed, and the receiver's adopt rules — not the
+    /// server — decide whether a resent copy advances anything.
+    async fn distribute_key(&self, caller: &Caller, request: GroupKeyDistribution) -> Result<()>;
 
     /// A founder renames a group.
     ///

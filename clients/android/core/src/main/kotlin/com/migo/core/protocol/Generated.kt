@@ -8325,6 +8325,8 @@ data class ConversationMemberEvent(
     val userId: Id,
     val change: MemberChange,
     val memberCount: Long,
+    /** The membership generation this change produced (section 163). Present on every event a group's own membership operations emit, so a client that missed a redistribution can tell by comparing against the generation its keys carry. */
+    val groupKeyEpoch: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -8332,7 +8334,15 @@ data class ConversationMemberEvent(
         w.id(userId)
         w.u32(change.toWire())
         w.u32(memberCount)
-        w.u32(0)
+        var present = 0
+        if (groupKeyEpoch != null) present++
+        w.u32(present)
+        if (groupKeyEpoch != null) {
+            val value = groupKeyEpoch
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -8343,12 +8353,58 @@ data class ConversationMemberEvent(
             val userId = r.id()
             val change = MemberChange.fromWire(r.u32())
             val memberCount = r.u32()
+            var groupKeyEpoch: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> groupKeyEpoch = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationMemberEvent(conversationId, userId, change, memberCount, groupKeyEpoch)
+        }
+    }
+}
+
+/** Relays one member's sealed sender-key distribution to one member device (section 163). The server routes it and never opens it. */
+data class GroupKeyDistribution(
+    val conversationId: Id,
+    /** The distributing member's device. */
+    val fromDevice: Id,
+    /** The member the distribution is for. */
+    val toAccount: Id,
+    /** The member device the distribution is sealed for. */
+    val toDevice: Id,
+    /** E2E-sealed sender-key distribution, sealed for the target device's pairwise session with the distributor. */
+    val sealedDistribution: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(fromDevice)
+        w.id(toAccount)
+        w.id(toDevice)
+        w.bytes(sealedDistribution)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GroupKeyDistribution {
+            r.enter()
+            val conversationId = r.id()
+            val fromDevice = r.id()
+            val toAccount = r.id()
+            val toDevice = r.id()
+            val sealedDistribution = r.bytes()
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 r.optional() // no optional fields in this build; a newer peer's are skipped by length
             }
             r.leave()
-            return ConversationMemberEvent(conversationId, userId, change, memberCount)
+            return GroupKeyDistribution(conversationId, fromDevice, toAccount, toDevice, sealedDistribution)
         }
     }
 }
@@ -8742,6 +8798,8 @@ object Op {
     const val CONVERSATION_MEMBER_EVENT: Long = 50L
     /** A founder renames a group. */
     const val CONVERSATION_UPDATE: Long = 51L
+    /** Relays one member's sealed sender-key distribution to one member device, sealed for the target's pairwise session (section 163). The server routes the frame between the distributor's device and the named member's user topic and never opens it: one frame per target device, never coalesced, because a member who missed theirs is stranded on a dead chain. */
+    const val GROUP_KEY_DISTRIBUTE: Long = 53L
     const val PRESENCE_SET: Long = 64L
     /** Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost. */
     const val PRESENCE_EVENT: Long = 65L
@@ -8932,6 +8990,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     49L to OpcodeMeta(49L, "CONVERSATION_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationVoteEvent", null, "conversation_id", false, listOf(), null),
     50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, null, false, listOf(), null),
     51L to OpcodeMeta(51L, "CONVERSATION_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationUpdateRequest", "ConversationSummary", null, false, listOf(), null),
+    53L to OpcodeMeta(53L, "GROUP_KEY_DISTRIBUTE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "GroupKeyDistribution", "Acknowledged", null, false, listOf(), null),
     64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null, false, listOf(), null),
     65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id", true, listOf(), null),
     80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null, false, listOf(), null),

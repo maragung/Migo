@@ -68,9 +68,10 @@ use migo_protocol::{
     ConversationMemberEvent, ConversationMuteRequest, ConversationRole, ConversationRosterEntry,
     ConversationRosterRequest, ConversationRosterResponse, ConversationStateEvent,
     ConversationSummary, ConversationUpdateRequest, ConversationVoteEvent,
-    ConversationVoteKickRequest, ConversationVoteKickResponse, EncryptionMode, MemberChange,
-    MessageAccepted, MessageDelete, MessageEvent, MessageKind, MessageReceipt, MessageSend, Opcode,
-    ReceiptKind, SyncRequest, SyncResponse, SyncStatus, TypingEvent, TypingState,
+    ConversationVoteKickRequest, ConversationVoteKickResponse, EncryptionMode,
+    GroupKeyDistribution, MemberChange, MessageAccepted, MessageDelete, MessageEvent, MessageKind,
+    MessageReceipt, MessageSend, Opcode, ReceiptKind, SyncRequest, SyncResponse, SyncStatus,
+    TypingEvent, TypingState,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{
@@ -88,6 +89,7 @@ use crate::model::{
     Caller, MessagingConfig, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS,
     MAX_TITLE_LEN, MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
 };
+use crate::redistribution::{Redistribution, RedistributionBook};
 use crate::traits::{Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
 
 /// A shared, fully erased messaging service.
@@ -129,6 +131,10 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     /// at a time per group; see [`OpenVote`] for the lazy expiry that keeps this
     /// map from holding a vote nobody is answering.
     votes: Mutex<HashMap<Id, OpenVote>>,
+    /// The section 163 trigger book: which membership generation a group is on,
+    /// and who the redistribution that follows a change is owed to. In memory
+    /// on purpose — see [`crate::redistribution`] for why that is enough.
+    redistribution: RedistributionBook,
 }
 
 /// A group kick vote in flight.
@@ -215,10 +221,23 @@ where
             random: Mutex::new(random),
             meters: Meters::new(registry),
             votes: Mutex::new(HashMap::new()),
+            redistribution: RedistributionBook::new(),
         }
     }
 
     // --- shared checks ---------------------------------------------------------
+
+    /// The latest recorded membership change for one group (section 163): the
+    /// generation its member events are stamped with, and the audience the
+    /// redistribution that follows the change is owed to.
+    ///
+    /// A read rather than an event stream because there is exactly one consumer
+    /// of the audience — the tests that pin the trigger bookkeeping, and the
+    /// relay's own authority is the store, not this snapshot.
+    #[must_use]
+    pub fn redistribution(&self, conversation_id: Id) -> Option<Redistribution> {
+        self.redistribution.latest(conversation_id)
+    }
 
     /// Charges the caller's own surfaces for one operation.
     ///
@@ -1283,6 +1302,16 @@ where
         // appears without a refresh. Without this, a direct chat's first message
         // is sealed for a peer who does not know the conversation exists.
         let count = others.len() as u32 + 1;
+        // Section 163's trigger bookkeeping: the create is a membership change
+        // like any other, and the distribution that follows it is owed to every
+        // seat the create produced. The generation recorded here is the number
+        // every event this change emits carries on the wire, so a client that
+        // missed a later redistribution can compare it against the generation
+        // its keys carry and know to ask.
+        let generation = self
+            .redistribution
+            .record(summary.conversation_id, members.clone())
+            .generation;
         let fanouts = others
             .iter()
             .map(|member| {
@@ -1294,6 +1323,7 @@ where
                         user_id: *member,
                         change: MemberChange::Joined,
                         member_count: count,
+                        group_key_epoch: Some(generation),
                     }),
                 )
             })
@@ -1370,6 +1400,19 @@ where
         // member by member. The count is the count after all the seats, because a
         // client coalescing these still has to end on the truth.
         let count = (active + fresh.len()) as u32;
+        // Section 163's trigger bookkeeping, recorded once for the whole invite:
+        // the audience is every member after all the seats, and every arrival
+        // this change emits carries the same generation.
+        let mut audience: Vec<Id> = members
+            .iter()
+            .filter(|m| m.left_at.is_none())
+            .map(|m| m.account_id)
+            .collect();
+        audience.extend_from_slice(&fresh);
+        let generation = self
+            .redistribution
+            .record(request.conversation_id, audience)
+            .generation;
         let mut fanouts = Vec::with_capacity(fresh.len());
         for member in &fresh {
             self.store
@@ -1395,6 +1438,7 @@ where
                     user_id: *member,
                     change: MemberChange::Joined,
                     member_count: count,
+                    group_key_epoch: Some(generation),
                 }),
             ));
         }
@@ -1497,6 +1541,18 @@ where
                 user_id: caller.account_id,
                 change: MemberChange::Left,
                 member_count: count,
+                // Section 163's trigger bookkeeping: the redistribution this
+                // departure owes is for the members who remain, and the number
+                // this event carries is how a remaining client that missed the
+                // distribution knows its generation moved.
+                group_key_epoch: Some(
+                    self.redistribution
+                        .record(
+                            request.conversation_id,
+                            remaining.iter().map(|m| m.account_id).collect(),
+                        )
+                        .generation,
+                ),
             }),
         ));
         Ok(fanouts)
@@ -1675,6 +1731,22 @@ where
         }
         // `Kicked` and not `Left`: a client that could not tell a removal from a
         // departure could not colour the two differently in its roster.
+        //
+        // Section 163's trigger bookkeeping: the redistribution a kick owes is
+        // for the members who remain — the removed member gets the event that
+        // says they are gone, and no distribution after it, which the relay
+        // enforces against the store rather than trusting this snapshot.
+        let generation = self
+            .redistribution
+            .record(
+                request.conversation_id,
+                members
+                    .iter()
+                    .filter(|m| m.left_at.is_none() && m.account_id != request.target_id)
+                    .map(|m| m.account_id)
+                    .collect(),
+            )
+            .generation;
         fanouts.push(Fanout::to_conversation(
             request.conversation_id,
             caller.device_id,
@@ -1683,6 +1755,7 @@ where
                 user_id: request.target_id,
                 change: MemberChange::Kicked,
                 member_count: count,
+                group_key_epoch: Some(generation),
             }),
         ));
         Ok(fanouts)
@@ -1856,7 +1929,20 @@ where
             // with `closed: false` would tell the group a vote ended, and the
             // removal it caused says that already, in the frame every client
             // renders. A client watching the tally sees it stop at `open: true`
-            // and the member go in the same breath.
+            // and the member go in the same breath. The section 163 generation
+            // rides the same frame, for the same reason the founder's kick
+            // stamps its own.
+            let generation = self
+                .redistribution
+                .record(
+                    request.conversation_id,
+                    members
+                        .iter()
+                        .filter(|m| m.left_at.is_none() && m.account_id != request.target_id)
+                        .map(|m| m.account_id)
+                        .collect(),
+                )
+                .generation;
             fanouts.push(Fanout::to_conversation(
                 request.conversation_id,
                 caller.device_id,
@@ -1865,10 +1951,58 @@ where
                     user_id: request.target_id,
                     change: MemberChange::Kicked,
                     member_count: count,
+                    group_key_epoch: Some(generation),
                 }),
             ));
         }
         Ok((response, fanouts))
+    }
+
+    async fn distribute_key(&self, caller: &Caller, request: GroupKeyDistribution) -> Result<()> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if request.to_account.is_nil() {
+            return Err(fault::field_required("to_account"));
+        }
+        if request.to_device.is_nil() {
+            return Err(fault::field_required("to_device"));
+        }
+        if request.sealed_distribution.is_empty() {
+            return Err(fault::field_required("sealed_distribution"));
+        }
+        if request.sealed_distribution.len() > MAX_BYTES_LEN {
+            return Err(fault::field_too_long("sealed_distribution", MAX_BYTES_LEN));
+        }
+        self.charge(caller, Opcode::GroupKeyDistribute).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        // The distribution travels under the device that sealed it. A frame
+        // naming another device would route a sealed envelope as if a third
+        // party had sealed it, and the target's client has no reason to expect
+        // that shape from this opcode.
+        if request.from_device != caller.device_id {
+            return Err(fault::permission_denied(
+                "a distribution travels under the device that sealed it",
+            ));
+        }
+        // The audience question, answered from the store rather than the
+        // trigger book: the book is a snapshot of the last change, and the
+        // store is the truth about who is in the group *now*. A distribution
+        // aimed at somebody a removal already dropped — or one that races a
+        // removal — is refused here, which is the server's whole contribution
+        // to "the departed hold nothing further": it cannot unseal what it
+        // refused, but it can keep the wire from carrying it.
+        let members = self.store.members(request.conversation_id).await?;
+        if Self::active_row(&members, request.to_account).is_none() {
+            return Err(fault::permission_denied(
+                "the distribution is for somebody who is no longer a member",
+            ));
+        }
+        Ok(())
     }
 
     async fn update(
