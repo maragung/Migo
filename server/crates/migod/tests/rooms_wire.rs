@@ -167,6 +167,11 @@ impl LiveSession {
 
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            // Every frame this suite drives belongs to the rooms family, and brief section 72
+            // ties that family to the ROOMS bit — a session that did not ask for it is refused
+            // FEATURE_NOT_NEGOTIATED before the first ROOM_CREATE, exactly as a CALLS-less
+            // session is refused before it may place a ring.
+            features: migo_protocol::features::ROOMS,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
@@ -436,6 +441,11 @@ async fn resume_session(addr: SocketAddr, grant: &Grant, dropped: &DroppedSessio
             .expect("the connection is accepted");
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            // The resumed session asks for the rooms family too: it will re-join, leave, and
+            // hear the room's frames, and the feature it negotiated is a fact of the session —
+            // a fresh HELLO on the reconnect negotiates from zero, not from what the dead
+            // session had.
+            features: migo_protocol::features::ROOMS,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             resume: Some(ResumeRequest {
