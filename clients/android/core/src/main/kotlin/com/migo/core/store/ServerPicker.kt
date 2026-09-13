@@ -1,5 +1,6 @@
 package com.migo.core.store
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -113,12 +114,15 @@ object ServerPicker {
      * Resolves the auto mode's server: probes every server in the list in parallel and returns
      * the fastest responder, or null when none answered.
      *
-     * Every probe runs under [timeoutMs] however it is implemented -- a probe that hangs is a
-     * server that did not answer, not a resolver that never returns -- and the probes are
-     * launched together so a slow node never delays the question to a fast one. The winner is
-     * decided by [fastestResponder] over the measured latencies, not by which coroutine resumed
-     * first: the probe's own number is the fact being compared, and it is the same number the
-     * interface lets a test name directly.
+     * Every probe runs under [timeoutMs] however it is implemented, and a probe that hangs or
+     * throws is a server that did not answer -- never a resolver that never returns or a round
+     * that dies because one node reset the connection. The exceptions are swallowed *per probe*
+     * (with [CancellationException] rethrown, so a cancelled caller still cancels), because one
+     * broken node must not take the whole race down with it. The probes are launched together so
+     * a slow node never delays the question to a fast one, and the winner is decided by
+     * [fastestResponder] over the measured latencies, not by which coroutine resumed first: the
+     * probe's own number is the fact being compared, and it is the same number the interface lets
+     * a test name directly.
      */
     suspend fun resolveAuto(
         servers: List<ServerEndpoint>,
@@ -128,7 +132,19 @@ object ServerPicker {
         if (servers.isEmpty()) return null
         return coroutineScope {
             servers
-                .map { server -> async { withTimeoutOrNull(timeoutMs) { probe.probe(server) } } }
+                .map { server ->
+                    async {
+                        withTimeoutOrNull(timeoutMs) {
+                            try {
+                                probe.probe(server)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                null
+                            }
+                        }
+                    }
+                }
                 .awaitAll()
                 // zip's own pair is (latency, server); the pick wants (server, latency), so the
                 // transform names both halves rather than leaving the reader to un-swap it.
