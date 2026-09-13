@@ -125,9 +125,10 @@ class GamesDomain(
      * `slug` is a catalogue entry's slug. The wire names no opponents, so in this build a start can
      * open the single-player guessing game and nothing else — the server refuses a multi-player kind
      * with "wrong number of players" rather than inventing an opponent on the caller's behalf, and
-     * that refusal surfaces here as a [com.migo.core.wire.WireError]. Nothing is published to the
-     * conversation on start: the reply carries the opening view to the caller alone, and the other
-     * members hear of the game when its first move publishes a [GameEvent].
+     * that refusal surfaces here as a [com.migo.core.wire.WireError]. The server publishes a
+     * `started` [GameEvent] to the conversation for everyone else -- the reply already carries the
+     * opening view, so the starting connection itself is excluded from that fan-out and learns of
+     * its own start only through this reply.
      */
     suspend fun startGame(conversationId: Id, slug: String): GameViewWire {
         val request = GameStart(conversationId, slug)

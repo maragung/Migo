@@ -803,6 +803,26 @@ pub enum Event {
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
     AlertPushed,
+    /// A game in a watched conversation moved: started, played, or finished.
+    ///
+    /// The published delta as the wire put it, with the IDL's `room_id` already read as the
+    /// conversation it names (one subject, two names). It is a delta, not a state — the board
+    /// lives in GAME_VIEW's answer — so the only honest consumer is a feed that appends the line,
+    /// and a surface that wants the score asks for the view.
+    GamePushed {
+        conversation_id: Id,
+        game_id: Id,
+        event: String,
+        actor_id: Option<Id>,
+        /// The board version every event of one move shares, for a consumer that orders by it.
+        state_version: u64,
+    },
+    /// The caller's wallet moved on the server: a spend made from any session of the account.
+    ///
+    /// The economy twin of [`Event::AlertPushed`]: a cue to re-read, never a fact. The wire's
+    /// event names the kind and the amount but never the resulting balance, so the only honest
+    /// reaction is to ask for the wallet again.
+    EconomyPushed,
     /// The caller's wallet: the MIG coin balance, the points balance, and the Kick Point balance.
     ///
     /// `kick_points` is optional the way the wire's field is: a node that predates the currency
@@ -6519,6 +6539,32 @@ impl Worker {
         self.sink.send(Event::AlertPushed);
     }
 
+    /// A game event was pushed: one delta from the referee, handed to the games pane's feed.
+    ///
+    /// The decode is the whole job. The pane owns no board to patch, because a delta is not a
+    /// state: a client that wants the score asks GAME_VIEW, and the feed only says that the game
+    /// moved.
+    fn on_game_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::GameEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::GamePushed {
+            conversation_id: event.room_id,
+            game_id: event.game_id,
+            event: event.event,
+            actor_id: event.actor_id,
+            state_version: event.state_version,
+        });
+    }
+
+    /// An economy event was pushed: the cue to re-read the wallet. See [`Event::EconomyPushed`].
+    fn on_economy_pushed(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(_event) = gateway::decode::<migo_protocol::EconomyEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::EconomyPushed);
+    }
+
     /// The wallet came back.
     fn on_balance(&mut self, frame: &migo_protocol::Frame) {
         let Ok(wallet) = gateway::decode::<migo_protocol::WalletView>(frame) else {
@@ -6843,6 +6889,15 @@ impl Worker {
             Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),
             Opcode::NotificationEvent => self.on_alert_pushed(&frame),
+            // A game's delta, published to the conversation's subscribers by the referee after a
+            // move, a start, or an abandon. The starting connection is excluded from a start's
+            // fan-out — its reply is the opening view — and included in every other event's, so
+            // this arm hears the games the account's other sessions and the other members play.
+            Opcode::GameEvent => self.on_game_event(&frame),
+            // The caller's own wallet moved: a spend from any session of the account, pushed on
+            // the user topic every session holds from its handshake. A cue to re-read, the same
+            // contract as the notification push above.
+            Opcode::EconomyEvent => self.on_economy_pushed(&frame),
             Opcode::BalanceFetch => self.on_balance(&frame),
             Opcode::LedgerHistory => self.on_ledger(&frame),
             Opcode::Progression => self.on_progression(&frame),

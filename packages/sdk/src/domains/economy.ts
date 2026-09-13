@@ -28,11 +28,21 @@
  * server-side. The result carries the transaction id and nothing else — the recipient's balance is
  * the recipient's business, and a gift already sent in the currently-open conversation needs no
  * separate announcement here (the conversation's own message flow is the announcement).
+ *
+ * # The live balance tick
+ *
+ * Every spend the caller makes — a gift sent, a store purchase, a Kick Point pack — is answered
+ * by an {@link EconomyEvent} on the caller's *own user topic*, the topic every session subscribes
+ * to at its handshake. The event is a cue, not a fact: it names the kind and the amount but not
+ * the resulting balance, so the handler for it is "re-read my wallet" ({@link getBalance}), never
+ * arithmetic applied to a number the server did not vouch for. It is what makes the wallet live on
+ * a second device and the sender's own balance tick after a send, without either client polling.
  */
 
 import type { Id } from '@migo/wire';
 import {
   OP,
+  decodeEconomyEvent,
   encodeWalletReq,
   decodeWalletView,
   encodeGiftSend,
@@ -57,6 +67,7 @@ import {
 import type {
   BadgeWire,
   BadgesReq,
+  EconomyEvent,
   Entitlement,
   EntitlementsReq,
   EntitlementsResponse,
@@ -79,19 +90,58 @@ import type {
   WalletView,
 } from '@migo/protocol';
 
-import type { Rpc } from './rpc.js';
+import { ListenerSet } from './listeners.js';
+import type { Listener } from './listeners.js';
+import type { EventErrorHandler, Rpc } from './rpc.js';
 
 /**
  * Read the wallet, send gifts, and follow XP, badges, and the statement.
  *
- * One instance per client. Stateless: every method is a plain request/response, so there is nothing
- * to start or stop.
+ * One instance per client. The reads are plain request/response; the one live half is the
+ * {@link EconomyEvent} tick, which delivers nothing until {@link start}, so a client registers
+ * its handler first and does not miss the first tick.
  */
 export class EconomyDomain {
   readonly #rpc: Rpc;
+  readonly #listeners: ListenerSet<EconomyEvent>;
+  #unsubscribe: (() => void) | null = null;
 
-  constructor(rpc: Rpc) {
+  constructor(rpc: Rpc, onEventError?: EventErrorHandler) {
     this.#rpc = rpc;
+    this.#listeners = new ListenerSet(OP.ECONOMY_EVENT, onEventError);
+  }
+
+  /**
+   * Begins delivering inbound economy events to registered handlers. Idempotent.
+   *
+   * The frames arrive on the caller's own user topic, which the client subscribes to at its
+   * handshake, so there is no topic to choose here — only the handlers to begin feeding.
+   */
+  start(): void {
+    if (this.#unsubscribe !== null) {
+      return;
+    }
+    this.#unsubscribe = this.#rpc.on(OP.ECONOMY_EVENT, decodeEconomyEvent, (event) =>
+      this.#listeners.deliver(event),
+    );
+  }
+
+  /** Stops delivering economy events. Registered handlers are kept for a later {@link start}. */
+  stop(): void {
+    this.#unsubscribe?.();
+    this.#unsubscribe = null;
+  }
+
+  /**
+   * Registers a handler for the caller's own economy events. Returns an unsubscribe function.
+   *
+   * Every event this build's server publishes — `gift_sent`, `purchase`, `kick_points_bought` —
+   * means the caller's own wallet moved, so the handler is "refresh my wallet state", not a
+   * switch over kinds: the resulting balance is never in the event and always one
+   * {@link getBalance} away.
+   */
+  onEconomyEvent(handler: Listener<EconomyEvent>): () => void {
+    return this.#listeners.add(handler);
   }
 
   /**

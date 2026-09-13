@@ -98,6 +98,7 @@ import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.ConversationVoteEvent
+import com.migo.core.protocol.EconomyEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
@@ -2869,6 +2870,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * A published economy event for this account: the wallet moved, from one of this account's
+     * devices.
+     *
+     * The event is a cue, not a fact -- it names the kind of movement but never the resulting
+     * balance -- so the handler is a re-read and never arithmetic. The refresh is scoped to the
+     * wallet screen the way the friend event's is scoped to the friends list: a wallet nobody is
+     * looking at is refreshed by its own entry (`Section.WALLET -> loadWallet()`), and a tick that
+     * arrives while it is open is the multi-device balance sync that nothing else provides.
+     */
+    private fun economyEvent(event: EconomyEvent) {
+        if ((_state.value as? AppState.SignedIn)?.section != AppState.Section.WALLET) return
+        loadWallet()
+    }
+
     fun loadSpace() {
         val live = session ?: return
         signedIn { it.copy(space = it.space.copy(loading = true)) }
@@ -4627,6 +4643,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // The game stream: a published event becomes a line in the open thread and a fresh view of
         // the game it moved. Added with the rest so a reconnect re-bridges it with them.
         subscriptions.add(opened.client.onGameEvent { gameEvent(it) })
+        // The wallet's live tick: an economy event on our own user topic means this account spent
+        // from somewhere -- this phone, the web, another device -- and the wallet screen re-reads
+        // rather than trusting a number it holds, exactly as its own refresh button does. Added
+        // with the rest so a reconnect re-bridges it with them.
+        subscriptions.add(opened.client.onEconomy { economyEvent(it) })
         // The call manager: one per session, bridged onto the client's reconnect-surviving call
         // streams with the rest. It owns the WebRTC engine and the call's tracked state; its
         // overlay state is forwarded into this class's stable flow so a session change does not

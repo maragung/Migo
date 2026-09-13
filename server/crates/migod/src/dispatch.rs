@@ -1086,7 +1086,7 @@ impl Dispatcher for AppDispatcher {
                 let mv = domain_move(&request)?;
                 let result = self.games.play(&caller, request.game_id, mv).await?;
                 context.reply(&Acknowledged { ok: true })?;
-                publish_game(context, &result.view, &result.events)
+                publish_game(context, &result.view, &result.events, true)
             }
             Opcode::GameStart => games_admin::handle_game_start(context, frame, &self.games).await,
             Opcode::GameView => games_admin::handle_game_view(context, frame, &self.games).await,
@@ -1803,13 +1803,25 @@ fn domain_move(request: &GameAction) -> Result<Move, Error> {
 
 /// Publishes one move's deltas to the conversation the game is played in.
 ///
-/// **Including the mover's own connection**, which is the one place in this file that does not use
-/// [`publish_excluding_self`](ClientContext::publish_excluding_self). The house rule holds elsewhere
-/// because the reply carries the outcome; here the IDL's response to `GAME_ACTION` is
-/// `Acknowledged`, which carries nothing, so a mover excluded from its own fan-out would never learn
-/// whose turn it now is or that the game just ended. The deltas are safe to send to every player by
-/// construction — section 39's `Moved` says only *that* somebody moved, never what the move was — so
-/// there is nothing in them the mover may not see.
+/// Who hears the fan-out is decided by the caller's own reply, which is why [`publish_game`]
+/// takes `to_caller` rather than choosing on its own:
+///
+/// * `GAME_ACTION` passes `true` (**including** the mover's own connection), which is the one
+///   place in this file that does not use
+///   [`publish_excluding_self`](ClientContext::publish_excluding_self). The house rule holds
+///   elsewhere because the reply carries the outcome; here the IDL's response to `GAME_ACTION`
+///   is `Acknowledged`, which carries nothing, so a mover excluded from its own fan-out would
+///   never learn whose turn it now is or that the game just ended. `GAME_ABANDON` passes `true`
+///   for exactly the same reason: its reply is the same bare `Acknowledged`, so the abandoner's
+///   own devices learn the game ended only through this fan-out.
+/// * `GAME_START` passes `false` (the house rule): its reply *is* the opening view, so the
+///   starting connection already holds fresher state than the delta could carry, and the other
+///   members — and the starter's other devices — hear the `started` event through
+///   [`publish_excluding_self`](ClientContext::publish_excluding_self).
+///
+/// The deltas are safe to send to every player by construction — section 39's `Moved` says only
+/// *that* somebody moved, never what the move was — so there is nothing in them the mover may
+/// not see.
 ///
 /// The topic comes from [`GameView::conversation_id`], never from the request. A client that could
 /// name the topic could publish a game event into a conversation it is not playing in.
@@ -1822,6 +1834,7 @@ fn publish_game(
     context: &ClientContext<'_>,
     view: &GameView,
     events: &[GameDelta],
+    to_caller: bool,
 ) -> Result<(), Error> {
     let topic = Topic {
         kind: TopicKind::Conversation,
@@ -1858,7 +1871,11 @@ fn publish_game(
         };
         // Coalescing is not offered: `GAME_EVENT` is Critical, so a queued event is never
         // superseded, and collapsing two moves would lose one.
-        context.publish(&topic, Opcode::GameEvent, &wire, None)?;
+        if to_caller {
+            context.publish(&topic, Opcode::GameEvent, &wire, None)?;
+        } else {
+            context.publish_excluding_self(&topic, Opcode::GameEvent, &wire, None)?;
+        }
     }
     Ok(())
 }
