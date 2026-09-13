@@ -34,12 +34,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
 use migo_core::{Clock, Config, Id, Secret};
 use migo_economy::{Grant as CoinGrant, Reason};
-use migo_store::model::Currency;
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationKickRequest, ConversationKind,
     Encode, Frame, Hello, Opcode, Platform, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
     TypingEvent, TypingState, Welcome, PROTOCOL_VERSION,
 };
+use migo_store::model::Currency;
 use migod::App;
 
 /// How long any single exchange may take before the test declares the server
