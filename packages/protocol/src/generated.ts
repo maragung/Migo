@@ -3679,6 +3679,35 @@ export function decodeFedRouting(r: Reader): FedRouting {
   return out;
 }
 
+export interface FedConversationRouting {
+  epoch: number;
+  homeRegion: string;
+  conversationId: Id;
+}
+
+export function encodeFedConversationRouting(w: Writer, v: FedConversationRouting): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.str(v.homeRegion);
+  w.id(v.conversationId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedConversationRouting(r: Reader): FedConversationRouting {
+  r.enter();
+  const epoch = r.u64();
+  const homeRegion = r.str();
+  const conversationId = r.id();
+  const out: FedConversationRouting = { epoch, homeRegion, conversationId } as FedConversationRouting;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export interface FedEpoch {
   epoch: number;
 }
@@ -4198,6 +4227,32 @@ export function decodeFedRoomEvent(r: Reader): FedRoomEvent {
   const roomId = r.id();
   const payload = r.bytes();
   const out: FedRoomEvent = { roomId, payload } as FedRoomEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedConversationEvent {
+  conversationId: Id;
+  payload: Uint8Array;
+}
+
+export function encodeFedConversationEvent(w: Writer, v: FedConversationEvent): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.bytes(v.payload);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedConversationEvent(r: Reader): FedConversationEvent {
+  r.enter();
+  const conversationId = r.id();
+  const payload = r.bytes();
+  const out: FedConversationEvent = { conversationId, payload } as FedConversationEvent;
   const optionalCount = r.u32();
   // No optional fields in this version of the struct. Each entry is length-delimited,
   // so reading it is skipping it, and a newer peer may well have sent one.
@@ -7074,6 +7129,10 @@ export const OP = {
   FED_ERROR: 219,
   FED_CALL_RELAY: 220,
   FED_DIRECTORY: 221,
+  /** A node asks the conversation's home node to mirror its sealed event stream. The payload names the conversation and the watcher; the home node keeps one entry per node and sends each event once per watcher. */
+  FED_CONVERSATION_SUBSCRIBE: 241,
+  /** One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content. */
+  FED_CONVERSATION_EVENT: 242,
   /** Invites a callee to a call. */
   CALL_INVITE: 224,
   /** Tells the callee a call is ringing. */
@@ -7231,6 +7290,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  241: { code: 241, name: 'FED_CONVERSATION_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationRouting', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  242: { code: 242, name: 'FED_CONVERSATION_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [] },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [] },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [] },

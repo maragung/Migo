@@ -80,6 +80,15 @@ non-zero and prints everything observed, including both nodes' logs and
 4. **A typing signal crosses the link.** bob's typing start in the room's
    conversation reaches alice's subscriber on node 1.
 
+5. **A 1:1 direct message crosses the link, both directions, and decrypts.**
+   alice opens a direct conversation with bob on node 1 — node 1 is its home,
+   stamped into the row's `home_region` at creation — and the row plus bob's
+   membership are fixtured into node 2 the way the room's were. bob watches
+   the conversation on node 2 (the conversation tier's subscribe half: node 2
+   asks the home node to watch it), and each side's sealed message reaches and
+   decrypts on the other: alice's via the home node's tiered fan-out, bob's
+   reply handed by node 2 to the home node and served from its own hub.
+
 ## What it does not prove — reported, not hidden
 
 These are reported by the sync check as known gaps, and they are the design
@@ -87,19 +96,17 @@ today, not harness limitations:
 
 - **Presence does not federate.** User topics stay node-local; bob's watch of
   alice's user topic on node 2 never hears her presence change on node 1.
-- **A 1:1 direct message does not federate.** Only room conversations ride
-  the tiered fan-out; a direct conversation's messages stay on the node they
-  were sent to.
 
 The harness also stands in, deliberately, for replication that does not exist
-yet: accounts, devices, key bundles, room rows, and membership rows do not
-replicate across nodes, so the sync check copies the counterpart rows
-directly in PostgreSQL (verbatim copies of what the registering node already
-holds, plus the membership rows a join on that node would have written).
-Without those fixtures the cross-node paths would fail on missing rows
-before they ever reached the mesh. A future replication layer replaces the
-fixtures; until then the check proves exactly the part that exists: the
-configuration-formed link and the tiered room fan-out over it.
+yet: accounts, devices, key bundles, room and conversation rows, and
+membership rows do not replicate across nodes, so the sync check copies the
+counterpart rows directly in PostgreSQL (verbatim copies of what the
+registering node already holds, plus the membership rows a join or a
+conversation create on that node would have written). Without those fixtures
+the cross-node paths would fail on missing rows before they ever reached the
+mesh. A future replication layer replaces the fixtures; until then the check
+proves exactly the part that exists: the configuration-formed link and the
+tiered room and conversation fan-out over it.
 
 ## Files
 

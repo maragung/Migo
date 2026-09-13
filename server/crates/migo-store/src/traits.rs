@@ -301,13 +301,17 @@ pub trait MessagingStore: Send + Sync {
     ///
     /// Idempotent under concurrency: two devices tapping "message Bob" at the
     /// same moment must not produce two conversations, so the pair is a unique
-    /// key and the loser of the race reads the winner's row.
+    /// key and the loser of the race reads the winner's row. The `home_region`
+    /// label is stamped only when the row is created — the winner of a race
+    /// keeps the home it already had, which is the point of stamping at birth
+    /// rather than deriving it again.
     async fn direct_conversation(
         &self,
         a: Id,
         b: Id,
         conversation_id: Id,
         encryption: migo_protocol::EncryptionMode,
+        home_region: String,
         at: Timestamp,
     ) -> Result<Conversation>;
 

@@ -11,11 +11,13 @@
  *     1. bob's room join on node 2 surfaces on alice's node 1 subscriber;
  *     2. a room message alice sends on node 1 arrives and decrypts on bob's
  *        node 2 subscriber — and the reply comes back the other way;
- *     3. bob's typing signal in the room's conversation reaches alice.
+ *     3. bob's typing signal in the room's conversation reaches alice;
+ *     4. a 1:1 direct message crosses the link both ways: the conversation is
+ *        created on node 1 (its home), bob watches it on node 2, and each
+ *        side's sealed message reaches and decrypts on the other.
  *
  *   REPORTED (expected NOT to cross; the report is the point, not a failure):
- *     4. presence does not federate — user topics stay local;
- *     5. a 1:1 direct message does not federate — only room conversations do.
+ *     5. presence does not federate — user topics stay local.
  *
  * Accounts, devices, key bundles, and room membership rows do not replicate
  * across nodes today. To keep the proof about the *link* and the tiered
@@ -340,8 +342,8 @@ async function main(): Promise<void> {
   insertJson(PG.db1, 'room_member', membershipRow(bobUuid, RoomRole.Member));
   insertJson(PG.db2, 'room_member', membershipRow(aliceUuid, RoomRole.Owner));
 
-  // A friendship on node 1 so the direct-message attempt is refused by neither
-  // privacy policy — the gap report then measures federation, not permissions.
+  // A friendship on node 1 so the direct-message check is refused by neither
+  // privacy policy — it then measures federation, not permissions.
   for (const [a, b] of [
     [aliceUuid, bobUuid],
     [bobUuid, aliceUuid],
@@ -480,6 +482,91 @@ async function main(): Promise<void> {
   proved.push('typing signal: node 2 → node 1');
   log('check-3', "PROVED: alice's subscriber saw bob start typing");
 
+  // CHECK 4: the 1:1 direct message, both directions. Alice opens a direct
+  // conversation with bob on node 1 — node 1 becomes the conversation's home,
+  // stamped into the row's home_region at creation — and the row plus bob's
+  // membership are fixtured into node 2 the same way the room's were. Bob
+  // watches it on node 2, which is the conversation tier's subscribe half:
+  // node 2 asks node 1 to watch the conversation. Alice's sealed message then
+  // rides the tiered fan-out (one federated copy per watching node), and
+  // bob's reply is handed by node 2 to the home node, which publishes it to
+  // alice's session from its own hub. Both directions must deliver *and
+  // decrypt*: the sealed envelope crosses every node on the way unopened.
+  const direct = await alice.startConversation(ConversationKind.Direct, [bobId]);
+  const directUuid = idToUuid(direct.conversationId);
+  const directRow = mustRow<Record<string, unknown>>(
+    PG.db1,
+    `select row_to_json(t) from conversation t where conversation_id = '${directUuid}'`,
+    'the direct conversation row',
+  );
+  if (String(directRow.home_region) !== 'nnode-1') {
+    fail(
+      'check-4',
+      `the direct conversation's home_region is ${String(directRow.home_region)}, not node 1's region`,
+    );
+  }
+  insertJson(PG.db2, 'conversation', directRow);
+  insertJson(
+    PG.db2,
+    'conversation_member',
+    mustRow<Record<string, unknown>>(
+      PG.db1,
+      `select row_to_json(t) from conversation_member t
+        where conversation_id = '${directUuid}' and account_id = '${bobUuid}'`,
+      "bob's direct conversation membership",
+    ),
+  );
+  await bob.watchConversation(direct.conversationId);
+  log(
+    'check-4',
+    `direct conversation ${direct.conversationId} created on node 1 (home), bob watching it on node 2`,
+  );
+
+  // Let the FED_CONVERSATION_SUBSCRIBE drain through the outbox before the
+  // first send, the same drain the room's subscribe got: a send that leaves
+  // before the home node recorded the watcher is simply not fanned out.
+  await sleep(3_000);
+
+  const dmText = `direct hello across the mesh (${stamp})`;
+  log('alice', `sending "${dmText}" into the direct conversation`);
+  await alice.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmText });
+  const check4a = await waitFor(
+    () =>
+      bobMessages.some(
+        (m) =>
+          m.senderId === aliceId && m.text === dmText && m.conversationId === direct.conversationId,
+      ),
+    DELIVERY_TIMEOUT_MS,
+  );
+  if (!check4a) {
+    fail(
+      'check-4a',
+      `the direct message did not cross the mesh link; bob observed: ${JSON.stringify(bobMessages)}`,
+    );
+  }
+  proved.push('direct message: node 1 → node 2 (delivered and decrypted)');
+  log('check-4a', `PROVED: bob received and decrypted "${dmText}"`);
+
+  const dmReply = `direct reply across the mesh (${stamp})`;
+  log('bob', `sending "${dmReply}" back`);
+  await bob.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmReply });
+  const check4b = await waitFor(
+    () =>
+      aliceMessages.some(
+        (m) =>
+          m.senderId === bobId && m.text === dmReply && m.conversationId === direct.conversationId,
+      ),
+    DELIVERY_TIMEOUT_MS,
+  );
+  if (!check4b) {
+    fail(
+      'check-4b',
+      `the direct reply did not reach node 1; alice observed: ${JSON.stringify(aliceMessages)}`,
+    );
+  }
+  proved.push('direct message: node 2 → node 1 (delivered and decrypted)');
+  log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
+
   // KNOWN GAP A: presence. User topics are deliberately not federated (section
   // 170 tiers fan-out to room conversations only), and presence is ephemeral
   // node-local state besides. Bob's watch of alice's user topic on node 2 is
@@ -515,69 +602,6 @@ async function main(): Promise<void> {
     );
   }
 
-  // KNOWN GAP B: the plain 1:1 message. Alice opens a direct conversation with
-  // bob on node 1 (both accounts exist there), the conversation and bob's
-  // membership are fixtured into node 2, bob watches it there, and alice
-  // sends. Room conversations federate; direct ones do not — the send should
-  // succeed locally while bob's subscriber stays silent.
-  const direct = await alice.startConversation(ConversationKind.Direct, [bobId]);
-  const directUuid = idToUuid(direct.conversationId);
-  insertJson(
-    PG.db2,
-    'conversation',
-    mustRow<Record<string, unknown>>(
-      PG.db1,
-      `select row_to_json(t) from conversation t where conversation_id = '${directUuid}'`,
-      'the direct conversation row',
-    ),
-  );
-  insertJson(
-    PG.db2,
-    'conversation_member',
-    mustRow<Record<string, unknown>>(
-      PG.db1,
-      `select row_to_json(t) from conversation_member t
-        where conversation_id = '${directUuid}' and account_id = '${bobUuid}'`,
-      "bob's direct conversation membership",
-    ),
-  );
-  const bobBefore = bobMessages.length;
-  await bob.watchConversation(direct.conversationId);
-  log(
-    'gap-dm',
-    `direct conversation ${direct.conversationId} created on node 1, bob watching it on node 2`,
-  );
-  let dmSendError: string | null = null;
-  const dmText = `direct hello that should not cross (${stamp})`;
-  try {
-    await alice.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmText });
-    log('gap-dm', 'the direct send itself succeeded on node 1');
-  } catch (error) {
-    dmSendError = error instanceof Error ? error.message : String(error);
-    log('gap-dm', `the direct send itself FAILED on node 1: ${dmSendError}`);
-  }
-  await sleep(GAP_TIMEOUT_MS);
-  const dmArrived = bobMessages
-    .slice(bobBefore)
-    .some((m) => m.conversationId === direct.conversationId);
-  if (dmArrived) {
-    log(
-      'gap-dm',
-      'UNEXPECTED: the direct message crossed the link — only room conversations are supposed to federate',
-    );
-  } else if (dmSendError === null) {
-    log(
-      'gap-dm',
-      'CONFIRMED GAP: the direct message stayed on node 1 — bob on node 2 received nothing (room conversations federate, direct ones do not)',
-    );
-  } else {
-    log(
-      'gap-dm',
-      'CONFIRMED GAP, with a second gap in front of it: the send never left node 1 — the failure was ' +
-        dmSendError,
-    );
-  }
-
   // 6. What the link itself did, straight off both nodes' /metrics.
   for (const [label, origin] of [
     ['node 1', NODE1_HTTP],
@@ -599,7 +623,6 @@ async function main(): Promise<void> {
     console.log(`  PROVED   ${line}`);
   }
   console.log('  REPORTED presence does not cross the link (by design; user topics stay local)');
-  console.log('  REPORTED the 1:1 direct message does not cross the link (by design; rooms only)');
   console.log('');
   log(
     'result',

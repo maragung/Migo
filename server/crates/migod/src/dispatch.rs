@@ -92,6 +92,7 @@ use migo_rooms::{
 };
 use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
 
+use crate::conversation_relay::ConversationRelay;
 use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
 use crate::room_relay::{FederatedPublisher, RoomRelay};
 
@@ -159,6 +160,13 @@ pub struct AppDispatcher {
     /// shares the same table — the home node's watchers and the subscriber's asks are two
     /// halves of one bookkeeping, not two components that happen to talk.
     room_relay: Arc<RoomRelay>,
+    /// The conversation half of the same tier (section 170): which peer nodes hold
+    /// subscribers of which direct or group conversations, and the one federated copy per
+    /// node such a conversation's publish owes them. A sibling of the room relay rather
+    /// than a field of it, because the two tiers answer different questions of the store
+    /// (which room owns a conversation, and which node homes it) and share nothing but
+    /// the shape.
+    conversation_relay: Arc<ConversationRelay>,
 }
 
 impl AppDispatcher {
@@ -186,6 +194,7 @@ impl AppDispatcher {
         calls: SharedCallkeeper,
         gateway: Arc<GatewayHandle>,
         room_relay: Arc<RoomRelay>,
+        conversation_relay: Arc<ConversationRelay>,
     ) -> Self {
         // The room-presence component reads the same store and rooms handle and publishes through
         // the same gateway handle, so it is assembled from what this call already holds rather
@@ -218,6 +227,7 @@ impl AppDispatcher {
             room_presence,
             gateway,
             room_relay,
+            conversation_relay,
         }
     }
 
@@ -358,9 +368,25 @@ impl AppDispatcher {
                     );
                 }
             }
-            // Not a room's conversation: a direct or group chat, which no node homes
-            // and so nothing here can tier.
-            Ok(None) => {}
+            // Not a room's conversation: a direct or group chat, whose home node the
+            // conversation row itself names (section 170's conversation tier). The
+            // publish that just reached this node's hub is owed to the far members
+            // through the same tiered fanout a room's chat rides — one copy to the
+            // home node from here, or one per watching node from there — and the
+            // sealed envelope crosses every node on the way unread.
+            Ok(None) => {
+                if let Err(error) = self
+                    .conversation_relay
+                    .forward(&federated, context.now())
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        conversation = %conversation_id.to_text(),
+                        "cannot enqueue the federated half of a conversation fanout"
+                    );
+                }
+            }
             Err(error) => {
                 tracing::warn!(%error, "cannot tell whether a conversation belongs to a room");
             }
@@ -411,13 +437,15 @@ impl Dispatcher for AppDispatcher {
         let now = context.now();
 
         match context.opcode() {
-            // Section 146 invariant: the reserved span 241-255 is never-allocated, and
+            // Section 146 invariant: the reserved span 243-255 is never-allocated, and
             // the gateway refuses it before a frame can reach this dispatcher (see the
             // range gate in migo-gateway's connection.rs). A variant generated into that
             // span therefore must not be routable here — the migo-protocol registry test
             // (`no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range`) fails
             // the build first, and the allocation needs a written decision per section
-            // 145's precedent before any number is taken from the reserved head.
+            // 145's precedent before any number is taken from the reserved head. The
+            // conversation-federation pair at 241-242 is one such decision; the span it
+            // left never-allocated begins at 243.
             // --- messaging ---
             Opcode::MessageSend => {
                 let caller = MessageCaller::new(
@@ -1218,10 +1246,32 @@ impl AppDispatcher {
                     identity.tier,
                     now,
                 );
-                self.messaging
+                let granted = self
+                    .messaging
                     .is_participant(&caller, topic.id)
                     .await
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                // The granted subscription is the moment this node first has a reason to
+                // hear the conversation's federated stream: the same tiered fanout a room
+                // rides (section 170), asking the conversation's home node to watch it,
+                // once per conversation. A room's own conversation needs no ask — its
+                // events ride the room's tier — and the relay reads the row to tell the
+                // two apart. Best-effort for the same reason every other half here is:
+                // the local subscription already succeeded, and the ask is retried by the
+                // next granted `SUBSCRIBE` if it could not be made.
+                let watch = if granted {
+                    self.conversation_relay.subscribe_to(topic.id, now).await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = watch {
+                    tracing::warn!(
+                        %error,
+                        conversation = %topic.id.to_text(),
+                        "cannot ask the home node to watch this conversation"
+                    );
+                }
+                granted
             }
             // A room topic carries membership and state events — and, for a room that does not
             // claim end-to-end, the messages themselves. An empty mask to `authorize` asks only

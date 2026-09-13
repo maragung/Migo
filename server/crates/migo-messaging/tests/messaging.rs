@@ -21,7 +21,7 @@ use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Random, Result, SeededRandom, Timestamp};
 use migo_messaging::fanout::Broadcast;
-use migo_messaging::model::{Caller, MAX_GROUP_MEMBERS};
+use migo_messaging::model::{Caller, MessagingConfig, MAX_GROUP_MEMBERS};
 use migo_messaging::service::Messages;
 use migo_messaging::traits::{
     FreeKicks, KickTariff, MessageGate, Messaging, RoomSpeak, SharedKickTariff,
@@ -127,6 +127,7 @@ impl Harness {
             limiter,
             erased,
             std::sync::Arc::new(FreeKicks),
+            MessagingConfig::default(),
             &registry,
             Box::new(SeededRandom::new(0x5eed_9001)) as Box<dyn Random>,
         );
@@ -164,6 +165,7 @@ impl Harness {
             limiter,
             erased,
             tariff,
+            MessagingConfig::default(),
             &registry,
             Box::new(SeededRandom::new(0x5eed_9001)) as Box<dyn Random>,
         );

@@ -888,6 +888,14 @@ async fn dispatcher() -> DispatcherHarness {
             app_store.clone(),
             None,
         )),
+        // The conversation half of the same tier, over the same mesh and store: the
+        // subscribe half's asks are what a real node would make, and no home node ever
+        // answers, so nothing federates — which is the honest posture for a
+        // single-process harness.
+        std::sync::Arc::new(migod::conversation_relay::ConversationRelay::new(
+            app.federation.clone(),
+            app_store.clone(),
+        )),
     );
     DispatcherHarness { app, dispatcher }
 }

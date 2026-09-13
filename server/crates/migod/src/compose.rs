@@ -338,6 +338,13 @@ pub struct App {
     /// TCP is the native clients' (Android, desktop) default transport (section 138), advertised
     /// through the `TCP_TRANSPORT` feature bit only while it is serving.
     pub tcp_bind: Option<SocketAddr>,
+    /// The address the optional mesh listener bound, or `None` when the node runs no
+    /// federation listener. The server-to-server segment's own bind (section 169),
+    /// advertised through the `FEDERATION` feature bit only while it is serving. Held
+    /// for the same reason the QUIC and TCP binds are: a test that builds several
+    /// nodes in one process must hand each node's real address to its peers' allow-lists,
+    /// and port zero is how those tests keep off each other's sockets.
+    pub mesh_bind: Option<SocketAddr>,
     /// Authentication: register, sign in, refresh, sign out, and access-token verification.
     pub auth: SharedAuth,
     /// Direct messaging: send, receipt, delete, sync, and conversation management.
@@ -491,7 +498,10 @@ impl App {
         // and the layering rule says they meet here, in the composition root,
         // rather than by `migo-messaging` depending on either. The room config
         // takes its home region from the node identity — one source, the same
-        // one every other region-scoped decision reads.
+        // one every other region-scoped decision reads. The messaging config
+        // takes its home region from the same place, for the conversations this
+        // node creates: the label names the node that holds their federated
+        // watch table (section 170), so a second source would be a second home.
         let rooms = migo_rooms::open(
             store.clone(),
             limiter.clone(),
@@ -551,6 +561,7 @@ impl App {
                 rooms.clone(),
             )),
             Arc::new(EconomyKickTariff::new(economy.clone())),
+            migo_messaging::MessagingConfig::from_node(&config.node),
             &registry,
         );
         let presence = migo_presence::open(
@@ -711,6 +722,16 @@ impl App {
                 Arc::clone(&gateway_handle),
             ))),
         ));
+        // The conversation half of the same tier, for the conversations a room does not
+        // own: a direct chat or a group whose members connected to whichever node they
+        // connected to. It holds no late-bound handle — a conversation has no move path —
+        // so the mesh and the store it reads are the whole of what it needs, and it is
+        // built beside the room relay so the composition root keeps both halves of both
+        // tiers in one place.
+        let conversation_relay = Arc::new(crate::conversation_relay::ConversationRelay::new(
+            federation.clone(),
+            store.clone(),
+        ));
 
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
@@ -739,6 +760,7 @@ impl App {
             calls.clone(),
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),
+            Arc::clone(&conversation_relay),
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
@@ -834,16 +856,19 @@ impl App {
             Arc::clone(&federation),
             Some(Arc::clone(&gateway)),
             Some(Arc::clone(&room_relay)),
+            Some(Arc::clone(&conversation_relay)),
             &registry,
             clock.clone(),
             config.federation.handshake_timeout_ms,
         ));
+        let mut mesh_bind: Option<SocketAddr> = None;
         if let Some(bind) = config.node.mesh_bind.as_deref() {
             let bound = mesh_transport
                 .spawn_listener(bind)
                 .await
                 .context("cannot bind the mesh listener")?;
             tracing::info!(%bound, "mesh listener bound");
+            mesh_bind = Some(bound);
         }
         mesh_transport.spawn_runner(clock.clone());
 
@@ -892,6 +917,7 @@ impl App {
             bind: config.http.bind.clone(),
             quic_bind,
             tcp_bind,
+            mesh_bind,
             auth,
             messaging,
             presence,
