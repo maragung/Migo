@@ -26,6 +26,10 @@
  *   events the live stream already delivered above it, asks once (not once per later event)
  *   about a hole the server cannot fill, and continues a larger hole on the next above-gap
  *   event.
+ * * **Heartbeat probes** — the gateway's quiet-session probe is one PING at correlation 0
+ *   carrying a *Ping* body (section 139 reuses the opcode both directions), so the client
+ *   decodes it with the Ping codec and answers it. A client whose own heartbeat interval is
+ *   longer than the server's deadline stays alive on that answer alone.
  *
  * They drive the real `MigoClient` over a scripted socket — the same harness shape the
  * membership-cache tests use — because the point under test is the client's own wiring, not
@@ -51,6 +55,7 @@ import {
   SyncStatus,
   decodeKeyBundleRequest,
   decodeMessageSend,
+  decodePing,
   decodeSubscribeRequest,
   decodeSyncRequest,
   encodeAcknowledged,
@@ -60,6 +65,7 @@ import {
   encodeKeyPublishResult,
   encodeMessageAccepted,
   encodeMessageEvent,
+  encodePing,
   encodePong,
   encodeSubscribeResponse,
   encodeSyncResponse,
@@ -352,7 +358,7 @@ class ScriptedServer {
 }
 
 /** An outbox-tuned client connected to a fresh scripted session. */
-async function connectedClient(): Promise<{
+async function connectedClient(onEventError?: (opcode: number, cause: unknown) => void): Promise<{
   client: MigoClient;
   server: ScriptedServer;
   socket: ControlledSocket;
@@ -380,6 +386,7 @@ async function connectedClient(): Promise<{
     deviceDisplayName: 'test device',
     webSocketFactory: () => socket as unknown as WebSocket,
     heartbeatMs: 600_000,
+    ...(onEventError !== undefined ? { onEventError } : {}),
     // The reconnect tests wait on the transport's own backoff; a cap of 1ms keeps the suite
     // from inheriting the production thirty seconds.
     maxReconnectDelayMs: 1,
@@ -936,6 +943,51 @@ test("teardownRoom forgets the room conversation's crypto, so the next send re-d
       distributedAfter > distributedBefore,
       'a sender key forgotten by the teardown is distributed again on the next send',
     );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a server probe is a Ping body on the wire, and the client answers it quietly', async () => {
+  const faults: Array<{ opcode: number; cause: unknown }> = [];
+  const { client, socket } = await connectedClient((opcode, cause) =>
+    faults.push({ opcode, cause }),
+  );
+  try {
+    // The PING frames this client has put on the wire. Nothing pings on its own here — the
+    // heartbeat is ten minutes out — so the only PING this test can ever see is the one a
+    // server probe earns.
+    const pingFrames = () =>
+      socket.sent
+        .filter((raw): raw is Uint8Array => raw instanceof Uint8Array)
+        .map((raw) => decodeFrame(raw))
+        .filter((frame) => frame.header.opcode === OP.PING);
+    assert.equal(pingFrames().length, 0, 'nothing pings before the probe arrives');
+
+    // The gateway's quiet-session probe: one PING at correlation 0 carrying a *Ping* body —
+    // a client timestamp and the optional count, no server_time. Decoding it with the Pong
+    // codec reads a second timestamp that is not there ("needed 1 more bytes"), the handler
+    // never runs, and the probe goes unanswered — a session whose own heartbeat interval is
+    // longer than the server's deadline is then closed while alive.
+    socket.deliver(
+      encodeFrame({
+        header: frameHeader(OP.PING, 0),
+        payload: encodeBody(encodePing, { clientTime: 1_700_000_000_000 }),
+      }),
+    );
+    await tick();
+
+    // Answered, exactly once, with a Ping body of the client's own.
+    const answers = pingFrames();
+    assert.equal(answers.length, 1, 'the probe was answered with exactly one PING');
+    const answer = answers[0];
+    assert.ok(answer !== undefined, 'a PING answer was recorded');
+    const body = decodeBody(decodePing, answer.payload);
+    assert.ok(Number.isFinite(body.clientTime), 'the answer carries a client timestamp');
+
+    // And quietly: a probe is an ordinary keep-alive, so nothing about it reached the
+    // error sink.
+    assert.deepEqual(faults, []);
   } finally {
     await client.disconnect();
   }

@@ -48,6 +48,7 @@ import {
   decodeSubscribeResponse,
   decodeAcknowledged,
   encodePing,
+  decodePing,
   decodePong,
   decodeConversationMemberEvent,
   decodeRoomMemberEvent,
@@ -1475,13 +1476,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     await transport.connect();
 
     const rpc = new Rpc(transport, this.#options.onEventError);
-    // Server-initiated heartbeats arrive as a PING on the wire (brief 139
-    // reuses the opcode for both directions). The client must answer each
-    // one with a PONG or the server closes the session as
-    // `heartbeat_timeout` and inbound events stop arriving. A frame that
-    // is the reply itself is also a PING and the codec hands the handler
-    // a decoded Pong, so we read the result and drop it.
-    rpc.on(OP.PING, decodePong, () => {
+    // A server-initiated heartbeat is one PING at correlation 0 carrying a *Ping* body
+    // (brief 139 reuses the opcode for both directions; the gateway's quiet-session
+    // probe sends `Ping { client_time }`). A Pong body never reaches this listener —
+    // it only ever answers a request of ours, and the transport resolves that on the
+    // request's own correlation before any listener runs — so the Ping codec is the
+    // one that fits every frame the listener can see. The answer is a fresh PING of
+    // our own; the server replies Pong on its correlation and the pending call reads
+    // the result and drops it. Answering is what keeps a quiet session alive: the
+    // gateway refreshes `last_seen` on any frame back, and a client whose heartbeat
+    // interval outlives the server's deadline is closed while alive without it.
+    rpc.on(OP.PING, decodePing, () => {
       void rpc.call(OP.PING, encodePing, decodePong, { clientTime: Date.now() }).catch(() => {
         // The server is welcome to drop the session if it cannot tolerate
         // a missing PONG; the next keepalive will close the loop and
