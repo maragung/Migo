@@ -27,10 +27,15 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import { ConversationKind, EncryptionMode } from '@migo/sdk';
-import type { Id, RoomJoinResponse, RoomSummary } from '@migo/sdk';
+import { ConversationKind, EncryptionMode, MemberChange } from '@migo/sdk';
+import type { Id, RoomJoinResponse, RoomMemberEvent, RoomSummary } from '@migo/sdk';
 
-import { applyRoomState, capacityLabel, roomInfoOf } from '../src/lib/migo/rooms-provider.js';
+import {
+  applyRoomState,
+  capacityLabel,
+  departedRoomOf,
+  roomInfoOf,
+} from '../src/lib/migo/rooms-provider.js';
 import { roomRowTitle } from '../src/components/conversation-list.js';
 import { clearRoomInfo, loadRoomInfo, saveRoomInfo } from '../src/lib/storage/room-info-store.js';
 import { installFakeIndexedDb, installRecordingWebStorage } from './support/dom-stubs.js';
@@ -155,4 +160,80 @@ test('the remembered rooms persist to IndexedDB under their account, and only th
 
   await clearRoomInfo();
   assert.equal(await loadRoomInfo(), undefined);
+});
+
+// departedRoomOf: the one frame a removed member gets to keep. The server publishes the
+// removal event and then takes the room's topics away, so the projection below is the whole
+// client-side story of audit area 4 — the event naming this account with Kicked, Banned, or
+// Left must identify the room to drop (record, watch, sidebar row, open thread), and nothing
+// else may: a join or a return keeps the account seated, a disconnect revokes nothing, and a
+// departure naming someone else is not this shell's to act on.
+
+const ME = 'acct_me' as Id;
+const OTHER = 'acct_other' as Id;
+const ROOM_TWO = 'room_2' as Id;
+const CONV_TWO = 'conv_2' as Id;
+
+/** The bridge map the provider holds: one watched room, mapped to its conversation. */
+const byRoomId = new Map<Id, Id>([
+  [ROOM.roomId, 'conv_1' as Id],
+  [ROOM_TWO, CONV_TWO],
+]);
+
+function memberEvent(change: MemberChange, userId: Id, roomId: Id = ROOM.roomId): RoomMemberEvent {
+  return { roomId, userId, change, joined: change === MemberChange.Joined, memberCount: 11 };
+}
+
+test('a kick, a ban, and a leave naming this account each name the room to drop', () => {
+  for (const change of [MemberChange.Kicked, MemberChange.Banned, MemberChange.Left]) {
+    const gone = departedRoomOf(memberEvent(change, ME), ME, byRoomId);
+    assert.deepEqual(
+      gone,
+      { roomId: ROOM.roomId, conversationId: 'conv_1' as Id },
+      `${MemberChange[change]} naming self must cost the room its surface`,
+    );
+  }
+});
+
+test('the dropped room names both halves: the room the record is keyed by, the conversation the row is', () => {
+  const gone = departedRoomOf(memberEvent(MemberChange.Kicked, ME, ROOM_TWO), ME, byRoomId);
+  assert.deepEqual(gone, { roomId: ROOM_TWO, conversationId: CONV_TWO });
+});
+
+test('a join, a return, or a disconnect naming this account keeps the room', () => {
+  for (const change of [MemberChange.Joined, MemberChange.Reconnected, MemberChange.Disconnected]) {
+    assert.equal(
+      departedRoomOf(memberEvent(change, ME), ME, byRoomId),
+      null,
+      `${MemberChange[change]} naming self is not a departure`,
+    );
+  }
+});
+
+test('a departure naming someone else is the room’s business, not this shell’s', () => {
+  for (const change of [MemberChange.Kicked, MemberChange.Banned, MemberChange.Left]) {
+    assert.equal(departedRoomOf(memberEvent(change, OTHER), ME, byRoomId), null);
+  }
+});
+
+test('a legacy event with no change is read as no departure, even when its joined flag is false', () => {
+  // The legacy flag predates the change enum; a modern server's removals always carry the
+  // change, so a changeless frame must not guess a departure off the flag alone.
+  const legacy: RoomMemberEvent = {
+    roomId: ROOM.roomId,
+    userId: ME,
+    joined: false,
+    memberCount: 11,
+  };
+  assert.equal(departedRoomOf(legacy, ME, byRoomId), null);
+});
+
+test('no account or no held room means nothing to drop', () => {
+  assert.equal(departedRoomOf(memberEvent(MemberChange.Kicked, ME), null, byRoomId), null);
+  // A room the map does not hold was never watched, so no frame for it can arrive — but the
+  // projection still refuses to invent a conversation for one that somehow does.
+  assert.equal(
+    departedRoomOf(memberEvent(MemberChange.Kicked, ME, 'room_unknown' as Id), ME, byRoomId),
+    null,
+  );
 });
