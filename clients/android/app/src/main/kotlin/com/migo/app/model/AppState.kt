@@ -19,6 +19,7 @@ import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.ProgressionWire
 import com.migo.core.protocol.RankWire
 import com.migo.core.protocol.RelationshipEntry
+import com.migo.core.protocol.RoomMemberEvent
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
@@ -721,6 +722,43 @@ data class ChatState(
      */
     val safety: ChatSafety? = null,
 )
+
+/**
+ * The conversation a room membership event takes away from *this* account, when it names one the
+ * shell holds.
+ *
+ * Pure, so the phone-free suite can pin it. The server publishes a removal
+ * [RoomMemberEvent] naming the removed member and then takes the room's topics away, so a
+ * `Kicked`, `Banned`, or `Left` naming this account is the one last frame the shell ever hears
+ * about a room it can no longer read -- audit area 4's rule that a kicked member loses the
+ * surface, not just the delivery. `Joined` and `Reconnected` keep the account seated, and a
+ * `Disconnected` revokes nothing server-side: a flaky connection is not a departure, so the room
+ * stays. A departure naming someone else is the room's business, not this shell's.
+ *
+ * The event names only the room; the conversation is read back out of the surfaces that carry
+ * the room-to-conversation bridge (the list row first, then the window tab, then the open chat)
+ * because those are the three places a cleanup has to reach and any one of them may know the
+ * pairing the others never learned.
+ */
+fun departedRoomConversation(
+    event: RoomMemberEvent,
+    self: Id?,
+    conversations: List<ConversationRow>,
+    windows: List<WindowTab>,
+    open: ChatState?,
+): Id? {
+    val change = event.change?.takeIf { it != MemberChange.Unknown }
+        ?: return null // a legacy event carries no reason; a modern removal always does
+    if (
+        event.userId != self ||
+        (change != MemberChange.Kicked && change != MemberChange.Banned && change != MemberChange.Left)
+    ) {
+        return null
+    }
+    return conversations.firstOrNull { it.roomId == event.roomId }?.conversationId
+        ?: windows.firstOrNull { it.roomId == event.roomId }?.conversationId
+        ?: open?.takeIf { it.roomId == event.roomId }?.conversationId
+}
 
 /**
  * A direct conversation's safety numbers, as the verification surface shows them.
