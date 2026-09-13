@@ -3100,7 +3100,7 @@ data class RoomMemberEvent(
     val joined: Boolean,
     val role: RoomRole? = null,
     val memberCount: Long? = null,
-    /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
+    /** Why the membership changed. Absent on a join, where `joined` says it; a leave, kick, ban, or grace timeout sets it so a removal can be told from a roster refresh. */
     val change: MemberChange? = null,
     /** The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe. */
     val revision: Long? = null,

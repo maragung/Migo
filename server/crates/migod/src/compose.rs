@@ -923,6 +923,10 @@ impl App {
             Some(Arc::clone(&conversation_relay)),
             Some(Arc::clone(&presence_relay)),
             Some(Arc::clone(&replication_relay)),
+            // The ingest path's revocation half needs the room rows: a member removed on
+            // another node must lose the room's topics on this one, and the conversation
+            // id that pairs with the room is a row, not a wire fact.
+            Some(Arc::clone(&store)),
             &registry,
             clock.clone(),
             config.federation.handshake_timeout_ms,

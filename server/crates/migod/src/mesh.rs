@@ -623,6 +623,12 @@ pub(crate) struct IngestRouter {
     conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
     presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
     replication: Option<Arc<crate::replication::ReplicationRelay>>,
+    /// The local rows, for the one ingest question the wire event cannot answer: which
+    /// conversation speaks for a room whose member just left. A removal that arrives over
+    /// the mesh must take the removed account's topics away on *this* node too — the
+    /// origin node's own revocation reaches only the sessions it holds — and the room's
+    /// chat topic is named by the row, not by the member event.
+    store: Option<migo_store::SharedStore>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
     /// What this node has ingested, capped, so the operator's metrics answer "is anything
@@ -637,6 +643,7 @@ impl IngestRouter {
         conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         replication: Option<Arc<crate::replication::ReplicationRelay>>,
+        store: Option<migo_store::SharedStore>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -646,6 +653,7 @@ impl IngestRouter {
             conversations,
             presence,
             replication,
+            store,
             meters: MeshMeters::new(registry),
             clock,
             seen: parking_lot::Mutex::new(Vec::new()),
@@ -665,6 +673,74 @@ impl IngestRouter {
     /// integration tests' window onto the wire. The cap keeps it from being a log.
     pub fn ingested(&self) -> Vec<(u32, usize)> {
         self.seen.lock().clone()
+    }
+
+    /// The account a room member event removed, when it removed one.
+    ///
+    /// The same gate the dispatcher's publish path applies locally: `Kicked`, `Banned`,
+    /// and `Left` empty a seat, and a seat that emptied must take its subscriptions with
+    /// it. A join or a plain roster refresh keeps the member and their topics.
+    fn removed_member_of(opcode: Opcode, inner: &Frame) -> Result<Option<Id>> {
+        match opcode {
+            Opcode::RoomMemberEvent => {
+                let event: migo_protocol::RoomMemberEvent =
+                    from_frame(inner).map_err(fault::from_wire)?;
+                Ok(event
+                    .change
+                    .filter(|change| {
+                        matches!(
+                            change,
+                            migo_protocol::MemberChange::Kicked
+                                | migo_protocol::MemberChange::Banned
+                                | migo_protocol::MemberChange::Left
+                        )
+                    })
+                    .map(|_| event.user_id))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The account a conversation member event removed, when it removed one.
+    ///
+    /// The conversation half of [`Self::removed_member_of`], for the member events that
+    /// ride the conversation envelope — a group's kick and a group's self-leave arrive
+    /// here exactly as a room's do over the room envelope.
+    fn removed_conversation_member_of(
+        event: &migo_protocol::ConversationMemberEvent,
+    ) -> Option<Id> {
+        matches!(
+            event.change,
+            migo_protocol::MemberChange::Kicked | migo_protocol::MemberChange::Left
+        )
+        .then_some(event.user_id)
+    }
+
+    /// Takes a removed member's room topics away from their sessions on this node.
+    ///
+    /// The origin node revoked its own sessions when it processed the removal; the
+    /// sessions the removed member holds *here* — the node they actually connected
+    /// through — are this node's to revoke, and a subscription that survives the ingest
+    /// would keep delivering a room the account can no longer ask for. The conversation
+    /// id comes from the local row, because the member event names the room and the row
+    /// is the one place that knows which conversation speaks for it.
+    async fn revoke_room_member(&self, room_id: Id, account_id: Id) {
+        let Some(gateway) = &self.gateway else {
+            return;
+        };
+        let mut topics = vec![migo_protocol::Topic {
+            kind: migo_protocol::TopicKind::Room,
+            id: room_id,
+        }];
+        if let Some(store) = &self.store {
+            if let Ok(Some(room)) = store.room(room_id).await {
+                topics.push(migo_protocol::Topic {
+                    kind: migo_protocol::TopicKind::Conversation,
+                    id: room.conversation_id,
+                });
+            }
+        }
+        gateway.revoke_subscriptions(account_id, &topics);
     }
 
     async fn ingest(&self, peer: Id, inner: Frame) -> Result<()> {
@@ -903,6 +979,10 @@ impl IngestRouter {
             .ok_or_else(|| fault::validation("opcode", "not a known room event"))?;
         let now = self.clock.now();
         let placement = placement_of(inner_opcode, &inner, room_id)?;
+        // Read before the publish takes the frame: the removal gate below needs the
+        // member the event removed, and the decode is the same one the placement for a
+        // member event already proved valid.
+        let removed = Self::removed_member_of(inner_opcode, &inner)?;
         if let Some(gateway) = &self.gateway {
             gateway.broadcast_frame_to_topic(
                 &placement.topic,
@@ -914,6 +994,13 @@ impl IngestRouter {
             if let Some(topic) = &placement.also {
                 gateway.broadcast_frame_to_topic(topic, inner_opcode, &payload, None, now);
             }
+        }
+        // Publish first, revoke second — the removed member's last frame from the room is
+        // the one that tells them they were removed, on this node exactly as on the origin
+        // (section 170's promise is one *same* fanout everywhere, and the origin's
+        // revocation only reached the sessions it holds).
+        if let Some(account_id) = removed {
+            self.revoke_room_member(room_id, account_id).await;
         }
         // The home node's second obligation: the event came from a peer that
         // already delivered it locally, so the other watching nodes are the
@@ -992,6 +1079,26 @@ impl IngestRouter {
             );
             if let Some(topic) = &placement.also {
                 gateway.broadcast_frame_to_topic(topic, inner_opcode, &payload, None, now);
+            }
+        }
+        // A member the event removed loses the conversation topic on this node too —
+        // publish first, revoke second, exactly as the room path and the origin's own
+        // request path order it. The decode is the one the placement already performed
+        // for a member event, so a failure here cannot happen for an event that placed.
+        if inner_opcode == Opcode::ConversationMemberEvent {
+            let removed = from_frame::<migo_protocol::ConversationMemberEvent>(&inner)
+                .ok()
+                .and_then(|event| Self::removed_conversation_member_of(&event));
+            if let Some(account_id) = removed {
+                if let Some(gateway) = &self.gateway {
+                    gateway.revoke_subscriptions(
+                        account_id,
+                        &[migo_protocol::Topic {
+                            kind: migo_protocol::TopicKind::Conversation,
+                            id: conversation_id,
+                        }],
+                    );
+                }
             }
         }
         // The home node's second obligation: the event came from a peer that
@@ -1217,12 +1324,25 @@ struct Placement {
 fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement> {
     let room = room_topic(room_id);
     match opcode {
-        // Room lifecycle: the room topic is the one the room's own members subscribe to.
-        Opcode::RoomMemberEvent => Ok(Placement {
-            topic: room,
-            coalesce: None,
-            also: None,
-        }),
+        // Room lifecycle: the room topic is the one the room's own members subscribe to. A
+        // join also rings the joiner's user topic — the same doorbell the conversation tier
+        // rings for an invite — because a member who has just joined is not a subscriber of
+        // the room on any session but the one that asked, and their other sessions here
+        // learn the room exists from the one frame they are guaranteed to be listening for.
+        Opcode::RoomMemberEvent => {
+            let event: migo_protocol::RoomMemberEvent =
+                from_frame(inner).map_err(fault::from_wire)?;
+            Ok(Placement {
+                topic: room,
+                coalesce: None,
+                also: matches!(event.change, Some(migo_protocol::MemberChange::Joined)).then_some(
+                    migo_protocol::Topic {
+                        kind: migo_protocol::TopicKind::User,
+                        id: event.user_id,
+                    },
+                ),
+            })
+        }
         // A rebalance's instruction rides the room envelope like any other room event,
         // because the members it addresses are the room's subscribers; the hint names no
         // conversation and must never be coalesced — two moves collapsed into one would
@@ -1665,6 +1785,7 @@ impl MeshTransport {
         conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         replication: Option<Arc<crate::replication::ReplicationRelay>>,
+        store: Option<migo_store::SharedStore>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
         handshake_timeout_ms: u64,
@@ -1677,6 +1798,7 @@ impl MeshTransport {
                 conversations,
                 presence,
                 replication,
+                store,
                 registry,
                 Arc::clone(&clock),
             )),
@@ -2122,6 +2244,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2201,6 +2324,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2252,6 +2376,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,
@@ -2390,6 +2515,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2471,6 +2597,7 @@ mod tests {
             None,
             Some(Arc::clone(&relay_b)),
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2549,6 +2676,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2639,6 +2767,7 @@ mod tests {
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2810,6 +2939,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(ManualClock::new(later)),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2944,6 +3074,7 @@ mod tests {
             None,
             None,
             Some(relay_b.clone()),
+            None,
             None,
             None,
             &registry,
@@ -3111,6 +3242,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -3177,6 +3309,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,
@@ -3280,6 +3413,112 @@ mod tests {
             transport_b.ingested().len(),
             1,
             "B ingested the event the retry carried"
+        );
+    }
+
+    /// The ingest revocation gate, decode half: a member event that removed someone names
+    /// them, and one that did not names nobody. The federated revoke (section 170) hangs off
+    /// this reading — a `Left`, `Kicked`, or `Banned` on the room envelope must cost the
+    /// removed account their topics on *this* node, while a join, a presence edge, or a plain
+    /// roster refresh must not — so the gate is pinned here, where the verb is the only
+    /// variable. The conversation twin carries the same rule on its own envelope.
+    #[test]
+    fn a_removal_names_the_removed_and_nothing_else_does() {
+        let room_id = Id::from(0x5A00);
+        let removed = Id::from(0x5A01);
+        let member_event = |change: Option<migo_protocol::MemberChange>| {
+            let event = migo_protocol::RoomMemberEvent {
+                room_id,
+                user_id: removed,
+                joined: change.is_none(),
+                role: None,
+                member_count: Some(3),
+                change,
+                revision: None,
+            };
+            to_frame(Opcode::RoomMemberEvent.to_wire(), 0, &event)
+                .expect("the member event encodes")
+        };
+
+        for verb in [
+            migo_protocol::MemberChange::Left,
+            migo_protocol::MemberChange::Kicked,
+            migo_protocol::MemberChange::Banned,
+        ] {
+            let frame = member_event(Some(verb));
+            assert_eq!(
+                IngestRouter::removed_member_of(Opcode::RoomMemberEvent, &frame)
+                    .expect("a placed event decodes"),
+                Some(removed),
+                "{verb:?} empties a seat, and an emptied seat loses its topics"
+            );
+        }
+
+        // A join and a plain roster refresh keep the member: the gate must not fire, or every
+        // join would strip the joiner's subscriptions on the nodes watching the room.
+        assert_eq!(
+            IngestRouter::removed_member_of(
+                Opcode::RoomMemberEvent,
+                &member_event(Some(migo_protocol::MemberChange::Joined))
+            )
+            .expect("a placed event decodes"),
+            None,
+            "a join is not a removal"
+        );
+        assert_eq!(
+            IngestRouter::removed_member_of(Opcode::RoomMemberEvent, &member_event(None))
+                .expect("a placed event decodes"),
+            None,
+            "a roster refresh without a verb is not a removal"
+        );
+        // The presence edges move no membership either, but they carry no `change` at all and
+        // land in the branch above; the opcode guard is what keeps other frames out.
+        assert_eq!(
+            IngestRouter::removed_member_of(
+                Opcode::RoomStateEvent,
+                &member_event(Some(migo_protocol::MemberChange::Left))
+            )
+            .expect("an unknown opcode is not a decode"),
+            None,
+            "only the member envelope is read for removals"
+        );
+
+        let conversation_id = Id::from(0x5B00);
+        let conversation_event = |change: migo_protocol::MemberChange| {
+            let event = migo_protocol::ConversationMemberEvent {
+                conversation_id,
+                user_id: removed,
+                change,
+                member_count: 2,
+                group_key_epoch: None,
+            };
+            to_frame(Opcode::ConversationMemberEvent.to_wire(), 0, &event)
+                .expect("the conversation member event encodes")
+        };
+        for verb in [
+            migo_protocol::MemberChange::Left,
+            migo_protocol::MemberChange::Kicked,
+        ] {
+            assert_eq!(
+                IngestRouter::removed_conversation_member_of(
+                    &from_frame::<migo_protocol::ConversationMemberEvent>(&conversation_event(
+                        verb
+                    ))
+                    .expect("the event decodes")
+                ),
+                Some(removed),
+                "{verb:?} empties a conversation seat too"
+            );
+        }
+        assert_eq!(
+            IngestRouter::removed_conversation_member_of(
+                &from_frame::<migo_protocol::ConversationMemberEvent>(&conversation_event(
+                    migo_protocol::MemberChange::Joined
+                ))
+                .expect("the event decodes")
+            ),
+            None,
+            "a conversation join is not a removal"
         );
     }
 }

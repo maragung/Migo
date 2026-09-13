@@ -104,12 +104,16 @@ export function CreateRoomDialog({
     try {
       // Creation is entry: the reply is the join handle, and the projections the join flow uses
       // are the ones this uses — one wire moment, one way to land in the list and the registry.
+      // That includes the conversation start: the creator is a member the moment the reply
+      // lands, and a room whose creator hears nothing until they happen to open the thread is
+      // the deafness the join flow's start call exists to prevent.
       const joined = await client.rooms.create(
         trimmedSlug,
         trimmedName,
         kind,
         trimmedTopic.length > 0 ? trimmedTopic : undefined,
       );
+      await client.startRoomConversation(joined.conversationId, joined.room.roomId);
       noteConversation(joinedRoomSummary(joined));
       noteRoom(roomInfoOf(joined));
       onClose();

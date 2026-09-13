@@ -100,7 +100,7 @@ use migo_auth::{RequestContext, SharedAuth};
 use migo_core::config::GatewayConfig;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Id, Random, Shutdown, Timestamp};
-use migo_protocol::NodeInfo;
+use migo_protocol::{NodeInfo, Topic};
 use migo_ratelimit::SharedRateLimiter;
 
 use crate::config::{Settings, MAX_SUBSCRIPTIONS};
@@ -158,7 +158,7 @@ pub(crate) struct GatewayInner {
     /// The application-logic seam, called for every application opcode on a ready session.
     pub(crate) dispatcher: Arc<dyn Dispatcher>,
     /// Retained resume state for recently-dropped sessions, keyed by session id (section 150).
-    pub(crate) resume_store: DashMap<Id, ResumeBuffer>,
+    pub(crate) resume_store: DashMap<Id, RetainedSession>,
     /// How many sessions are currently admitted, for the section 149 ceiling.
     pub(crate) session_count: AtomicUsize,
 }
@@ -204,27 +204,41 @@ impl GatewayInner {
         self.session_count.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Takes the retained resume buffer for a session id, if one is held, removing it from the
+    /// Takes the retained resume state for a session id, if one is held, removing it from the
     /// store so a resume consumes it exactly once.
-    pub(crate) fn take_resume(&self, session_id: Id) -> Option<ResumeBuffer> {
+    pub(crate) fn take_resume(&self, session_id: Id) -> Option<RetainedSession> {
         self.resume_store
             .remove(&session_id)
-            .map(|(_, buffer)| buffer)
+            .map(|(_, retained)| retained)
     }
 
-    /// Retains a session's resume buffer for a possible reconnect.
+    /// Retains a session's resume state for a possible reconnect.
     ///
     /// The store is bounded by the same ceiling as live sessions; when it is full, expired buffers
     /// are swept before the new one is inserted, so a burst of dropped sessions cannot grow it
     /// without bound.
-    pub(crate) fn store_resume(&self, session_id: Id, buffer: ResumeBuffer) {
+    pub(crate) fn store_resume(&self, session_id: Id, retained: RetainedSession) {
         if self.resume_store.len() >= self.settings.max_sessions {
             let now = self.now();
             self.resume_store
-                .retain(|_, retained| !retained.expired(now));
+                .retain(|_, retained| !retained.buffer.expired(now));
         }
-        self.resume_store.insert(session_id, buffer);
+        self.resume_store.insert(session_id, retained);
     }
+}
+
+/// What a dropped session leaves behind for its reconnect: the Critical-frame ring that bridges
+/// the gap (section 150), and the topics the session held.
+///
+/// The topics are the half section 158 owes a resumed session: "a resumed reconnect does no sync
+/// and no resubscribe" is only honest if delivery actually continues, and a resume that replays
+/// the ring into a session subscribed to nothing delivers the backlog and then silence forever.
+/// They are re-applied on resume *through authorization* — membership may have moved while the
+/// session was down, and a topic the account can no longer ask for must not come back.
+#[derive(Clone)]
+pub(crate) struct RetainedSession {
+    pub(crate) buffer: ResumeBuffer,
+    pub(crate) topics: Vec<Topic>,
 }
 
 /// The collaborators a [`Gateway`] needs, gathered so [`Gateway::open`] takes one bundle rather

@@ -29,6 +29,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { MemberChange } from '@migo/sdk';
 import type { Id, RoomJoinResponse, RoomStateEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
@@ -259,6 +260,41 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
     });
     return off;
   }, [client, resetNonce, commit]);
+
+  // The join's other half, and rooms owe conversations the same doorbell. A `Joined` naming
+  // *this* account, for a room the shell does not know, arrives on our own user topic — the
+  // one frame the server sends a member who cannot be a subscriber of the room yet: the join
+  // happened on another device, and this session has never heard of the room. The reaction is
+  // the join flow re-run: a membership check first (the roster refuses anyone who is not in
+  // the room, and a doorbell can be stale — the account may have left since the other device
+  // joined, and a reaction that re-joined them would be this device deciding membership), then
+  // an idempotent re-join (the server answers an already-member with the full handle and tells
+  // the room nothing, so no other member sees a phantom join), then the conversation start and
+  // the records, so this device hears everything the room says next. Anything else — another
+  // user's join, or a join for a room this shell already knows — is not ours to act on.
+  useEffect(() => {
+    if (!client || accountId === null) {
+      return;
+    }
+    const off = client.rooms.onMember((event) => {
+      if (event.userId !== accountId || event.change !== MemberChange.Joined) {
+        return;
+      }
+      if (byRoomId.current.has(event.roomId)) {
+        return;
+      }
+      void (async () => {
+        await client.rooms.getRoster(event.roomId, 1);
+        const joined: RoomJoinResponse = await client.rooms.join(event.roomId);
+        await client.startRoomConversation(joined.conversationId, joined.room.roomId);
+        noteRoom(roomInfoOf(joined));
+      })().catch(() => {
+        // A refused doorbell reaction costs this device the room until the next list refresh;
+        // the membership itself is server-side truth and needs no repair here.
+      });
+    });
+    return off;
+  }, [client, accountId, resetNonce, noteRoom]);
 
   const infoFor = useCallback(
     (conversationId: Id): RoomInfo | null => roomsRef.current.get(conversationId) ?? null,

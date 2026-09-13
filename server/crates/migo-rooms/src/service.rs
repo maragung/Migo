@@ -962,21 +962,24 @@ where
         // Brief section 156: a client that asked to join a room it is already in gets
         // its answer and the room hears nothing.
         let fanout = (!already).then(|| {
-            Fanout::member(
+            let mut event = member_event(
                 room.room_id,
-                caller.device_id,
-                member_event(
-                    room.room_id,
-                    caller.account_id,
-                    true,
-                    Some(stored.role),
-                    Some(view::count(room.member_count)),
-                    // The re-read above already happened after the store's
-                    // write, so the revision it carries is the one the join
-                    // advanced the room to.
-                    view::revision(room.revision),
-                ),
-            )
+                caller.account_id,
+                true,
+                Some(stored.role),
+                Some(view::count(room.member_count)),
+                // The re-read above already happened after the store's
+                // write, so the revision it carries is the one the join
+                // advanced the room to.
+                view::revision(room.revision),
+            );
+            // Said with `Joined`, not just `joined: true`, for the same reason a leave
+            // says `Left`: the dispatcher's doorbell — the copy of this event that
+            // reaches the joiner's *other* devices on their user topic, so a member
+            // becomes a member everywhere they have a session — keys on the verb, and
+            // a role change or a transfer publishes `joined: true` without being one.
+            event.change = Some(MemberChange::Joined);
+            Fanout::member(room.room_id, caller.device_id, event)
         });
         Ok((response, fanout))
     }
@@ -1015,18 +1018,21 @@ where
             .leave_room(room.room_id, caller.account_id, caller.now)
             .await?;
         self.meters.leave(ChangeOutcome::Applied);
-        Ok(Some(Fanout::member(
+        let mut event = member_event(
             room.room_id,
-            caller.device_id,
-            member_event(
-                room.room_id,
-                caller.account_id,
-                false,
-                None,
-                Some(self.current_count(room.room_id).await?),
-                view::revision(revision),
-            ),
-        )))
+            caller.account_id,
+            false,
+            None,
+            Some(self.current_count(room.room_id).await?),
+            view::revision(revision),
+        );
+        // Said with `Left`, not just `joined: false`, so the dispatcher's removal gate
+        // (brief section 156: a leave empties the seat and raises the revision) recognises
+        // this frame as a revocation trigger — a boolean alone cannot be told from a
+        // roster refresh, and a subscription that survives the leave keeps delivering the
+        // room's frames to the session that walked out.
+        event.change = Some(MemberChange::Left);
+        Ok(Some(Fanout::member(room.room_id, caller.device_id, event)))
     }
 
     async fn timeout_member(

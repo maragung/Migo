@@ -1212,7 +1212,7 @@
           "type": "MemberChange",
           "optional": true,
           "id": 3,
-          "doc": "Why the membership changed. Absent on legacy join/leave, where `joined` says it."
+          "doc": "Why the membership changed. Absent on a join, where `joined` says it; a leave, kick, ban, or grace timeout sets it so a removal can be told from a roster refresh."
         },
         {
           "name": "revision",

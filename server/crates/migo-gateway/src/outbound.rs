@@ -49,7 +49,7 @@
 //! [`resume_buffer_frames`]: crate::config::Settings::resume_buffer_frames
 //! [`resume_window_ms`]: crate::config::Settings::resume_window_ms
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -59,6 +59,7 @@ use migo_core::Timestamp;
 use migo_protocol::{cadence_for, BandwidthMode, Cadence, DeliveryClass, Opcode};
 
 use crate::metrics::{Closed, Dropped};
+use crate::topic::TopicKey;
 
 /// A frame waiting to be written to the client.
 struct Queued {
@@ -98,6 +99,11 @@ pub(crate) enum PushOutcome {
     /// The frame's opcode is suppressed for this session's bandwidth mode (section 159), so
     /// it was refused at the mailbox. Not a drop: policy, not pressure, and nothing to count.
     Suppressed,
+    /// The frame's topic was taken from this session before the frame reached the mailbox, so
+    /// it was refused at the mailbox. Not a drop: the session stopped listening (a membership
+    /// removal or an explicit unsubscribe), and a frame for a topic nobody is owed is not
+    /// pressure and not a loss — it is the gate doing its job.
+    NotSubscribed,
     /// The queue is closed; the frame was discarded.
     Closed,
 }
@@ -179,6 +185,15 @@ struct Inner {
     /// between deliveries rather than between arrivals — a frame that sat behind a slow drain
     /// must still count as the session's one presence frame for its subject in the window.
     paced_sent: HashMap<u64, Timestamp>,
+    /// The topics this session is currently listening on, as the hub files them. The fan-out
+    /// gate: a topic push checks this set under the mailbox lock, so once a topic is taken —
+    /// by an unsubscribe, a membership revocation, or teardown — no frame for it can be
+    /// enqueued afterwards, no matter when the fan-out snapshotted its subscriber list.
+    /// A fan-out that races a removal either completes its enqueue first (the frame precedes
+    /// the removal, and the caller that ordered removal-then-acknowledgement makes the ack
+    /// follow it) or finds the topic gone and refuses the frame. Direct pushes (replies,
+    /// session-scoped echoes) do not pass this gate: they answer a request this session made.
+    topics: HashSet<TopicKey>,
 }
 
 impl Inner {
@@ -239,6 +254,7 @@ impl Outbound {
                 mode,
                 cadence: cadence_for(mode, heartbeat_ms),
                 paced_sent: HashMap::new(),
+                topics: HashSet::new(),
             }),
             notify: Notify::new(),
         }
@@ -252,7 +268,9 @@ impl Outbound {
     }
 
     /// Pushes a frame, applying the delivery-class policy and the section 159 rules, and wakes
-    /// the writer if anything became sendable.
+    /// the writer if anything became sendable. This is the ungated entry: replies and
+    /// session-scoped pushes, which answer something this session asked for and are owed
+    /// regardless of what topics it holds. Topic fan-out goes through [`Outbound::push_for_topic`].
     pub(crate) fn push(
         &self,
         bytes: Bytes,
@@ -265,10 +283,74 @@ impl Outbound {
         if inner.closed {
             return PushOutcome::Closed;
         }
+        let outcome = Self::enqueue(&mut inner, bytes, class, opcode, coalesce_key, now);
+        drop(inner);
+        self.notify_if_sendable(outcome);
+        outcome
+    }
+
+    /// Pushes a frame a topic's fan-out owes this session, gated on the session still
+    /// listening: the topic check and the enqueue happen under the same mailbox lock, so a
+    /// topic taken by [`Outbound::remove_topic`] either precedes this push (and the frame is
+    /// refused) or follows it (and the frame precedes whatever ordered the removal). This is
+    /// the enqueue-time half of "the instant a leave is acknowledged, no further frame from
+    /// that room reaches the session": the hub's subscriber snapshot alone cannot promise
+    /// that, because a fan-out can be between its snapshot and its push when the removal
+    /// lands.
+    pub(crate) fn push_for_topic(
+        &self,
+        topic: TopicKey,
+        bytes: Bytes,
+        class: DeliveryClass,
+        opcode: Opcode,
+        coalesce_key: Option<u64>,
+        now: Timestamp,
+    ) -> PushOutcome {
+        let mut inner = self.inner.lock();
+        if inner.closed {
+            return PushOutcome::Closed;
+        }
+        if !inner.topics.contains(&topic) {
+            return PushOutcome::NotSubscribed;
+        }
+        let outcome = Self::enqueue(&mut inner, bytes, class, opcode, coalesce_key, now);
+        drop(inner);
+        self.notify_if_sendable(outcome);
+        outcome
+    }
+
+    /// Records that the session now listens on `topic`, so topic fan-out may reach it.
+    pub(crate) fn add_topic(&self, topic: TopicKey) {
+        self.inner.lock().topics.insert(topic);
+    }
+
+    /// Records that the session stopped listening on `topic`. Once this returns, no
+    /// [`Outbound::push_for_topic`] for `topic` can enqueue a frame on this mailbox.
+    pub(crate) fn remove_topic(&self, topic: TopicKey) {
+        self.inner.lock().topics.remove(&topic);
+    }
+
+    /// Takes every topic away, for teardown: a session going down stops listening to
+    /// everything at once, and a fan-out that snapshotted it just before must find the gate
+    /// shut rather than enqueue into a queue nobody drains.
+    pub(crate) fn clear_topics(&self) {
+        self.inner.lock().topics.clear();
+    }
+
+    /// The queue-class policy, shared by the gated and ungated entries. The lock is held by
+    /// the caller, so the pacing read and the queue write cannot disagree.
+    fn enqueue(
+        inner: &mut Inner,
+        bytes: Bytes,
+        class: DeliveryClass,
+        opcode: Opcode,
+        coalesce_key: Option<u64>,
+        now: Timestamp,
+    ) -> PushOutcome {
         if opcode.suppressed_on(inner.mode) {
             return PushOutcome::Suppressed;
         }
-        let outcome = match class {
+        match class {
             DeliveryClass::Critical => {
                 let seq = inner.next_seq;
                 inner.next_seq += 1;
@@ -348,8 +430,13 @@ impl Outbound {
                     PushOutcome::Enqueued
                 }
             }
-        };
-        drop(inner);
+        }
+    }
+
+    /// Wakes the writer when an outcome left something sendable in the queue. A refused
+    /// frame (suppressed, not-subscribed, dropped, closed) wakes nobody: there is nothing
+    /// new to take.
+    fn notify_if_sendable(&self, outcome: PushOutcome) {
         if matches!(
             outcome,
             PushOutcome::Enqueued
@@ -359,7 +446,6 @@ impl Outbound {
         ) {
             self.notify.notify_one();
         }
-        outcome
     }
 
     /// Takes every frame whose pacing window has closed, in order, for the writer to send.

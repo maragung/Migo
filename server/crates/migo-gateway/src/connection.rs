@@ -57,6 +57,7 @@ use crate::outbound::{Outbound, PushOutcome, ResumeBuffer};
 use crate::session::{Phase, SessionHandle};
 use crate::transport::{Transport, TransportError};
 use crate::GatewayInner;
+use crate::RetainedSession;
 
 /// The upper bound on the randomized reconnect delay a graceful close suggests (section 149), so a
 /// draining node sheds its sessions over a window rather than in a thundering herd.
@@ -98,13 +99,21 @@ struct Established {
     /// re-`AUTHENTICATE` to refresh its token; this flag is what keeps the second of those from
     /// announcing a start the first already did, and what tells teardown whether an end is owed.
     lifecycle_started: bool,
+    /// The topics a resumed session held before it dropped, waiting for the identity that can
+    /// ask about them. A resume that arrived with an inline token applies them in the handshake;
+    /// one that must `AUTHENTICATE` first applies them there. Empty on every fresh session and
+    /// after the one application, so a re-`AUTHENTICATE` never applies them twice.
+    pending_topics: Vec<migo_protocol::Topic>,
 }
 
 /// Fresh-versus-resume, decided from the `HELLO` before a session slot is taken.
 enum Plan {
     /// A brand-new session under a freshly minted id.
     Fresh { session_id: Id },
-    /// A resume of a dropped session, reusing its id and the retained backlog to redeliver.
+    /// A resume of a dropped session, reusing its id, the retained backlog to redeliver, and
+    /// the topics it held — which the resume re-applies through authorization, because
+    /// section 158 promises a resumed session it need not sync or resubscribe, and that
+    /// promise is only honest if delivery actually continues past the replayed ring.
     Resume {
         session_id: Id,
         /// Why the client had to come back: the reason its previous session closed, read off
@@ -112,7 +121,7 @@ enum Plan {
         /// `retains_resume`'s set, exactly the reasons [`Reconnect::of`] names — but the type
         /// stays honest rather than inventing a label for the impossible.
         reconnect: Option<Reconnect>,
-        buffer: ResumeBuffer,
+        retained: RetainedSession,
         last_seq: u64,
     },
 }
@@ -163,11 +172,13 @@ impl<T: Transport> Connection<'_, T> {
         // Admission control: every established session, fresh or resumed, takes one slot.
         if !self.gateway.try_admit() {
             if let Plan::Resume {
-                session_id, buffer, ..
+                session_id,
+                retained,
+                ..
             } = plan
             {
-                // Hand the buffer back so a later, less loaded moment can still resume it.
-                self.gateway.store_resume(session_id, buffer);
+                // Hand the retained state back so a later, less loaded moment can still resume it.
+                self.gateway.store_resume(session_id, retained);
             }
             // Section 160: a node past its ceiling answers OVERLOADED, not a silent drop. The
             // 1600 class tells the client to retry with backoff — the honest instruction for a
@@ -203,12 +214,12 @@ impl<T: Transport> Connection<'_, T> {
         ));
         let (resumed, resume_from_seq, reconnect) = match &plan {
             Plan::Resume {
-                buffer,
+                retained,
                 last_seq,
                 reconnect,
                 ..
             } => {
-                outbound.seed_resume(buffer, *last_seq);
+                outbound.seed_resume(&retained.buffer, *last_seq);
                 (Some(true), Some(*last_seq), *reconnect)
             }
             Plan::Fresh { .. } => (None, None, None),
@@ -285,6 +296,28 @@ impl<T: Transport> Connection<'_, T> {
             lifecycle_started = true;
         }
 
+        // The resumed session's topics, taken out of the plan before it drops. Applied now when
+        // the greeting carried a token; held for `AUTHENTICATE` otherwise. A fresh session has
+        // none.
+        let pending_topics = match plan {
+            Plan::Resume { retained, .. } => retained.topics,
+            Plan::Fresh { .. } => Vec::new(),
+        };
+        let mut pending_topics = pending_topics;
+        if !pending_topics.is_empty() {
+            if let Some(identity) = identity.as_ref() {
+                let topics = std::mem::take(&mut pending_topics);
+                self.restore_resumed_topics(
+                    identity,
+                    &topics,
+                    session_id,
+                    hello.bandwidth_mode,
+                    now,
+                )
+                .await;
+            }
+        }
+
         Some(Established {
             session_id,
             outbound,
@@ -292,7 +325,50 @@ impl<T: Transport> Connection<'_, T> {
             phase,
             identity,
             lifecycle_started,
+            pending_topics,
         })
+    }
+
+    /// Re-applies a resumed session's retained topics, through authorization.
+    ///
+    /// Section 158 promises a resumed reconnect that it need not sync or resubscribe — so the
+    /// server, which is the one that emptied the subscription set when the old connection tore
+    /// down, is the one that must fill it again. Authorization is re-asked per topic rather
+    /// trusted from before the drop, because membership moves while a session is down: a member
+    /// removed in the gap must not have the room handed back by their own reconnect. A topic the
+    /// account can no longer ask for is quietly not restored — the client was told `resumed`, and
+    /// the frames it is owed for that topic are simply no longer its to receive.
+    async fn restore_resumed_topics(
+        &self,
+        identity: &Identity,
+        topics: &[migo_protocol::Topic],
+        session_id: Id,
+        mode: migo_protocol::BandwidthMode,
+        now: Timestamp,
+    ) {
+        let asked: &[migo_protocol::Topic] = if topics.len() > MAX_SUBSCRIPTIONS {
+            &topics[..MAX_SUBSCRIPTIONS]
+        } else {
+            topics
+        };
+        let granted = self
+            .gateway
+            .dispatcher
+            .authorize_topics(&TopicRequest::new(identity, session_id, mode, now), asked)
+            .await;
+        // A mask that does not line up with the topics it answers is a bug in the dispatcher,
+        // and the only safe reading of a bug in an authorization answer is that nothing was
+        // granted — the same rule `handle_subscribe` applies.
+        let aligned = granted.len() == asked.len();
+        let permitted: Vec<migo_protocol::Topic> = asked
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| aligned && granted[*index])
+            .map(|(_, topic)| topic.clone())
+            .collect();
+        if !permitted.is_empty() {
+            self.gateway.hub.subscribe(session_id, &permitted);
+        }
     }
 
     /// Cuts the frame-level switches — BATCHING (section 154) and COMPRESSION (section 72) —
@@ -431,12 +507,14 @@ impl<T: Transport> Connection<'_, T> {
             });
         };
         match gateway.take_resume(request.session_id) {
-            Some(buffer) if buffer.covers(request.last_frame_seq, now) => Some(Plan::Resume {
-                session_id: request.session_id,
-                reconnect: Reconnect::of(buffer.closed()),
-                buffer,
-                last_seq: request.last_frame_seq,
-            }),
+            Some(retained) if retained.buffer.covers(request.last_frame_seq, now) => {
+                Some(Plan::Resume {
+                    session_id: request.session_id,
+                    reconnect: Reconnect::of(retained.buffer.closed()),
+                    retained,
+                    last_seq: request.last_frame_seq,
+                })
+            }
             Some(_) => {
                 // The buffer no longer bridges the gap: a Critical frame aged out or was evicted
                 // unacknowledged, so only a full resync can repair it.
@@ -1298,6 +1376,20 @@ impl<T: Transport> Connection<'_, T> {
                     }
                     established.lifecycle_started = true;
                 }
+                // A resume that arrived without a token held its topics for exactly this moment:
+                // the identity that can ask about them exists now, and the restore consumes the
+                // held list once, so a later token-refresh AUTHENTICATE applies nothing twice.
+                if !established.pending_topics.is_empty() {
+                    let topics = std::mem::take(&mut established.pending_topics);
+                    self.restore_resumed_topics(
+                        established.identity.as_ref().expect("just set above"),
+                        &topics,
+                        established.session_id,
+                        established.handle.bandwidth_mode(),
+                        now,
+                    )
+                    .await;
+                }
             }
             Err(error) => {
                 push_error(
@@ -1621,12 +1713,16 @@ impl<T: Transport> Connection<'_, T> {
     /// socket — balancing the admission slot and the live-sessions gauge taken at handshake.
     async fn teardown(&mut self, established: Established, reason: Closed) {
         let gateway = self.gateway;
+        // Read before the deregister empties it: the topics are part of what an involuntary
+        // close retains, because the resume that answers it must restore delivery without the
+        // client resubscribing (section 158).
+        let topics = gateway.hub.topics_of(established.session_id);
         gateway.hub.deregister(established.session_id);
         // Retain resume state only for an involuntary close of an authenticated session, so a
         // reconnect can bridge the gap (section 150). A clean client-driven close keeps nothing.
         if established.identity.is_some() && retains_resume(reason) {
             let buffer = established.outbound.resume_buffer(gateway.now(), reason);
-            gateway.store_resume(established.session_id, buffer);
+            gateway.store_resume(established.session_id, RetainedSession { buffer, topics });
         }
         // Balance the start: a connection that announced itself owes exactly one end, however it
         // closed. The flag, not `identity.is_some()`, is the condition — a session can hold an
