@@ -1580,6 +1580,77 @@ pub async fn leaving_a_conversation_keeps_the_membership_row(store: &SharedStore
     );
 }
 
+/// One seat of a group, at the moment it is asked for.
+fn seat(conversation_id: Id, account_id: Id, at: i64) -> ConversationMember {
+    ConversationMember {
+        conversation_id,
+        account_id,
+        role: ConversationRole::Member,
+        joined_at: ts(at),
+        left_at: None,
+        muted_until: None,
+        pinned: false,
+    }
+}
+
+/// The group ceiling is enforced where the seat lands, not only where the invite
+/// was counted.
+///
+/// The messaging service reads the member count before it writes the invite,
+/// which is exactly the window two racing invites step over: both read "one seat
+/// left", both pass, and the group ends over its ceiling. The store is where the
+/// count and the insert become one fact — under the write lock in memory, inside
+/// the row-locked transaction on postgres — so the (MAX+1)th seat is refused
+/// here even when every check above it has already said yes.
+pub async fn a_group_refuses_a_seat_beyond_its_ceiling_at_the_store(store: &SharedStore) {
+    // The ceiling itself, in accounts: MAX_GROUP_MEMBERS seats and one more
+    // asking in. The ids sit far above the other fixtures because there are a
+    // great many of them, and a collision with a hand-written id would read as
+    // a mysterious extra member rather than an obvious one.
+    let mut seated = Vec::with_capacity(MAX_GROUP_MEMBERS);
+    for n in 0..MAX_GROUP_MEMBERS as u128 {
+        seated.push(seed_account(store, 6_000 + n, &format!("seat{n}")).await);
+    }
+    let outsider = seed_account(store, 6_000 + MAX_GROUP_MEMBERS as u128, "standing").await;
+    let conversation = seed_group(store, id(70), seated.clone()).await;
+    let conversation_id = conversation.conversation_id;
+
+    // The refusal the backstop exists for: a full group, one more seat asked
+    // for at the store, past every service-level check.
+    expect_code(
+        store
+            .add_member(seat(conversation_id, outsider, 5_000))
+            .await,
+        codes::GROUP_FULL,
+    );
+
+    // A freed seat is a seat: one departure makes room for exactly one arrival.
+    store
+        .remove_member(conversation_id, seated[0], ts(5_100))
+        .await
+        .unwrap();
+    store
+        .add_member(seat(conversation_id, outsider, 5_200))
+        .await
+        .unwrap();
+    assert!(store.is_member(conversation_id, outsider).await.unwrap());
+
+    // And a comeback is a seat too: the group is full again, so the member who
+    // left is refused on the same count rather than slipped back in over it.
+    expect_code(
+        store
+            .add_member(seat(conversation_id, seated[0], 5_300))
+            .await,
+        codes::GROUP_FULL,
+    );
+
+    // Re-adding a member who never left changes no count and stays quiet.
+    store
+        .add_member(seat(conversation_id, outsider, 5_400))
+        .await
+        .unwrap();
+}
+
 /// The three group setters: a title on the conversation, a role and a mute on the
 /// membership row. One case for the three because they share one property — the
 /// write is only visible through a read back, never through its return value
@@ -4068,6 +4139,7 @@ macro_rules! for_each_contract_case {
         $case!(a_cursor_only_moves_forward_and_never_past_the_end);
         $case!(deleting_a_message_takes_the_payload_with_it);
         $case!(leaving_a_conversation_keeps_the_membership_row);
+        $case!(a_group_refuses_a_seat_beyond_its_ceiling_at_the_store);
         $case!(the_group_setters_touch_only_their_own_row);
         $case!(the_conversation_list_is_ordered_by_activity_and_counts_unread);
         $case!(purging_expired_messages_respects_its_budget_and_never_reuses_a_sequence);

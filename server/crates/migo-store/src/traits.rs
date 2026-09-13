@@ -335,6 +335,15 @@ pub trait MessagingStore: Send + Sync {
     async fn is_member(&self, conversation_id: Id, account_id: Id) -> Result<bool>;
 
     /// Adds a member.
+    ///
+    /// The capacity backstop for a group lives here and not in the caller: a
+    /// check that only runs before the write is a check two racing invites can
+    /// both step over, so the seat is counted under the same lock or
+    /// transaction it lands in, and a group already holding
+    /// [`MAX_GROUP_MEMBERS`](crate::model::MAX_GROUP_MEMBERS) active members is
+    /// refused with `GROUP_FULL`. The refusal is keyed to whether this call
+    /// would raise the active count — a fresh seat or a departed member coming
+    /// back — so re-adding a member who never left stays a quiet no-op.
     async fn add_member(&self, member: ConversationMember) -> Result<()>;
 
     /// Marks a member as having left. The row stays, so history access remains

@@ -102,7 +102,7 @@ use crate::model::{
     Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
     ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
     Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
-    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
+    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -2222,12 +2222,57 @@ impl MessagingStore for PostgresStore {
     }
 
     async fn add_member(&self, member: ConversationMember) -> Result<()> {
+        let transaction = self.begin("add_member").await?;
+        let conversation_id = uuid_of(member.conversation_id);
+        let account_id = uuid_of(member.account_id);
+
+        // `for update` on the conversation row is what makes the capacity check
+        // safe, the same serialisation `join_room` takes for a room's own
+        // ceiling: two invites that both read "one seat left" would both take it
+        // if the count ran outside the transaction the seat lands in.
+        let conversation: Conversation = entity::conversation::Entity::find_by_id(conversation_id)
+            .lock(LockType::Update)
+            .one(&transaction)
+            .await
+            .context("add_member: lock conversation")?
+            .ok_or_else(|| fault::not_found("conversation"))?
+            .into();
+
+        if conversation.kind == ConversationKind::Group {
+            let already_active =
+                entity::conversation_member::Entity::find_by_id((conversation_id, account_id))
+                    .filter(entity::conversation_member::Column::LeftAt.is_null())
+                    .count(&transaction)
+                    .await
+                    .context("add_member: check membership")?
+                    > 0;
+            // An already-active member re-added changes no count, so it is
+            // never refused on this one; a departed member coming back is a
+            // seat like any other and is checked like one.
+            if !already_active {
+                // Counted from the rows rather than any cached figure, because a
+                // capacity check has to be right even if a counter has drifted.
+                let active = entity::conversation_member::Entity::find()
+                    .filter(entity::conversation_member::Column::ConversationId.eq(conversation_id))
+                    .filter(entity::conversation_member::Column::LeftAt.is_null())
+                    .count(&transaction)
+                    .await
+                    .context("add_member: count members")?;
+                if active >= MAX_GROUP_MEMBERS as u64 {
+                    return Err(fault::error(
+                        codes::GROUP_FULL,
+                        "the group already has as many members as it may have",
+                    ));
+                }
+            }
+        }
+
         // Rejoining clears the departure but keeps the original join time, so
         // "member since" does not reset every time somebody leaves and comes back:
         // `joined_at` is deliberately absent from the update list.
         entity::conversation_member::Entity::insert(entity::conversation_member::ActiveModel {
-            conversation_id: Set(uuid_of(member.conversation_id)),
-            account_id: Set(uuid_of(member.account_id)),
+            conversation_id: Set(conversation_id),
+            account_id: Set(account_id),
             role: Set(member.role as i16),
             joined_at: Set(stamp_of(member.joined_at)),
             left_at: Set(None),
@@ -2246,7 +2291,7 @@ impl MessagingStore for PostgresStore {
             .update_columns([entity::conversation_member::Column::Role])
             .to_owned(),
         )
-        .exec_without_returning(&self.db)
+        .exec_without_returning(&transaction)
         .await
         .map_err(|error| {
             on_conflict(error, "conversation_member", |name| match name {
@@ -2257,6 +2302,7 @@ impl MessagingStore for PostgresStore {
                 _ => None,
             })
         })?;
+        transaction.commit().await.context("add_member: commit")?;
         Ok(())
     }
 

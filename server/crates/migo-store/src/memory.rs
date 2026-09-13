@@ -48,7 +48,7 @@ use crate::model::{
     Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
     ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
     Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
-    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
+    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -1135,13 +1135,37 @@ impl MessagingStore for MemoryStore {
 
     async fn add_member(&self, member: ConversationMember) -> Result<()> {
         let mut s = self.state.write();
-        if !s.conversations.contains_key(&member.conversation_id) {
-            return Err(fault::not_found("conversation"));
-        }
+        let kind = s
+            .conversations
+            .get(&member.conversation_id)
+            .map(|conversation| conversation.kind)
+            .ok_or_else(|| fault::not_found("conversation"))?;
         let rows = s
             .conversation_members
             .entry(member.conversation_id)
             .or_default();
+        // The capacity backstop, inside the same write the seat lands in: the
+        // messaging service's pre-check is friendly and racy — two invites that
+        // both read "one seat left" both pass it — so the store is where the
+        // count and the insert become one fact, the same posture `join_room`
+        // takes for a room's own ceiling. It runs whenever this call would
+        // raise the active count — a fresh row or a departed member coming
+        // back — and never when it would not, so an idempotent re-add is
+        // still quiet. Groups only: a room's conversation is seated by
+        // `join_room`'s critical section, and a direct conversation has two
+        // seats by construction.
+        let seated = rows
+            .iter()
+            .any(|m| m.account_id == member.account_id && m.left_at.is_none());
+        if !seated && kind == ConversationKind::Group {
+            let active = rows.iter().filter(|m| m.left_at.is_none()).count();
+            if active >= MAX_GROUP_MEMBERS {
+                return Err(fault::error(
+                    codes::GROUP_FULL,
+                    "the group already has as many members as it may have",
+                ));
+            }
+        }
         if let Some(existing) = rows.iter_mut().find(|m| m.account_id == member.account_id) {
             // Rejoining clears the departure but keeps the original join time, so
             // "member since" does not reset every time somebody leaves and comes

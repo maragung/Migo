@@ -745,6 +745,18 @@ pub struct KeyBundle {
     pub one_time_prekey: Option<(i32, Vec<u8>)>,
 }
 
+/// Members a group may have, including its creator.
+///
+/// A group is fanned out to synchronously and every member's cursor is written
+/// on every send, so the number is a latency budget rather than a product
+/// preference. Anything larger belongs in a room, which has a home region, a
+/// sequencer, and a member count column for exactly this reason. It lives here
+/// and not in the messaging service because the store's `add_member` is the
+/// backstop that enforces it — the service's own check is the friendly refusal
+/// a caller meets on the happy path, and a check that only runs before the
+/// write is a check two racing invites can both step over.
+pub const MAX_GROUP_MEMBERS: usize = 256;
+
 /// A conversation: direct, group, or the chat side of a room.
 #[derive(Clone, Debug)]
 pub struct Conversation {
