@@ -160,6 +160,26 @@ struct LiveSession {
 
 impl LiveSession {
     async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        // The test-open burst can trip the connection limiter — a room of founder, members,
+        // and second devices is several handshakes from one IP inside the limiter's window —
+        // and the refusal names a time at which the answer changes, so the session waits
+        // exactly as long as it is told and tries again, the way a client with manners does.
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            match Self::handshake(addr, grant).await {
+                Ok(session) => return session,
+                Err(retry_after_ms) => backoff = retry_after_ms,
+            }
+        }
+        panic!("the handshake never succeeds even after backing off as instructed");
+    }
+
+    /// One full connection attempt, returning the retry-after the server asked for when it
+    /// refuses the handshake as rate-limited.
+    async fn handshake(addr: SocketAddr, grant: &Grant) -> Result<Self, u64> {
         let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
             .await
             .expect("connecting does not stall")
@@ -186,28 +206,34 @@ impl LiveSession {
             Some(Opcode::Hello),
             "the handshake is answered with a WELCOME"
         );
-        assert!(
-            !welcome_frame.header.is_error(),
-            "the handshake is not refused: {:?}",
-            from_frame::<migo_protocol::Error>(&welcome_frame)
-        );
-        // The WELCOME is itself a Critical reply, so the mirror starts at one.
-        let welcome: Welcome = from_frame(&welcome_frame).expect("the WELCOME decodes");
-        assert_eq!(welcome.authenticated_user, Some(grant.account_id));
+        if !welcome_frame.header.is_error() {
+            // The WELCOME is itself a Critical reply, so the mirror starts at one.
+            let welcome: Welcome = from_frame(&welcome_frame).expect("the WELCOME decodes");
+            assert_eq!(welcome.authenticated_user, Some(grant.account_id));
 
-        let mut session = Self {
-            stream,
-            session_id: welcome.session_id,
-            critical_seen: 1,
-            correlation: 1,
-        };
-        session
-            .subscribe(&[Topic {
-                kind: TopicKind::User,
-                id: grant.account_id,
-            }])
-            .await;
-        session
+            let mut session = Self {
+                stream,
+                session_id: welcome.session_id,
+                critical_seen: 1,
+                correlation: 1,
+            };
+            session
+                .subscribe(&[Topic {
+                    kind: TopicKind::User,
+                    id: grant.account_id,
+                }])
+                .await;
+            return Ok(session);
+        }
+        // Any other answer is the server refusing the session; only a rate-limit refusal is
+        // worth retrying, because only it names a time at which the answer changes.
+        let refusal: migo_protocol::Error =
+            from_frame(&welcome_frame).expect("the refusal decodes");
+        assert!(
+            refusal.code == migo_protocol::codes::RATE_LIMITED,
+            "the handshake is refused outright: {refusal:?}"
+        );
+        Err(u64::from(refusal.retry_after_ms.unwrap_or(1000)))
     }
 
     /// Reads one frame, advancing the Critical-frame mirror a resume would claim.
@@ -480,9 +506,15 @@ async fn resume_session(addr: SocketAddr, grant: &Grant, dropped: &DroppedSessio
             };
         }
         // Not resumable yet — most likely the reset has not been read — so drop this attempt
-        // without lingering and let the old session finish dying.
+        // without lingering and let the old session finish dying. A rate-limited attempt
+        // backs off as told instead: hammering the limiter the resume is waiting behind would
+        // only extend its window.
+        let wait = from_frame::<migo_protocol::Error>(&answer)
+            .ok()
+            .and_then(|refusal| refusal.retry_after_ms.map(u64::from))
+            .map_or(100, |told| told + 100);
         drop(stream);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(wait)).await;
     }
     panic!("the dropped session never became resumable — the server did not retain it");
 }
