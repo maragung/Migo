@@ -24,8 +24,8 @@ use std::time::Duration;
 use crate::chat_log::{self, ChatLogLine};
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection, Toast, ToastKind};
-use crate::net::{Command, Event, Net};
-use crate::settings::{self, Settings};
+use crate::net::{server_probe, Command, Event, Net};
+use crate::settings::{self, ServerMode, Settings};
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
@@ -36,6 +36,7 @@ use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
 use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
+use crate::ui::server_form::AutoStatus;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
 use crate::ui::wallet::{TrackingTx, WalletState};
@@ -90,6 +91,11 @@ pub struct App {
     /// The path the settings file lives at, when the platform data directory is reachable.
     /// None disables persistence; the form still works, the choice just does not survive a reload.
     settings_path: Option<PathBuf>,
+    /// Whether a `MIGO_SERVER` environment override owns this session's server. While it does,
+    /// the startup auto re-resolution is skipped — the override is the point of the env — and
+    /// the server mode is not persisted, because a session run under an override must not
+    /// rewrite the choice the user saved without it.
+    server_env_override: bool,
 }
 
 impl App {
@@ -124,10 +130,26 @@ impl App {
         // The server is the same endpoint the user just set; the auth form's own
         // `server` field starts from the loopback default and the user can
         // overtype it from the form's server disclosure.
-        let auth = AuthState {
+        let mut auth = AuthState {
             server: server.clone(),
             ..AuthState::default()
         };
+        // Auto mode re-resolves at every launch: the persisted `server` is the last resolution,
+        // not a promise that the node it names is still the fastest one standing. The probe runs
+        // on its own thread and its answer lands through the same channel the form's "Otomatis"
+        // choice uses — the UI never waits for it. A `MIGO_SERVER` override outranks the
+        // re-resolution, because a session started under the env is the operator's call.
+        let server_env_override = server != settings.server;
+        if settings.server_mode == ServerMode::Auto && !server_env_override {
+            let (reply, probe) = std::sync::mpsc::channel();
+            server_probe::spawn(
+                crate::config::server_candidates(),
+                cc.egui_ctx.clone(),
+                reply,
+            );
+            auth.server_probe = Some(probe);
+            auth.server_choice.auto = AutoStatus::Probing;
+        }
 
         Self {
             theme,
@@ -155,6 +177,7 @@ impl App {
             chat_log_actions: Vec::new(),
             settings,
             settings_path,
+            server_env_override,
         }
     }
 
@@ -168,6 +191,65 @@ impl App {
         if let Err(error) = settings::save(path, &self.settings) {
             tracing::warn!("migo-desktop: could not persist settings: {error}");
         }
+    }
+
+    /// Applies the auto mode's probe answer, if one has arrived. Never blocks: the channel is
+    /// polled, not read.
+    ///
+    /// A resolution becomes the session's server and the persisted last resolution. A failure
+    /// leaves both alone — auto stays chosen, the last accepted server is still the one the
+    /// client tries, and the connection status reports what happens to it — because pinning a
+    /// server nothing answered for would be a lie with an address in it.
+    fn poll_server_probe(&mut self) {
+        let answer = match self
+            .auth
+            .server_probe
+            .as_ref()
+            .map(|probe| probe.try_recv())
+        {
+            Some(Ok(answer)) => Some(answer),
+            // Nothing yet: the probes are still in flight, and the next frame asks again.
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return,
+            // The probe thread died without answering. Filing it as a failure ends the spinner
+            // honestly; a form left probing forever is a hang with a spinner on it.
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => None,
+            None => return,
+        };
+        self.auth.server_probe = None;
+        // The user may have left auto while the probe was in flight — flipped to Manual, or
+        // accepted a server by hand. A resolution that arrives after that is not theirs to
+        // apply: it is dropped, and the mode they chose stands.
+        if !self.auth.server_choice.auto_on() {
+            return;
+        }
+        // Flattened: the outer layer is "did the channel deliver at all" — a probe thread that
+        // died without answering files as a failure — and the inner is "did any node answer",
+        // so only a real endpoint reaches the resolution arm.
+        match answer.flatten() {
+            Some(endpoint) => {
+                self.auth.server_choice.auto = AutoStatus::Resolved(endpoint.clone());
+                self.auth.apply_server(endpoint.clone());
+                self.settings.server = endpoint;
+                // The mode is restated with the resolution rather than left to the post-frame
+                // diff, which a `MIGO_SERVER` override suppresses: a probe that answered means
+                // auto is on, whatever else this session is running under.
+                self.settings.server_mode = ServerMode::Auto;
+            }
+            None => {
+                self.auth.server_choice.auto = AutoStatus::Failed;
+            }
+        }
+        self.persist_settings();
+    }
+
+    /// Spawns the auto mode's probe: every candidate node checked in parallel on a thread of its
+    /// own, the fastest responder delivered on a channel [`App::poll_server_probe`] reads.
+    /// `ctx` is handed to the thread so the answer wakes the UI — egui repaints on input, and an
+    /// idle window would otherwise never see the result arrive.
+    fn start_server_probe(&mut self, ctx: egui::Context) {
+        let (reply, probe) = std::sync::mpsc::channel();
+        self.auth.server_probe = Some(probe);
+        server_probe::spawn(crate::config::server_candidates(), ctx, reply);
     }
 
     /// Applies every event the worker has produced since the last frame.
@@ -1726,6 +1808,11 @@ impl eframe::App for App {
     /// and the Escape key (which closes the conversation window that is on top, and nothing else).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain();
+        // Before the frame draws: the auto mode's probe answer, if it landed, becomes the
+        // session's server first, so the frame below draws the endpoint that is now true. This
+        // also keeps it ahead of the server-change capture below, which must not see the probe's
+        // own application as a user edit.
+        self.poll_server_probe();
 
         // Cloned because the closures below borrow `self` mutably while a `&Ui` borrow would still be
         // alive; an `egui::Context` is a handle to shared state, so a clone is a refcount bump and
@@ -1954,6 +2041,31 @@ impl eframe::App for App {
         if self.auth.server != server_before {
             self.settings.server = self.auth.server.clone();
             self.persist_settings();
+        }
+
+        // The server mode the form ended the frame in, persisted when it differs from the
+        // record: the mode is the user's choice and must survive the restart. Suppressed under
+        // a `MIGO_SERVER` override, where this session's server is the operator's and the saved
+        // mode is not this session's to rewrite. Every auto standing except Off is Auto — a
+        // failed probe is still "the user asked auto to pick", and the next launch retries.
+        if !self.server_env_override {
+            let mode_now = if self.auth.server_choice.auto_on() {
+                ServerMode::Auto
+            } else {
+                ServerMode::Manual
+            };
+            if mode_now != self.settings.server_mode {
+                self.settings.server_mode = mode_now;
+                self.persist_settings();
+            }
+        }
+
+        // The form's "Otomatis" choice raised the probe flag during the frame. Spawned here,
+        // after the frame, because nothing in `ui` may reach a socket — the flag is the form's
+        // whole hand-off, and this is the seam that owns threads.
+        if self.auth.server_choice.probe_requested {
+            self.auth.server_choice.probe_requested = false;
+            self.start_server_probe(ctx.clone());
         }
 
         for command in self.commands.drain(..) {

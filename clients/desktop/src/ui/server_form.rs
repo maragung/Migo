@@ -4,6 +4,15 @@
 //! and passphrase. A user who has opened it picks the host, port and scheme, and on
 //! "Use this server" the disclosure closes and the choice becomes the new form input.
 //!
+//! The mode row inside the panel is the one addition that changes what the panel is: "Otomatis"
+//! probes every candidate node (`MIGO_SERVERS`, else the public deployment) in parallel on
+//! `GET /health` and adopts the fastest responder, while "Manual" is the host-and-port form that
+//! has always been here. Auto shows the node it resolved beside the choice, so the person never
+//! wonders which node answered; and when no node answers, auto stays chosen and the failure
+//! surfaces through the connection status — never as a silently pinned dead server. The form
+//! itself never probes: it raises a flag the shell turns into a probe thread, because nothing in
+//! `ui` may reach a socket.
+//!
 //! The transport is the one choice that is not behind the disclosure: a TCP/WebSocket/QUIC row of
 //! selectable labels rides directly under the toggle and one click commits the swap immediately —
 //! a transport change never needs the host and port re-confirmed, so it never lives in the draft.
@@ -25,11 +34,50 @@
 use egui::{Align, ComboBox, Layout, RichText, Ui};
 
 use crate::config::{
-    default_loopback_server_endpoint, is_loopback_host, parse_host, QuicScheme, RestScheme, Scheme,
-    ServerEndpoint, TcpScheme, Transport, WsScheme,
+    default_loopback_server_endpoint, is_loopback_host, parse_host, rest_base_url, QuicScheme,
+    RestScheme, Scheme, ServerEndpoint, TcpScheme, Transport, WsScheme,
 };
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets::ghost_button;
+
+/// What the auto choice is doing right now. Held by the caller between frames because the probe
+/// outlives the frame that asked for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AutoStatus {
+    /// Auto is not chosen: the manual host-and-port form is the interface.
+    #[default]
+    Off,
+    /// The probes are in flight. The shell spawns them and files the answer back here.
+    Probing,
+    /// Auto resolved to this node — the endpoint the panel shows beside the choice.
+    Resolved(ServerEndpoint),
+    /// No candidate answered the health probe. Auto stays chosen; the last accepted server is
+    /// still the one the client tries, and the connection status reports its failure.
+    Failed,
+}
+
+/// The mode choice's cross-frame state: what auto is doing, and the flag the form raises when
+/// the user picks "Otomatis".
+///
+/// The form cannot probe by itself — nothing in `ui` is given a socket — so it sets
+/// `probe_requested` and the shell spawns the probe thread, delivers the answer on a channel,
+/// and clears the flag. One flag rather than a channel here keeps this struct plain data the
+/// caller can hold next to its other form state.
+#[derive(Debug, Default)]
+pub struct ServerChoiceState {
+    /// The auto choice's current standing.
+    pub auto: AutoStatus,
+    /// Raised the frame the user picks "Otomatis"; the shell spawns the probes and clears it.
+    pub probe_requested: bool,
+}
+
+impl ServerChoiceState {
+    /// Whether the auto choice is on — probing, resolved, or failed all count, because all three
+    /// are "the user asked auto to pick" rather than "the user is typing a host".
+    pub fn auto_on(&self) -> bool {
+        self.auto != AutoStatus::Off
+    }
+}
 
 /// What the form is holding locally. Local until the user accepts; the caller's `ServerEndpoint`
 /// is the only thing outside the widget's local state.
@@ -69,19 +117,24 @@ impl Default for ServerFormState {
 ///
 /// `value` is the caller's committed endpoint — the thing the one-tap transport selector swaps
 /// and the thing the summary line reports. The draft `state` only ever becomes an endpoint
-/// through "Use this server".
+/// through "Use this server". `choice` is the mode choice's cross-frame state: the form reads it
+/// to draw the auto standing and writes it when the user flips the mode or accepts an endpoint
+/// by hand, which always leaves auto — a hand-accepted server is a manual choice, whatever was
+/// resolved before it.
 ///
 /// Returns an endpoint the caller must apply, or `None`. Two paths produce a value: the
 /// transport selector under the toggle (a one-tap swap of the committed endpoint's transport and
 /// its paired schemes — everything else rides along untouched), and "Use this server" inside the
 /// panel. The caller is responsible for applying the value to its own state and persisting it;
 /// the widget is intentionally ignorant of the persistence path so the same shape can be reused
-/// on any screen that wants to ask for a server.
+/// on any screen that wants to ask for a server. The auto path never returns here: its endpoint
+/// arrives from the shell when the probe answers, and lands in `value` the same way.
 pub fn show(
     ui: &mut Ui,
     theme: crate::theme::Theme,
     value: &ServerEndpoint,
     state: &mut ServerFormState,
+    choice: &mut ServerChoiceState,
 ) -> Option<ServerEndpoint> {
     let colors = palette(theme);
     let mut open = ui
@@ -105,11 +158,18 @@ pub fn show(
                 open = !open;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // In auto mode the draft is not the interface — the committed value is, because
+                // the committed value is the node auto resolved.
+                let (host, port) = if choice.auto_on() {
+                    (value.host.as_str(), value.port)
+                } else {
+                    (state.host.as_str(), state.port_text.parse().unwrap_or(value.port))
+                };
                 ui.label(
                     RichText::new(format!(
                         "{}:{} · {}",
-                        state.host,
-                        state.port_text,
+                        host,
+                        port,
                         transport_label(value.transport)
                     ))
                     .font(egui::FontId::proportional(font::SMALL))
@@ -179,32 +239,133 @@ pub fn show(
         if open {
             ui.indent("migo-server-disclosure-panel", |ui| {
                 ui.add_space(space::SM);
-                draw_fields(ui, theme, state);
+                mode_row(ui, theme, choice);
                 ui.add_space(space::SM);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ghost_button(ui, theme, "Use this server").clicked() {
-                        match build_endpoint(state) {
-                            Ok(endpoint) => accepted = Some(endpoint),
-                            Err(message) => {
-                                ui.label(
-                                    RichText::new(message)
-                                        .font(egui::FontId::proportional(font::TINY))
-                                        .color(colors.danger),
-                                );
+                if choice.auto_on() {
+                    auto_standing(ui, theme, &choice.auto);
+                } else {
+                    draw_fields(ui, theme, state);
+                    ui.add_space(space::SM);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ghost_button(ui, theme, "Use this server").clicked() {
+                            match build_endpoint(state) {
+                                Ok(endpoint) => accepted = Some(endpoint),
+                                Err(message) => {
+                                    ui.label(
+                                        RichText::new(message)
+                                            .font(egui::FontId::proportional(font::TINY))
+                                            .color(colors.danger),
+                                    );
+                                }
                             }
                         }
-                    }
-                });
+                    });
+                }
                 ui.add_space(space::MD);
             });
         }
     });
+
+    // A hand-accepted endpoint always leaves auto: the person overruled the probe, and the
+    // persisted mode must say so rather than letting the next launch re-resolve over their
+    // choice.
+    if accepted.is_some() {
+        choice.auto = AutoStatus::Off;
+    }
 
     ui.data_mut(|data| {
         data.insert_temp(egui::Id::new("migo-server-disclosure-open"), open);
     });
 
     accepted
+}
+
+/// The mode row: "Manual" and "Otomatis" as one-tap selected labels, the same shape the
+/// transport selector takes. Committing "Otomatis" raises the probe flag — the shell owns the
+/// probing — and committing "Manual" only flips the standing, because the host-and-port form
+/// below it commits through "Use this server" as it always has.
+fn mode_row(ui: &mut Ui, theme: crate::theme::Theme, choice: &mut ServerChoiceState) {
+    let colors = palette(theme);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Mode")
+                .text_style(crate::theme::named(text_style::OVERLINE))
+                .color(colors.text_muted),
+        );
+        if ui.selectable_label(!choice.auto_on(), "Manual").clicked() && choice.auto_on() {
+            choice.auto = AutoStatus::Off;
+        }
+        if ui
+            .selectable_label(choice.auto_on(), "Otomatis")
+            .on_hover_text(
+                "Probes every candidate node with GET /health and takes the fastest responder. \
+                 The candidates come from MIGO_SERVERS, or the public deployment when unset.",
+            )
+            .clicked()
+            // Clickable when auto is off, and again once a probe has failed: a failed standing
+            // is still "auto is on", but the one action it owes is another try.
+            && (!choice.auto_on() || matches!(choice.auto, AutoStatus::Failed))
+        {
+            choice.auto = AutoStatus::Probing;
+            choice.probe_requested = true;
+        }
+    });
+}
+
+/// The auto choice's standing, drawn where the manual fields would be. The resolved endpoint is
+/// shown in full beside the choice, because "which node did auto pick?" is the one question the
+/// choice owes an answer to; a failure says so and names the fallback, rather than pretending a
+/// dead server was chosen.
+fn auto_standing(ui: &mut Ui, theme: crate::theme::Theme, status: &AutoStatus) {
+    let colors = palette(theme);
+    match status {
+        AutoStatus::Off => {}
+        AutoStatus::Probing => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Memeriksa server kandidat\u{2026}")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+            });
+            ui.label(
+                RichText::new(
+                    "Every candidate is asked GET /health at once, three seconds each; the \
+                     fastest 2xx answer wins.",
+                )
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+            );
+        }
+        AutoStatus::Resolved(endpoint) => {
+            ui.label(
+                RichText::new(rest_base_url(endpoint))
+                    .font(egui::FontId::monospace(font::SMALL))
+                    .color(colors.text),
+            );
+            ui.label(
+                RichText::new(
+                    "The fastest node that answered the health probe. It is re-chosen at every \
+                     launch; pick Manual to pin a server by hand.",
+                )
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+            );
+        }
+        AutoStatus::Failed => {
+            ui.label(
+                RichText::new(
+                    "No candidate answered the health probe. The last accepted server stays in \
+                     use and its failure shows in the connection status — auto never pins a \
+                     server it could not reach. Pick Manual to type one by hand, or choose \
+                     Otomatis again to retry.",
+                )
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.warning),
+            );
+        }
+    }
 }
 
 /// Draws the fields plus the scheme picker on the current disclosure. The transport is not here:
@@ -471,6 +632,25 @@ fn parse_port(raw: &str, label: &str) -> Result<u16, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every standing except `Off` is "auto is on", because probing, resolved, and failed are
+    /// all "the user asked auto to pick" — the mode row's selected label and the shell's
+    /// persisted mode both read it that way, and the two must not drift.
+    #[test]
+    fn every_standing_except_off_means_auto_is_on() {
+        let mut choice = ServerChoiceState::default();
+        assert!(!choice.auto_on());
+        for standing in [
+            AutoStatus::Probing,
+            AutoStatus::Failed,
+            AutoStatus::Resolved(crate::config::default_production_server_endpoint()),
+        ] {
+            choice.auto = standing;
+            assert!(choice.auto_on());
+        }
+        choice.auto = AutoStatus::Off;
+        assert!(!choice.auto_on());
+    }
 
     #[test]
     fn build_endpoint_accepts_a_well_formed_form() {

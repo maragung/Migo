@@ -400,6 +400,49 @@ pub fn server_endpoint_from_url(url: &str) -> ServerEndpoint {
         rest_scheme,
     }
 }
+/// The candidate servers auto mode probes.
+///
+/// `MIGO_SERVERS` holds a comma-separated list of URLs, e.g.
+/// `http://152.53.102.150:8080,http://node2.example.com:8080`, so an operator facing the
+/// multi-node deployment can hand every client the whole list without a person having to guess a
+/// node address. Unset, the list is this deployment's public endpoint alone — the same one a
+/// first run talks to before anyone has chosen anything.
+pub fn server_candidates() -> Vec<ServerEndpoint> {
+    match std::env::var("MIGO_SERVERS") {
+        Ok(raw) => parse_server_list(&raw),
+        Err(_) => vec![default_production_server_endpoint()],
+    }
+}
+
+/// Parses the `MIGO_SERVERS` payload: comma-separated URLs, each resolved through
+/// [`server_endpoint_from_url`].
+///
+/// Entries are trimmed and blank ones dropped; an entry that is not an `http(s)` URL, or that
+/// resolves to an empty host, is dropped rather than healed into a loopback guess — a typo in an
+/// env var should shrink the list, not silently nominate `localhost` as a candidate. Duplicates
+/// collapse to their first occurrence. A list that ends up empty falls back to the public
+/// deployment, because an empty candidate list would make auto mode a dead end rather than a
+/// choice.
+pub fn parse_server_list(raw: &str) -> Vec<ServerEndpoint> {
+    let mut list: Vec<ServerEndpoint> = Vec::new();
+    for entry in raw.split(',') {
+        let trimmed = entry.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        if !(lowered.starts_with("http://") || lowered.starts_with("https://")) {
+            continue;
+        }
+        let endpoint = server_endpoint_from_url(trimmed);
+        if endpoint.host.is_empty() || list.contains(&endpoint) {
+            continue;
+        }
+        list.push(endpoint);
+    }
+    if list.is_empty() {
+        return vec![default_production_server_endpoint()];
+    }
+    list
+}
+
 fn default_port_for(scheme: RestScheme) -> u16 {
     match scheme {
         RestScheme::Https => 443,
@@ -601,6 +644,47 @@ mod tests {
         assert_eq!(
             gateway_url(&endpoint),
             "ws://[2a0a:4cc0:80:2bc8::1]:8081/ws"
+        );
+    }
+
+    #[test]
+    fn the_server_list_parses_every_well_formed_entry() {
+        let list = parse_server_list(
+            "http://152.53.102.150:8080, http://node2.example.com:8080 ,https://node3.example.com",
+        );
+        assert_eq!(list.len(), 3);
+        // The deployment's own URL resolves to its TCP-first record, not a WebSocket guess.
+        assert_eq!(list[0], default_production_server_endpoint());
+        assert_eq!(list[1].host, "node2.example.com");
+        assert_eq!(list[1].port, 8080);
+        assert_eq!(list[1].transport, Transport::WebSocket);
+        assert_eq!(list[2].host, "node3.example.com");
+        assert_eq!(list[2].port, 443);
+        assert_eq!(list[2].rest_scheme, RestScheme::Https);
+    }
+
+    #[test]
+    fn the_server_list_drops_junk_and_duplicates_rather_than_healing_them() {
+        // Blank entries, a bare host, a scheme that is not HTTP, and a URL with no host at all:
+        // each is dropped, because a typo should shrink the list, not nominate a loopback guess.
+        let list = parse_server_list(
+            " , node2.example.com , ftp://node3.example.com ,http:// ,http://node2.example.com:8080",
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].host, "node2.example.com");
+        assert_eq!(list[0].port, 8080);
+    }
+
+    #[test]
+    fn an_empty_or_unusable_server_list_falls_back_to_the_deployment() {
+        // A list with nothing left in it must not make auto mode a dead end.
+        assert_eq!(
+            parse_server_list(""),
+            vec![default_production_server_endpoint()]
+        );
+        assert_eq!(
+            parse_server_list("  , not-a-url "),
+            vec![default_production_server_endpoint()]
         );
     }
 }

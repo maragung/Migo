@@ -34,6 +34,7 @@ pub mod gateway;
 pub(crate) mod media;
 pub mod quic;
 pub mod rest;
+pub mod server_probe;
 pub mod tcp;
 pub(crate) mod voice_draft;
 
