@@ -1033,22 +1033,20 @@ async fn a_dead_session_s_seat_is_retired_and_the_roster_told() {
     let _: migo_protocol::CallTurnResponse = founder_session
         .ask(Opcode::CallSfuJoin, 19, &sfu_join(call_id, conversation_id))
         .await;
-    let mut roster_frame = None;
-    loop {
-        // The re-join is a duplicate, so the conversation topic hears nothing
-        // from it; the one frame the founder's user topic carries is the
-        // snapshot itself.
+    // The re-join is a duplicate, so the conversation topic hears nothing from
+    // it; the one frame the founder's user topic carries is the snapshot
+    // itself, and the loop hands it straight out — the snapshot is the only
+    // way out of it.
+    let roster_frame = loop {
         let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
         let event: CallStateEvent = from_frame(&frame).expect("the roster event decodes");
         if event.user_id == Some(founder.account_id) && event.participants.is_some() {
-            roster_frame = Some(event);
-            break;
+            break event;
         }
-    }
+    };
     let roster = roster_frame
-        .expect("the roster snapshot arrives")
-        .participants;
-    let roster = roster.expect("the snapshot carries the roster");
+        .participants
+        .expect("the snapshot carries the roster");
     assert_eq!(roster.len(), 1, "the dead seat is gone from the roster");
     assert_eq!(roster[0].user_id, founder.account_id);
     assert!(roster.iter().all(|seat| seat.user_id != second.account_id));
