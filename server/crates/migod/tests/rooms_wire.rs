@@ -69,13 +69,26 @@ fn valid_token_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])
 }
 
-/// A development app with the TCP listener bound, as the listener tests build it.
+/// A development app with the TCP listener bound, as the listener tests build it. The limiter
+/// ceilings are raised the way the cross-node resume suite raises them: a room is several
+/// sessions from one peer address driving a burst of joins and subscribes, and the default
+/// endpoint bucket is sized for strangers, not for a scripted client proving a delivery
+/// guarantee — configuration, not clock-waiting, with the ask/handshake politeness below as
+/// the net for whatever still lands outside the burst.
 async fn build_app() -> App {
     let config = Config::from_sources(
         &[],
         &[
             ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
             ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+            (
+                "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
+                "1000".to_string(),
+            ),
+            (
+                "MIGO_RATE_LIMIT__USER_BURST".to_string(),
+                "1000".to_string(),
+            ),
         ],
     )
     .expect("configuration should parse");
@@ -149,11 +162,14 @@ async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Opt
 /// A live authenticated TCP session: HELLO with the grant's inline token, then the SUBSCRIBE
 /// every client sends for its own user topic. Tracks the session id (the resume key) and the
 /// Critical-frame count (the honest watermark a resume would claim — the server assigns a
-/// `frame_seq` to every Critical frame and the client's mirror of it is how many it has seen).
+/// `frame_seq` to a frame iff it is Critical and left through the session mailbox, and the
+/// client's mirror of that counter is how many such frames it has seen; the WELCOME bypasses
+/// the mailbox and carries no seq, so the mirror starts at zero, and an off-by-one here turns
+/// a clean resume into a refused one).
 struct LiveSession {
     stream: tokio::net::TcpStream,
     session_id: Id,
-    /// How many Critical-class frames this connection has received, as the SDK counts them.
+    /// How many sequenced Critical frames this connection has received, as the SDK counts them.
     critical_seen: u64,
     correlation: u32,
 }
@@ -214,7 +230,9 @@ impl LiveSession {
             let mut session = Self {
                 stream,
                 session_id: welcome.session_id,
-                critical_seen: 1,
+                // The WELCOME itself is not sequenced — it is written straight to the socket,
+                // outside the mailbox — so the mirror the SDK keeps starts at zero.
+                critical_seen: 0,
                 correlation: 1,
             };
             session
@@ -264,21 +282,37 @@ impl LiveSession {
 
     /// Sends a request that must succeed, returning the decoded reply. Frames that are not the
     /// reply — the events a subscribed session receives — are read and kept, never discarded.
+    /// A rate-limited refusal is waited out and retried, exactly as told: a room's setup is a
+    /// burst of joins and subscribes inside the limiter's window, and "retry in N ms" is the
+    /// server talking, not the server broken.
     async fn ask<M: Encode, R: Decode>(&mut self, opcode: Opcode, message: &M) -> R {
         self.correlation += 1;
         let correlation = self.correlation;
-        send(&mut self.stream, opcode, correlation, message).await;
-        loop {
-            let frame = self.next_frame().await;
-            if frame.header.correlation == correlation {
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            send(&mut self.stream, opcode, correlation, message).await;
+            loop {
+                let frame = self.next_frame().await;
+                if frame.header.correlation != correlation {
+                    continue;
+                }
+                if !frame.header.is_error() {
+                    return from_frame(&frame).expect("the reply decodes");
+                }
+                let refusal: migo_protocol::Error =
+                    from_frame(&frame).expect("the refusal decodes");
                 assert!(
-                    !frame.header.is_error(),
-                    "the request was refused: {:?}",
-                    from_frame::<migo_protocol::Error>(&frame)
+                    refusal.code == migo_protocol::codes::RATE_LIMITED,
+                    "the request was refused outright: {refusal:?}"
                 );
-                return from_frame(&frame).expect("the reply decodes");
+                backoff = u64::from(refusal.retry_after_ms.unwrap_or(1000));
+                break;
             }
         }
+        panic!("the request never succeeds even after backing off as instructed");
     }
 
     /// Subscribes a set of topics, asserting every one was accepted.
@@ -501,7 +535,8 @@ async fn resume_session(addr: SocketAddr, grant: &Grant, dropped: &DroppedSessio
             return LiveSession {
                 stream,
                 session_id: welcome.session_id,
-                critical_seen: 1,
+                // As on a fresh connect: the resumed WELCOME is not sequenced either.
+                critical_seen: 0,
                 correlation: 1,
             };
         }
