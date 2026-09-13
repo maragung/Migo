@@ -611,6 +611,7 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
 pub(crate) struct IngestRouter {
     gateway: Option<Arc<Gateway>>,
     relay: Option<Arc<crate::room_relay::RoomRelay>>,
+    presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
     /// What this node has ingested, capped, so the operator's metrics answer "is anything
@@ -622,12 +623,14 @@ impl IngestRouter {
     fn new(
         gateway: Option<Arc<Gateway>>,
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
+        presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             gateway,
             relay,
+            presence,
             meters: MeshMeters::new(registry),
             clock,
             seen: parking_lot::Mutex::new(Vec::new()),
@@ -705,6 +708,32 @@ impl IngestRouter {
                 self.note(inner.header.opcode, inner.payload.len());
                 self.meters.ingested();
                 Ok(())
+            }
+            Opcode::FedUserSubscribe => {
+                let watch: migo_protocol::FedUserWatch =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                // The user-topic tier's watch half: the peer holds subscribers of this
+                // subject's presence stream, so a presence change this node publishes owes
+                // it one federated copy. Unlike a room there is no home row to check — the
+                // ask was a broadcast because a session can appear on any node — so the
+                // entry is kept here and stays inert until this node holds a session of
+                // the subject, which is the one moment it becomes exactly right.
+                if let Some(presence) = &self.presence {
+                    presence.register_watcher(peer, &watch)?;
+                }
+                tracing::info!(
+                    subject = %watch.user_id.to_text(),
+                    epoch = watch.epoch,
+                    "peer subscribed to a user topic this node may serve"
+                );
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                Ok(())
+            }
+            Opcode::FedUserEvent => {
+                let event: migo_protocol::FedUserEvent =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                self.route_user_event(peer, event).await
             }
             Opcode::FedKeyRotate => {
                 let rotate: migo_protocol::FedKeyRotate =
@@ -826,6 +855,59 @@ impl IngestRouter {
         self.meters.ingested();
         Ok(())
     }
+
+    /// Publishes a forwarded user-topic presence event into the local hub.
+    ///
+    /// The inner payload is itself an encoded frame — the presence event as the origin
+    /// node's session would have pushed it — and the subject's user topic is the one place
+    /// it belongs, named by the envelope's `user_id` the same way a room lifecycle event
+    /// is placed by its envelope's room id: the peer is authenticated and the envelope is
+    /// the fact the watcher registered, while the frame's own `user_id` is data the
+    /// publish does not need to re-derive a topic from.
+    ///
+    /// The coalescing mirrors the origin node's publish path exactly (section 154): keyed
+    /// by the subject, so a backed-up consumer keeps only the latest state — which also
+    /// makes a re-delivered copy (at least once, section 153) the state it already holds.
+    ///
+    /// There is no onward half, and that is the difference from the room tier: a room
+    /// event may arrive at a node that is itself the home node and owes the other
+    /// watchers a copy, while a presence change is only ever published by the node whose
+    /// session caused it, and that origin reaches every watcher directly because the
+    /// user-topic subscribe is a broadcast — every peer holds the table.
+    async fn route_user_event(&self, peer: Id, event: migo_protocol::FedUserEvent) -> Result<()> {
+        let migo_protocol::FedUserEvent { user_id, payload } = event;
+        let payload = bytes::Bytes::from(payload);
+        let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
+        let inner_opcode = Opcode::from_wire(inner.header.opcode)
+            .ok_or_else(|| fault::validation("opcode", "not a known user event"))?;
+        if inner_opcode != Opcode::PresenceEvent {
+            // The envelope names a presence stream; anything else sealed inside it is not
+            // this tier's to place, and publishing it to a user topic would deliver a
+            // frame the local publish path would never have sent there.
+            return Err(fault::validation(
+                "opcode",
+                "a user event envelope carries a presence event",
+            ));
+        }
+        let now = self.clock.now();
+        if let Some(gateway) = &self.gateway {
+            gateway.broadcast_frame_to_topic(
+                &user_topic(user_id),
+                inner_opcode,
+                &payload,
+                Some(crate::dispatch::coalesce_key_of(&user_id)),
+                now,
+            );
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            subject = %user_id.to_text(),
+            "user-topic presence event ingested from the mesh"
+        );
+        self.note(inner.header.opcode, inner.payload.len());
+        self.meters.ingested();
+        Ok(())
+    }
 }
 
 /// The room topic one room's subscribers are on.
@@ -833,6 +915,14 @@ fn room_topic(room_id: Id) -> migo_protocol::Topic {
     migo_protocol::Topic {
         kind: migo_protocol::TopicKind::Room,
         id: room_id,
+    }
+}
+
+/// The user topic one subject's presence subscribers are on.
+fn user_topic(user_id: Id) -> migo_protocol::Topic {
+    migo_protocol::Topic {
+        kind: migo_protocol::TopicKind::User,
+        id: user_id,
     }
 }
 
@@ -1284,6 +1374,7 @@ impl MeshTransport {
         mesh: SharedMesh,
         gateway: Option<Arc<Gateway>>,
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
+        presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
         handshake_timeout_ms: u64,
@@ -1293,6 +1384,7 @@ impl MeshTransport {
             router: Arc::new(IngestRouter::new(
                 gateway,
                 relay,
+                presence,
                 registry,
                 Arc::clone(&clock),
             )),
@@ -1712,6 +1804,7 @@ mod tests {
             mesh_b.clone(),
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1788,6 +1881,7 @@ mod tests {
             mesh_a.clone(),
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1839,6 +1933,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             &registry,
@@ -1971,6 +2066,7 @@ mod tests {
             mesh_b.clone(),
             None,
             Some(Arc::clone(&relay_b)),
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2036,6 +2132,166 @@ mod tests {
         );
     }
 
+    /// The user-topic tier, subscribe half over the wire: node A asks to watch a subject,
+    /// and node B records the *authenticated* peer — the id the handshake proved, not one
+    /// the frame claims — as the subject's watcher.
+    #[tokio::test]
+    async fn a_user_subscribe_over_the_wire_registers_the_peer_as_a_watcher() {
+        let (mesh_a, mesh_b, a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            None,
+            Some(Arc::clone(&relay_b)),
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        let subject = Id::from(0x7777);
+        mesh_a
+            .enqueue(
+                FederatedEvent {
+                    target_node: b_id,
+                    opcode: Opcode::FedUserSubscribe.to_wire() as i32,
+                    payload: framed(
+                        Opcode::FedUserSubscribe,
+                        0,
+                        &migo_protocol::FedUserWatch {
+                            epoch: mesh_a.epoch(),
+                            user_id: subject,
+                        },
+                    )
+                    .expect("the watch encodes")
+                    .encode()
+                    .expect("the frame encodes")
+                    .to_vec(),
+                },
+                now,
+            )
+            .await
+            .expect("the watch enqueues");
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(due.len(), 1);
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b;
+        let server_router = transport_b.router_ref().clone();
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            now,
+            &client_budget,
+        )
+        .await
+        .expect("the watch is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+
+        assert_eq!(delivered.len(), 1, "the watermark covered the watch");
+        assert_eq!(
+            relay_b.watchers_of(subject),
+            vec![a_id],
+            "the authenticated peer is the watcher the receiving node records"
+        );
+    }
+
+    /// The user-topic tier, forward half over the wire: the node a subject's session lives
+    /// on enqueues one federated presence event per watching node, and the receiving node
+    /// ingests it exactly as a local publish would have carried it.
+    #[tokio::test]
+    async fn a_user_event_crosses_the_wire_and_is_ingested_as_a_presence_event() {
+        let (mesh_a, mesh_b, a_id, _b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let subject = Id::from(0x7777);
+        // B is the node the subject's session lives on, so B is the one whose forward half
+        // fires; A is the node whose sessions watch her.
+        let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
+        let transport_a = Arc::new(MeshTransport::new(
+            mesh_a.clone(),
+            None,
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        let watch = migo_protocol::FedUserWatch {
+            epoch: mesh_b.epoch(),
+            user_id: subject,
+        };
+        relay_b
+            .register_watcher(a_id, &watch)
+            .expect("a current epoch admits the watch");
+
+        let event = migo_protocol::PresenceEvent {
+            user_id: subject,
+            state: migo_protocol::PresenceState::Away,
+            custom_status: None,
+            last_seen: None,
+        };
+        let fanout = migo_presence::Fanout::about(subject, Id::from(0x0707), event.clone());
+        relay_b
+            .forward(&fanout, now)
+            .await
+            .expect("the presence change forwards");
+
+        let due = mesh_b.due(now).await.expect("the queue reads");
+        assert_eq!(due.len(), 1, "one copy, for the one node that watches her");
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
+        let server_mesh = mesh_a;
+        let server_router = transport_a.router_ref().clone();
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_b,
+            transport_a.router_ref(),
+            &peer_view,
+            &due,
+            now,
+            &client_budget,
+        )
+        .await
+        .expect("the event is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 1, "the watermark covered the event");
+
+        let expected = framed(Opcode::PresenceEvent, 0, &event)
+            .expect("the presence event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_a.ingested(),
+            vec![(Opcode::PresenceEvent.to_wire(), expected)],
+            "A ingested the presence event, sealed as a local subscriber would have seen it"
+        );
+    }
+
     /// Tiered fanout, forward half: the home node enqueues one federated copy per watching
     /// *node* — not per session, and not per member — and the receiving node ingests the
     /// member and vote events exactly as a local publish would have carried them.
@@ -2056,6 +2312,7 @@ mod tests {
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             &registry,
@@ -2221,6 +2478,7 @@ mod tests {
             mesh_b.clone(),
             None,
             Some(relay_b.clone()),
+            None,
             &registry,
             Arc::new(ManualClock::new(later)),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2379,6 +2637,7 @@ mod tests {
             mesh_b.clone(),
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2445,6 +2704,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             &registry,

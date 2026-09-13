@@ -102,6 +102,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
         mesh_a.clone(),
         None,
         None,
+        None,
         &Registry::new(),
         clock.clone(),
         DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -158,6 +159,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
 
     let transport_b = Arc::new(migod::mesh::MeshTransport::new(
         mesh_b.clone(),
+        None,
         None,
         None,
         &Registry::new(),

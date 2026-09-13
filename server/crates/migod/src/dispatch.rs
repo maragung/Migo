@@ -92,6 +92,7 @@ use migo_rooms::{
 };
 use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
 
+use crate::presence_relay::PresenceRelay;
 use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
 use crate::room_relay::{FederatedPublisher, RoomRelay};
 
@@ -159,6 +160,11 @@ pub struct AppDispatcher {
     /// shares the same table — the home node's watchers and the subscriber's asks are two
     /// halves of one bookkeeping, not two components that happen to talk.
     room_relay: Arc<RoomRelay>,
+    /// The user-topic tier of the same fanout: which peer nodes hold subscribers of which
+    /// users' presence streams, and the one federated copy per node that a presence change
+    /// owes them. Built by the composition root for the same reason `room_relay` is — the
+    /// mesh transport's ingest path registers watchers into the same table.
+    presence_relay: Arc<PresenceRelay>,
 }
 
 impl AppDispatcher {
@@ -186,6 +192,7 @@ impl AppDispatcher {
         calls: SharedCallkeeper,
         gateway: Arc<GatewayHandle>,
         room_relay: Arc<RoomRelay>,
+        presence_relay: Arc<PresenceRelay>,
     ) -> Self {
         // The room-presence component reads the same store and rooms handle and publishes through
         // the same gateway handle, so it is assembled from what this call already holds rather
@@ -218,6 +225,7 @@ impl AppDispatcher {
             room_presence,
             gateway,
             room_relay,
+            presence_relay,
         }
     }
 
@@ -249,6 +257,22 @@ impl AppDispatcher {
             coalesce_key_of(&fanout.subject_id),
             now,
         );
+        // The federated half, spawned for the same reason the room tier's out-of-band
+        // publisher spawns its copy: this publish is sync — it happens on the connection
+        // edge, with no request in hand — while the outbox enqueue it now also owes is a
+        // durable write. At least once by design, so a moment's delay between the two
+        // halves costs ordering headroom the per-link sequence already preserves.
+        let relay = Arc::clone(&self.presence_relay);
+        let federated = fanout.clone();
+        tokio::spawn(async move {
+            if let Err(error) = relay.forward(&federated, now).await {
+                tracing::warn!(
+                    %error,
+                    subject = %federated.subject_id.to_text(),
+                    "cannot enqueue the federated half of a presence change"
+                );
+            }
+        });
     }
 
     /// The read-only gate of section 173's scenario 2, for the handlers that
@@ -776,6 +800,19 @@ impl Dispatcher for AppDispatcher {
                         &fanout.event,
                         Some(stream_key(&fanout.subject_id)),
                     )?;
+                    // The federated half of the same change: the peers whose sessions watch
+                    // this subject's user topic are owed one copy per node. The origin of a
+                    // presence change is always the node whose session caused it, so this
+                    // node is the fan-out authority and there is no home-node detour to
+                    // consult. A failure to enqueue is logged rather than failed — the local
+                    // publish already happened, and the ack above already promised success.
+                    if let Err(error) = self.presence_relay.forward(&fanout, now).await {
+                        tracing::warn!(
+                            %error,
+                            subject = %fanout.subject_id.to_text(),
+                            "cannot enqueue the federated half of a presence change"
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -1086,6 +1123,12 @@ impl Dispatcher for AppDispatcher {
             Opcode::FedDirectory => {
                 federation::handle_directory(context, frame, &self.federation).await
             }
+            Opcode::FedUserSubscribe => {
+                federation::handle_user_subscribe(context, frame, &self.federation).await
+            }
+            Opcode::FedUserEvent => {
+                federation::handle_user_event(context, frame, &self.federation).await
+            }
 
             // --- calls ---
             // Each handler replies to the sender and publishes the returned
@@ -1267,7 +1310,7 @@ impl AppDispatcher {
             // as every other "no" here: it names nothing, and is indistinguishable from a topic
             // that does not exist.
             TopicKind::User => {
-                if topic.id == identity.account_id() {
+                let granted = if topic.id == identity.account_id() {
                     true
                 } else if self.presence.cadence(mode).scope != PresenceScope::Everything {
                     false
@@ -1282,7 +1325,24 @@ impl AppDispatcher {
                         .may_interact(&caller, topic.id, Interaction::LastSeen)
                         .await
                         .is_ok()
+                };
+                // The granted subscription is the moment this node first has a reason to
+                // hear the subject's federated presence stream: the user-topic tier of
+                // section 170 asks the peers to watch her, once per subject. This includes
+                // the subject's own topic — her devices may sit on several nodes, and the
+                // phone's Busy is news to the laptop. Best-effort for the same reason every
+                // other half here is: the local subscription already succeeded, and the ask
+                // is retried by the next granted `SUBSCRIBE` if it could not be made.
+                if granted {
+                    if let Err(error) = self.presence_relay.subscribe_to(topic.id, now).await {
+                        tracing::warn!(
+                            %error,
+                            subject = %topic.id.to_text(),
+                            "cannot ask the peers to watch this user topic"
+                        );
+                    }
                 }
+                granted
             }
             // Nothing on this node ever broadcasts to either, so subscribing is refused outright.
             // Granting them would be granting a topic that produces no events but still costs a

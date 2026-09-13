@@ -5444,6 +5444,60 @@ data class FedRoomEvent(
     }
 }
 
+data class FedUserWatch(
+    val epoch: Long,
+    val userId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.id(userId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedUserWatch {
+            r.enter()
+            val epoch = r.u64()
+            val userId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedUserWatch(epoch, userId)
+        }
+    }
+}
+
+data class FedUserEvent(
+    val userId: Id,
+    val payload: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.bytes(payload)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedUserEvent {
+            r.enter()
+            val userId = r.id()
+            val payload = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedUserEvent(userId, payload)
+        }
+    }
+}
+
 data class FedKeyRotate(
     val nodeId: String,
     val newPublicKey: ByteArray,
@@ -8726,6 +8780,10 @@ object Op {
     const val FED_ERROR: Long = 219L
     const val FED_CALL_RELAY: Long = 220L
     const val FED_DIRECTORY: Long = 221L
+    /** Asks a peer to forward a user topic's presence stream: one copy per watching node, for the life of the process. */
+    const val FED_USER_SUBSCRIBE: Long = 222L
+    /** Carries one presence event of a watched user topic, sealed as a local subscriber would have received it. */
+    const val FED_USER_EVENT: Long = 223L
     /** Invites a callee to a call. */
     const val CALL_INVITE: Long = 224L
     /** Tells the callee a call is ringing. */
@@ -8883,6 +8941,8 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     219L to OpcodeMeta(219L, "FED_ERROR", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedError", "Acknowledged", null, false, listOf(), "FEDERATION"),
     220L to OpcodeMeta(220L, "FED_CALL_RELAY", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null, false, listOf(), "FEDERATION"),
     221L to OpcodeMeta(221L, "FED_DIRECTORY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedDirectoryReq", "FedDirectory", null, false, listOf(), "FEDERATION"),
+    222L to OpcodeMeta(222L, "FED_USER_SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedUserWatch", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    223L to OpcodeMeta(223L, "FED_USER_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedUserEvent", "Acknowledged", null, false, listOf(), "FEDERATION"),
     224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null, false, listOf(), null),
     225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null, false, listOf(), null),
     226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null, false, listOf(), null),
