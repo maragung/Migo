@@ -85,8 +85,15 @@ non-zero and prints everything observed, including both nodes' logs and
 These are reported by the sync check as known gaps, and they are the design
 today, not harness limitations:
 
-- **Presence does not federate.** User topics stay node-local; bob's watch of
-  alice's user topic on node 2 never hears her presence change on node 1.
+- **Presence does not federate — in the released binaries this harness
+  runs.** The server tree now carries the user-topic tier (FED_USER_SUBSCRIBE
+  / FED_USER_EVENT): bob's watch of alice's user topic on node 2 asks the
+  peers to watch her, and her presence change on node 1 is forwarded as one
+  copy per watching node, proven in-process by
+  `server/crates/migod/tests/cross_node_presence.rs`. The sync check here
+  runs against released `migod` binaries, so it keeps reporting the gap until
+  a release carries the tier; flipping the check to demand it is the release
+  follow-up.
 - **A 1:1 direct message does not federate.** Only room conversations ride
   the tiered fan-out; a direct conversation's messages stay on the node they
   were sent to.

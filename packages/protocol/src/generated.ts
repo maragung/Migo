@@ -4206,6 +4206,58 @@ export function decodeFedRoomEvent(r: Reader): FedRoomEvent {
   return out;
 }
 
+export interface FedUserWatch {
+  epoch: number;
+  userId: Id;
+}
+
+export function encodeFedUserWatch(w: Writer, v: FedUserWatch): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.id(v.userId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedUserWatch(r: Reader): FedUserWatch {
+  r.enter();
+  const epoch = r.u64();
+  const userId = r.id();
+  const out: FedUserWatch = { epoch, userId } as FedUserWatch;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedUserEvent {
+  userId: Id;
+  payload: Uint8Array;
+}
+
+export function encodeFedUserEvent(w: Writer, v: FedUserEvent): void {
+  w.enter();
+  w.id(v.userId);
+  w.bytes(v.payload);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedUserEvent(r: Reader): FedUserEvent {
+  r.enter();
+  const userId = r.id();
+  const payload = r.bytes();
+  const out: FedUserEvent = { userId, payload } as FedUserEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export interface FedKeyRotate {
   nodeId: string;
   newPublicKey: Uint8Array;
@@ -7074,6 +7126,10 @@ export const OP = {
   FED_ERROR: 219,
   FED_CALL_RELAY: 220,
   FED_DIRECTORY: 221,
+  /** Asks a peer to forward a user topic's presence stream: one copy per watching node, for the life of the process. */
+  FED_USER_SUBSCRIBE: 222,
+  /** Carries one presence event of a watched user topic, sealed as a local subscriber would have received it. */
+  FED_USER_EVENT: 223,
   /** Invites a callee to a call. */
   CALL_INVITE: 224,
   /** Tells the callee a call is ringing. */
@@ -7231,6 +7287,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  222: { code: 222, name: 'FED_USER_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedUserWatch', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  223: { code: 223, name: 'FED_USER_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedUserEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [] },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [] },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [] },

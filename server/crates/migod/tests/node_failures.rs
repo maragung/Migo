@@ -155,6 +155,7 @@ fn transport(mesh: &SharedMesh) -> Arc<MeshTransport> {
         mesh.clone(),
         None,
         None,
+        None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn Clock>,
         DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1048,6 +1049,7 @@ async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_o
         Arc::clone(&mesh_b),
         None,
         None,
+        None,
         &Registry::new(),
         Arc::clone(&clock) as Arc<dyn Clock>,
         DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1220,6 +1222,7 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
 
     let transport_a = Arc::new(MeshTransport::new(
         Arc::clone(&mesh_a),
+        None,
         None,
         None,
         &Registry::new(),
@@ -1513,6 +1516,7 @@ async fn a_moved_room_hands_its_members_a_reconnect_hint_naming_the_new_node() {
         mesh_a.clone(),
         None,
         Some(Arc::clone(&relay_a)),
+        None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn Clock>,
         DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,

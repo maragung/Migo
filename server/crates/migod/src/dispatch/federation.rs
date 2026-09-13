@@ -25,6 +25,8 @@
 //! | `FED_ERROR`        | `FedError`        | —                      | `Acknowledged`  |
 //! | `FED_CALL_RELAY`   | `FedEvent`        | —                      | `Acknowledged`  |
 //! | `FED_DIRECTORY`    | `FedDirectoryReq` | `Mesh::peers`          | `FedDirectory`  |
+//! | `FED_USER_SUBSCRIBE` | `FedUserWatch`  | —                      | `Acknowledged`  |
+//! | `FED_USER_EVENT`   | `FedUserEvent`    | —                      | `Acknowledged`  |
 //!
 //! The `Mesh` subsystem is a security boundary, not an application router: it keeps the allow-list,
 //! the handshake, the sequence window, and the routing epoch (section 169), and it carries opaque
@@ -45,7 +47,7 @@ use migo_gateway::ClientContext;
 use migo_protocol::{
     fault, from_frame, Acknowledged, FedAck, FedAuth, FedDirectory, FedDirectoryReq, FedError,
     FedEvent, FedForward, FedHealth, FedHello, FedKeyRotate, FedPeerView, FedPing, FedPong,
-    FedPresenceDigest, FedRoomEvent, FedRouting, FedShardMap, Frame,
+    FedPresenceDigest, FedRoomEvent, FedRouting, FedShardMap, FedUserEvent, FedUserWatch, Frame,
 };
 
 /// The default page clamp handed to `Mesh::peers` when a directory or shard-map view is requested.
@@ -273,6 +275,37 @@ pub(crate) async fn handle_directory(
     let peers = svc.peers(PEER_LIST_LIMIT).await?;
     let peers: Vec<_> = peers.into_iter().map(peer_to_view).collect();
     ctx.reply(&FedDirectory { peers })
+}
+
+/// Accepts a user-topic subscription and acknowledges.
+///
+/// A peer asking to hear a user's presence stream is an event for the presence surface,
+/// which the mesh only delivers to; there is no `Mesh` method that admits a subscription.
+/// The handler decodes the frame — proving it is well-formed — and acknowledges. The
+/// presence relay's own ingest path is what actually wires the peer into the subject's
+/// stream, the same split `FED_ROOM_SUBSCRIBE` follows.
+pub(crate) async fn handle_user_subscribe(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    _svc: &SharedMesh,
+) -> Result<(), Error> {
+    let _watch = from_frame::<FedUserWatch>(frame).map_err(fault::from_wire)?;
+    ctx.reply(&Acknowledged { ok: true })
+}
+
+/// Accepts a user-topic presence event and acknowledges.
+///
+/// A federated presence event is a sealed envelope for the presence surface, which the
+/// mesh only forwards; no `Mesh` method opens or stores it here. The handler decodes the
+/// frame — proving it is well-formed — and acknowledges. The presence relay's own ingest
+/// path is what publishes the sealed event into this node's hub.
+pub(crate) async fn handle_user_event(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    _svc: &SharedMesh,
+) -> Result<(), Error> {
+    let _event = from_frame::<FedUserEvent>(frame).map_err(fault::from_wire)?;
+    ctx.reply(&Acknowledged { ok: true })
 }
 
 /// Projects a domain [`PeerView`] onto the wire [`FedPeerView`] a peer may see.
