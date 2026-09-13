@@ -17,12 +17,22 @@
 //!
 //! There is no method that takes a message, a body, or a byte slice. The only payload
 //! it can be handed is a [`Wakeup`], which structurally cannot hold a sentence. An
-//! implementation is free to render [`Wakeup::alert`] into a provider's `notification`
-//! field; it has nothing else to render, because it was given nothing else.
+//! implementation is free to render [`Wakeup::alert`] into a provider's
+//! `notification` field; it has nothing else to render, because it was given nothing
+//! else.
+//!
+//! # The bell is a port for the same reason the sender is
+//!
+//! [`Bell`] is the realtime mirror of a push: the frame a session that is connected
+//! right now hears instead of being woken. It is a port because the service that rings
+//! it has no transport of its own — notifications are raised inside other crates'
+//! fan-outs, where no connection context exists — and the composition root binds the
+//! gateway's broadcast behind it, exactly as it binds a provider behind
+//! [`PushSender`].
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::Platform;
+use migo_protocol::{NotificationEvent, Platform};
 use migo_store::model::NotificationPosition;
 
 use crate::model::{Caller, Delivery, Event, Inbox, RawToken, Wakeup};
@@ -183,8 +193,53 @@ pub trait Notifier: Send + Sync {
     async fn sweep(&self, before: Timestamp, limit: u16) -> Result<u64>;
 }
 
+/// The realtime half of a notification: the bell a connected device hears.
+///
+/// A delivery has three halves — the inbox row that survives the recipient being
+/// offline, the push wake-up for a device that is asleep, and the `NOTIFICATION_EVENT`
+/// frame a session that is connected right now receives on its socket — and only the
+/// first two are this crate's own to finish. The third needs the transport, and the
+/// transport is not here: [`Notifier::notify`] fires mid-fan-out, often inside another
+/// crate's transaction, with no connection context to publish from. So the frame is
+/// handed to this port, and the composition root decides what ringing means — in
+/// production, a broadcast onto the recipient's user topic through the gateway; in a
+/// test, a recorder.
+///
+/// The payload arrives complete, because the wire event is this crate's to build:
+/// `title` and `body` are empty by the same rule that empties them everywhere else
+/// (the client writes the sentence, in the reader's language), and every field the
+/// frame can carry comes straight off the [`Event`](crate::model::Event) being
+/// delivered. `subject_id` is not among them — it is the inbox row's pointer, not the
+/// bell's.
+///
+/// Ringing is infallible, and deliberately so. A bell that did not ring costs a buzz
+/// the recipient catches up on at their next inbox read; making it a `Result` would
+/// hand every announcer a failure it has no way to act on — the gift is paid for
+/// either way.
+pub trait Bell: Send + Sync {
+    /// Rings one account's devices: the notification event, on the recipient's own
+    /// user topic, coalesced per recipient so a burst collapses to the latest for a
+    /// subscriber whose mailbox is backed up.
+    fn ring(&self, recipient: Id, event: &NotificationEvent, now: Timestamp);
+}
+
+/// A bell that never rings.
+///
+/// The default for a deployment that has bound no realtime path and for tests that do
+/// not assert on frames: the row and the push are still delivered, and the socket
+/// hears nothing it was not already owed by a reply.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoBell;
+
+impl Bell for NoBell {
+    fn ring(&self, _recipient: Id, _event: &NotificationEvent, _now: Timestamp) {}
+}
+
 /// The service, shared.
 pub type SharedNotifier = std::sync::Arc<dyn Notifier>;
+
+/// A bell, shared.
+pub type SharedBell = std::sync::Arc<dyn Bell>;
 
 /// A push sender, shared.
 pub type SharedPushSender = std::sync::Arc<dyn PushSender>;

@@ -69,9 +69,12 @@ class SocialDomain(
     /**
      * Registers a handler for friendship changes.
      *
-     * An event names the other account and a `state` string (`"request"`, `"accepted"`); it is a hint
-     * that the graph moved, not a source of truth -- re-read [listRelationships] to draw the right
-     * buttons, since the event carries no direction (incoming vs outgoing) and no removal state.
+     * An event names the other account and a `state` string -- `"request"` (an edge now waits),
+     * `"accepted"` (a friendship now exists), `"removed"` (an edge is gone: a declined request,
+     * an un-friend, or the teardown a block performs), or `"blocked"` (this account blocked
+     * somebody; only ever delivered to the blocker's own devices). It is a hint that the graph
+     * moved, not a source of truth -- re-read [listRelationships] to draw the right buttons,
+     * since the event carries no direction (incoming vs outgoing) and no verdict.
      */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
 

@@ -203,12 +203,34 @@ impl PushSender for FakeSender {
 type TestNotify =
     Notifications<MemoryStore, MemoryCache, CacheRateLimiter<MemoryCache>, FakeSender>;
 
-/// Everything a test needs, with the real limiter and cache and a recording transport.
+/// A bell that records instead of ringing, so a test can assert what the realtime half
+/// would have heard — the frame, addressed to whom, and nothing else.
+#[derive(Default)]
+struct RecordingBell {
+    rings: Mutex<Vec<(Id, migo_protocol::NotificationEvent)>>,
+}
+
+impl RecordingBell {
+    /// Every ring so far, in the order they were rung.
+    fn rings(&self) -> Vec<(Id, migo_protocol::NotificationEvent)> {
+        self.rings.lock().clone()
+    }
+}
+
+impl migo_notify::Bell for RecordingBell {
+    fn ring(&self, recipient: Id, event: &migo_protocol::NotificationEvent, _now: Timestamp) {
+        self.rings.lock().push((recipient, event.clone()));
+    }
+}
+
+/// Everything a test needs, with the real limiter and cache, a recording transport,
+/// and a recording bell.
 struct Harness {
     notify: TestNotify,
     store: Arc<MemoryStore>,
     cache: Arc<MemoryCache>,
     sender: Arc<FakeSender>,
+    bell: Arc<RecordingBell>,
     registry: Registry,
 }
 
@@ -230,11 +252,13 @@ impl Harness {
             policies,
             &registry,
         ));
+        let bell = Arc::new(RecordingBell::default());
         let notify = Notifications::new(
             Arc::clone(&store),
             Arc::clone(&cache),
             limiter,
             Arc::clone(&sender),
+            Arc::clone(&bell) as migo_notify::SharedBell,
             Box::new(SeededRandom::new(42)) as Box<dyn Random>,
             ROOT_SECRET,
             config,
@@ -245,6 +269,7 @@ impl Harness {
             store,
             cache,
             sender,
+            bell,
             registry,
         }
     }
@@ -1818,6 +1843,119 @@ async fn one_dead_token_does_not_stop_the_other_devices() {
     // gives the caller no way to tell which prefix.
     assert_eq!(delivery.woken, 1);
     assert_eq!(harness.sender.last().device_id, id(ALICE_TABLET));
+}
+
+// ---------------------------------------------------------------------------
+// The bell
+//
+// The realtime half is a port, and a port nobody exercises is a port nobody can trust.
+// These tests record what the bell would have rung: one frame per accepted event, the
+// event's own payload with no prose in it, and nothing at all for the events the
+// service drops before delivery — the ones a bell must not ring for, because the row
+// and the push were never written for them either.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_delivery_rings_one_bell_with_the_events_payload() {
+    let harness = Harness::new();
+    harness.account(ALICE, "alice").await;
+    let conversation = id(9_000);
+    let event = Event::new(id(ALICE), NotificationKind::Gift, ts(NOW))
+        .by(id(BOB))
+        .in_room(id(ROOM))
+        .in_conversation(conversation)
+        .about(id(SUBJECT));
+
+    harness
+        .notify
+        .notify(event)
+        .await
+        .expect("the gift notifies");
+
+    let rings = harness.bell.rings();
+    assert_eq!(rings.len(), 1, "one event rings one bell");
+    let (recipient, frame) = &rings[0];
+    assert_eq!(
+        *recipient,
+        id(ALICE),
+        "the bell rings the recipient's topic"
+    );
+    // The frame carries everything the event did, and no prose: the client writes the
+    // sentence, in the reader's language, from the kind and the actor.
+    assert_eq!(frame.kind, NotificationKind::Gift);
+    assert_eq!(frame.at, ts(NOW));
+    assert_eq!(frame.title, None);
+    assert_eq!(frame.body, None);
+    assert_eq!(frame.conversation_id, Some(conversation));
+    assert_eq!(frame.room_id, Some(id(ROOM)));
+    assert_eq!(frame.actor_id, Some(id(BOB)));
+    // The subject is the inbox row's pointer, not the bell's: the wire frame has no
+    // field for it, so there is nothing to assert it was not put into.
+}
+
+#[tokio::test]
+async fn a_self_inflicted_event_rings_nothing() {
+    let harness = Harness::new();
+    harness.account(ALICE, "alice").await;
+    // The one person who certainly does not need telling is the one who did it. The
+    // row and the push are dropped for this event, so the bell must be too — a frame
+    // without a row is a badge count the inbox will disagree with.
+    let event = Event::new(id(ALICE), NotificationKind::Gift, ts(NOW)).by(id(ALICE));
+
+    harness
+        .notify
+        .notify(event)
+        .await
+        .expect("silence is a delivery");
+
+    assert!(
+        harness.bell.rings().is_empty(),
+        "a self-inflicted event rings no bell"
+    );
+}
+
+#[tokio::test]
+async fn an_event_of_no_kind_rings_nothing() {
+    let harness = Harness::new();
+    harness.account(ALICE, "alice").await;
+    // An Unknown kind is a newer build's event arriving at an older node. The row is
+    // dropped because nobody could recover its meaning; the bell is dropped for the
+    // same reason.
+    let event = Event::new(id(ALICE), NotificationKind::Unknown, ts(NOW)).by(id(BOB));
+
+    harness
+        .notify
+        .notify(event)
+        .await
+        .expect("silence is a delivery");
+
+    assert!(
+        harness.bell.rings().is_empty(),
+        "an event of no kind rings no bell"
+    );
+}
+
+#[tokio::test]
+async fn every_recipient_of_a_fan_out_rings_their_own_bell() {
+    let harness = Harness::new();
+    harness.account(ALICE, "alice").await;
+    harness.account(BOB, "bob").await;
+    harness.account(CAROL, "carol").await;
+    let event = Event::new(Id::NIL, NotificationKind::Gift, ts(NOW)).by(id(ALICE));
+
+    harness
+        .notify
+        .notify_many(&[id(ALICE), id(BOB), id(CAROL)], event)
+        .await
+        .expect("the fan-out notifies");
+
+    let rings = harness.bell.rings();
+    let rung: Vec<Id> = rings.iter().map(|(recipient, _)| *recipient).collect();
+    assert_eq!(rung, vec![id(ALICE), id(BOB), id(CAROL)]);
+    for (_recipient, frame) in &rings {
+        assert_eq!(frame.actor_id, Some(id(ALICE)));
+        assert_eq!(frame.kind, NotificationKind::Gift);
+    }
 }
 
 // ---------------------------------------------------------------------------

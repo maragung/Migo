@@ -45,8 +45,9 @@ use migo_calls::{CallState, EndReason};
 use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_protocol::{
     from_frame, to_frame, CallAnswer, CallDecline, CallInvite, CallInviteEvent, CallInviteResult,
-    CallSdp, CallStateEvent, Encode, Frame, Hello, Opcode, Platform, RoomJoinRequest, RoomKind,
-    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    CallSdp, CallStateEvent, Encode, Frame, Hello, NotificationEvent, NotificationKind, Opcode,
+    Platform, RoomJoinRequest, RoomKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
+    Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -547,6 +548,94 @@ async fn a_call_answered_on_one_device_stops_the_ring_on_the_other() {
         CallState::Connecting.to_wire(),
         "the still-ringing sibling must hear the answer"
     );
+}
+
+#[tokio::test]
+async fn an_incoming_call_rings_the_bell_on_every_device() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "bellcaller").await;
+    let callee = registered_grant(&app, "bellcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "bell-room").await;
+
+    let laptop = second_device_grant(&app, "bellcallee").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut phone = LiveSession::connect(addr, &callee).await;
+    let mut laptop_session = LiveSession::connect(addr, &laptop).await;
+
+    let call_id = Id::from_bytes([0xB3; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            95,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x44; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+
+    // The semantic ring each screen reacts to, on both of the callee's devices.
+    let invite_frame = next_event_of(&mut phone.stream, Opcode::CallInviteEvent, STEP).await;
+    let invite: CallInviteEvent = from_frame(&invite_frame).expect("the phone's invite decodes");
+    assert_eq!(invite.call_id, call_id);
+    let invite_frame =
+        next_event_of(&mut laptop_session.stream, Opcode::CallInviteEvent, STEP).await;
+    let invite: CallInviteEvent = from_frame(&invite_frame).expect("the laptop's invite decodes");
+    assert_eq!(invite.call_id, call_id);
+
+    // The bell. The notification the invite hands to the notifier used to be a row and
+    // a (future) push only — no frame — so a callee watching their screen learned
+    // nothing until the invite event itself arrived, and a client that renders the
+    // bell from NOTIFICATION_EVENT learned nothing at all. The notifier's seam now
+    // rings it on the recipient's user topic, which both devices are subscribed to.
+    let bell_frame = next_event_of(&mut phone.stream, Opcode::NotificationEvent, STEP).await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the phone's bell decodes");
+    assert_eq!(bell.kind, NotificationKind::IncomingCall);
+    assert_eq!(bell.actor_id, Some(caller.account_id));
+    assert_eq!(bell.title, None, "the client writes the sentence");
+    assert_eq!(bell.body, None, "the client writes the sentence");
+    let bell_frame =
+        next_event_of(&mut laptop_session.stream, Opcode::NotificationEvent, STEP).await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the laptop's bell decodes");
+    assert_eq!(bell.kind, NotificationKind::IncomingCall);
+    assert_eq!(bell.actor_id, Some(caller.account_id));
+
+    // The caller rang somebody else's bell, not their own. A PING is the next frame
+    // their session is owed, and any notification queued ahead of it would be read
+    // here — which is the assertion.
+    send(
+        &mut caller_session.stream,
+        Opcode::Ping,
+        96,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    loop {
+        let frame = recv_within(&mut caller_session.stream, STEP).await;
+        if frame.header.correlation == 96 {
+            assert!(
+                !frame.header.is_error(),
+                "a PING is always answerable: {:?}",
+                from_frame::<migo_protocol::Error>(&frame)
+            );
+            break;
+        }
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::NotificationEvent),
+            "the caller's session is owed no bell for the ring they started"
+        );
+    }
 }
 
 #[tokio::test]

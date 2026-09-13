@@ -1,6 +1,6 @@
 //! The SOCIAL opcodes answered on the wire, where the handler layer lives.
 //!
-//! Three behaviours only the dispatcher can get wrong, because the service under it is
+//! Five behaviours only the dispatcher can get wrong, because the service under it is
 //! correct in isolation:
 //!
 //! * **A full friends page must not hide the request behind it.** The combined
@@ -33,6 +33,17 @@
 //!   watching a friend's topic, one with the bit and one without, and reads the
 //!   bitless session through a PING to make the missing frame a deterministic fact
 //!   rather than a timeout that proves nothing.
+//! * **Every graph move reaches every device that holds a stale copy.** The fan-out
+//!   behind `FRIEND_EVENT` has two halves, and for a long time only one of them
+//!   existed: the other party heard the move, while the actor's *other* devices —
+//!   and, for declines and blocks, the other party entirely — sat on a stale friends
+//!   list until somebody refreshed by hand. The five tests after the crossing one
+//!   drive each mutation with both parties live on two devices each, over real TCP
+//!   sockets, and assert who hears what: an acceptance reaches the acceptor's other
+//!   device (and not the session that answered), a request reaches the asker's other
+//!   device, a decline moves the graph for both parties without a bell, a block
+//!   tears a friendship down live on both sides, and blocking a stranger publishes
+//!   nothing to the stranger at all — the privacy half of the same fan-out.
 //!
 //! Every test uses the reply rule as its clock: every frame it waits for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -48,9 +59,10 @@ use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
     codes, from_frame, to_frame, Acknowledged, Encode, Frame, FriendEvent, FriendRespond,
-    FriendTarget, Opcode, PresenceEvent, PresenceState, PresenceUpdate, ProfileRequest,
-    ProfileResponse, ProfileUpdate, RelationshipList, RelationshipListReq, SubscribeRequest,
-    SubscribeResponse, Topic, TopicKind, UserProfile, PROTOCOL_VERSION,
+    FriendTarget, NotificationEvent, NotificationKind, Opcode, PresenceEvent, PresenceState,
+    PresenceUpdate, ProfileRequest, ProfileResponse, ProfileUpdate, RelationshipList,
+    RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic, TopicKind, UserProfile,
+    PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -408,6 +420,454 @@ async fn a_crossing_request_is_announced_as_an_acceptance() {
     assert_eq!(
         accepted.state, "accepted",
         "a crossing request is an acceptance to the account that asked first"
+    );
+}
+
+#[tokio::test]
+async fn a_friend_request_rings_exactly_one_bell() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "bellalice").await;
+    let bob_grant = registered_grant(&app, "bellbob").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+
+    // The ask. Bob is owed two frames for it — the hint and the bell — and the bell
+    // used to be published by the dispatcher's own hand while the row went through the
+    // notifier; both halves now leave through the notifier's one seam, and this test
+    // pins that the fold did not double the frame.
+    alice.friend_request(20, bob_grant.account_id).await;
+    let request_frame = next_event_of(&mut bob.stream, Opcode::FriendEvent).await;
+    let request: FriendEvent = from_frame(&request_frame).expect("the event decodes");
+    assert_eq!(request.user_id, alice_grant.account_id);
+    assert_eq!(request.state, "request");
+
+    let bell_frame = next_event_of(&mut bob.stream, Opcode::NotificationEvent).await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the bell decodes");
+    assert_eq!(bell.kind, NotificationKind::FriendRequest);
+    assert_eq!(bell.actor_id, Some(alice_grant.account_id));
+    assert_eq!(bell.title, None, "the client writes the sentence");
+    assert_eq!(bell.body, None, "the client writes the sentence");
+
+    // Exactly one. A PING is the next frame Bob's session is owed; a second bell
+    // queued ahead of the PONG would be read here.
+    send(
+        &mut bob.stream,
+        Opcode::Ping,
+        21,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut bob.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::NotificationEvent),
+            "one ask rings one bell"
+        );
+        if frame.header.correlation == 21 {
+            break frame;
+        }
+    };
+    assert!(!pong.header.is_error());
+
+    // Alice asked, so nobody rings hers: her session was answered by the
+    // acknowledgement, and the only frame her own topic owes her is the echo hint,
+    // which is not a notification.
+    let echo = next_event_of(&mut alice.stream, Opcode::FriendEvent).await;
+    let echo: FriendEvent = from_frame(&echo).expect("the echo decodes");
+    assert_eq!(echo.user_id, bob_grant.account_id);
+    assert_eq!(echo.state, "request");
+}
+
+/// The acceptance's other half: the acceptor's own second device.
+///
+/// The session that pressed the button was answered by its `Acknowledged` and re-read
+/// the graph itself, but an account's *other* device holds a friends list that just
+/// grew, and before the caller-echo fan-out it sat stale until somebody refreshed by
+/// hand — the exact shape of the "accepted friend requests do not appear immediately"
+/// report. The echo must also skip the session that acted (section 156): it already
+/// knows, and a second hint for a change it just made is a frame with no news in it.
+#[tokio::test]
+async fn an_acceptance_reaches_the_acceptors_other_device() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "fiona").await;
+    let bob_grant = registered_grant(&app, "gael").await;
+    let bob_laptop_grant = second_device_grant(&app, "gael").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+    let mut bob_laptop = LiveSession::connect(addr, &bob_laptop_grant).await;
+
+    alice.friend_request(10, bob_grant.account_id).await;
+    let _: Acknowledged = bob
+        .ask(
+            Opcode::FriendRespond,
+            11,
+            &FriendRespond {
+                user_id: alice_grant.account_id,
+                accept: true,
+            },
+        )
+        .await;
+
+    // The asker hears the acceptance: the notice's audience, as it always was.
+    let accepted: FriendEvent =
+        from_frame(&next_event_of(&mut alice.stream, Opcode::FriendEvent).await)
+            .expect("the asker's event decodes");
+    assert_eq!(accepted.user_id, bob_grant.account_id);
+    assert_eq!(accepted.state, "accepted");
+
+    // The acceptor's other device hears the same move as an echo on the acceptor's
+    // own topic, naming the new friend.
+    let echo: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the acceptor's other device gets an event");
+    assert_eq!(echo.user_id, alice_grant.account_id);
+    assert_eq!(
+        echo.state, "accepted",
+        "the acceptor's other device learns the graph grew a friend"
+    );
+
+    // The session that answered does not. A PING, and a read to its PONG: the echo —
+    // if the fan-out had leaked it to the actor — is queued ahead of the reply this
+    // PING earns, so finding the PONG without a FRIEND_EVENT in front of it is the
+    // assertion, exactly as the feature-bit test reads its bitless session.
+    send(
+        &mut bob.stream,
+        Opcode::Ping,
+        12,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut bob.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::FriendEvent),
+            "the session that answered is not handed the echo it was already answered with"
+        );
+        if frame.header.correlation == 12 {
+            break frame;
+        }
+    };
+    assert!(
+        !pong.header.is_error(),
+        "the acting session keeps serving the frames it did ask for"
+    );
+}
+
+/// A request is a row in the asker's own graph too: the outgoing list the asker's
+/// other device shows must grow without a manual refresh, the same way the recipient's
+/// incoming list does.
+#[tokio::test]
+async fn a_request_reaches_the_askers_other_device() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "hana").await;
+    let alice_laptop_grant = second_device_grant(&app, "hana").await;
+    let bob_grant = registered_grant(&app, "ivan").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+
+    alice.friend_request(10, bob_grant.account_id).await;
+
+    // The recipient hears the request, as they always did.
+    let request: FriendEvent =
+        from_frame(&next_event_of(&mut bob.stream, Opcode::FriendEvent).await)
+            .expect("the recipient's event decodes");
+    assert_eq!(request.user_id, alice_grant.account_id);
+    assert_eq!(request.state, "request");
+
+    // The asker's other device hears the echo: the outgoing list it renders gained a
+    // row, and this is the only frame that tells it so.
+    let echo: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the asker's other device gets an event");
+    assert_eq!(echo.user_id, bob_grant.account_id);
+    assert_eq!(
+        echo.state, "request",
+        "the asker's other device learns the request it watched leave"
+    );
+}
+
+/// A decline moves the graph for both parties, and neither of them hears a bell.
+///
+/// The service's rule is that a decline is the responder's own business — no notice,
+/// no inbox row — and that rule stands. But the *graph* moved on both sides: the
+/// asker's outgoing list and the decliner's incoming list each hold a row that is
+/// gone. The `FRIEND_EVENT` hint carries no verdict, only that the edge moved, so the
+/// asker learns exactly what their own next listing would have told them and nothing
+/// more.
+#[tokio::test]
+async fn a_decline_moves_the_graph_for_both_parties() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "juno").await;
+    let bob_grant = registered_grant(&app, "kira").await;
+    let bob_laptop_grant = second_device_grant(&app, "kira").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+    let mut bob_laptop = LiveSession::connect(addr, &bob_laptop_grant).await;
+
+    alice.friend_request(10, bob_grant.account_id).await;
+    let _: Acknowledged = bob
+        .ask(
+            Opcode::FriendRespond,
+            11,
+            &FriendRespond {
+                user_id: alice_grant.account_id,
+                accept: false,
+            },
+        )
+        .await;
+
+    // The asker hears the edge is gone — the hint, not a verdict.
+    let removed: FriendEvent =
+        from_frame(&next_event_of(&mut alice.stream, Opcode::FriendEvent).await)
+            .expect("the asker's event decodes");
+    assert_eq!(removed.user_id, bob_grant.account_id);
+    assert_eq!(
+        removed.state, "removed",
+        "a decline tells the asker the edge is gone, and nothing about why"
+    );
+
+    // The decliner's other device: the incoming list it renders lost the same row.
+    let echo: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the decliner's other device gets an event");
+    assert_eq!(echo.user_id, alice_grant.account_id);
+    assert_eq!(echo.state, "removed");
+
+    // And the asker's own listing agrees: no outgoing request survives the decline.
+    let listing: RelationshipList = alice
+        .ask(
+            Opcode::RelationshipList,
+            12,
+            &RelationshipListReq {
+                limit: 0,
+                kind: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        !listing.entries.iter().any(|entry| {
+            entry.user_id == bob_grant.account_id
+                && entry.kind == migo_protocol::RelationshipKind::PendingOutgoing.to_wire()
+        }),
+        "the declined request is gone from the asker's graph: {:?}",
+        listing.entries
+    );
+}
+
+/// A block tears a friendship down, and both sides' devices watch it happen live.
+///
+/// The blocked account hears the same `removed` hint an un-friend would carry — the
+/// two must stay indistinguishable — on every device but the blocker's acting session
+/// (section 156). The blocker's other devices hear the block itself, because their
+/// block list and friends list both moved.
+#[tokio::test]
+async fn a_block_tears_the_friendship_down_live_on_both_sides() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "lena").await;
+    let alice_laptop_grant = second_device_grant(&app, "lena").await;
+    let bob_grant = registered_grant(&app, "omar").await;
+    let bob_laptop_grant = second_device_grant(&app, "omar").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+    let mut bob_laptop = LiveSession::connect(addr, &bob_laptop_grant).await;
+
+    // The friendship, established the ordinary way. Each device's expected events are
+    // drained as they arrive, so the block below is read against a quiet stream.
+    alice.friend_request(10, bob_grant.account_id).await;
+    let request: FriendEvent =
+        from_frame(&next_event_of(&mut bob.stream, Opcode::FriendEvent).await)
+            .expect("the recipient's event decodes");
+    assert_eq!(request.state, "request");
+    let asker_echo: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the asker's other device gets the request echo");
+    assert_eq!(asker_echo.user_id, bob_grant.account_id);
+
+    let _: Acknowledged = bob
+        .ask(
+            Opcode::FriendRespond,
+            11,
+            &FriendRespond {
+                user_id: alice_grant.account_id,
+                accept: true,
+            },
+        )
+        .await;
+    let accepted: FriendEvent =
+        from_frame(&next_event_of(&mut alice.stream, Opcode::FriendEvent).await)
+            .expect("the asker's acceptance decodes");
+    assert_eq!(accepted.state, "accepted");
+    let acceptor_echo: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the acceptor's other device gets the acceptance echo");
+    assert_eq!(acceptor_echo.state, "accepted");
+    // The asker's other device hears the acceptance too — the notice's topic is the
+    // asker's own, and both her sessions are subscribed to it — so it is drained here
+    // to keep the block below read against a quiet stream.
+    let asker_device_accepted: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the asker's other device gets the acceptance");
+    assert_eq!(asker_device_accepted.state, "accepted");
+
+    // Bob blocks Alice. Every device of both accounts but the acting one holds a
+    // stale copy of the graph now.
+    let _: Acknowledged = bob
+        .ask(
+            Opcode::BlockSet,
+            12,
+            &FriendTarget {
+                user_id: alice_grant.account_id,
+            },
+        )
+        .await;
+
+    // The blocked account, on both her devices: the friendship is gone, and the hint
+    // is the word an un-friend would have carried.
+    for stream in [&mut alice.stream, &mut alice_laptop.stream] {
+        let removed: FriendEvent = from_frame(&next_event_of(stream, Opcode::FriendEvent).await)
+            .expect("the blocked account's device gets an event");
+        assert_eq!(removed.user_id, bob_grant.account_id);
+        assert_eq!(
+            removed.state, "removed",
+            "the block's teardown is indistinguishable from an un-friend"
+        );
+    }
+
+    // The blocker's other device: the block itself, which moved the block list and
+    // the friends list it renders.
+    let blocker_echo: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the blocker's other device gets an event");
+    assert_eq!(blocker_echo.user_id, alice_grant.account_id);
+    assert_eq!(blocker_echo.state, "blocked");
+
+    // The acting session is excluded, and the graphs agree with the frames: no
+    // friendship survives on either side, and the block is where the blocker left it.
+    send(
+        &mut bob.stream,
+        Opcode::Ping,
+        13,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut bob.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::FriendEvent),
+            "the session that blocked is not handed the echo it was already answered with"
+        );
+        if frame.header.correlation == 13 {
+            break frame;
+        }
+    };
+    assert!(!pong.header.is_error());
+
+    let listing: RelationshipList = alice
+        .ask(
+            Opcode::RelationshipList,
+            14,
+            &RelationshipListReq {
+                limit: 0,
+                kind: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        !listing
+            .entries
+            .iter()
+            .any(|entry| entry.kind == migo_protocol::RelationshipKind::Friend.to_wire()),
+        "no friendship survives the block on the blocked side: {:?}",
+        listing.entries
+    );
+}
+
+/// The privacy half of the block fan-out: blocking a stranger publishes nothing to
+/// the stranger.
+///
+/// A "the graph moved" hint delivered to an account whose graph did not visibly move
+/// would name the blocker to somebody the wire otherwise tells nothing — most blocks
+/// are of strangers, and a stranger who receives an event naming the person who just
+/// blocked them has been told exactly that. The blocker's own other devices still
+/// hear the block, because the block list they render did move.
+#[tokio::test]
+async fn blocking_a_stranger_publishes_nothing_to_the_stranger() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "paula").await;
+    let alice_laptop_grant = second_device_grant(&app, "paula").await;
+    let carol_grant = registered_grant(&app, "quinn").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+    let mut carol = LiveSession::connect(addr, &carol_grant).await;
+
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::BlockSet,
+            10,
+            &FriendTarget {
+                user_id: carol_grant.account_id,
+            },
+        )
+        .await;
+
+    // The blocker's other device hears the block: the block list it renders grew.
+    let echo: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the blocker's other device gets an event");
+    assert_eq!(echo.user_id, carol_grant.account_id);
+    assert_eq!(echo.state, "blocked");
+
+    // The stranger hears nothing. A PING, and a read to its PONG: any leaked hint
+    // would be queued ahead of the reply, so finding the PONG without a FRIEND_EVENT
+    // in front of it is the assertion.
+    send(
+        &mut carol.stream,
+        Opcode::Ping,
+        11,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut carol.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::FriendEvent),
+            "a stranger the block removed nothing from is told nothing"
+        );
+        if frame.header.correlation == 11 {
+            break frame;
+        }
+    };
+    assert!(
+        !pong.header.is_error(),
+        "the stranger's session keeps serving the frames it did ask for"
     );
 }
 

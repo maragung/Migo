@@ -275,6 +275,40 @@ pub enum RespondOutcome {
     Declined,
 }
 
+/// What a block changed that somebody's clients should hear about.
+///
+/// A block is the one social write that is also a teardown, so the answer it owes the
+/// dispatcher is not "done" but "whose graph moved". The [`FRIEND_EVENT`](migo_protocol::Opcode::FriendEvent)
+/// hint is how a client learns to re-read without a manual refresh, and the two flags
+/// below are the service's honest account of who needs one.
+///
+/// Neither flag describes a notification. No bell rings and no inbox row is written for
+/// a block: the [`Notice`](crate::notice::Notice) path is for requests and acceptances,
+/// things worth waking somebody for. A block that removed a friendship tells the blocked
+/// account only that the graph moved, with the same `state` an un-friend would carry, so
+/// the two stay indistinguishable from each other — which is the arrangement section
+/// 180 demands for every other way an account disappears from view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockOutcome {
+    /// An edge the blocked account could observe was removed — a friendship, a pending
+    /// request in either direction, or their follow of the blocker — so their clients
+    /// should hear that the graph moved.
+    ///
+    /// False when nothing they could see changed, which is the common case: most blocks
+    /// are of strangers. Publishing a "the graph moved" hint for a block that removed
+    /// nothing would tell a stranger exactly who blocked them, which is a fact the wire
+    /// is otherwise careful never to hand over.
+    pub severed: bool,
+    /// The blocker's own graph changed — the block or its carried mute is new, or an
+    /// edge of theirs was removed — so the blocker's *other* devices should re-read.
+    ///
+    /// The device that asked already knows; section 156 excludes it from the fan-out.
+    /// False only for the pure no-op: blocking an account that was already blocked and
+    /// already muted, with no other edge between the two, changes nothing, and state
+    /// that did not change produces no frame.
+    pub moved: bool,
+}
+
 /// A thing one account might try to do to another.
 ///
 /// Four, and not the seven brief section 124 lists. `docs/04-data-model.md` gives a

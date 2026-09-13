@@ -5,13 +5,16 @@
 //! assert the behaviour those handlers rely on: a fresh wallet reads as zero, and sending a
 //! gift spends the sender's coins.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Secret, Timestamp};
-use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift};
+use migo_economy::{
+    Announcement, Announcer, Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift,
+};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{Currency, EntitlementPosition, LedgerPosition, NewAccount};
 use migo_store::traits::{AccountStore, EconomyStore};
@@ -147,6 +150,115 @@ async fn gift_send_spends_the_sender_coins() {
     assert_eq!(
         after_retry, after,
         "the retry charges nothing on top of the first send"
+    );
+}
+
+/// An announcer that records instead of notifying, so a test can assert what the
+/// service told the world — the port the composition root binds to the notifier, whose
+/// seam turns each announcement into a bell, a row, and a push.
+struct RecordingAnnouncer {
+    announced: Mutex<Vec<Announcement>>,
+}
+
+#[async_trait::async_trait]
+impl Announcer for RecordingAnnouncer {
+    async fn announce(&self, announcement: Announcement) -> migo_core::Result<()> {
+        self.announced.lock().push(announcement);
+        Ok(())
+    }
+}
+
+/// The same harness as [`harness`], with the recorder bound where the composition root
+/// binds the notifier.
+fn harness_with_announcer() -> (
+    migo_economy::SharedTreasurer,
+    Arc<MemoryStore>,
+    Arc<RecordingAnnouncer>,
+) {
+    let settings = Config::default();
+    let mem = Arc::new(MemoryStore::new());
+    let registry = Registry::new();
+    let policies = Policies::from_config(&settings.rate_limit).expect("default policies are valid");
+    let limiter = Arc::new(CacheRateLimiter::new(
+        Arc::new(MemoryCache::new()),
+        policies,
+        &registry,
+    ));
+    let cache: migo_cache::SharedCache = Arc::new(MemoryCache::new());
+    let announcer = Arc::new(RecordingAnnouncer {
+        announced: Mutex::new(Vec::new()),
+    });
+    let store: migo_store::SharedStore = mem.clone();
+    let svc = migo_economy::open(
+        store,
+        cache,
+        limiter,
+        announcer.clone(),
+        Catalogue::with_default_gifts(),
+        EconomyConfig::default(),
+        &registry,
+    );
+    (svc, mem, announcer)
+}
+
+/// A gift's announcement carries the conversation it was given in.
+///
+/// The bell's frame has a `conversation_id` so its tap target opens the right screen,
+/// and the only road that id can travel is the announcement: the dispatcher no longer
+/// hand-rolls the recipient's frame, so what the announcer carries is what the bell
+/// rings. A gift with no conversation announces none, the same way.
+#[tokio::test]
+async fn a_gift_announcement_carries_its_conversation() {
+    let (svc, store, announcer) = harness_with_announcer();
+    seed_account(&store, 1, "sender").await;
+    seed_account(&store, 2, "recipient").await;
+    let sender = caller(1, 101);
+    let conversation = Id::from(77u128);
+
+    svc.grant(Grant {
+        account_id: Id::from(1u128),
+        currency: Currency::Coins,
+        amount: 1000,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: "seed:announce".to_string(),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("grant succeeds");
+
+    svc.send_gift(
+        &sender,
+        SendGift {
+            recipient_id: Id::from(2u128),
+            gift: Gift::Rose,
+            conversation_id: Some(conversation),
+            client_key: "spec:announce".to_string(),
+        },
+    )
+    .await
+    .expect("gift sent");
+
+    svc.send_gift(
+        &sender,
+        SendGift {
+            recipient_id: Id::from(2u128),
+            gift: Gift::Rose,
+            conversation_id: None,
+            client_key: "spec:announce-2".to_string(),
+        },
+    )
+    .await
+    .expect("second gift sent");
+
+    let announced = announcer.announced.lock().clone();
+    assert_eq!(announced.len(), 2, "one announcement per first-time gift");
+    assert_eq!(announced[0].account_id, Id::from(2u128));
+    assert_eq!(announced[0].conversation_id, Some(conversation));
+    assert_eq!(
+        announced[1].conversation_id, None,
+        "a gift outside any conversation announces none"
     );
 }
 

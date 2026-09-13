@@ -43,9 +43,9 @@ pub mod service;
 pub mod traits;
 
 pub use model::{
-    query_is_usable, strictest, Caller, Edge, Found, FriendOutcome, Interaction, Pending,
-    ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE, MAX_BLOCKS,
-    MAX_FAVORITES, MAX_FOLLOWING, MAX_FRIENDS, MAX_MUTES, MAX_MUTUAL_SCAN, MAX_PAGE,
+    query_is_usable, strictest, BlockOutcome, Caller, Edge, Found, FriendOutcome, Interaction,
+    Pending, ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE,
+    MAX_BLOCKS, MAX_FAVORITES, MAX_FOLLOWING, MAX_FRIENDS, MAX_MUTES, MAX_MUTUAL_SCAN, MAX_PAGE,
     MAX_PROFILE_BATCH, MAX_QUERY_LEN,
 };
 pub use notice::Notice;
