@@ -1561,7 +1561,7 @@ impl App {
             Place::Wallet => crate::ui::wallet::show(ui, &mut context, &mut self.wallet),
             Place::Profile => crate::ui::profile::show(ui, &mut context, &mut self.profile_panel),
             Place::Admins => crate::ui::admins::show(ui, &mut context, &mut self.admins_panel),
-            Place::Games => crate::ui::games::show(ui, &mut context, &mut self.games),
+            Place::Games => crate::ui::games::show(ui, &context, &mut self.games),
             Place::Settings => {
                 crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
             }
