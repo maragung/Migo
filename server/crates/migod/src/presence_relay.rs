@@ -68,7 +68,6 @@
 //! be a digest because a watcher must see the state, not a summary of it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::FederatedEvent;
@@ -268,6 +267,7 @@ mod tests {
     use migo_federation::{MeshService, NewPeerSpec};
     use migo_protocol::{PresenceEvent, PresenceState};
     use migo_store::MemoryStore;
+    use std::sync::Arc;
 
     const NOW: i64 = 1_700_000_000_000;
 
