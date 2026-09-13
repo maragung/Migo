@@ -229,12 +229,6 @@ impl<T: Transport> Connection<'_, T> {
             session_id,
         );
 
-        // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
-        // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
-        // writer never re-derives it and a session's frames keep one shape for its whole life.
-        self.batching = hello.features & migo_protocol::features::BATCHING != 0
-            && admitted & migo_protocol::features::BATCHING != 0;
-
         // Section 148: the session's feature set is the intersection of what the client asked
         // for and what this node advertised *to this session* — the rollout-trimmed `admitted`
         // set, so a session the staged rollout held back never negotiates what it withheld. It
@@ -243,12 +237,9 @@ impl<T: Transport> Connection<'_, T> {
         // frame's feature gate reads it rather than re-deriving it.
         let negotiated = hello.features & admitted;
 
-        // Section 72/148: COMPRESSION has the same shape as BATCHING above — the node-wide
-        // setting is the offer, the intersection is the decision, made once here so a
-        // client that never announced the bit is never handed a deflate payload it had
-        // no reason to be able to read.
-        self.compression =
-            self.compression && negotiated & migo_protocol::features::COMPRESSION != 0;
+        // The frame-level switches — BATCHING (section 154) and COMPRESSION (section 72) —
+        // are cut from the same intersection; the helper says what that means for each.
+        self.settle_frame_switches(negotiated);
 
         if !self
             .send_welcome(
@@ -302,6 +293,22 @@ impl<T: Transport> Connection<'_, T> {
             identity,
             lifecycle_started,
         })
+    }
+
+    /// Cuts the frame-level switches — BATCHING (section 154) and COMPRESSION (section 72) —
+    /// from the intersection the session negotiated.
+    ///
+    /// Each is opt-in on both sides: an envelope or a deflate payload leaves this node only
+    /// for a client that asked for the bit and a node that offered it. BATCHING is the plain
+    /// intersection; COMPRESSION starts from the node-wide setting — the offer — so a node
+    /// with compression switched off never compresses, and a client that never announced the
+    /// bit is never handed a deflate payload it had no reason to be able to read. Decided
+    /// once, here, so the writer never re-derives it and a session's frames keep one shape
+    /// for their whole life.
+    fn settle_frame_switches(&mut self, negotiated: u64) {
+        self.batching = negotiated & migo_protocol::features::BATCHING != 0;
+        self.compression =
+            self.compression && negotiated & migo_protocol::features::COMPRESSION != 0;
     }
 
     /// Reads and validates the opening `HELLO`: decodes it, checks the opcode and protocol
