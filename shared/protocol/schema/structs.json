@@ -3894,6 +3894,43 @@
         {
           "name": "member_count",
           "type": "u32"
+        },
+        {
+          "name": "group_key_epoch",
+          "type": "u32",
+          "optional": true,
+          "id": 1,
+          "doc": "The membership generation this change produced (section 163). Present on every event a group's own membership operations emit, so a client that missed a redistribution can tell by comparing against the generation its keys carry."
+        }
+      ]
+    },
+    {
+      "name": "GroupKeyDistribution",
+      "doc": "Relays one member's sealed sender-key distribution to one member device (section 163). The server routes it and never opens it.",
+      "fields": [
+        {
+          "name": "conversation_id",
+          "type": "id"
+        },
+        {
+          "name": "from_device",
+          "type": "id",
+          "doc": "The distributing member's device."
+        },
+        {
+          "name": "to_account",
+          "type": "id",
+          "doc": "The member the distribution is for."
+        },
+        {
+          "name": "to_device",
+          "type": "id",
+          "doc": "The member device the distribution is sealed for."
+        },
+        {
+          "name": "sealed_distribution",
+          "type": "bytes",
+          "doc": "E2E-sealed sender-key distribution, sealed for the target device's pairwise session with the distributor."
         }
       ]
     },

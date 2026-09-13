@@ -30,9 +30,10 @@ use migo_protocol::{
     codes, ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
     ConversationKind, ConversationLeaveRequest, ConversationListRequest, ConversationMuteRequest,
     ConversationRosterRequest, ConversationSummary, ConversationUpdateRequest,
-    ConversationVoteKickRequest, EncryptionMode, MemberChange, MessageAccepted, MessageDelete,
-    MessageKind, MessageReceipt, MessageSend, Opcode, ReceiptKind, RelationshipKind, RoomKind,
-    RoomRole, SyncRequest, SyncResponse, SyncStatus, TypingEvent, TypingState,
+    ConversationVoteKickRequest, EncryptionMode, GroupKeyDistribution, MemberChange,
+    MessageAccepted, MessageDelete, MessageKind, MessageReceipt, MessageSend, Opcode, ReceiptKind,
+    RelationshipKind, RoomKind, RoomRole, SyncRequest, SyncResponse, SyncStatus, TypingEvent,
+    TypingState,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{NewRoom, Patch, Relationship, RoomMember};
@@ -3245,4 +3246,363 @@ async fn a_backwards_page_honours_the_byte_budget_too() {
         .await
         .expect("a member may keep paging");
     assert_eq!(seqs(&older), vec![2], "the next older row pages next");
+}
+
+// --- section 163: the redistribution trigger bookkeeping -----------------------------
+
+/// One sealed distribution, sealed for one device's pairwise session the way a
+/// client seals it. The bytes are opaque to the server by design; what the
+/// tests below pin is who they reach, so a short real AEAD envelope stands in
+/// for the full sender-key distribution and the relay's behaviour must be
+/// identical either way — it never opens the blob.
+fn sealed_for(device: u128) -> Vec<u8> {
+    migo_crypto::aead::seal(
+        &migo_crypto::aead::SymmetricKey::from_bytes([device as u8; 32]),
+        b"migo-sender-key-distribution-v1",
+        b"epoch, chain id, message number, chain key, identity",
+        &mut migo_core::SeededRandom::new(0x1630_0000 + device as u64),
+    )
+    .expect("the test distribution seals")
+}
+
+#[tokio::test]
+async fn every_membership_change_queues_a_redistribution_to_every_member() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    // The create is the first change: generation 1, owed to every seat the
+    // create produced, and the number travels on the wire so a client that
+    // missed a later redistribution can tell.
+    let first = harness
+        .messaging
+        .redistribution(conversation)
+        .expect("the create records a redistribution");
+    assert_eq!(first.generation, 1);
+    assert_eq!(first.audience, vec![id(ALICE), id(BOB), id(CAROL)]);
+
+    // An invite is the second change: the generation rises, the newcomer is in
+    // the audience alongside the founders, and every arrival event the invite
+    // emits carries the new generation.
+    let (_, fanouts) = harness
+        .messaging
+        .invite(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationInviteRequest {
+                conversation_id: conversation,
+                members: vec![id(DAVE)],
+            },
+        )
+        .await
+        .expect("a member may invite a fourth");
+    assert_eq!(fanouts.len(), 1);
+    let event = member_of(&fanouts[0]);
+    assert_eq!(event.group_key_epoch, Some(2));
+
+    let second = harness
+        .messaging
+        .redistribution(conversation)
+        .expect("the invite records a redistribution");
+    assert_eq!(second.generation, 2);
+    assert_eq!(
+        second.audience,
+        vec![id(ALICE), id(BOB), id(CAROL), id(DAVE)],
+        "the redistribution is owed to every member after the change, newcomer included"
+    );
+}
+
+#[tokio::test]
+async fn a_removal_queues_the_redistribution_to_everyone_but_the_removed_member() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    let fanouts = harness
+        .messaging
+        .kick(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("a founder removes a member outright");
+    let event = member_of(&fanouts[0]);
+    assert_eq!(
+        event.group_key_epoch,
+        Some(2),
+        "the removal's event carries the generation the redistribution will travel under"
+    );
+
+    let recorded = harness
+        .messaging
+        .redistribution(conversation)
+        .expect("the kick records a redistribution");
+    assert_eq!(recorded.generation, 2);
+    assert_eq!(
+        recorded.audience,
+        vec![id(ALICE), id(BOB)],
+        "the removed member is not owed the redistribution that follows their removal"
+    );
+
+    // The relay answers the audience question the bookkeeping asks: a
+    // distribution aimed at the removed member is refused, and the same frame
+    // aimed at a remaining member is accepted, sealed bytes unread.
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: conversation,
+                    from_device: id(ALICE_PHONE),
+                    to_account: id(CAROL),
+                    to_device: id(103),
+                    sealed_distribution: sealed_for(103),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+    harness
+        .messaging
+        .distribute_key(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            GroupKeyDistribution {
+                conversation_id: conversation,
+                from_device: id(ALICE_PHONE),
+                to_account: id(BOB),
+                to_device: id(BOB_LAPTOP),
+                sealed_distribution: sealed_for(BOB_LAPTOP),
+            },
+        )
+        .await
+        .expect("a member may distribute a sealed key to a fellow member");
+}
+
+#[tokio::test]
+async fn a_departure_and_a_carried_vote_remember_who_remains() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    let fanouts = harness
+        .messaging
+        .leave(
+            &caller(CAROL, 103, 2 * MINUTE),
+            ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("a member may leave");
+    let event = member_of(&fanouts[0]);
+    assert_eq!(event.group_key_epoch, Some(2));
+    let recorded = harness
+        .messaging
+        .redistribution(conversation)
+        .expect("the departure records a redistribution");
+    assert_eq!(
+        recorded.audience,
+        vec![id(ALICE), id(BOB)],
+        "the leaver is not owed the redistribution that follows their departure"
+    );
+}
+
+#[tokio::test]
+async fn a_carried_vote_queues_the_redistribution_to_the_roster_that_remains() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    // Dave joins first so the vote has a majority to carry it, and so the
+    // generation under test is one no earlier assert made: create is 1, the
+    // invite is 2, and the carried vote's removal must say 3.
+    let (_, fanouts) = harness
+        .messaging
+        .invite(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationInviteRequest {
+                conversation_id: conversation,
+                members: vec![id(DAVE)],
+            },
+        )
+        .await
+        .expect("the group grows to four");
+    assert!(
+        fanouts
+            .iter()
+            .map(member_of)
+            .all(|event| event.change == MemberChange::Joined),
+        "an invite seats; it removes nobody"
+    );
+
+    let (response, fanouts) = harness
+        .messaging
+        .vote_kick(
+            &caller(DAVE, 104, 3 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the first voice opens the vote");
+    assert!(response.open, "one voice of four is not a majority");
+    assert!(
+        !fanouts
+            .iter()
+            .any(|f| matches!(f.event, Broadcast::Member(_))),
+        "a vote that has not carried emits the tally, not a membership change"
+    );
+    let (response, fanouts) = harness
+        .messaging
+        .vote_kick(
+            &caller(ALICE, ALICE_PHONE, 4 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the second voice carries it");
+    assert!(!response.open, "two of four carries a strict majority");
+    // The member event is the tally's closing, so it is the only broadcast a
+    // carried vote emits; the search still skips anything that is not a
+    // member broadcast, so it names what it wants rather than tripping over
+    // whatever else a future tally may say.
+    let removal = fanouts
+        .iter()
+        .filter_map(|f| match &f.event {
+            Broadcast::Member(event) => Some(event),
+            _ => None,
+        })
+        .find(|event| event.change == MemberChange::Kicked)
+        .expect("the carried vote emits the removal");
+    assert_eq!(removal.user_id, id(CAROL));
+    assert_eq!(removal.group_key_epoch, Some(3));
+    let recorded = harness
+        .messaging
+        .redistribution(conversation)
+        .expect("the carried vote records a redistribution");
+    assert_eq!(
+        recorded.audience,
+        vec![id(ALICE), id(BOB), id(DAVE)],
+        "the audience after a carried vote is the roster that remains"
+    );
+}
+
+#[tokio::test]
+async fn the_key_relay_checks_the_shape_and_the_speaker_before_the_store() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    // Shape first, on the cheapest checks, exactly like every other write:
+    // a nil id and an empty or oversized envelope never touch the store.
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: Id::from(0u128),
+                    from_device: id(ALICE_PHONE),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: sealed_for(BOB_LAPTOP),
+                },
+            )
+            .await,
+        codes::FIELD_REQUIRED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: conversation,
+                    from_device: id(ALICE_PHONE),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: Vec::new(),
+                },
+            )
+            .await,
+        codes::FIELD_REQUIRED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: conversation,
+                    from_device: id(ALICE_PHONE),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: vec![9u8; migo_wire::limits::MAX_BYTES_LEN + 1],
+                },
+            )
+            .await,
+        codes::FIELD_TOO_LONG,
+    );
+
+    // A frame naming a device other than the speaker's is refused: the
+    // distribution travels under the device that sealed it, and nothing on
+    // this path may route a sealed envelope as a third party.
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: conversation,
+                    from_device: id(999_999),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: sealed_for(BOB_LAPTOP),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+
+    // A stranger gets the same answer the rest of the conversation surface
+    // gives: one NOT_FOUND for "no such conversation" and "not a member"
+    // alike, because a key relay must not be a probe for which groups exist.
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(STRANGER, 900, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: conversation,
+                    from_device: id(900),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: sealed_for(BOB_LAPTOP),
+                },
+            )
+            .await,
+        codes::NOT_FOUND,
+    );
+
+    // A direct conversation has no third member and no sender keys to
+    // redistribute; the group-only rule is the same one every other group
+    // operation enforces.
+    let direct = harness.direct(MINUTE).await;
+    expect_code(
+        harness
+            .messaging
+            .distribute_key(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                GroupKeyDistribution {
+                    conversation_id: direct,
+                    from_device: id(ALICE_PHONE),
+                    to_account: id(BOB),
+                    to_device: id(BOB_LAPTOP),
+                    sealed_distribution: sealed_for(BOB_LAPTOP),
+                },
+            )
+            .await,
+        codes::VALIDATION_FAILED,
+    );
 }

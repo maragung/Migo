@@ -7877,6 +7877,7 @@ mod tests {
             user_id: id_of(user),
             change,
             member_count: 2,
+            group_key_epoch: None,
         }
     }
 

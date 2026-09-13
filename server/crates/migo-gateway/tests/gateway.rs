@@ -1942,6 +1942,7 @@ async fn a_member_event_survives_a_disconnect_into_the_resume() {
         user_id: id(0x00B7),
         change: MemberChange::Joined,
         member_count: 2,
+        group_key_epoch: None,
     };
 
     let drive =

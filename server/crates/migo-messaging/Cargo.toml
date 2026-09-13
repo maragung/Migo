@@ -21,4 +21,5 @@ parking_lot.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+migo-crypto.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
