@@ -5,9 +5,9 @@
  * runs the ratchets, the transport resumes a socket, each domain speaks one slice of the protocol. This
  * module is where they meet. {@link MigoClient} owns the lifecycle (bootstrap over REST, then a resumable
  * gateway session), constructs the two crypto layers over a single {@link KeyStore}, hands every domain the
- * shared {@link Rpc}, and supplies the two seams the messaging layer cannot fill itself: which devices a
- * broadcast must reach ({@link DeviceDirectory}) and how to fetch a peer's key bundle ({@link
- * PeerBundleSource}).
+ * shared {@link Rpc}, and supplies the seams the messaging layer cannot fill itself: which devices a
+ * broadcast must reach ({@link DeviceDirectory}), how to fetch a peer's key bundle ({@link
+ * PeerBundleSource}), and how to fetch the pages a detected sequence gap is missing ({@link GapFiller}).
  *
  * # Why the client backs the device directory
  *
@@ -117,7 +117,7 @@ import { NotificationsDomain } from './domains/notifications.js';
 import { SocialDomain } from './domains/social.js';
 import { EconomyDomain } from './domains/economy.js';
 import { GamesDomain } from './domains/games.js';
-import type { DeviceAddress, DeviceDirectory } from './domains/messaging.js';
+import type { DeviceAddress, DeviceDirectory, GapFiller } from './domains/messaging.js';
 import type { ConversationKind } from '@migo/protocol';
 import type { ServerEndpoint } from './server-endpoint.js';
 
@@ -193,6 +193,16 @@ export interface MigoClientOptions {
 /** The default prekey top-up: replenish a full batch once fewer than sixteen remain. */
 export const DEFAULT_REPLENISH_POLICY: PrekeyReplenishPolicy = { low: 16, batch: 64 };
 
+/** One page of an automatic gap fill, matching {@link MigoClient.catchUp}'s page size. */
+const GAP_FILL_PAGE_LIMIT = 200;
+
+/**
+ * How many pages one automatic gap fill may ask for before it hands the conversation back to live
+ * delivery. A larger hole is not abandoned — the next above-gap event continues the walk from the
+ * watermark — but a single trigger must never turn into an unbounded history crawl.
+ */
+const MAX_GAP_FILL_PAGES = 5;
+
 /**
  * The live object graph for one connected session.
  *
@@ -229,10 +239,14 @@ interface Connected {
  * Construct it with {@link MigoClient.create}, then bring it online with {@link register} (a new account),
  * {@link login} (an existing one), or {@link resume} (a grant persisted from a previous run). Once
  * connected, the domain getters expose the protocol surface, and the orchestration helpers on this class
- * ({@link startConversation}, {@link loadConversations}, {@link watchConversation}, {@link catchUp}) wire
- * the pieces the domains deliberately leave to the composition root — subscription and membership.
+ * ({@link startConversation}, {@link loadConversations}, {@link watchConversation}, {@link catchUp},
+ * {@link startRoomConversation} with its restore and teardown companions {@link rehydrateRoom} and
+ * {@link teardownRoom}) wire the pieces the domains deliberately leave to the composition root —
+ * subscription and membership. The client is also the messaging layer's third seam: a mid-session
+ * gap in a conversation's sequence numbers is filled by {@link fillGap}, called by the domain so
+ * the application never has to poll for holes itself.
  */
-export class MigoClient implements DeviceDirectory, PeerBundleSource {
+export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller {
   readonly #options: MigoClientOptions;
   readonly #bootstrap: BootstrapClient;
   readonly #keyStore: KeyStore;
@@ -255,7 +269,8 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    * Room id to its conversation id, so a room's member events can patch the conversation they
    * belong to. Rooms publish membership movement on the room's own topic naming the room, while
    * the membership cache is keyed by conversation — this is the bridge {@link #applyRoomMemberEvent}
-   * reads. Filled by {@link startRoomConversation}, which is the one moment both halves are known.
+   * reads. Filled by {@link startRoomConversation}, which is the one moment both halves are known,
+   * and rebuilt after a restore by {@link rehydrateRoom}; dropped by {@link teardownRoom}.
    */
   readonly #roomConversations = new Map<Id, Id>();
   /**
@@ -717,7 +732,9 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    * is the join's other half: the roster is paged until a short page (a room can dwarf the page),
    * cached complete, and both the conversation topic (messages) and the room topic (membership
    * and state) are subscribed. Callers that resume an already-joined room may call it again
-   * freely — the pages re-read, the subscriptions are idempotent server-side.
+   * freely — the pages re-read, the subscriptions are idempotent server-side. A caller restoring
+   * from persistence without a join handle in hand wants {@link rehydrateRoom} instead, which
+   * reaches this same prime from a room id alone.
    */
   async startRoomConversation(conversationId: Id, roomId: Id, rosterPageSize = 500): Promise<void> {
     const ctx = this.#requireConnected();
@@ -741,6 +758,77 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#roomConversations.set(roomId, conversationId);
     await this.watchConversation(conversationId);
     await this.watchRoom(roomId);
+  }
+
+  /**
+   * Rebuilds a joined room's bridge after a reload or restart, so the room's member events reach
+   * the conversation they belong to again.
+   *
+   * The room-to-conversation bridge is written by exactly one moment — {@link
+   * startRoomConversation}, right after a join — and lives only in memory, so a restored session
+   * starts with it empty: {@link #applyRoomMemberEvent} then no-ops for every room, the membership
+   * cache goes stale, and the next send seals for the group as it stood before any movement the
+   * session missed — a joiner who can never decrypt (§163 makes the sender-key audience the
+   * sender's own choice, and the pending buffer only masks the silence). This is the restore
+   * path: it learns the room's conversation id the one way the wire offers — a `rooms.join`,
+   * which §156 makes free of fanout for a member already seated — and then runs
+   * {@link startRoomConversation}'s prime: the roster is paged into the membership cache and both
+   * topics are subscribed.
+   *
+   * Cheap and idempotent by design, because a restore loop calls it for every persisted room: a
+   * room whose bridge already stands is answered from the map with no wire work at all, so the
+   * first pass pays one join and one roster walk per room and every later pass pays nothing. The
+   * join's honest edges are the join's own: a room the account departed while this device was
+   * away is re-entered (the caller believed it was still in), and one it was banned from refuses.
+   *
+   * Resolves with the conversation id — the handle a restore needs to open the thread.
+   */
+  async rehydrateRoom(roomId: Id, rosterPageSize = 500): Promise<Id> {
+    const bridged = this.#roomConversations.get(roomId);
+    if (bridged !== undefined) {
+      return bridged;
+    }
+    const ctx = this.#requireConnected();
+    const handle = await ctx.rooms.join(roomId);
+    await this.startRoomConversation(handle.conversationId, roomId, rosterPageSize);
+    return handle.conversationId;
+  }
+
+  /**
+   * Tears a room down in one call: both of its topics are unsubscribed in a single frame, the
+   * conversation's crypto state is forgotten, and the bridge and the membership cache are dropped.
+   *
+   * A leaver otherwise orchestrates four calls by hand — `unwatchRoom`, `unwatchConversation`,
+   * `messaging.forget`, `invalidateConversation` — and must carry the room's conversation id
+   * correctly across all of them. Missing any one leaves residue with its own symptom: a tracked
+   * topic the next session reset re-asks (and the server refuses, §156's leaver revocation), a
+   * sender key kept live for a room that can no longer be read, a stale membership an
+   * already-departed member could still be sealed for, or a bridge entry that misroutes the next
+   * member event. This is the one call that does all four, in the order that stops the inflow
+   * first.
+   *
+   * Call it after `rooms.leave` resolves — the same moment `unwatchRoom` documents — or when a
+   * restored session learns (from a refused {@link rehydrateRoom}, or a self-departure event) that
+   * a persisted room is no longer theirs. The conversation id is taken from the bridge; pass
+   * `conversationId` when the bridge was never built, the reload-then-leave shape where the caller
+   * knows both ids from its own persistence. With neither, only the room topic is dropped: nothing
+   * is mapped, so there is nothing else to clean. Idempotent throughout.
+   */
+  async teardownRoom(roomId: Id, conversationId?: Id): Promise<void> {
+    const bridged = this.#roomConversations.get(roomId) ?? conversationId;
+    const topics: Topic[] = [{ kind: TopicKind.Room, id: roomId }];
+    if (bridged !== undefined) {
+      topics.push({ kind: TopicKind.Conversation, id: bridged });
+    }
+    // One frame for both topics: the wire carries a topic list on purpose, and a leaver's
+    // goodbye should not cost two round trips.
+    await this.unsubscribe(topics);
+    if (bridged === undefined) {
+      return;
+    }
+    this.messaging.forget(bridged);
+    this.invalidateConversation(bridged);
+    this.#roomConversations.delete(roomId);
   }
 
   /**
@@ -780,6 +868,41 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       ctx.messaging.ingest(event);
     }
     return response;
+  }
+
+  /**
+   * Fills a mid-session gap: pages the missing range in and replays it through the live path.
+   *
+   * This is the {@link GapFiller} seam the messaging layer calls when a live sequence lands above
+   * watermark + 1 — a hole, in a space §152 says is gapless — and nothing else is already filling
+   * that conversation. Each page is asked from the watermark as it stands (ingest advances it) and
+   * bounded to {@link GAP_FILL_PAGE_LIMIT} events; the whole fill is bounded to {@link
+   * MAX_GAP_FILL_PAGES} pages, so one trigger can never become an unbounded walk, and what remains
+   * of a larger hole continues on the next above-gap event. Between pages the fill parks on the
+   * sync gate, the way §158 asks of any paging sync work a backgrounded page must stop neatly.
+   * A page that does not move the watermark ends the fill: the hole is the server's to answer
+   * (history gone, or a truncation the caller must render), not ours to re-ask in a loop.
+   */
+  async fillGap(conversationId: Id, toSeq: number): Promise<void> {
+    const ctx = this.#requireConnected();
+    for (let page = 0; page < MAX_GAP_FILL_PAGES; page += 1) {
+      const haveSeq = ctx.messaging.watermark(conversationId);
+      if (haveSeq === undefined || haveSeq >= toSeq) {
+        return;
+      }
+      await this.whenVisible();
+      const response = await ctx.sync.fetch(conversationId, haveSeq, GAP_FILL_PAGE_LIMIT, {
+        toSeq,
+      });
+      for (const event of response.messages) {
+        ctx.messaging.ingest(event);
+      }
+      if (!response.more || ctx.messaging.watermark(conversationId) === haveSeq) {
+        // The server has no more to give for this hole, or gave nothing the watermark moved on —
+        // either way the fill has nothing further to ask.
+        return;
+      }
+    }
   }
 
   // --- the offline outbox ---
@@ -974,7 +1097,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     if (members === undefined) {
       throw new SdkError(
         `migo: membership for conversation ${conversationId} is unknown; ` +
-          'call startConversation, loadConversations, or rememberMembers first',
+          'call startConversation, rehydrateRoom, loadConversations, or rememberMembers first',
       );
     }
     const audience = new Set<Id>(members.ids);
@@ -1382,6 +1505,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
         groupCrypto,
         this,
         this.#options.onEventError,
+        this,
       ),
       conversations: new ConversationsDomain(rpc, this.#options.onEventError),
       sync: new SyncDomain(rpc),
