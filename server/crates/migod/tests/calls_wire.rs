@@ -172,7 +172,18 @@ struct LiveSession {
 }
 
 impl LiveSession {
+    /// A participant's session: the HELLO carries the CALLS bit, because every frame
+    /// this suite drives belongs to the call family and brief section 72 ties that
+    /// family to the bit — a session that did not ask is refused
+    /// FEATURE_NOT_NEGOTIATED (the test at the bottom of this file pins that half;
+    /// this helper is the half a participant needs to place a ring at all).
     async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        Self::connect_with_features(addr, grant, migo_protocol::features::CALLS).await
+    }
+
+    /// `connect` with an explicit feature mask, backing off exactly the same way — the
+    /// limiter charges the handshake the same whatever bits the HELLO carried.
+    async fn connect_with_features(addr: SocketAddr, grant: &Grant, features: u64) -> Self {
         // A third handshake from one IP inside the limiter's window is refused
         // with a retry-after — the server talking, not the server broken — so
         // the session waits exactly as long as it is told and tries again, the
@@ -182,7 +193,7 @@ impl LiveSession {
             if backoff > 0 {
                 tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
             }
-            match Self::handshake(addr, grant).await {
+            match Self::handshake_with_features(addr, grant, features).await {
                 Ok(session) => return session,
                 Err(retry_after_ms) => backoff = retry_after_ms,
             }
@@ -190,9 +201,15 @@ impl LiveSession {
         panic!("the handshake never succeeds even after backing off as instructed");
     }
 
-    /// One full connection attempt, returning the retry-after the server asked
-    /// for when it refuses the handshake as rate-limited.
-    async fn handshake(addr: SocketAddr, grant: &Grant) -> Result<Self, u64> {
+    /// One full connection attempt with an explicit feature mask — the sessions the
+    /// feature gate is under test on are the ones that pass something other than the
+    /// family's bit — returning the retry-after the server asked for when it refuses
+    /// the handshake as rate-limited.
+    async fn handshake_with_features(
+        addr: SocketAddr,
+        grant: &Grant,
+        features: u64,
+    ) -> Result<Self, u64> {
         let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
             .await
             .expect("connecting does not stall")
@@ -200,6 +217,7 @@ impl LiveSession {
 
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
@@ -672,4 +690,69 @@ async fn the_answer_relay_tells_both_parties_the_call_connected() {
     // out before it. Nothing further is owed to the callee's own session, and
     // that is the design — the answering device's truth is its reply and its
     // own screen state, not an event it must wait for.
+}
+
+#[tokio::test]
+async fn a_session_without_the_calls_bit_is_refused_the_ring_and_keeps_the_connection() {
+    // Brief section 72: the CALLS bit is a real switch, not an advertisement. A session
+    // whose HELLO never asked for the bit is answered FEATURE_NOT_NEGOTIATED for the
+    // family's opcodes — refused, not ignored — and the connection keeps serving every
+    // frame the negotiated set does allow, exactly as section 148 puts it.
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "bitlesscaller").await;
+    let callee = registered_grant(&app, "bittedcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "bit-room").await;
+
+    // One session that asked for the bit and one that did not — the two halves of the
+    // intersection, on the same node, over the same wire. The bitted session is the
+    // control: the suite's other tests prove its invites go through.
+    let mut bitless = LiveSession::connect_with_features(addr, &caller, 0).await;
+    let _bitted = LiveSession::connect(addr, &callee).await;
+
+    let call_id = Id::from_bytes([0xB1; 16]);
+    send(
+        &mut bitless.stream,
+        Opcode::CallInvite,
+        91,
+        &CallInvite {
+            call_id,
+            conversation_id,
+            callee_id: callee.account_id,
+            media_kind: 0,
+            caller_device: caller.device_id,
+            capabilities: 0,
+            sealed_offer: vec![0x11; 48],
+        },
+    )
+    .await;
+    let refusal = LiveSession::reply_to_correlation(&mut bitless.stream, 91).await;
+    assert!(
+        refusal.header.is_error(),
+        "the invite from a session without the CALLS bit is an error reply"
+    );
+    let error: migo_protocol::Error = from_frame(&refusal).expect("the refusal decodes");
+    assert_eq!(
+        error.code,
+        migo_protocol::codes::FEATURE_NOT_NEGOTIATED,
+        "the family's opcode is refused with the feature error, not a generic one"
+    );
+
+    // The refusal is answered, not fatal: the same connection still serves an opcode
+    // outside the family — the next frame the client sends is a PING, and the PONG is
+    // the proof the session was never marked for close.
+    send(
+        &mut bitless.stream,
+        Opcode::Ping,
+        92,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = LiveSession::reply_to_correlation(&mut bitless.stream, 92).await;
+    assert!(
+        !pong.header.is_error(),
+        "a session refused one feature keeps serving the frames it did negotiate"
+    );
 }

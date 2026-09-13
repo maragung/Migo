@@ -174,8 +174,13 @@ impl LiveSession {
             .expect("connecting does not stall")
             .expect("the connection is accepted");
 
+        // The CALLS bit: the suite drives CALL_SDP/CALL_END/CALL_KEY_UPDATE alongside the
+        // SFU opcodes, and the non-SFU call family is gated on the negotiated bit
+        // (brief section 72). The SFU opcodes themselves stay ungated — the decision
+        // section 165 records — but the ring that leads to them is not.
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features: migo_protocol::features::CALLS,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()

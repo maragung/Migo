@@ -757,8 +757,17 @@ fn hello() -> Hello {
 /// A greeting that carries an inline access token and device, the shape that promotes a session
 /// straight to `Ready` when the token verifies.
 fn hello_with_token(token: &str, device: Id) -> Hello {
+    hello_with_token_features(token, device, 0)
+}
+
+/// The token-bearing greeting plus a feature mask: the HELLO a client sends when the test's
+/// frames belong to a family the registry ties to a bit (brief section 72) — a session that
+/// never asked for the bit must not be sent the family's frames, so a test that wants to see
+/// them has to ask the way a real client does.
+fn hello_with_token_features(token: &str, device: Id, features: u64) -> Hello {
     Hello {
         protocol_version: PROTOCOL_VERSION,
+        features,
         access_token: Some(token.to_string()),
         device_id: Some(device),
         ..Default::default()
@@ -1774,7 +1783,13 @@ async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
     member.client(
         Opcode::Hello,
         1,
-        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+        // Both members ask for the ROOMS bit: the frames this test drives are ROOM_MEMBER_EVENT,
+        // and brief section 72 withholds a family's frames from a session that did not ask.
+        &hello_with_token_features(
+            VALID_TOKEN,
+            device_of(ACCOUNT),
+            migo_protocol::features::ROOMS,
+        ),
     );
     member.client(
         Opcode::Subscribe,
@@ -1788,7 +1803,11 @@ async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
     kicked_pipe.client(
         Opcode::Hello,
         1,
-        &hello_with_token(SECOND_TOKEN, device_of(KICKED)),
+        &hello_with_token_features(
+            SECOND_TOKEN,
+            device_of(KICKED),
+            migo_protocol::features::ROOMS,
+        ),
     );
     kicked_pipe.client(
         Opcode::Subscribe,
@@ -2385,7 +2404,14 @@ async fn backpressure_drops_droppable_and_coalescable_but_never_critical() {
     pipe.client(
         Opcode::Hello,
         1,
-        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+        // The flood publishes a PRESENCE_EVENT among its frames, so the session asks for the
+        // bit — the drop counters under test are the mailbox's, and the mailbox never sees a
+        // frame the session did not negotiate (brief section 72).
+        &hello_with_token_features(
+            VALID_TOKEN,
+            device_of(ACCOUNT),
+            migo_protocol::features::PRESENCE,
+        ),
     );
     pipe.client(
         Opcode::Subscribe,
@@ -3162,7 +3188,7 @@ async fn a_batching_session_receives_one_envelope_per_burst() {
     pipe.client(
         Opcode::Hello,
         1,
-        &hello_with_features(migo_protocol::features::BATCHING),
+        &hello_with_features(migo_protocol::features::BATCHING | migo_protocol::features::PRESENCE),
     );
     pipe.client(
         Opcode::Subscribe,
@@ -3224,8 +3250,14 @@ async fn a_session_that_did_not_ask_keeps_bare_frames() {
     });
     let h = builder.build();
     let pipe = Pipe::new();
-    // No BATCHING bit — the desktop's HELLO, exactly.
-    pipe.client(Opcode::Hello, 1, &hello_with_features(0));
+    // No BATCHING bit — the desktop's HELLO, exactly. The PRESENCE bit is there because the
+    // burst's frames are presence events and section 72 withholds them from a session that
+    // did not ask; only the batching decision is under test here.
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::PRESENCE),
+    );
     pipe.client(
         Opcode::Subscribe,
         2,
@@ -3286,7 +3318,7 @@ async fn a_rollout_that_withholds_batching_keeps_the_whole_session_bare() {
     pipe.client(
         Opcode::Hello,
         1,
-        &hello_with_features(migo_protocol::features::BATCHING),
+        &hello_with_features(migo_protocol::features::BATCHING | migo_protocol::features::PRESENCE),
     );
     pipe.client(
         Opcode::Subscribe,
@@ -3334,7 +3366,7 @@ async fn a_batched_burst_preserves_the_mailbox_order() {
     pipe.client(
         Opcode::Hello,
         1,
-        &hello_with_features(migo_protocol::features::BATCHING),
+        &hello_with_features(migo_protocol::features::BATCHING | migo_protocol::features::PRESENCE),
     );
     pipe.client(
         Opcode::Subscribe,
