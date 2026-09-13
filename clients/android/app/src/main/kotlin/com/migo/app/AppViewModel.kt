@@ -61,6 +61,8 @@ import com.migo.app.model.groupMemberLine
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.ResetResync
+import com.migo.app.session.RoomInfoStore
+import com.migo.app.session.RoomRecord
 import com.migo.app.session.SessionHooks
 import com.migo.core.ConnectionState
 import com.migo.core.account.AVALANCHE_MAINNET
@@ -442,6 +444,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * is public directory data.
      */
     private val roomInfo = ConcurrentHashMap<Id, RoomSummary>()
+
+    /**
+     * Conversation id to its room id: the bridge this shell holds in memory, the reverse of what
+     * [RoomInfoStore] persists.
+     *
+     * The list's rows and the open chat key a room's events by conversation, while the room
+     * service publishes them naming the room — this is the one map that joins the halves after a
+     * restart. [noteRoom] fills it from a join reply, [rehydrateRooms] from the persisted record,
+     * and the departure paths drop it. It is *not* filled by [rememberRooms]: a directory row is
+     * a room this account can see, not one it is in, and a bridge entry for a room the account
+     * never joined would rotate and patch a conversation that is not its own.
+     */
+    private val roomOf = ConcurrentHashMap<Id, Id>()
 
     /**
      * The member count this shell last saw for a group, by conversation id.
@@ -925,6 +940,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // ratchets that re-decrypt them are gone, and a stale row is a lie about what the
             // server holds).
             transcripts.clear()
+            // The followed-room record is the same inheritance question by another door: room
+            // names and bridges are a map of where this account spends its time, and the store
+            // is scoped to the account — the copy goes with the session, in memory and on disk,
+            // or the next account's first rehydration would resurrect this one's rooms.
+            roomInfo.clear()
+            roomOf.clear()
+            try {
+                withContext(Dispatchers.IO) { RoomInfoStore.clear(getApplication<Application>().filesDir) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Best effort, like the log directory below it.
+            }
             // The auto-saved chat logs are the same conversations in plaintext on disk, written
             // by this device at its owner's ask — the keys going does not make them private
             // again — so they follow the transcripts out, or the sign-out promise of nothing
@@ -1190,6 +1218,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.watchConversation(conversationId)
+                // A room chat also keeps its room topic watched. The join's own start call did
+                // this once, but the tracked set is what a reset re-subscribes from, and a room
+                // joined before this bridge existed (or whose watch was lost some other way)
+                // would otherwise never receive the room's member and state events again. The
+                // watch is idempotent and a refusal is quiet: a room this account has since left
+                // is the next list refresh's story, not the chat's.
+                val room = row?.roomId
+                if (row?.kind == ConversationKind.Room && room != null) {
+                    try {
+                        live.client.watchRoom(room)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // The conversation topic above carries the thread; the room's own deltas
+                        // stay stale until the next re-join.
+                    }
+                }
                 // A direct chat's header draws the peer's avatar, and the conversation list's row
                 // knew the peer but never fetched their profile: the read here is what makes the
                 // picture (and the name, when only the title was known) arrive with the open.
@@ -1206,12 +1251,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         // The monogram stays; the chat does not fail over a decoration.
                     }
                 }
-                // The tail fetch starts at the highest sequence the cache holds: everything at or
-                // below it is already decrypted as far as this device is concerned, and asking the
-                // server for it again would replay ciphertext the ratchet refuses as key reuse --
-                // the empty-transcript bug the cache exists for. A conversation with no cache yet
-                // (first open of the session) still fetches from the beginning.
-                val held = transcripts[conversationId]?.lastOrNull()?.seq ?: HISTORY_FROM
+                // The tail fetch starts at the highest sequence this device holds: everything at or
+                // below it is already accounted for as far as this device is concerned, and asking
+                // the server for it again would replay ciphertext the ratchet refuses as key reuse --
+                // the empty-transcript bug the cache exists for. The core's contiguous watermark is
+                // the honest cursor — it counts the key exchanges and tombstones the transcript
+                // cache never sees, so it is never behind the last rendered message; the cached
+                // transcript is the fallback for a conversation the watermark has not counted (and
+                // null still fetches from the beginning, the first open of the session).
+                val held = live.client.watermark(conversationId)
+                    ?: transcripts[conversationId]?.lastOrNull()?.seq
+                    ?: HISTORY_FROM
                 val response = live.client.catchUp(conversationId, held, HISTORY_LIMIT)
                 inChat(conversationId) { it.copy(loading = false) }
                 // The read receipt is the preference's to withhold: opening a conversation still
@@ -2503,9 +2553,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Projects a join (or create) reply into the conversation list, keeping the room id for leave. */
+    /**
+     * Projects a join (or create) reply into the conversation list, keeping the room id for leave.
+     *
+     * The bridge and the persisted record go down with the row: this is the one wire moment that
+     * names both the room and its conversation, so it is the moment the reverse map is filled and
+     * the store is rewritten — a restart that comes later rebuilds everything the reader sees
+     * from what this call persisted.
+     */
     private fun noteRoom(joined: RoomJoinResponse) {
         roomInfo[joined.room.roomId] = joined.room
+        roomOf[joined.conversationId] = joined.room.roomId
+        persistRoomRecords()
         val fresh = ConversationRow(
             conversationId = joined.conversationId,
             title = joined.room.name,
@@ -2565,14 +2624,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.rooms.leave(roomId)
-                // The server revoked both topics the moment the leave landed; these drops are
-                // for the client's own tracked set, so a later session reset does not re-ask
-                // for a room the account is no longer in. Each is idempotent and failures are
-                // swallowed: tidying a set the server already cleaned is not a failure the
-                // leaver needs to read.
-                runCatching { live.client.unwatchRoom(roomId) }
-                runCatching { live.client.unwatchConversation(conversationId) }
+                // The teardown is one call for all four halves of the leave's client-side
+                // cleanup: both topics dropped from the tracked set in a single frame, the
+                // conversation's crypto state forgotten, the membership cache invalidated, and
+                // the bridge entry removed. Missing any one leaves residue with its own symptom
+                // — a topic a later reset re-asks (and the server refuses), a sender key kept
+                // live for a room that can no longer be read, or a member event misrouted to a
+                // conversation that is gone. Idempotent, so a room already torn down costs
+                // nothing to name again.
+                runCatching { live.client.teardownRoom(roomId, conversationId) }
                 roomInfo.remove(roomId)
+                roomOf.remove(conversationId)
+                persistRoomRecords()
                 signedIn { current ->
                     current.copy(
                         conversations = current.conversations.filterNot { it.conversationId == conversationId },
@@ -2969,7 +3032,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 action(live.client.social)
-                loadFriends()
+                // The busy mark comes off the moment the action lands: it existed to keep a
+                // double-tap from double-sending, and a mark that outlived its action would
+                // block every later action on the same account for the session.
+                signedIn { it.copy(friends = it.friends.copy(busy = it.friends.busy - userId)) }
+                // The graph re-read is the same debounced reload the friend-event stream drives:
+                // the action's own reply is not the graph, and the event it fans out arrives on
+                // the bridge anyway -- the reload here is the belt to that braces.
+                scheduleFriendRefresh()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -2977,6 +3047,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /**
+     * Re-reads the friend graph a moment after the last cue, not per cue.
+     *
+     * The same cancel-and-wait shape the search field uses: cues that arrive inside the window
+     * collapse into one read, and the read that runs is always the one the freshest state owes.
+     */
+    private fun scheduleFriendRefresh() {
+        friendRefreshJob?.cancel()
+        friendRefreshJob = viewModelScope.launch {
+            delay(FRIEND_REFRESH_DEBOUNCE_MS)
+            loadFriends()
+        }
+    }
+
+    private var friendRefreshJob: Job? = null
 
     /** Records the search field; the read is debounced, not per keystroke. */
     fun setSearchQuery(text: String) {
@@ -4650,13 +4736,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onTyping { typing(it) })
         // A pushed notification is a cue to reconcile every inbox-shaped surface, and a friend
         // event a cue to re-read the graph -- the same reconcile-don't-trust rule each section
-        // applies on its own refresh button. The re-read runs whatever section is open: the
-        // friends cache is app-global and section entry only loads it when empty, so an event
-        // that arrived while another tab was showing would otherwise sit unapplied until some
+        // applies on its own refresh button, but debounced rather than per event: the server
+        // fans a burst of friend events out for what is one change (a request answered moves
+        // both accounts' rows), and a graph read per event would spend the round trips and
+        // flicker the list for each. The re-read runs whatever section is open: the friends
+        // cache is app-global and section entry only loads it when empty, so an event that
+        // arrived while another tab was showing would otherwise sit unapplied until some
         // unrelated action reloaded the list -- the exact "accepted but not showing" state the
         // event exists to prevent.
         subscriptions.add(opened.client.onNotification { pushed(it) })
-        subscriptions.add(opened.client.onFriendEvent { loadFriends() })
+        subscriptions.add(opened.client.onFriendEvent { scheduleFriendRefresh() })
         // The three room streams. They land in the cache and, when they name the open room, in its
         // header, timeline and member sheet; a stream for any other room updates the cache and stops
         // there. Added here with the rest so a reconnect re-bridges all of them together.
@@ -4728,6 +4817,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             groups.state.collect { _groupCallState.value = it }
         }
         refreshConversations()
+        // The followed rooms restore beside the list: the conversation list will not name them,
+        // and without this pass every room renders as an anonymous row after a restart and
+        // stops receiving the room's own events. Runs on its own coroutine because the list's
+        // re-read is on one too — the two converge, whichever lands first.
+        rehydrateRooms()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
         loadWallet()
@@ -4843,33 +4937,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         },
         // A fresh session was opened behind a reconnect the server could not resume. The SDK has
         // already re-subscribed every tracked topic; what it cannot do is re-read this shell's
-        // own surfaces, so the section 158 resync runs here -- the list, and the open chat's gap
-        // from its watermark. Hopped to the main dispatcher first, because the state and the
-        // transcript cache this reads are main-thread state, and the hook fires on whichever
-        // thread the SDK noticed the reset on.
+        // own surfaces, so the section 158 resync runs here -- the list, and the held
+        // conversations' gaps from their watermarks, the open chat first. Hopped to the main
+        // dispatcher first, because the state and the transcript cache this reads are
+        // main-thread state, and the hook fires on whichever thread the SDK noticed the reset on.
         onReset = {
             viewModelScope.launch {
                 val open = signedInState?.open?.conversationId
-                resetResync.run(open) { conversationId ->
-                    transcripts[conversationId]?.lastOrNull()?.seq
-                }
+                resetResync.run(
+                    open,
+                    heldSeq = { conversationId ->
+                        // The core's contiguous watermark first — it counts the key exchanges and
+                        // tombstones the transcript cache never sees — with the cached transcript
+                        // as the fallback for a conversation the watermark has not counted.
+                        session?.client?.watermark(conversationId)
+                            ?: transcripts[conversationId]?.lastOrNull()?.seq
+                    },
+                    conversations = {
+                        signedInState?.conversations?.map { it.conversationId } ?: emptyList()
+                    },
+                )
             }
         },
-    )
+    }
 
     /**
      * The section 158 resync's two actions, as the phone-free suite pins them: the list re-read
-     * and the open chat's watermark-keyed catch-up. Constructed once so the hook that fires it
-     * is the same object every reset, not a fresh closure each sign-in.
+     * and the held conversations' watermark-keyed catch-up, the open chat first. Constructed once
+     * so the hook that fires it is the same object every reset, not a fresh closure each sign-in.
      */
     private val resetResync = ResetResync(
         reloadConversations = { refreshConversations() },
-        catchUpOpenChat = { conversationId, haveSeq -> catchUpAfterReset(conversationId, haveSeq) },
+        catchUpConversation = { conversationId, haveSeq -> catchUpAfterReset(conversationId, haveSeq) },
     )
 
     /**
-     * Fetches the open chat's gap after a fresh-session reset, from the highest sequence the
-     * transcript cache holds.
+     * Fetches a held conversation's gap after a fresh-session reset, from the highest sequence the
+     * shell holds — the open chat first, then the background ones.
      *
      * The replays arrive on the ordinary message listener, exactly the way [open]'s catch-up
      * lands, so the open chat updates, the unread rows bump, and the read receipts ride along
@@ -5086,6 +5190,121 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Rewrites the persisted room record from the bridges this shell holds.
+     *
+     * Persisted at the moments the durable facts move — a join, a leave, a departure, the boot
+     * rehydration — rather than on every count delta: the bridge and the name are what a restart
+     * cannot re-derive, while counts and topics are a floor the room's own state deltas refresh
+     * the moment the topic is watched again. The rooms this account follows are few, so a full
+     * rewrite per moment is cheaper than any incremental scheme and cannot drift from what the
+     * shell holds.
+     */
+    private fun persistRoomRecords() {
+        val accountId = (_state.value as? AppState.SignedIn)?.accountId ?: return
+        val rooms = ArrayList<RoomRecord>()
+        for ((conversationId, roomId) in roomOf) {
+            val summary = roomInfo[roomId] ?: continue
+            rooms.add(RoomInfoStore.record(summary, conversationId))
+        }
+        val baseDir = getApplication<Application>().filesDir
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { RoomInfoStore.save(baseDir, accountId, rooms) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A failed write costs a stale name after the next restart, never a wrong
+                // screen now.
+            }
+        }
+    }
+
+    /**
+     * Restores the followed rooms once per session: their bridges and names back in place, their
+     * topics back under watch, so a restarted app is the shell it was before the restart.
+     *
+     * Everything here is re-derived from the persisted record because the wire will not name it
+     * again: the conversation list carries neither a room's id nor its name, and the SDK's own
+     * room-to-conversation bridge is in-memory only. Each record is rehydrated through the
+     * client's own restore call — an idempotent re-join that pages the roster and subscribes
+     * both topics — so the room's membership cache, its seal audience, and its live deltas all
+     * come back with it. The stored copy is only a floor: a join in this session re-notes the
+     * room with fresher counts over it.
+     *
+     * The stored copy is scoped to the account, and a copy naming a different account is
+     * discarded outright rather than merged — room names are a map of where an account spends
+     * its time, and the next account on this device inherits nothing of it. A record that
+     * refuses its rehydration (a room the account was banned from while this device was away)
+     * is quietly dropped and not persisted again; the honest edge of the join's own semantics
+     * is that a departed room is re-entered, because the caller believed it was still in.
+     */
+    private fun rehydrateRooms() {
+        val live = session ?: return
+        viewModelScope.launch {
+            val baseDir = getApplication<Application>().filesDir
+            val stored = try {
+                withContext(Dispatchers.IO) { RoomInfoStore.load(baseDir) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Unreadable or absent storage: the session starts without remembered rooms.
+                null
+            } ?: return@launch
+            if (stored.accountId != live.client.accountId) {
+                try {
+                    withContext(Dispatchers.IO) { RoomInfoStore.clear(baseDir) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // The copy is inert either way; a file that will not delete is one the next
+                    // sign-in of the owning account can still read.
+                }
+                return@launch
+            }
+            val revived = ArrayList<RoomRecord>(stored.rooms.size)
+            for (record in stored.rooms) {
+                try {
+                    val conversationId = live.client.rehydrateRoom(record.roomId)
+                    roomOf[conversationId] = record.roomId
+                    roomInfo[record.roomId] = record.summary()
+                    revived.add(record)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A refused rehydration costs this device the room until the next list
+                    // refresh; the membership itself is server-side truth and needs no repair
+                    // here.
+                }
+            }
+            if (revived.size != stored.rooms.size) {
+                persistRoomRecords()
+            }
+            // The rows the list already drew (or is about to draw) gain their room ids and
+            // names; the row builder reads the same maps, so this patch and a list re-read
+            // converge on the same rows whichever lands first.
+            signedIn { current ->
+                current.copy(
+                    conversations = current.conversations.map { existing -> withRoomNamed(existing) },
+                    windows = current.windows.map { existing ->
+                        val roomId = roomOf[existing.conversationId]
+                        if (roomId != null) existing.copy(roomId = roomId) else existing
+                    },
+                )
+            }
+        }
+    }
+
+    /** One row, re-keyed to its room and re-named from the room's record when this shell holds one. */
+    private fun withRoomNamed(existing: ConversationRow): ConversationRow {
+        val roomId = roomOf[existing.conversationId] ?: return existing
+        if (existing.kind != ConversationKind.Room) return existing
+        return existing.copy(
+            roomId = roomId,
+            title = roomInfo[roomId]?.name?.takeIf { it.isNotBlank() } ?: existing.title,
+        )
+    }
+
+    /**
      * A room's live shape, from the last summary seen for it, as the Rooms directory reads it.
      *
      * Public where [liveInfoFor] is private because the directory is a different caller with the
@@ -5150,15 +5369,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             current?.open,
         )
         if (departed != null) {
+            // The one-call teardown for the same four reasons [leaveRoom] names: both topics out
+            // of the tracked set in one frame, the crypto state forgotten, the membership cache
+            // invalidated, the bridge entry dropped. The record follows the room out, so a
+            // restart does not resurrect a room the server has already taken away.
             roomInfo.remove(event.roomId)
+            roomOf.remove(departed)
+            persistRoomRecords()
             viewModelScope.launch {
                 try {
-                    live.client.messaging.forget(departed)
+                    live.client.teardownRoom(event.roomId, departed)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
                     // The room is already gone from the screen; the crypto state it held is
-                    // sealed on disk and a failed forget costs nothing the next sign-in will
+                    // sealed on disk and a failed teardown costs nothing the next sign-in will
                     // not re-derive.
                 }
             }
@@ -5170,6 +5395,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             return
+        }
+
+        // A departure from a room this shell bridges kills the room's outbound chain: the member
+        // who left may still hold its key, and the one thing a chain must not do after a member
+        // leaves is keep sealing. The next send builds a fresh chain and distributes it to
+        // everyone remaining -- the same rule the group's own membership churn follows above,
+        // and the desktop client applies to rooms. A member *joining* needs no rotation: the
+        // chain key they are handed starts at the current position, so history stays sealed to
+        // them. A `Disconnected` rotates too, the way the desktop's reference does, because a
+        // disconnect starts the grace period that ends in the member's removal.
+        if (change == MemberChange.Left ||
+            change == MemberChange.Disconnected ||
+            change == MemberChange.Kicked ||
+            change == MemberChange.Banned
+        ) {
+            roomOf.entries.firstOrNull { it.value == event.roomId }?.let { (conversationId, _) ->
+                live.client.messaging.rotateSenderKey(conversationId)
+            }
         }
 
         // The join's other half, and rooms owe conversations the same doorbell. A `Joined` naming
@@ -5498,11 +5741,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?.filter { it != live.client.accountId }
             ?.singleOrNull()
             ?.takeIf { summary.kind == ConversationKind.Direct }
+        // The room behind a Room-kind conversation, from the bridge the join (or the boot
+        // rehydration) built. The list's own summary carries no room id, and a row without one
+        // breaks every room-keyed behaviour downstream: a self-departure event that names the
+        // room can no longer find the conversation to close, and the open chat's notices and
+        // counts can no longer find the room they belong to. Null when this shell holds no
+        // bridge — a room the account is not in, or one joined before the bridge existed.
+        val room = if (summary.kind == ConversationKind.Room) {
+            roomOf[summary.conversationId]
+        } else {
+            null
+        }
         return ConversationRow(
             conversationId = summary.conversationId,
             title = title(live, summary),
             kind = summary.kind,
             peerId = peer,
+            roomId = room,
             preview = preview,
             unread = (summary.lastSeq - summary.readSeq).coerceAtLeast(0),
             updatedAt = summary.lastMessage?.createdAt ?: 0L,
@@ -5523,6 +5778,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun title(live: MigoSession, summary: ConversationSummary): String {
         summary.title?.takeIf { it.isNotBlank() }?.let { return it }
+        // A room is named by the room, not the conversation: the summary the list carries never
+        // includes one, so the room record this shell holds (from a join, or from the persisted
+        // store after a restart) is the only source. Without this a restarted app renders every
+        // followed room as its short id until the next re-join — the bug the record exists to
+        // prevent.
+        if (summary.kind == ConversationKind.Room) {
+            val roomId = roomOf[summary.conversationId]
+            if (roomId != null) {
+                roomInfo[roomId]?.name?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+        }
         val others = summary.members?.filter { it != live.client.accountId } ?: emptyList()
         if (summary.kind == ConversationKind.Direct && others.size == 1) {
             return names[others[0]] ?: shortId(others[0])
@@ -5786,6 +6052,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         /** How long the search field must be quiet before its query reaches the wire. */
         const val SEARCH_DEBOUNCE_MS = 300L
+
+        /**
+         * How long the friend-graph cues must be quiet before the re-read reaches the wire. The
+         * same window as the search's: bursts the server fans out for one change collapse into
+         * one read, and a reader watching the list sees it move once.
+         */
+        const val FRIEND_REFRESH_DEBOUNCE_MS = 300L
+
         /** One screen of conversations, and more on demand rather than a list nobody scrolls. */
         const val CONVERSATION_PAGE = 50L
 
@@ -5806,7 +6080,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
          */
         const val TYPING_TIMEOUT_MS = 4_000L
 
-        /** Catch up from the beginning: there is no local store to have a high-water mark in. */
+        /** Catch up from the beginning: no watermark and no cached transcript to start later from. */
         const val HISTORY_FROM = 0L
 
         /** Enough history to open a chat on, bounded so a long conversation does not stall the open. */
