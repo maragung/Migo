@@ -79,9 +79,13 @@ const SEND_ATTEMPTS: usize = 10;
 
 /// The node signing keys, exactly 32 bytes each so the mesh identity derives
 /// from them the way a production node's does: the node id is the first 16
-/// bytes and the Ed25519 key pair is the whole string.
-const ALPHA_KEY: &str = "alpha-node-mesh-key-00000000000";
+/// bytes and the Ed25519 key pair is the whole string. The compile-time check
+/// keeps them that way — `NodeSecret::from_seed` demands exactly 32 bytes, and
+/// a literal one byte short would otherwise only surface at test boot.
+const ALPHA_KEY: &str = "alpha-node-mesh-key-000000000000";
 const BETA_KEY: &str = "beta-node-mesh-key-0000000000000";
+const _: () = assert!(ALPHA_KEY.len() == 32);
+const _: () = assert!(BETA_KEY.len() == 32);
 
 /// What alice's device sealed for bob. The bytes are opaque to both nodes on
 /// the way; the test asserts they arrive exactly as they left.
