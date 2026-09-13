@@ -24,7 +24,9 @@
 //! verbatim the way the replication stand-in (nnode) copies them, which is the
 //! honest stand-in for the account-to-node map section 170 still lists as a
 //! gap, and the conversation row crosses the same way so membership
-//! authorisation answers on both nodes.
+//! authorisation answers on both nodes — and so does the friendship, because
+//! the far node's privacy gate is fail-closed and can only answer for a
+//! recipient whose profile and friendship edge it holds.
 //!
 //! The sealed envelope is the whole security claim under test. Direct messages
 //! are sealed client-side (section 170's standing rule); the frames this
@@ -55,7 +57,8 @@ use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationKind, ConversationSummary, Decode,
     Encode, Frame, Hello, MessageAccepted, MessageEvent, MessageKind, MessageSend, Opcode,
-    Platform, SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    Platform, RelationshipKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome,
+    PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_social::Caller;
@@ -332,6 +335,45 @@ async fn copy_conversation_to(from: &SharedStore, to: &SharedStore, conversation
     .expect("the far store takes the conversation verbatim, label included");
 }
 
+/// Copies the social rows the far node's privacy gate reads for a direct
+/// send: both profiles, and the friendship's two edges, verbatim.
+///
+/// A direct send enforces the recipient's `who_can_message` on every message,
+/// at whichever node takes the send — so bob's reply is gated on node beta,
+/// which was not there when the friendship was made on alpha. The gate is
+/// deliberately fail-closed: a node that cannot see the recipient's profile
+/// cannot answer the privacy question, and a node that cannot answer refuses
+/// — the same posture that keeps a stranger's `Nobody` setting meaningful. So
+/// the replication stand-in carries the answer with the passenger: alice's
+/// profile row (the setting itself) and the caller-side friendship edge (the
+/// `Friends` verdict), copied verbatim, nothing derived. The pair arrives
+/// whole rather than as only the rows this one send reads, because that is
+/// the shape the store keeps — a friendship is two edges or it is the "we are
+/// friends but you are not in my list" bug the store's own acceptance path
+/// refuses to write.
+async fn copy_friendship_to(from: &SharedStore, to: &SharedStore, left: Id, right: Id) {
+    for account_id in [left, right] {
+        let profile = from
+            .profile(account_id)
+            .await
+            .expect("the source store reads")
+            .expect("a registered account has a profile");
+        to.create_profile(profile)
+            .await
+            .expect("the far store takes the profile row verbatim");
+    }
+    for (owner, peer) in [(left, right), (right, left)] {
+        let edge = from
+            .relationship(owner, peer, RelationshipKind::Friend)
+            .await
+            .expect("the source store reads")
+            .expect("the friendship exists in both directions");
+        to.put_relationship(edge)
+            .await
+            .expect("the far store takes the friendship edge verbatim");
+    }
+}
+
 /// Sends one request frame as a length-prefixed record.
 async fn send<M: Encode>(
     stream: &mut tokio::net::TcpStream,
@@ -605,6 +647,12 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
         row.home_region, "alpha",
         "the creating node stamped itself as the conversation's home"
     );
+
+    // The friendship's rows cross too, the same stand-in's cargo: bob's reply
+    // is a send like any other, and it is node beta that must enforce alice's
+    // `who_can_message` for it — fail-closed until her profile and the edge
+    // are there to answer.
+    copy_friendship_to(&store_alpha, &store_beta, alice.account_id, bob.account_id).await;
 
     // Both participants subscribe their side. Alice's subscribe needs no ask —
     // her node is the home node. Bob's subscribe is the subscribe half of the
