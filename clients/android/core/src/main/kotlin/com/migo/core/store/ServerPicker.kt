@@ -130,7 +130,9 @@ object ServerPicker {
             servers
                 .map { server -> async { withTimeoutOrNull(timeoutMs) { probe.probe(server) } } }
                 .awaitAll()
-                .zip(servers)
+                // zip's own pair is (latency, server); the pick wants (server, latency), so the
+                // transform names both halves rather than leaving the reader to un-swap it.
+                .zip(servers) { latency, server -> server to latency }
                 .let(::fastestResponder)
         }
     }
