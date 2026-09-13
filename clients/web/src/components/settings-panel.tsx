@@ -18,6 +18,9 @@
  *     and the one honest broom: clearing the saved chat logs, which names exactly what it keeps.
  *   * **Tampilan** — the theme.
  *   * **Akun** — the door to the account panel (identity, email, passphrase, key file).
+ *   * **Diagnostik** — the dev-build-only session wire counter (§171), so the bandwidth cost of
+ *     a feature is visible while the feature is being written. It never appears in a production
+ *     build.
  *
  * There is deliberately no notification group: this client renders its alerts in its own panel
  * and never asks the OS to show them, and a settings group is not the place to invent a
@@ -35,7 +38,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { AccountSession, DeviceSummary, Id } from '@migo/sdk';
+import type { AccountSession, DeviceSummary, Id, WireBytes } from '@migo/sdk';
 
 import { formatBytes, formatRelative } from '@/lib/format.js';
 import { downloadTextFile, formatTranscriptText, logFileName } from '@/lib/chat-logs.js';
@@ -202,6 +205,59 @@ export function SessionList({
         />
       ))}
     </div>
+  );
+}
+
+/**
+ * The session's wire counters, drawn as one honest line (§171's dev-mode measurement).
+ *
+ * Plain data in, formatted line out, so the rules are testable without a live client: both
+ * directions named, both formatted as byte sizes, and a null reading (no session) rendered as
+ * the absence it is rather than as zero bytes that were never counted.
+ */
+export function WireBytesView({ bytes }: { bytes: WireBytes | null }): ReactNode {
+  if (bytes === null) {
+    return <p className="muted">No session — nothing has been measured.</p>;
+  }
+  return (
+    <p className="muted" data-testid="wire-bytes">
+      Sent {formatBytes(bytes.sent)} · Received {formatBytes(bytes.received)}
+    </p>
+  );
+}
+
+/**
+ * The Diagnostik group: the session's wire counters, refreshed once a second.
+ *
+ * The counters live entirely on this device (the SDK's transport counts the bytes it writes and
+ * reads; nothing is reported to the server), so there is no event to subscribe to and none
+ * needed — reading two numbers on a timer is the whole cost, and only a development build ever
+ * mounts this group.
+ */
+function WireBytesSection(): ReactNode {
+  const { client } = useMigo();
+  const [bytes, setBytes] = useState<WireBytes | null>(null);
+
+  useEffect(() => {
+    const read = (): void => {
+      setBytes(client !== null ? client.wireBytes : null);
+    };
+    read();
+    const timer = setInterval(read, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [client]);
+
+  return (
+    <section className="panel-section" aria-label="Diagnostik">
+      <h2 className="panel-heading">Diagnostik</h2>
+      <p className="hint">
+        This session&rsquo;s wire bytes, counted on this device only — the &sect;171 budget read
+        while a feature is being written. The count survives reconnects and starts over at sign-in.
+      </p>
+      <WireBytesView bytes={bytes} />
+    </section>
   );
 }
 
@@ -414,6 +470,9 @@ export function SettingsPanel({
       />
 
       <AppearanceSection />
+
+      {/* §171's runtime measurement is a development tool: the wire counter group never ships. */}
+      {process.env.NODE_ENV !== 'production' ? <WireBytesSection /> : null}
 
       {onOpenAccount !== undefined ? (
         <section className="panel-section" aria-label="Akun">
