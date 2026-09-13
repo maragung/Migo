@@ -4313,6 +4313,261 @@ export function decodeFedConversationEvent(r: Reader): FedConversationEvent {
   return out;
 }
 
+/** A node asks its peers which of them owns an account's rows: the account-to-node routing question of section 170, asked as a broadcast because an account row carries no home label to read. `regarding` names the local account the asker already holds, so a peer that owns the account can also send the edges between the two — the subject-side block and friendship rows the asker's privacy gate and block check read. The ask rides the mesh only from a fail-closed gate that found no local profile, and a peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same fail-closed refusal. */
+export interface FedAccountQuery {
+  epoch: number;
+  accountId: Id;
+  regarding: Id;
+}
+
+export function encodeFedAccountQuery(w: Writer, v: FedAccountQuery): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.id(v.accountId);
+  w.id(v.regarding);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedAccountQuery(r: Reader): FedAccountQuery {
+  r.enter();
+  const epoch = r.u64();
+  const accountId = r.id();
+  const regarding = r.id();
+  const out: FedAccountQuery = { epoch, accountId, regarding } as FedAccountQuery;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** One social-graph edge the queried account owns, crossing as part of its rows: verbatim — the kind, both timestamps, nothing derived. Only the edges between the queried account and the asker's `regarding` account cross, never the account's whole graph, because a replication answer may carry what the asker's gate reads and no more. */
+export interface FedAccountEdge {
+  otherId: Id;
+  kind: RelationshipKind;
+  createdAt: number;
+  /** Set when a friend request was accepted; absent while it is pending. */
+  acceptedAt?: number;
+}
+
+export function encodeFedAccountEdge(w: Writer, v: FedAccountEdge): void {
+  w.enter();
+  w.id(v.otherId);
+  w.u32(v.kind);
+  w.timestamp(v.createdAt);
+  let present = 0;
+  if (v.acceptedAt !== undefined) present++;
+  w.u32(present);
+  if (v.acceptedAt !== undefined) { const value = v.acceptedAt; w.optional(1, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeFedAccountEdge(r: Reader): FedAccountEdge {
+  r.enter();
+  const otherId = r.id();
+  const kind = r.u32() as RelationshipKind;
+  const createdAt = r.timestamp();
+  const out: FedAccountEdge = { otherId, kind, createdAt } as FedAccountEdge;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.acceptedAt = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** The answer to a FedAccountQuery, from a peer that holds the account: the account row, the profile row, and the edges between the account and the asker's `regarding` account, all verbatim. The passphrase hash crosses with the account row the way the replication stand-in copied it: the mesh is an authenticated link between allow-listed fleet peers, the same trust boundary that already carries sealed envelopes, and a replica account without its hash would not be the row it claims to be. Applied only by a node that asked, and only when the row is not already held — a peer cannot overwrite local truth, only feed a gate that had nothing to read. */
+export interface FedAccountRows {
+  accountId: Id;
+  username: string;
+  passphraseHash: string;
+  locale: string;
+  createdAt: number;
+  displayName: string;
+  showLastSeen: number;
+  whoCanMessage: number;
+  whoCanAdd: number;
+  searchable: boolean;
+  profileUpdatedAt: number;
+  edges: FedAccountEdge[];
+  email?: string;
+  phone?: string;
+  country?: string;
+  bio?: string;
+  avatarMediaId?: Id;
+  birthYear?: number;
+  /** The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for. */
+  gender?: number;
+  customStatus?: string;
+}
+
+export function encodeFedAccountRows(w: Writer, v: FedAccountRows): void {
+  w.enter();
+  w.id(v.accountId);
+  w.str(v.username);
+  w.str(v.passphraseHash);
+  w.str(v.locale);
+  w.timestamp(v.createdAt);
+  w.str(v.displayName);
+  w.u32(v.showLastSeen);
+  w.u32(v.whoCanMessage);
+  w.u32(v.whoCanAdd);
+  w.bool(v.searchable);
+  w.timestamp(v.profileUpdatedAt);
+  { w.listLen(v.edges.length); for (const item of v.edges) { encodeFedAccountEdge(w, item); } }
+  let present = 0;
+  if (v.email !== undefined) present++;
+  if (v.phone !== undefined) present++;
+  if (v.country !== undefined) present++;
+  if (v.bio !== undefined) present++;
+  if (v.avatarMediaId !== undefined) present++;
+  if (v.birthYear !== undefined) present++;
+  if (v.gender !== undefined) present++;
+  if (v.customStatus !== undefined) present++;
+  w.u32(present);
+  if (v.email !== undefined) { const value = v.email; w.optional(1, (w) => { w.str(value); }); }
+  if (v.phone !== undefined) { const value = v.phone; w.optional(2, (w) => { w.str(value); }); }
+  if (v.country !== undefined) { const value = v.country; w.optional(3, (w) => { w.str(value); }); }
+  if (v.bio !== undefined) { const value = v.bio; w.optional(4, (w) => { w.str(value); }); }
+  if (v.avatarMediaId !== undefined) { const value = v.avatarMediaId; w.optional(5, (w) => { w.id(value); }); }
+  if (v.birthYear !== undefined) { const value = v.birthYear; w.optional(6, (w) => { w.u32(value); }); }
+  if (v.gender !== undefined) { const value = v.gender; w.optional(7, (w) => { w.u32(value); }); }
+  if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(8, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeFedAccountRows(r: Reader): FedAccountRows {
+  r.enter();
+  const accountId = r.id();
+  const username = r.str();
+  const passphraseHash = r.str();
+  const locale = r.str();
+  const createdAt = r.timestamp();
+  const displayName = r.str();
+  const showLastSeen = r.u32();
+  const whoCanMessage = r.u32();
+  const whoCanAdd = r.u32();
+  const searchable = r.bool();
+  const profileUpdatedAt = r.timestamp();
+  const edges = ((): FedAccountEdge[] => { const n = r.listLen(); const v: FedAccountEdge[] = []; for (let i = 0; i < n; i++) v.push(decodeFedAccountEdge(r)); return v; })();
+  const out: FedAccountRows = { accountId, username, passphraseHash, locale, createdAt, displayName, showLastSeen, whoCanMessage, whoCanAdd, searchable, profileUpdatedAt, edges } as FedAccountRows;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.email = sub.str(); break;
+      case 2: out.phone = sub.str(); break;
+      case 3: out.country = sub.str(); break;
+      case 4: out.bio = sub.str(); break;
+      case 5: out.avatarMediaId = sub.id(); break;
+      case 6: out.birthYear = sub.u32(); break;
+      case 7: out.gender = sub.u32(); break;
+      case 8: out.customStatus = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A node asks its peers which of them owns a conversation's rows: the asker holds a session that wants the conversation's topic, and the membership read came back empty — which on a mesh means the row may live on another node rather than the topic being unreal. The peer that homes the conversation answers; a peer that holds nothing stays silent. */
+export interface FedConversationQuery {
+  epoch: number;
+  conversationId: Id;
+}
+
+export function encodeFedConversationQuery(w: Writer, v: FedConversationQuery): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.id(v.conversationId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedConversationQuery(r: Reader): FedConversationQuery {
+  r.enter();
+  const epoch = r.u64();
+  const conversationId = r.id();
+  const out: FedConversationQuery = { epoch, conversationId } as FedConversationQuery;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The answer to a FedConversationQuery: the conversation row verbatim — home_region included, the one fact every node holding a copy must read the same answer from — and the member ids. Membership crosses as the id set: the replica answers existence and authorization, not per-member preferences, which stay facts of the node whose session set them. Applied only by a node that asked, and only when the row is not already held. */
+export interface FedConversationRows {
+  conversationId: Id;
+  kind: ConversationKind;
+  encryption: EncryptionMode;
+  homeRegion: string;
+  createdBy: Id;
+  createdAt: number;
+  lastSeq: number;
+  members: Id[];
+  roomId?: Id;
+  title?: string;
+  lastMessageAt?: number;
+  archivedAt?: number;
+}
+
+export function encodeFedConversationRows(w: Writer, v: FedConversationRows): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.u32(v.kind);
+  w.u32(v.encryption);
+  w.str(v.homeRegion);
+  w.id(v.createdBy);
+  w.timestamp(v.createdAt);
+  w.u64(v.lastSeq);
+  { w.listLen(v.members.length); for (const item of v.members) { w.id(item); } }
+  let present = 0;
+  if (v.roomId !== undefined) present++;
+  if (v.title !== undefined) present++;
+  if (v.lastMessageAt !== undefined) present++;
+  if (v.archivedAt !== undefined) present++;
+  w.u32(present);
+  if (v.roomId !== undefined) { const value = v.roomId; w.optional(1, (w) => { w.id(value); }); }
+  if (v.title !== undefined) { const value = v.title; w.optional(2, (w) => { w.str(value); }); }
+  if (v.lastMessageAt !== undefined) { const value = v.lastMessageAt; w.optional(3, (w) => { w.timestamp(value); }); }
+  if (v.archivedAt !== undefined) { const value = v.archivedAt; w.optional(4, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeFedConversationRows(r: Reader): FedConversationRows {
+  r.enter();
+  const conversationId = r.id();
+  const kind = r.u32() as ConversationKind;
+  const encryption = r.u32() as EncryptionMode;
+  const homeRegion = r.str();
+  const createdBy = r.id();
+  const createdAt = r.timestamp();
+  const lastSeq = r.u64();
+  const members = ((): Id[] => { const n = r.listLen(); const v: Id[] = []; for (let i = 0; i < n; i++) v.push(r.id()); return v; })();
+  const out: FedConversationRows = { conversationId, kind, encryption, homeRegion, createdBy, createdAt, lastSeq, members } as FedConversationRows;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.roomId = sub.id(); break;
+      case 2: out.title = sub.str(); break;
+      case 3: out.lastMessageAt = sub.timestamp(); break;
+      case 4: out.archivedAt = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
 export interface FedKeyRotate {
   nodeId: string;
   newPublicKey: Uint8Array;
@@ -7189,6 +7444,14 @@ export const OP = {
   FED_CONVERSATION_SUBSCRIBE: 241,
   /** One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content. */
   FED_CONVERSATION_EVENT: 242,
+  /** A node broadcasts the account-to-node routing question: which peer owns this account's rows? Sent only from a fail-closed gate that found no local profile, with the local account whose edges with the subject the asker's privacy gate reads. */
+  FED_ACCOUNT_QUERY: 243,
+  /** The owning peer's answer: the account row, the profile row, and the edges between the account and the asker's local account, verbatim. Applied only by a node that asked and only where it held nothing, so the answer feeds a fail-closed gate rather than replacing local truth. */
+  FED_ACCOUNT_ROWS: 244,
+  /** A node asks which peer owns a conversation's rows: the asker's membership read for a topic subscription came back empty, and on a mesh that may mean the row lives elsewhere. The home node answers; peers that hold nothing stay silent. */
+  FED_CONVERSATION_QUERY: 245,
+  /** The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream. */
+  FED_CONVERSATION_ROWS: 246,
   /** Invites a callee to a call. */
   CALL_INVITE: 224,
   /** Tells the callee a call is ringing. */
@@ -7350,6 +7613,10 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   223: { code: 223, name: 'FED_USER_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedUserEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   241: { code: 241, name: 'FED_CONVERSATION_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationRouting', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   242: { code: 242, name: 'FED_CONVERSATION_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  243: { code: 243, name: 'FED_ACCOUNT_QUERY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAccountQuery', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  244: { code: 244, name: 'FED_ACCOUNT_ROWS', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAccountRows', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  245: { code: 245, name: 'FED_CONVERSATION_QUERY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationQuery', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  246: { code: 246, name: 'FED_CONVERSATION_ROWS', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationRows', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [] },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [] },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [] },

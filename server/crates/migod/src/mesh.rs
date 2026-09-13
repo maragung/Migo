@@ -609,7 +609,11 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
 /// subscribe are the same two halves for the conversations a room does not own — a direct
 /// chat or a group — whose members sit on whichever node they connected to. A user event
 /// and a user subscribe are the user-topic tier of the same fanout, with no onward half: a
-/// presence change is only ever published by the node whose session caused it. The others
+/// presence change is only ever published by the node whose session caused it. The
+/// row-replication tier's four events are the account-to-node routing map section 170
+/// waited for: a query is answered by the one node that holds the rows (and silently
+/// skipped by every node that does not), and an answer is applied only by a node whose own
+/// ask is still waiting for it. The others
 /// are real, validated frames whose final-mile crates do not yet expose an ingest port —
 /// call signaling — and the honest treatment is count-and-log, not a pretend success
 /// deeper in.
@@ -618,6 +622,7 @@ pub(crate) struct IngestRouter {
     relay: Option<Arc<crate::room_relay::RoomRelay>>,
     conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
     presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
+    replication: Option<Arc<crate::replication::ReplicationRelay>>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
     /// What this node has ingested, capped, so the operator's metrics answer "is anything
@@ -631,6 +636,7 @@ impl IngestRouter {
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
         conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
+        replication: Option<Arc<crate::replication::ReplicationRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -639,6 +645,7 @@ impl IngestRouter {
             relay,
             conversations,
             presence,
+            replication,
             meters: MeshMeters::new(registry),
             clock,
             seen: parking_lot::Mutex::new(Vec::new()),
@@ -762,6 +769,48 @@ impl IngestRouter {
                 let event: migo_protocol::FedConversationEvent =
                     from_frame(&inner).map_err(fault::from_wire)?;
                 self.route_conversation_event(peer, event).await
+            }
+            Opcode::FedAccountQuery => {
+                let query: migo_protocol::FedAccountQuery =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                self.route_account_query(peer, query).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                Ok(())
+            }
+            Opcode::FedAccountRows => {
+                let rows: migo_protocol::FedAccountRows =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                let applied = self.route_account_rows(peer, rows).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                if applied {
+                    // The counter an operator's smoke check reads: rows that
+                    // crossed the mesh and landed. It is also the release
+                    // marker nnode's fixture removal keys on, the way the
+                    // conversation tier keyed on the home_region label.
+                    self.meters.replicated();
+                }
+                Ok(())
+            }
+            Opcode::FedConversationQuery => {
+                let query: migo_protocol::FedConversationQuery =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                self.route_conversation_query(peer, query).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                Ok(())
+            }
+            Opcode::FedConversationRows => {
+                let rows: migo_protocol::FedConversationRows =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                let applied = self.route_conversation_rows(peer, rows).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                if applied {
+                    self.meters.replicated();
+                }
+                Ok(())
             }
             Opcode::FedUserEvent => {
                 let event: migo_protocol::FedUserEvent =
@@ -971,7 +1020,94 @@ impl IngestRouter {
         Ok(())
     }
 
-    /// Publishes a forwarded user-topic presence event into the local hub.
+    /// Answers an account-routing query: the row-replication tier's ask half,
+    /// arrived at whatever node holds the rows.
+    ///
+    /// The relay's silence rules do the honest work — a node that holds
+    /// nothing whole answers nothing, and the asker's bounded wait fails
+    /// closed on that silence — so this route only hands the query over. A
+    /// stale epoch is the one error raised, the same re-handshake contract
+    /// every other ingest half enforces.
+    async fn route_account_query(
+        &self,
+        peer: Id,
+        query: migo_protocol::FedAccountQuery,
+    ) -> Result<()> {
+        let now = self.clock.now();
+        if let Some(relay) = &self.replication {
+            relay.answer_account(peer, query, now).await?;
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            account = %query.account_id.to_text(),
+            "account routing query ingested from the mesh"
+        );
+        Ok(())
+    }
+
+    /// Applies an account-routing answer, returning whether rows were written.
+    ///
+    /// The asked-set is the whole security story here: a peer may only feed a
+    /// gate that had nothing to read, never push rows unasked, and the relay
+    /// refuses what no ask of this process is waiting for.
+    async fn route_account_rows(
+        &self,
+        peer: Id,
+        rows: migo_protocol::FedAccountRows,
+    ) -> Result<bool> {
+        let account_id = rows.account_id;
+        let applied = match &self.replication {
+            Some(relay) => relay.apply_account_rows(rows).await?,
+            None => false,
+        };
+        tracing::debug!(
+            from = %peer.to_text(),
+            account = %account_id.to_text(),
+            applied,
+            "account rows ingested from the mesh"
+        );
+        Ok(applied)
+    }
+
+    /// Answers a conversation-routing query: the tier's second ask half, for
+    /// the conversation row a subscribing session's membership read missed.
+    async fn route_conversation_query(
+        &self,
+        peer: Id,
+        query: migo_protocol::FedConversationQuery,
+    ) -> Result<()> {
+        let now = self.clock.now();
+        if let Some(relay) = &self.replication {
+            relay.answer_conversation(peer, query, now).await?;
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            conversation = %query.conversation_id.to_text(),
+            "conversation routing query ingested from the mesh"
+        );
+        Ok(())
+    }
+
+    /// Applies a conversation-routing answer, returning whether the row was
+    /// written. The same asked-set story as [`Self::route_account_rows`].
+    async fn route_conversation_rows(
+        &self,
+        peer: Id,
+        rows: migo_protocol::FedConversationRows,
+    ) -> Result<bool> {
+        let conversation_id = rows.conversation_id;
+        let applied = match &self.replication {
+            Some(relay) => relay.apply_conversation_rows(rows).await?,
+            None => false,
+        };
+        tracing::debug!(
+            from = %peer.to_text(),
+            conversation = %conversation_id.to_text(),
+            applied,
+            "conversation rows ingested from the mesh"
+        );
+        Ok(applied)
+    }
     ///
     /// The inner payload is itself an encoded frame — the presence event as the origin
     /// node's session would have pushed it — and the subject's user topic is the one place
@@ -1195,6 +1331,7 @@ struct MeshMeters {
     ingested: Arc<Counter>,
     delivered: Arc<Counter>,
     failed: Arc<Counter>,
+    replicated: Arc<Counter>,
 }
 
 impl MeshMeters {
@@ -1215,6 +1352,11 @@ impl MeshMeters {
                 "Outbox delivery attempts that failed",
                 &[],
             ),
+            replicated: registry.counter(
+                "migo_mesh_rows_replicated_total",
+                "Row-replication answers whose rows were applied",
+                &[],
+            ),
         }
     }
 
@@ -1228,6 +1370,10 @@ impl MeshMeters {
 
     fn failed(&self, count: u64) {
         self.failed.add(count);
+    }
+
+    fn replicated(&self) {
+        self.replicated.inc();
     }
 }
 
@@ -1513,6 +1659,7 @@ impl MeshTransport {
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
         conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
+        replication: Option<Arc<crate::replication::ReplicationRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
         handshake_timeout_ms: u64,
@@ -1524,6 +1671,7 @@ impl MeshTransport {
                 relay,
                 conversations,
                 presence,
+                replication,
                 registry,
                 Arc::clone(&clock),
             )),
@@ -1968,6 +2116,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2046,6 +2195,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2097,6 +2247,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,
@@ -2233,6 +2384,7 @@ mod tests {
             Some(Arc::clone(&relay_b)),
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2313,6 +2465,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(&relay_b)),
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2391,6 +2544,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2480,6 +2634,7 @@ mod tests {
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2649,6 +2804,7 @@ mod tests {
             Some(relay_b.clone()),
             None,
             None,
+            None,
             &registry,
             Arc::new(ManualClock::new(later)),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2783,6 +2939,7 @@ mod tests {
             None,
             None,
             Some(relay_b.clone()),
+            None,
             None,
             &registry,
             Arc::new(ManualClock::new(later)),
@@ -2948,6 +3105,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -3014,6 +3172,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,

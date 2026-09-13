@@ -5555,6 +5555,346 @@ data class FedConversationEvent(
     }
 }
 
+/** A node asks its peers which of them owns an account's rows: the account-to-node routing question of section 170, asked as a broadcast because an account row carries no home label to read. `regarding` names the local account the asker already holds, so a peer that owns the account can also send the edges between the two — the subject-side block and friendship rows the asker's privacy gate and block check read. The ask rides the mesh only from a fail-closed gate that found no local profile, and a peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same fail-closed refusal. */
+data class FedAccountQuery(
+    val epoch: Long,
+    val accountId: Id,
+    val regarding: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.id(accountId)
+        w.id(regarding)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedAccountQuery {
+            r.enter()
+            val epoch = r.u64()
+            val accountId = r.id()
+            val regarding = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedAccountQuery(epoch, accountId, regarding)
+        }
+    }
+}
+
+/** One social-graph edge the queried account owns, crossing as part of its rows: verbatim — the kind, both timestamps, nothing derived. Only the edges between the queried account and the asker's `regarding` account cross, never the account's whole graph, because a replication answer may carry what the asker's gate reads and no more. */
+data class FedAccountEdge(
+    val otherId: Id,
+    val kind: RelationshipKind,
+    val createdAt: Long,
+    /** Set when a friend request was accepted; absent while it is pending. */
+    val acceptedAt: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(otherId)
+        w.u32(kind.toWire())
+        w.timestamp(createdAt)
+        var present = 0
+        if (acceptedAt != null) present++
+        w.u32(present)
+        if (acceptedAt != null) {
+            val value = acceptedAt
+            w.optional(1) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedAccountEdge {
+            r.enter()
+            val otherId = r.id()
+            val kind = RelationshipKind.fromWire(r.u32())
+            val createdAt = r.timestamp()
+            var acceptedAt: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> acceptedAt = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return FedAccountEdge(otherId, kind, createdAt, acceptedAt)
+        }
+    }
+}
+
+/** The answer to a FedAccountQuery, from a peer that holds the account: the account row, the profile row, and the edges between the account and the asker's `regarding` account, all verbatim. The passphrase hash crosses with the account row the way the replication stand-in copied it: the mesh is an authenticated link between allow-listed fleet peers, the same trust boundary that already carries sealed envelopes, and a replica account without its hash would not be the row it claims to be. Applied only by a node that asked, and only when the row is not already held — a peer cannot overwrite local truth, only feed a gate that had nothing to read. */
+data class FedAccountRows(
+    val accountId: Id,
+    val username: String,
+    val passphraseHash: String,
+    val locale: String,
+    val createdAt: Long,
+    val displayName: String,
+    val showLastSeen: Long,
+    val whoCanMessage: Long,
+    val whoCanAdd: Long,
+    val searchable: Boolean,
+    val profileUpdatedAt: Long,
+    val edges: List<FedAccountEdge>,
+    val email: String? = null,
+    val phone: String? = null,
+    val country: String? = null,
+    val bio: String? = null,
+    val avatarMediaId: Id? = null,
+    val birthYear: Long? = null,
+    /** The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for. */
+    val gender: Long? = null,
+    val customStatus: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(accountId)
+        w.str(username)
+        w.str(passphraseHash)
+        w.str(locale)
+        w.timestamp(createdAt)
+        w.str(displayName)
+        w.u32(showLastSeen)
+        w.u32(whoCanMessage)
+        w.u32(whoCanAdd)
+        w.bool(searchable)
+        w.timestamp(profileUpdatedAt)
+        w.listLen(edges.size)
+        for (item in edges) { item.encode(w) }
+        var present = 0
+        if (email != null) present++
+        if (phone != null) present++
+        if (country != null) present++
+        if (bio != null) present++
+        if (avatarMediaId != null) present++
+        if (birthYear != null) present++
+        if (gender != null) present++
+        if (customStatus != null) present++
+        w.u32(present)
+        if (email != null) {
+            val value = email
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        if (phone != null) {
+            val value = phone
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
+        if (country != null) {
+            val value = country
+            w.optional(3) { w ->
+                w.str(value)
+            }
+        }
+        if (bio != null) {
+            val value = bio
+            w.optional(4) { w ->
+                w.str(value)
+            }
+        }
+        if (avatarMediaId != null) {
+            val value = avatarMediaId
+            w.optional(5) { w ->
+                w.id(value)
+            }
+        }
+        if (birthYear != null) {
+            val value = birthYear
+            w.optional(6) { w ->
+                w.u32(value)
+            }
+        }
+        if (gender != null) {
+            val value = gender
+            w.optional(7) { w ->
+                w.u32(value)
+            }
+        }
+        if (customStatus != null) {
+            val value = customStatus
+            w.optional(8) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedAccountRows {
+            r.enter()
+            val accountId = r.id()
+            val username = r.str()
+            val passphraseHash = r.str()
+            val locale = r.str()
+            val createdAt = r.timestamp()
+            val displayName = r.str()
+            val showLastSeen = r.u32()
+            val whoCanMessage = r.u32()
+            val whoCanAdd = r.u32()
+            val searchable = r.bool()
+            val profileUpdatedAt = r.timestamp()
+            val edges = run { val n = r.listLen(); val acc = ArrayList<FedAccountEdge>(n); for (i in 0 until n) acc.add(FedAccountEdge.decode(r)); acc }
+            var email: String? = null
+            var phone: String? = null
+            var country: String? = null
+            var bio: String? = null
+            var avatarMediaId: Id? = null
+            var birthYear: Long? = null
+            var gender: Long? = null
+            var customStatus: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> email = sub.str()
+                    2L -> phone = sub.str()
+                    3L -> country = sub.str()
+                    4L -> bio = sub.str()
+                    5L -> avatarMediaId = sub.id()
+                    6L -> birthYear = sub.u32()
+                    7L -> gender = sub.u32()
+                    8L -> customStatus = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return FedAccountRows(accountId, username, passphraseHash, locale, createdAt, displayName, showLastSeen, whoCanMessage, whoCanAdd, searchable, profileUpdatedAt, edges, email, phone, country, bio, avatarMediaId, birthYear, gender, customStatus)
+        }
+    }
+}
+
+/** A node asks its peers which of them owns a conversation's rows: the asker holds a session that wants the conversation's topic, and the membership read came back empty — which on a mesh means the row may live on another node rather than the topic being unreal. The peer that homes the conversation answers; a peer that holds nothing stays silent. */
+data class FedConversationQuery(
+    val epoch: Long,
+    val conversationId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.id(conversationId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedConversationQuery {
+            r.enter()
+            val epoch = r.u64()
+            val conversationId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedConversationQuery(epoch, conversationId)
+        }
+    }
+}
+
+/** The answer to a FedConversationQuery: the conversation row verbatim — home_region included, the one fact every node holding a copy must read the same answer from — and the member ids. Membership crosses as the id set: the replica answers existence and authorization, not per-member preferences, which stay facts of the node whose session set them. Applied only by a node that asked, and only when the row is not already held. */
+data class FedConversationRows(
+    val conversationId: Id,
+    val kind: ConversationKind,
+    val encryption: EncryptionMode,
+    val homeRegion: String,
+    val createdBy: Id,
+    val createdAt: Long,
+    val lastSeq: Long,
+    val members: List<Id>,
+    val roomId: Id? = null,
+    val title: String? = null,
+    val lastMessageAt: Long? = null,
+    val archivedAt: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.u32(kind.toWire())
+        w.u32(encryption.toWire())
+        w.str(homeRegion)
+        w.id(createdBy)
+        w.timestamp(createdAt)
+        w.u64(lastSeq)
+        w.listLen(members.size)
+        for (item in members) { w.id(item) }
+        var present = 0
+        if (roomId != null) present++
+        if (title != null) present++
+        if (lastMessageAt != null) present++
+        if (archivedAt != null) present++
+        w.u32(present)
+        if (roomId != null) {
+            val value = roomId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        if (title != null) {
+            val value = title
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
+        if (lastMessageAt != null) {
+            val value = lastMessageAt
+            w.optional(3) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (archivedAt != null) {
+            val value = archivedAt
+            w.optional(4) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedConversationRows {
+            r.enter()
+            val conversationId = r.id()
+            val kind = ConversationKind.fromWire(r.u32())
+            val encryption = EncryptionMode.fromWire(r.u32())
+            val homeRegion = r.str()
+            val createdBy = r.id()
+            val createdAt = r.timestamp()
+            val lastSeq = r.u64()
+            val members = run { val n = r.listLen(); val acc = ArrayList<Id>(n); for (i in 0 until n) acc.add(r.id()); acc }
+            var roomId: Id? = null
+            var title: String? = null
+            var lastMessageAt: Long? = null
+            var archivedAt: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> roomId = sub.id()
+                    2L -> title = sub.str()
+                    3L -> lastMessageAt = sub.timestamp()
+                    4L -> archivedAt = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return FedConversationRows(conversationId, kind, encryption, homeRegion, createdBy, createdAt, lastSeq, members, roomId, title, lastMessageAt, archivedAt)
+        }
+    }
+}
+
 data class FedKeyRotate(
     val nodeId: String,
     val newPublicKey: ByteArray,
@@ -8845,6 +9185,14 @@ object Op {
     const val FED_CONVERSATION_SUBSCRIBE: Long = 241L
     /** One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content. */
     const val FED_CONVERSATION_EVENT: Long = 242L
+    /** A node broadcasts the account-to-node routing question: which peer owns this account's rows? Sent only from a fail-closed gate that found no local profile, with the local account whose edges with the subject the asker's privacy gate reads. */
+    const val FED_ACCOUNT_QUERY: Long = 243L
+    /** The owning peer's answer: the account row, the profile row, and the edges between the account and the asker's local account, verbatim. Applied only by a node that asked and only where it held nothing, so the answer feeds a fail-closed gate rather than replacing local truth. */
+    const val FED_ACCOUNT_ROWS: Long = 244L
+    /** A node asks which peer owns a conversation's rows: the asker's membership read for a topic subscription came back empty, and on a mesh that may mean the row lives elsewhere. The home node answers; peers that hold nothing stay silent. */
+    const val FED_CONVERSATION_QUERY: Long = 245L
+    /** The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream. */
+    const val FED_CONVERSATION_ROWS: Long = 246L
     /** Invites a callee to a call. */
     const val CALL_INVITE: Long = 224L
     /** Tells the callee a call is ringing. */
@@ -9006,6 +9354,10 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     223L to OpcodeMeta(223L, "FED_USER_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedUserEvent", "Acknowledged", null, false, listOf(), "FEDERATION"),
     241L to OpcodeMeta(241L, "FED_CONVERSATION_SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationRouting", "Acknowledged", null, false, listOf(), "FEDERATION"),
     242L to OpcodeMeta(242L, "FED_CONVERSATION_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationEvent", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    243L to OpcodeMeta(243L, "FED_ACCOUNT_QUERY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAccountQuery", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    244L to OpcodeMeta(244L, "FED_ACCOUNT_ROWS", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAccountRows", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    245L to OpcodeMeta(245L, "FED_CONVERSATION_QUERY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationQuery", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    246L to OpcodeMeta(246L, "FED_CONVERSATION_ROWS", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationRows", "Acknowledged", null, false, listOf(), "FEDERATION"),
     224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null, false, listOf(), null),
     225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null, false, listOf(), null),
     226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null, false, listOf(), null),

@@ -94,6 +94,7 @@ use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial
 
 use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
+use crate::replication::ReplicationRelay;
 use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
 use crate::room_relay::{FederatedPublisher, RoomRelay};
 
@@ -173,6 +174,11 @@ pub struct AppDispatcher {
     /// owes them. Built by the composition root for the same reason `room_relay` is — the
     /// mesh transport's ingest path registers watchers into the same table.
     presence_relay: Arc<PresenceRelay>,
+    /// The row-replication tier (section 170's account-to-node routing map): the pull a
+    /// fail-closed read triggers when the row it missed may live on another node. Held by
+    /// the dispatcher for the one read that is a subscription door — a conversation topic
+    /// a far member asks for — and by the mesh transport's ingest path for the answers.
+    replication: Arc<ReplicationRelay>,
 }
 
 impl AppDispatcher {
@@ -202,6 +208,7 @@ impl AppDispatcher {
         room_relay: Arc<RoomRelay>,
         conversation_relay: Arc<ConversationRelay>,
         presence_relay: Arc<PresenceRelay>,
+        replication: Arc<ReplicationRelay>,
     ) -> Self {
         // The room-presence component reads the same store and rooms handle and publishes through
         // the same gateway handle, so it is assembled from what this call already holds rather
@@ -236,6 +243,7 @@ impl AppDispatcher {
             room_relay,
             conversation_relay,
             presence_relay,
+            replication,
         }
     }
 
@@ -461,15 +469,16 @@ impl Dispatcher for AppDispatcher {
         let now = context.now();
 
         match context.opcode() {
-            // Section 146 invariant: the reserved span 243-255 is never-allocated, and
+            // Section 146 invariant: the reserved span 247-255 is never-allocated, and
             // the gateway refuses it before a frame can reach this dispatcher (see the
             // range gate in migo-gateway's connection.rs). A variant generated into that
             // span therefore must not be routable here — the migo-protocol registry test
             // (`no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range`) fails
             // the build first, and the allocation needs a written decision per section
             // 145's precedent before any number is taken from the reserved head. The
-            // conversation-federation pair at 241-242 is one such decision; the span it
-            // left never-allocated begins at 243.
+            // conversation-federation pair at 241-242 and the row-replication tier at
+            // 243-246 are two such decisions; the span they left never-allocated begins
+            // at 247.
             // --- messaging ---
             Opcode::MessageSend => {
                 let caller = MessageCaller::new(
@@ -1289,11 +1298,27 @@ impl AppDispatcher {
                     identity.tier,
                     now,
                 );
-                let granted = self
+                let mut granted = self
                     .messaging
                     .is_participant(&caller, topic.id)
                     .await
                     .unwrap_or(false);
+                if !granted {
+                    // The empty membership read may only be the mesh's honest
+                    // gap: the conversation's row lives on another node — its
+                    // home, stamped at creation — and this node has never had
+                    // a reason to hold a copy. Pull the row over the mesh and
+                    // ask once more, fail-closed all the way: a home node that
+                    // cannot be reached leaves the refusal exactly as it was,
+                    // because a topic this node cannot vouch for is a topic it
+                    // does not grant.
+                    granted = self.replication.ensure_conversation(topic.id, now).await
+                        && self
+                            .messaging
+                            .is_participant(&caller, topic.id)
+                            .await
+                            .unwrap_or(false);
+                }
                 // The granted subscription is the moment this node first has a reason to
                 // hear the conversation's federated stream: the same tiered fanout a room
                 // rides (section 170), asking the conversation's home node to watch it,

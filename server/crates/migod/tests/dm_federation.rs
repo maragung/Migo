@@ -1,32 +1,29 @@
 //! Direct-message federation, driven at the client-visible seam: a direct
-//! conversation whose two participants are connected to *different* nodes, each
-//! message crossing the mesh between them as a sealed envelope nobody on the
-//! way opens.
+//! conversation whose two participants were *registered on different nodes*,
+//! each message crossing the mesh between them as a sealed envelope nobody on
+//! the way opens.
 //!
 //! This is the scenario section 170 spent its whole honest tail admitting was
-//! missing: two full nodes, a store per node (the tools/2node shape, not the
-//! shared-store one `cross_node_resume.rs` builds), and a participant on the
-//! far node whom a publish that stopped at the sender's hub would simply never
-//! reach — there is no row in the far store to sync from. The conversation tier
-//! is what closes that gap: the conversation row names a home node
-//! (`home_region`, stamped at creation), the far node asks the home node to
-//! watch the conversation once per process (`FED_CONVERSATION_SUBSCRIBE`), and
-//! every publish is handed to the node that owns the fan-out — one federated
-//! copy per watching node (`FED_CONVERSATION_EVENT`), the inner event frame
-//! sealed exactly as a local session would have received it.
+//! missing, and the gap it admitted is now closed for the rows this scenario
+//! needs. Two full nodes, a store per node (the tools/2node shape, not the
+//! shared-store one `cross_node_resume.rs` builds) — and no hand-copying at
+//! all: bob's account, profile, and social rows exist *only* on the node he
+//! registered through, and alice's only on hers. The conversation row is
+//! created on alice's node and reaches bob's the same way. What carries them
+//! is the row-replication tier (section 170's account-to-node routing map): a
+//! gate that fail-closes on a missing row asks the mesh which node holds it
+//! (`FED_ACCOUNT_QUERY` / `FED_CONVERSATION_QUERY`), the owner answers with
+//! the rows verbatim (`FED_ACCOUNT_ROWS` / `FED_CONVERSATION_ROWS`), and the
+//! gate asks its question again — fail-closed all the way, so an unreachable
+//! owner changes nothing.
 //!
-//! The topology is deliberately the *harder* of the two section 170 shapes.
-//! Two `App`s over one shared store would federate nothing worth testing: the
-//! far node would already hold every row, and a message would reach the far
-//! participant through the local hub of whichever node received the send. A
-//! store per node means the far participant is unreachable without the mesh —
-//! the account, device, and session rows authentication reads are copied
-//! verbatim the way the replication stand-in (nnode) copies them, which is the
-//! honest stand-in for the account-to-node map section 170 still lists as a
-//! gap, and the conversation row crosses the same way so membership
-//! authorisation answers on both nodes — and so does the friendship, because
-//! the far node's privacy gate is fail-closed and can only answer for a
-//! recipient whose profile and friendship edge it holds.
+//! The tiered fan-out is what carries the messages themselves: the
+//! conversation row names a home node (`home_region`, stamped at creation),
+//! the far node asks the home node to watch the conversation once per process
+//! (`FED_CONVERSATION_SUBSCRIBE`), and every publish is handed to the node
+//! that owns the fan-out — one federated copy per watching node
+//! (`FED_CONVERSATION_EVENT`), the inner event frame sealed exactly as a
+//! local session would have received it.
 //!
 //! The sealed envelope is the whole security claim under test. Direct messages
 //! are sealed client-side (section 170's standing rule); the frames this
@@ -37,11 +34,23 @@
 //! opaque payload, which is everything they need to route and nothing they
 //! could read.
 //!
+//! What is *still* seeded by hand, and honestly so: the friend handshake
+//! itself does not federate. A pending friend request is per-node state — the
+//! request and its acceptance are writes against the graph of the node that
+//! took them — so this test seeds each node with the one edge its own account
+//! owns (alice's `alice → bob` edge on alpha, bob's `bob → alice` edge on
+//! beta), which is exactly the state the store's own acceptance path would
+//! leave behind and exactly the state a friend-request federation tier will
+//! produce when it exists. The *cross* edges are not seeded: bob's edge toward
+//! alice crosses to alpha inside the row-replication answer, and alice's
+//! toward bob crosses to beta the same way, and the test asserts both arrived
+//! — the replication of edges is proven, only their creation stays local.
+//!
 //! Determinism is the client-seam house style: every exchange is bounded by a
 //! step budget, and the one place timing genuinely races — alice's first send
-//! may leave node alpha before node beta's watch registration lands — is
-//! handled the way a real client handles it, by retrying with *fresh* message
-//! ids (section 156: a duplicate id produces no fanout, so a retry that reuses
+//! may leave node alpha before beta's watch registration lands — is handled
+//! the way a real client handles it, by retrying with *fresh* message ids
+//! (section 156: a duplicate id produces no fanout, so a retry that reuses
 //! one would be a silent no-op), bounded by attempts, never by sleeping.
 
 use std::net::SocketAddr;
@@ -52,21 +61,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
 use migo_core::config::{MeshPeer, StoreConfig};
-use migo_core::{Clock, Config, Id, OsRandom, Secret, SystemClock};
+use migo_core::{Clock, Config, Id, OsRandom, Secret, SystemClock, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationKind, ConversationSummary, Decode,
     Encode, Frame, Hello, MessageAccepted, MessageEvent, MessageKind, MessageSend, Opcode,
-    Platform, RelationshipKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome,
+    Platform, ProfileUpdate, SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome,
     PROTOCOL_VERSION,
 };
-use migo_ratelimit::TrustTier;
-use migo_social::Caller;
-use migo_store::model::{NewAccount, NewDevice, NewSession};
+use migo_store::model::{Relationship, Visibility};
 use migo_store::SharedStore;
 use migod::App;
 
 /// How long any single exchange may take before the test declares a node stuck.
+///
+/// The row-replication pulls ride inside ordinary requests — a create, a
+/// subscribe, a send — and each costs one mesh round trip (the outbox runner
+/// drains every half second, so a question and its answer fit inside a second
+/// or two) on top of the request's own work. Five seconds bounds a request
+/// *plus* one pull with margin, and the pull's own wait is capped at three
+/// seconds inside the relay, so a stuck node still trips this budget rather
+/// than hanging the test.
 const STEP: Duration = Duration::from_secs(5);
 
 /// How long one delivery attempt waits for the far participant's event before
@@ -215,185 +230,28 @@ async fn registered_grant(app: &App, username: &str) -> Grant {
         .expect("a development app registers an account")
 }
 
-/// Makes the two accounts friends, because a direct conversation's privacy
-/// accepts friends only.
-async fn befriend(app: &App, requester: &Grant, accepter: &Grant) {
-    let friender = Caller::new(
-        requester.account_id,
-        requester.device_id,
-        TrustTier::Established,
-        app.clock.now(),
-    );
-    let answerer = Caller::new(
-        accepter.account_id,
-        accepter.device_id,
-        TrustTier::Established,
-        app.clock.now(),
-    );
-    app.social
-        .request_friend(&friender, accepter.account_id)
-        .await
-        .expect("a friend request between fresh accounts must be taken");
-    app.social
-        .respond_friend(&answerer, requester.account_id, true)
-        .await
-        .expect("the friend request must be accepted");
-}
-
-/// Copies one account's rows verbatim to the far node's store: account, device,
-/// and the session the access token names.
+/// Seeds the one friend edge an account owns on the node that account belongs
+/// to — the *remaining* stand-in, and the only one this test still makes.
 ///
-/// This is the replication stand-in's job in a real fleet — the
-/// account-to-node map section 170 lists as a gap is what would route this —
-/// and it is done by hand here so the test says exactly what the far node
-/// needs: nothing more than the rows authentication reads. The token itself
-/// verifies anywhere because both nodes share the token key, the way a
-/// deployment must.
-async fn copy_identity_to(from: &SharedStore, to: &SharedStore, grant: &Grant) {
-    copy_account_to(from, to, grant.account_id).await;
-
-    let device = from
-        .device_by_id(grant.device_id)
+/// The friend handshake does not federate: a pending request and its
+/// acceptance are writes against the graph of the node that took them, so
+/// there is no cross-node path today that would leave these rows behind. What
+/// is seeded is exactly what the store's own acceptance path writes on one
+/// node — an accepted edge owned by the account this node registered — and
+/// nothing more. The cross edges (bob's toward alice on alpha, alice's toward
+/// bob on beta) are *not* seeded: they cross inside the row-replication
+/// answers, and the test asserts they arrived.
+async fn seed_own_friend_edge(store: &SharedStore, owner: Id, peer: Id, at: Timestamp) {
+    store
+        .put_relationship(Relationship {
+            account_id: owner,
+            other_id: peer,
+            kind: migo_protocol::RelationshipKind::Friend,
+            created_at: at,
+            accepted_at: Some(at),
+        })
         .await
-        .expect("the source store reads")
-        .expect("the device exists");
-    to.register_device(NewDevice {
-        device_id: device.device_id,
-        account_id: device.account_id,
-        platform: device.platform,
-        display_name: device.display_name,
-        app_version: device.app_version,
-        os_version: device.os_version,
-        device_model: device.device_model,
-        status: device.status,
-        public_credential: device.public_credential,
-        created_at: device.created_at,
-    })
-    .await
-    .expect("the far store takes the device row verbatim");
-
-    let session = from
-        .session_by_id(grant.session_id)
-        .await
-        .expect("the source store reads")
-        .expect("the session exists");
-    to.create_session(NewSession {
-        session_id: session.session_id,
-        account_id: session.account_id,
-        device_id: session.device_id,
-        family_id: session.family_id,
-        refresh_hash: session.refresh_hash,
-        generation: session.generation,
-        created_at: session.created_at,
-        authenticated_at: session.authenticated_at,
-        access_expires_at: session.access_expires_at,
-        refresh_expires_at: session.refresh_expires_at,
-        ip_class: session.ip_class,
-        user_agent: session.user_agent,
-    })
-    .await
-    .expect("the far store takes the session row verbatim");
-}
-
-/// Copies a conversation row and its membership to the far node's store,
-/// verbatim — including the `home_region` label, which is the one fact every
-/// node holding a copy of the row must read the same answer from: both stores
-/// say the conversation is homed on alpha, so both nodes agree on who owns the
-/// fan-out.
-async fn copy_conversation_to(from: &SharedStore, to: &SharedStore, conversation_id: Id) {
-    let conversation = from
-        .conversation(conversation_id)
-        .await
-        .expect("the source store reads")
-        .expect("the conversation exists on the node that created it");
-    let members = from
-        .members(conversation_id)
-        .await
-        .expect("the member rows read");
-    assert_eq!(members.len(), 2, "a direct conversation seats exactly two");
-    to.create_conversation(
-        conversation,
-        members.iter().map(|member| member.account_id).collect(),
-    )
-    .await
-    .expect("the far store takes the conversation verbatim, label included");
-}
-
-/// Copies one account row verbatim — the root every other row the stand-in
-/// carries hangs from. The profile's foreign key resolves to it, and the far
-/// store refuses a profile whose account it does not hold, so this crosses
-/// first wherever a profile follows.
-async fn copy_account_to(from: &SharedStore, to: &SharedStore, account_id: Id) {
-    let account = from
-        .account_by_id(account_id)
-        .await
-        .expect("the source store reads")
-        .expect("the account exists on the node that registered it");
-    to.create_account(NewAccount {
-        account_id: account.account_id,
-        username: account.username,
-        email: account.email,
-        phone: account.phone,
-        passphrase_hash: account.passphrase_hash,
-        locale: account.locale,
-        country: account.country,
-        created_at: account.created_at,
-    })
-    .await
-    .expect("the far store takes the account row verbatim");
-}
-
-/// Copies the social rows the far node's privacy gate reads for a direct
-/// send: both profiles, and the friendship's two edges, verbatim.
-///
-/// A direct send enforces the recipient's `who_can_message` on every message,
-/// at whichever node takes the send — so bob's reply is gated on node beta,
-/// which was not there when the friendship was made on alpha. The gate is
-/// deliberately fail-closed: a node that cannot see the recipient's profile
-/// cannot answer the privacy question, and a node that cannot answer refuses
-/// — the same posture that keeps a stranger's `Nobody` setting meaningful. So
-/// the replication stand-in carries the answer with the passenger: alice's
-/// profile row (the setting itself) and the caller-side friendship edge (the
-/// `Friends` verdict), copied verbatim, nothing derived. The pair arrives
-/// whole rather than as only the rows this one send reads, because that is
-/// the shape the store keeps — a friendship is two edges or it is the "we are
-/// friends but you are not in my list" bug the store's own acceptance path
-/// refuses to write.
-///
-/// The account row crosses ahead of the profile, in the store's dependency
-/// order: the profile's foreign key must resolve on the far side before the
-/// profile can land. Bob's account is already there — his identity crossed
-/// when he did — so only alice's is written, and the check keeps the helper
-/// idempotent rather than assuming the caller remembers who crossed first.
-async fn copy_friendship_to(from: &SharedStore, to: &SharedStore, left: Id, right: Id) {
-    for account_id in [left, right] {
-        if to
-            .account_by_id(account_id)
-            .await
-            .expect("the far store reads")
-            .is_none()
-        {
-            copy_account_to(from, to, account_id).await;
-        }
-        let profile = from
-            .profile(account_id)
-            .await
-            .expect("the source store reads")
-            .expect("a registered account has a profile");
-        to.create_profile(profile)
-            .await
-            .expect("the far store takes the profile row verbatim");
-    }
-    for (owner, peer) in [(left, right), (right, left)] {
-        let edge = from
-            .relationship(owner, peer, RelationshipKind::Friend)
-            .await
-            .expect("the source store reads")
-            .expect("the friendship exists in both directions");
-        to.put_relationship(edge)
-            .await
-            .expect("the far store takes the friendship edge verbatim");
-    }
+        .expect("the node that owns the account takes its own friendship edge");
 }
 
 /// Sends one request frame as a length-prefixed record.
@@ -492,7 +350,7 @@ impl Client {
         assert_eq!(
             welcome.authenticated_user,
             Some(grant.account_id),
-            "the inline token authenticated the session — the far node read the copied rows"
+            "the inline token authenticated the session on the node that registered it"
         );
 
         send(
@@ -545,6 +403,26 @@ impl Client {
                     from_frame::<migo_protocol::Error>(&frame)
                 );
                 return from_frame(&frame).expect("the reply decodes");
+            }
+        }
+    }
+
+    /// Sends a request that must succeed, keeping only the fact that it did.
+    /// The profile update's reply is the caller's refreshed card, and this
+    /// test cares about the *far* node's copy of that card, not the near one.
+    async fn expect_ok<M: Encode>(&mut self, opcode: Opcode, message: &M) {
+        self.correlation += 1;
+        let correlation = self.correlation;
+        send(&mut self.stream, opcode, correlation, message).await;
+        loop {
+            let frame = self.next_frame().await;
+            if frame.header.correlation == correlation {
+                assert!(
+                    !frame.header.is_error(),
+                    "the request was refused: {:?}",
+                    from_frame::<migo_protocol::Error>(&frame)
+                );
+                return;
             }
         }
     }
@@ -608,11 +486,13 @@ impl Client {
     }
 }
 
-/// The full scenario: a direct conversation created on one node, its other
-/// participant seated on another node with another store, and the sealed
-/// messages crossing both directions over the mesh — the home node fanning
-/// out, the far node handing its reply to the home node, and neither ever
-/// holding anything but an opaque envelope.
+/// The full scenario: two accounts registered on two different nodes, a
+/// direct conversation created on one and subscribed on the other, and the
+/// sealed messages crossing both directions over the mesh — the home node
+/// fanning out, the far node handing its reply to the home node, and neither
+/// ever holding anything but an opaque envelope. No row is copied by hand:
+/// every account, profile, edge, and conversation row that crosses, crosses
+/// over the mesh.
 #[tokio::test]
 async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
     // The fleet: two full nodes, a store each — the shape where the far
@@ -629,21 +509,76 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
     let b_addr = beta.tcp_bind.expect("node beta binds its TCP listener");
     link_peers(&alpha, &beta).await;
 
-    // Two accounts, made friends on the node both were registered through,
-    // because the conversation's privacy accepts friends only.
+    // Two accounts, each registered through the front door of a *different*
+    // node. Bob's rows never exist anywhere but beta; alice's never anywhere
+    // but alpha. The assertion is a precondition, not a formality: it is what
+    // makes every later row on the far store a row the mesh carried.
     let alice = registered_grant(&alpha, "dmfedalice").await;
-    let bob = registered_grant(&alpha, "dmfedbob").await;
-    befriend(&alpha, &alice, &bob).await;
+    let bob = registered_grant(&beta, "dmfedbob").await;
+    assert!(
+        store_alpha
+            .account_by_id(bob.account_id)
+            .await
+            .expect("the home store reads")
+            .is_none(),
+        "bob's account does not exist on node alpha before the mesh carries it"
+    );
+    assert!(
+        store_beta
+            .account_by_id(alice.account_id)
+            .await
+            .expect("the home store reads")
+            .is_none(),
+        "alice's account does not exist on node beta before the mesh carries it"
+    );
 
-    // Bob's identity crosses to node beta the way the replication stand-in
-    // would carry it: the rows authentication reads, verbatim, nothing more.
-    copy_identity_to(&store_alpha, &store_beta, &bob).await;
-
-    // Alice, seated on the home node, opens the conversation through her own
-    // wire session. The row node alpha writes carries the home label "alpha",
-    // stamped at creation and never derived again.
+    // Each participant narrows their own messaging privacy to friends —
+    // through the front door, the PROFILE_UPDATE every client sends — so the
+    // gate has a real setting to enforce and the friendship edges have a
+    // verdict to decide. Both settings are facts of the node that owns the
+    // account, which is exactly what the pull must carry across.
     let mut alice_client = Client::connect_fresh(a_addr, &alice).await;
     assert_eq!(alice_client.node, "node-alpha");
+    let mut bob_client = Client::connect_fresh(b_addr, &bob).await;
+    assert_eq!(
+        bob_client.node, "node-beta",
+        "bob is genuinely seated on the other node"
+    );
+    assert_eq!(bob_client.region, "beta");
+    alice_client
+        .expect_ok(
+            Opcode::ProfileUpdate,
+            &ProfileUpdate {
+                who_can_message: Some(u32::from(Visibility::Friends.to_i16() as u16)),
+                ..Default::default()
+            },
+        )
+        .await;
+    bob_client
+        .expect_ok(
+            Opcode::ProfileUpdate,
+            &ProfileUpdate {
+                who_can_message: Some(u32::from(Visibility::Friends.to_i16() as u16)),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // The friendship, one edge each: alice's own edge on her node, bob's own
+    // edge on his. This is the one remaining hand-seeded stand-in — the friend
+    // handshake does not federate — and it seeds only what each node's own
+    // acceptance path would have written. The cross edges are not seeded; the
+    // assertions at the end prove the replication answer carried them.
+    let friend_at = alpha.clock.now();
+    seed_own_friend_edge(&store_alpha, alice.account_id, bob.account_id, friend_at).await;
+    seed_own_friend_edge(&store_beta, bob.account_id, alice.account_id, friend_at).await;
+
+    // Alice opens the conversation through her own wire session. The create's
+    // privacy gate fail-closed on a recipient whose profile node alpha does
+    // not hold — bob registered on beta — and the row-replication tier pulled
+    // his account, profile, and his edge toward alice from beta before the
+    // gate asked again. The reply arriving at all is the proof the pull
+    // answered; the row it wrote is checked right below.
     let summary: ConversationSummary = alice_client
         .ask(
             Opcode::ConversationCreate,
@@ -655,11 +590,6 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
         )
         .await;
     let conversation = summary.conversation_id;
-
-    // The conversation crosses to node beta the same way, label included, so
-    // both stores agree on who owns the fan-out and beta's membership check
-    // can answer for bob.
-    copy_conversation_to(&store_alpha, &store_beta, conversation).await;
     let row = store_alpha
         .conversation(conversation)
         .await
@@ -670,33 +600,68 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
         "the creating node stamped itself as the conversation's home"
     );
 
-    // The friendship's rows cross too, the same stand-in's cargo: bob's reply
-    // is a send like any other, and it is node beta that must enforce alice's
-    // `who_can_message` for it — fail-closed until her profile and the edge
-    // are there to answer.
-    copy_friendship_to(&store_alpha, &store_beta, alice.account_id, bob.account_id).await;
+    // Bob's rows crossed as a *replica*, verbatim: the account, the profile
+    // with the privacy setting he set through beta's front door, and the edge
+    // he owns toward alice. Nothing was derived and nothing was hand-copied —
+    // the assertion reads the far store, which only the mesh could have
+    // filled.
+    let bob_replica = store_alpha
+        .account_by_id(bob.account_id)
+        .await
+        .expect("the far store reads")
+        .expect("bob's account crossed the mesh inside the create's pull");
+    assert_eq!(bob_replica.username, "dmfedbob");
+    let bob_profile_replica = store_alpha
+        .profile(bob.account_id)
+        .await
+        .expect("the far store reads")
+        .expect("bob's profile crossed with the account");
+    assert_eq!(
+        bob_profile_replica.who_can_message,
+        Visibility::Friends,
+        "the privacy setting bob set on beta crossed verbatim"
+    );
+    let bob_edge_replica = store_alpha
+        .relationship(
+            bob.account_id,
+            alice.account_id,
+            migo_protocol::RelationshipKind::Friend,
+        )
+        .await
+        .expect("the far store reads")
+        .expect("bob's own-side friendship edge crossed inside the answer");
+    assert!(
+        bob_edge_replica.accepted_at.is_some(),
+        "the accepted edge crossed whole, timestamps and all"
+    );
 
     // Both participants subscribe their side. Alice's subscribe needs no ask —
-    // her node is the home node. Bob's subscribe is the subscribe half of the
-    // tier: node beta asks node alpha to watch the conversation, once.
+    // her node is the home node. Bob's subscribe is where the conversation's
+    // row crosses: beta's membership read came back empty (the row lives on
+    // alpha), the row-replication tier pulled it from the home node, and the
+    // subscription was granted against the replica — then the conversation
+    // tier asked alpha to watch it, once.
     alice_client
         .subscribe(vec![Topic {
             kind: TopicKind::Conversation,
             id: conversation,
         }])
         .await;
-    let mut bob_client = Client::connect_fresh(b_addr, &bob).await;
-    assert_eq!(
-        bob_client.node, "node-beta",
-        "bob is genuinely seated on the other node"
-    );
-    assert_eq!(bob_client.region, "beta");
     bob_client
         .subscribe(vec![Topic {
             kind: TopicKind::Conversation,
             id: conversation,
         }])
         .await;
+    let beta_row = store_beta
+        .conversation(conversation)
+        .await
+        .expect("the far store reads")
+        .expect("the conversation row crossed the mesh inside bob's subscribe");
+    assert_eq!(
+        beta_row.home_region, "alpha",
+        "the replica kept the home label, so both nodes agree on who owns the fan-out"
+    );
 
     // Alice sends, retrying with fresh message ids until the delivery lands.
     // The race is real: her first send may leave node alpha before beta's
@@ -735,14 +700,42 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
          two nodes carried it and neither opened it"
     );
 
-    // Bob answers from the far node. His send lands in beta's store (its own
-    // seq — a private message needs no global order, section 170), and the
-    // forward half hands it to the conversation's home node, because beta
-    // holds no watch table and cannot tier it itself.
+    // Bob answers from the far node. His send is gated on beta — alice's
+    // `who_can_message` is a fact of alpha, and beta holds none of her rows
+    // yet — so the gate's pull runs here too: alice's account, profile, and
+    // her edge toward bob cross from alpha inside this very request, and the
+    // send proceeds against rows the mesh just delivered. The send itself
+    // lands in beta's store (its own seq — a private message needs no global
+    // order, section 170), and the forward half hands it to the conversation's
+    // home node, because beta holds no watch table and cannot tier it itself.
     let (_, bob_accepted) = bob_client.send_message(conversation, BOB_SEALED).await;
     assert_eq!(
         bob_accepted.seq, 1,
         "beta's own store numbers its own sends"
+    );
+
+    // And the pull inside that send left a replica behind, the mirror of the
+    // one the create left on alpha: alice's account, her privacy setting, and
+    // her own-side edge — carried by the mesh, never by the test.
+    let alice_profile_replica = store_beta
+        .profile(alice.account_id)
+        .await
+        .expect("the far store reads")
+        .expect("alice's profile crossed the mesh inside bob's send");
+    assert_eq!(alice_profile_replica.who_can_message, Visibility::Friends);
+    assert!(
+        store_beta
+            .relationship(
+                alice.account_id,
+                bob.account_id,
+                migo_protocol::RelationshipKind::Friend
+            )
+            .await
+            .expect("the far store reads")
+            .expect("alice's own-side friendship edge crossed inside the answer")
+            .accepted_at
+            .is_some(),
+        "the cross edge the test never seeded is there — the answer carried it"
     );
 
     // Alice receives the reply from her own node's hub: the home node
@@ -758,7 +751,8 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
     );
 
     // And the label held: both stores still name the same home node, which is
-    // what keeps the tier's fan-out authority in one place.
+    // what keeps the tier's fan-out authority in one place — and the member
+    // rows the replica seated are the pair the conversation was created with.
     for store in [&store_alpha, &store_beta] {
         let row = store
             .conversation(conversation)
@@ -766,5 +760,14 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
             .expect("the store reads")
             .expect("the conversation row exists");
         assert_eq!(row.home_region, "alpha");
+        assert_eq!(
+            store
+                .members(conversation)
+                .await
+                .expect("the store reads")
+                .len(),
+            2,
+            "both participants are seated wherever the row is"
+        );
     }
 }

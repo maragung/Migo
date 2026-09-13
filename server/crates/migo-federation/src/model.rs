@@ -32,15 +32,27 @@ pub const CONVERSATION_OPCODE_MIN: i32 = 241;
 /// [`CONVERSATION_OPCODE_MIN`].
 pub const CONVERSATION_OPCODE_MAX: i32 = 242;
 
-/// Whether an opcode belongs to either federation band, i.e. may ride the mesh.
+/// The lowest opcode of the third federation band, the row-replication tier's
+/// carve-out from the same head (section 145's precedent again: 239-240, then
+/// 241-242). The account-to-node routing question and its answer take one pair
+/// (243/244), the conversation-rows question and its answer the second (245/246);
+/// see [`ROW_OPCODE_MAX`].
+pub const ROW_OPCODE_MIN: i32 = 243;
+
+/// The highest opcode of the third federation band, inclusive. See
+/// [`ROW_OPCODE_MIN`].
+pub const ROW_OPCODE_MAX: i32 = 246;
+
+/// Whether an opcode belongs to any federation band, i.e. may ride the mesh.
 ///
 /// A frame on the mesh must never be mistaken for a client frame, and equally a client
 /// opcode must never be enqueued toward a peer, so [`enqueue`](crate::Mesh::enqueue)
-/// refuses anything outside both bands.
+/// refuses anything outside the bands.
 #[must_use]
 pub const fn is_federation_opcode(opcode: i32) -> bool {
     (opcode >= FEDERATION_OPCODE_MIN && opcode <= FEDERATION_OPCODE_MAX)
         || (opcode >= CONVERSATION_OPCODE_MIN && opcode <= CONVERSATION_OPCODE_MAX)
+        || (opcode >= ROW_OPCODE_MIN && opcode <= ROW_OPCODE_MAX)
 }
 
 /// How long a handshake nonce is remembered, in milliseconds.
@@ -241,8 +253,8 @@ pub struct PeerIdentity {
 ///
 /// The payload is an already-encoded MWP frame body: opaque bytes here, and a private
 /// message inside one is a sealed envelope this layer never opens (section 169). The opcode
-/// must fall in one of the two federation bands, 208-223 or the conversation tier's
-/// 241-242 (see [`is_federation_opcode`]).
+/// must fall in one of the three federation bands, 208-223, the conversation tier's
+/// 241-242, or the row-replication tier's 243-246 (see [`is_federation_opcode`]).
 #[derive(Clone, Debug)]
 pub struct FederatedEvent {
     /// The node id to deliver to.

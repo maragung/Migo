@@ -32,10 +32,12 @@
 use std::collections::HashMap;
 use std::io::ErrorKind as IoErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
+use crate::replication::ReplicationHandle;
 use migo_calls::CallGate;
 use migo_core::{Id, Result, Timestamp};
 use migo_economy::{Award, Badge, BadgeGrant, SharedTreasurer, Source};
@@ -435,25 +437,44 @@ impl CallGate for StoreCallGate {
 /// Both questions fail closed, exactly as the port's contract requires: a graph
 /// or room that cannot answer is one that has not said "allowed", and the send
 /// is refused rather than sequenced past the refusal.
+///
+/// The privacy question has one more move on a federating node: a refusal that
+/// came from a missing profile — the graph cannot answer for a recipient whose
+/// rows this node does not hold — is retried once after the row-replication
+/// tier has pulled the recipient's account, profile, and the edges between the
+/// two accounts from the owning node (section 170's account-to-node routing
+/// map). The pull never weakens the gate: it either feeds the graph real rows
+/// to answer with or changes nothing, and the second refusal is the same
+/// fail-closed `false` the first was.
 pub struct StoreMessageGate {
     store: migo_store::SharedStore,
     social: migo_social::SharedSocial,
     rooms: migo_rooms::SharedRooms,
+    replication: Arc<ReplicationHandle>,
 }
 
 impl StoreMessageGate {
-    /// Wraps the store, social graph, and room service the composition root
-    /// already opened.
+    /// Wraps the store, social graph, room service, and the late-bound
+    /// replication handle the composition root fills once the mesh is open.
+    ///
+    /// The handle is late-bound for the same reason the gateway handle is:
+    /// messaging opens above the store and the graph, federation opens a layer
+    /// later, and a gate that must not exist after the mesh does is a gate
+    /// built backwards. Until the handle is filled the gate answers exactly as
+    /// it did before the tier existed, which is correct — no mesh, no rows to
+    /// pull.
     #[must_use]
     pub fn new(
         store: migo_store::SharedStore,
         social: migo_social::SharedSocial,
         rooms: migo_rooms::SharedRooms,
+        replication: Arc<ReplicationHandle>,
     ) -> Self {
         Self {
             store,
             social,
             rooms,
+            replication,
         }
     }
 }
@@ -469,6 +490,30 @@ impl migo_messaging::MessageGate for StoreMessageGate {
         // the graph's own refusal codes into the one answer the port allows.
         let who =
             migo_social::Caller::new(caller.account_id, caller.device_id, caller.tier, caller.now);
+        if self
+            .social
+            .may_interact(&who, peer_id, migo_social::Interaction::Message)
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        // The refusal may only be the mesh's honest gap: this node holds no
+        // profile for the recipient, so the graph failed closed on nothing
+        // rather than answering "no" from rows it read. Pull the recipient's
+        // rows from the owning node and ask again — once, bounded, and with
+        // the same fail-closed `false` if the rows cannot be had. An empty
+        // handle is the startup window before the mesh exists, and also a
+        // deployment with no mesh at all: both answer as the gate always did.
+        let Some(relay) = self.replication.get() else {
+            return false;
+        };
+        if !relay
+            .ensure_account(peer_id, caller.account_id, caller.now)
+            .await
+        {
+            return false;
+        }
         self.social
             .may_interact(&who, peer_id, migo_social::Interaction::Message)
             .await

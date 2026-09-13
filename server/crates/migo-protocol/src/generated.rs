@@ -6868,6 +6868,384 @@ impl Decode for FedConversationEvent {
     }
 }
 
+/// A node asks its peers which of them owns an account's rows: the account-to-node routing question of section 170, asked as a broadcast because an account row carries no home label to read. `regarding` names the local account the asker already holds, so a peer that owns the account can also send the edges between the two — the subject-side block and friendship rows the asker's privacy gate and block check read. The ask rides the mesh only from a fail-closed gate that found no local profile, and a peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same fail-closed refusal.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedAccountQuery {
+    pub epoch: u64,
+    pub account_id: Id,
+    pub regarding: Id,
+}
+
+impl Encode for FedAccountQuery {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_id(&self.account_id);
+        w.write_id(&self.regarding);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedAccountQuery {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        out.account_id = r.read_id()?;
+        out.regarding = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One social-graph edge the queried account owns, crossing as part of its rows: verbatim — the kind, both timestamps, nothing derived. Only the edges between the queried account and the asker's `regarding` account cross, never the account's whole graph, because a replication answer may carry what the asker's gate reads and no more.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedAccountEdge {
+    pub other_id: Id,
+    pub kind: RelationshipKind,
+    pub created_at: Timestamp,
+    /// Set when a friend request was accepted; absent while it is pending.
+    pub accepted_at: Option<Timestamp>,
+}
+
+impl Encode for FedAccountEdge {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.other_id);
+        w.write_u32(self.kind.to_wire());
+        w.write_timestamp(self.created_at);
+        let present = usize::from(self.accepted_at.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.accepted_at {
+            w.optional(1, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedAccountEdge {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.other_id = r.read_id()?;
+        out.kind = RelationshipKind::from_wire(r.read_u32()?);
+        out.created_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.accepted_at = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The answer to a FedAccountQuery, from a peer that holds the account: the account row, the profile row, and the edges between the account and the asker's `regarding` account, all verbatim. The passphrase hash crosses with the account row the way the replication stand-in copied it: the mesh is an authenticated link between allow-listed fleet peers, the same trust boundary that already carries sealed envelopes, and a replica account without its hash would not be the row it claims to be. Applied only by a node that asked, and only when the row is not already held — a peer cannot overwrite local truth, only feed a gate that had nothing to read.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedAccountRows {
+    pub account_id: Id,
+    pub username: String,
+    pub passphrase_hash: String,
+    pub locale: String,
+    pub created_at: Timestamp,
+    pub display_name: String,
+    pub show_last_seen: u32,
+    pub who_can_message: u32,
+    pub who_can_add: u32,
+    pub searchable: bool,
+    pub profile_updated_at: Timestamp,
+    pub edges: Vec<FedAccountEdge>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub country: Option<String>,
+    pub bio: Option<String>,
+    pub avatar_media_id: Option<Id>,
+    pub birth_year: Option<u32>,
+    /// The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for.
+    pub gender: Option<u32>,
+    pub custom_status: Option<String>,
+}
+
+impl Encode for FedAccountRows {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.account_id);
+        w.write_str(&self.username)?;
+        w.write_str(&self.passphrase_hash)?;
+        w.write_str(&self.locale)?;
+        w.write_timestamp(self.created_at);
+        w.write_str(&self.display_name)?;
+        w.write_u32(self.show_last_seen);
+        w.write_u32(self.who_can_message);
+        w.write_u32(self.who_can_add);
+        w.write_bool(self.searchable);
+        w.write_timestamp(self.profile_updated_at);
+        {
+            w.list_len(self.edges.len())?;
+            for item in self.edges.iter() {
+                item.encode(w)?;
+            }
+        }
+        let present = usize::from(self.email.is_some())
+            + usize::from(self.phone.is_some())
+            + usize::from(self.country.is_some())
+            + usize::from(self.bio.is_some())
+            + usize::from(self.avatar_media_id.is_some())
+            + usize::from(self.birth_year.is_some())
+            + usize::from(self.gender.is_some())
+            + usize::from(self.custom_status.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.email {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.phone {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.country {
+            w.optional(3, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.bio {
+            w.optional(4, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.avatar_media_id {
+            w.optional(5, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.birth_year {
+            w.optional(6, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.gender {
+            w.optional(7, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.custom_status {
+            w.optional(8, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedAccountRows {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.account_id = r.read_id()?;
+        out.username = r.read_string()?;
+        out.passphrase_hash = r.read_string()?;
+        out.locale = r.read_string()?;
+        out.created_at = r.read_timestamp()?;
+        out.display_name = r.read_string()?;
+        out.show_last_seen = r.read_u32()?;
+        out.who_can_message = r.read_u32()?;
+        out.who_can_add = r.read_u32()?;
+        out.searchable = r.read_bool()?;
+        out.profile_updated_at = r.read_timestamp()?;
+        out.edges = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(FedAccountEdge::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.email = Some(sub.read_string()?),
+                2 => out.phone = Some(sub.read_string()?),
+                3 => out.country = Some(sub.read_string()?),
+                4 => out.bio = Some(sub.read_string()?),
+                5 => out.avatar_media_id = Some(sub.read_id()?),
+                6 => out.birth_year = Some(sub.read_u32()?),
+                7 => out.gender = Some(sub.read_u32()?),
+                8 => out.custom_status = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A node asks its peers which of them owns a conversation's rows: the asker holds a session that wants the conversation's topic, and the membership read came back empty — which on a mesh means the row may live on another node rather than the topic being unreal. The peer that homes the conversation answers; a peer that holds nothing stays silent.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedConversationQuery {
+    pub epoch: u64,
+    pub conversation_id: Id,
+}
+
+impl Encode for FedConversationQuery {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_id(&self.conversation_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedConversationQuery {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The answer to a FedConversationQuery: the conversation row verbatim — home_region included, the one fact every node holding a copy must read the same answer from — and the member ids. Membership crosses as the id set: the replica answers existence and authorization, not per-member preferences, which stay facts of the node whose session set them. Applied only by a node that asked, and only when the row is not already held.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedConversationRows {
+    pub conversation_id: Id,
+    pub kind: ConversationKind,
+    pub encryption: EncryptionMode,
+    pub home_region: String,
+    pub created_by: Id,
+    pub created_at: Timestamp,
+    pub last_seq: u64,
+    pub members: Vec<Id>,
+    pub room_id: Option<Id>,
+    pub title: Option<String>,
+    pub last_message_at: Option<Timestamp>,
+    pub archived_at: Option<Timestamp>,
+}
+
+impl Encode for FedConversationRows {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_u32(self.kind.to_wire());
+        w.write_u32(self.encryption.to_wire());
+        w.write_str(&self.home_region)?;
+        w.write_id(&self.created_by);
+        w.write_timestamp(self.created_at);
+        w.write_u64(self.last_seq);
+        {
+            w.list_len(self.members.len())?;
+            for item in self.members.iter() {
+                w.write_id(item);
+            }
+        }
+        let present = usize::from(self.room_id.is_some())
+            + usize::from(self.title.is_some())
+            + usize::from(self.last_message_at.is_some())
+            + usize::from(self.archived_at.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.room_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.title {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.last_message_at {
+            w.optional(3, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.archived_at {
+            w.optional(4, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedConversationRows {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.kind = ConversationKind::from_wire(r.read_u32()?);
+        out.encryption = EncryptionMode::from_wire(r.read_u32()?);
+        out.home_region = r.read_string()?;
+        out.created_by = r.read_id()?;
+        out.created_at = r.read_timestamp()?;
+        out.last_seq = r.read_u64()?;
+        out.members = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_id()?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.room_id = Some(sub.read_id()?),
+                2 => out.title = Some(sub.read_string()?),
+                3 => out.last_message_at = Some(sub.read_timestamp()?),
+                4 => out.archived_at = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FedKeyRotate {
     pub node_id: String,
@@ -10822,6 +11200,14 @@ pub enum Opcode {
     FedConversationSubscribe = 241,
     /// One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content.
     FedConversationEvent = 242,
+    /// A node broadcasts the account-to-node routing question: which peer owns this account's rows? Sent only from a fail-closed gate that found no local profile, with the local account whose edges with the subject the asker's privacy gate reads.
+    FedAccountQuery = 243,
+    /// The owning peer's answer: the account row, the profile row, and the edges between the account and the asker's local account, verbatim. Applied only by a node that asked and only where it held nothing, so the answer feeds a fail-closed gate rather than replacing local truth.
+    FedAccountRows = 244,
+    /// A node asks which peer owns a conversation's rows: the asker's membership read for a topic subscription came back empty, and on a mesh that may mean the row lives elsewhere. The home node answers; peers that hold nothing stay silent.
+    FedConversationQuery = 245,
+    /// The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream.
+    FedConversationRows = 246,
     /// Invites a callee to a call.
     CallInvite = 224,
     /// Tells the callee a call is ringing.
@@ -10975,6 +11361,10 @@ impl Opcode {
             223 => Self::FedUserEvent,
             241 => Self::FedConversationSubscribe,
             242 => Self::FedConversationEvent,
+            243 => Self::FedAccountQuery,
+            244 => Self::FedAccountRows,
+            245 => Self::FedConversationQuery,
+            246 => Self::FedConversationRows,
             224 => Self::CallInvite,
             225 => Self::CallInviteEvent,
             226 => Self::CallAnswer,
@@ -11105,6 +11495,10 @@ impl Opcode {
             Self::FedUserEvent => "FED_USER_EVENT",
             Self::FedConversationSubscribe => "FED_CONVERSATION_SUBSCRIBE",
             Self::FedConversationEvent => "FED_CONVERSATION_EVENT",
+            Self::FedAccountQuery => "FED_ACCOUNT_QUERY",
+            Self::FedAccountRows => "FED_ACCOUNT_ROWS",
+            Self::FedConversationQuery => "FED_CONVERSATION_QUERY",
+            Self::FedConversationRows => "FED_CONVERSATION_ROWS",
             Self::CallInvite => "CALL_INVITE",
             Self::CallInviteEvent => "CALL_INVITE_EVENT",
             Self::CallAnswer => "CALL_ANSWER",
@@ -11235,6 +11629,10 @@ impl Opcode {
             Self::FedUserEvent => 0,
             Self::FedConversationSubscribe => 2,
             Self::FedConversationEvent => 0,
+            Self::FedAccountQuery => 2,
+            Self::FedAccountRows => 0,
+            Self::FedConversationQuery => 2,
+            Self::FedConversationRows => 0,
             Self::CallInvite => 20,
             Self::CallInviteEvent => 0,
             Self::CallAnswer => 5,
@@ -11364,6 +11762,10 @@ impl Opcode {
             Self::FedUserEvent => DeliveryClass::Critical,
             Self::FedConversationSubscribe => DeliveryClass::Critical,
             Self::FedConversationEvent => DeliveryClass::Critical,
+            Self::FedAccountQuery => DeliveryClass::Critical,
+            Self::FedAccountRows => DeliveryClass::Critical,
+            Self::FedConversationQuery => DeliveryClass::Critical,
+            Self::FedConversationRows => DeliveryClass::Critical,
             Self::CallInvite => DeliveryClass::Critical,
             Self::CallInviteEvent => DeliveryClass::Critical,
             Self::CallAnswer => DeliveryClass::Critical,
@@ -11497,6 +11899,10 @@ impl Opcode {
             Self::FedUserEvent => false,
             Self::FedConversationSubscribe => false,
             Self::FedConversationEvent => false,
+            Self::FedAccountQuery => false,
+            Self::FedAccountRows => false,
+            Self::FedConversationQuery => false,
+            Self::FedConversationRows => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -11634,6 +12040,10 @@ impl Opcode {
             Self::FedUserEvent => AuthLevel::Server,
             Self::FedConversationSubscribe => AuthLevel::Server,
             Self::FedConversationEvent => AuthLevel::Server,
+            Self::FedAccountQuery => AuthLevel::Server,
+            Self::FedAccountRows => AuthLevel::Server,
+            Self::FedConversationQuery => AuthLevel::Server,
+            Self::FedConversationRows => AuthLevel::Server,
             Self::CallInvite => AuthLevel::User,
             Self::CallInviteEvent => AuthLevel::User,
             Self::CallAnswer => AuthLevel::User,
@@ -11683,6 +12093,10 @@ impl Opcode {
             Self::FedUserEvent => Some(features::FEDERATION),
             Self::FedConversationSubscribe => Some(features::FEDERATION),
             Self::FedConversationEvent => Some(features::FEDERATION),
+            Self::FedAccountQuery => Some(features::FEDERATION),
+            Self::FedAccountRows => Some(features::FEDERATION),
+            Self::FedConversationQuery => Some(features::FEDERATION),
+            Self::FedConversationRows => Some(features::FEDERATION),
             _ => None,
         }
     }
@@ -11794,6 +12208,10 @@ impl Opcode {
             Self::FedUserEvent => Direction::Both,
             Self::FedConversationSubscribe => Direction::Both,
             Self::FedConversationEvent => Direction::Both,
+            Self::FedAccountQuery => Direction::Both,
+            Self::FedAccountRows => Direction::Both,
+            Self::FedConversationQuery => Direction::Both,
+            Self::FedConversationRows => Direction::Both,
             Self::CallInvite => Direction::ClientToServer,
             Self::CallInviteEvent => Direction::ServerToClient,
             Self::CallAnswer => Direction::ClientToServer,
@@ -11924,6 +12342,10 @@ impl Opcode {
             Self::FedUserEvent => false,
             Self::FedConversationSubscribe => false,
             Self::FedConversationEvent => false,
+            Self::FedAccountQuery => false,
+            Self::FedAccountRows => false,
+            Self::FedConversationQuery => false,
+            Self::FedConversationRows => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -12061,6 +12483,10 @@ impl Opcode {
         Self::FedUserEvent,
         Self::FedConversationSubscribe,
         Self::FedConversationEvent,
+        Self::FedAccountQuery,
+        Self::FedAccountRows,
+        Self::FedConversationQuery,
+        Self::FedConversationRows,
         Self::CallInvite,
         Self::CallInviteEvent,
         Self::CallAnswer,

@@ -18,20 +18,35 @@
  *        a release that has the tier from one that does not;
  *     5. a presence change on node 1 reaches a watcher on node 2 — demanded
  *        by the same version tell, since the user-topic tier shipped in the
- *        same release as the conversation tier.
+ *        same release as the conversation tier;
+ *     6. when the running binary carries the row-replication tier (its tell
+ *        is the /metrics counter migo_mesh_rows_replicated_total, which only
+ *        exists once the tier does), the account and conversation rows the
+ *        direct-message path needs are demanded to cross the link themselves:
+ *        alice's create pulls bob's account over the mesh through her privacy
+ *        gate, bob's watch pulls the conversation row and its membership
+ *        through his subscribe, and bob's reply pulls alice's account the same
+ *        way — no account, profile, friendship-cross-edge, conversation, or
+ *        membership fixture is written for the direct path at all.
  *
  *   REPORTED (expected NOT to cross when the running binary predates the
  *   tiers; the report is the point, not a failure):
- *     6. direct messages and presence changes do not federate when the
+ *     7. direct messages and presence changes do not federate when the
  *        running binary predates the tier-bearing release (no home_region).
  *
- * Accounts, devices, key bundles, and room membership rows do not replicate
- * across nodes today. To keep the proof about the *link* and the tiered
- * fan-out rather than about that missing replication, this script fixtures the
- * other node's rows directly in PostgreSQL (verbatim copies of what the
- * registering node already holds), the same stand-in a replication layer would
- * eventually provide. Every fixture is logged; nothing is papered over — if a
- * PROVED path fails, the run exits non-zero with everything observed.
+ * What still does not replicate, and is fixtured in BOTH regimes because no
+ * tier carries it yet: device and key-bundle rows (the clients seal for each
+ * other's devices, so each node must serve the other account's device and key
+ * rows — a device-federation tier does not exist), and every room row (the
+ * room tier fans events out but does not replicate the room, its membership,
+ * or its conversation — bob joins the room ON node 2, which only works if the
+ * rows are already there, and his own membership row on node 2 is exactly the
+ * row a join on that node would have written). The account, profile, and
+ * friendship rows are fixtured ONLY when the running binary predates the
+ * row-replication tier; a binary that has the tier must pull them itself, and
+ * the direct-message check fails if it does not. Every fixture is logged;
+ * nothing is papered over — if a PROVED path fails, the run exits non-zero
+ * with everything observed.
  *
  * Environment variables (defaults match tools/nnode/run.sh):
  *   NODE1_HTTP  node 1 REST origin   (default http://127.0.0.1:18201)
@@ -173,18 +188,31 @@ function idToUuid(id: Id): string {
 
 /** One metric's value off a node's `/metrics`, summed over label variants. */
 async function metric(origin: string, name: string): Promise<number> {
+  const lines = await metricLines(origin, name);
+  let total = 0;
+  for (const line of lines) {
+    total += Number.parseFloat(line.slice(line.lastIndexOf(' ') + 1));
+  }
+  return total;
+}
+
+/**
+ * The exposition lines naming `name`, empty when the node does not export it.
+ *
+ * A counter that exists but is still zero is not the same fact as a counter
+ * that does not exist: the row-replication tier's counter is the version tell
+ * for whether the running binary can pull rows at all, and `metric()` returns
+ * 0 for both. This reads the raw exposition so the two cases stay distinct.
+ */
+async function metricLines(origin: string, name: string): Promise<string[]> {
   const response = await fetch(`${origin}/metrics`);
   if (!response.ok) {
     throw new Error(`/metrics on ${origin} answered ${response.status}`);
   }
   const text = await response.text();
-  let total = 0;
-  for (const line of text.split('\n')) {
-    if (line.startsWith(`${name}{`) || line.startsWith(`${name} `)) {
-      total += Number.parseFloat(line.slice(line.lastIndexOf(' ') + 1));
-    }
-  }
-  return total;
+  return text
+    .split('\n')
+    .filter((line) => line.startsWith(`${name}{`) || line.startsWith(`${name} `));
 }
 
 /** Waits until `condition` holds, or gives up after `timeout` milliseconds. */
@@ -243,6 +271,20 @@ async function main(): Promise<void> {
   const aliceUuid = idToUuid(aliceId);
   const bobUuid = idToUuid(bobId);
 
+  // The row-replication tier's version tell. The counter is registered at
+  // boot by binaries that carry the tier and absent from ones that predate
+  // it — and a zero reading is not the same fact as absence, which is why
+  // the tell reads the exposition lines rather than the value. A binary with
+  // the counter must pull account and conversation rows across the mesh by
+  // itself, and the checks below demand it does; a binary without it gets
+  // the stand-in fixtures, exactly as before.
+  const rowsReplicate =
+    (await metricLines(NODE1_HTTP, 'migo_mesh_rows_replicated_total')).length > 0;
+  log(
+    'boot',
+    `row-replication tier: ${rowsReplicate ? 'present (no account/conversation fixtures will be written)' : 'absent (stand-in fixtures in use)'}`,
+  );
+
   // 2. Alice founds a public room on node 1. Node 1 is the room's home — its
   //    `home_region` is node 1's region, which is what the tiered fan-out keys
   //    the cross-node copies on.
@@ -259,27 +301,41 @@ async function main(): Promise<void> {
   const conversationUuid = idToUuid(conversationId);
   log('room', `room ${roomId} → conversation ${conversationId} (encryption=${joined.encryption})`);
 
-  // 3. Fixtures: stand in for the account/device/key replication a full mesh
-  //    does not have yet. Everything is a verbatim copy of rows the other node
-  //    already owns, except one policy tweak that makes cross-node visibility
-  //    meaningful and the membership rows a join on that node would have
-  //    written.
+  // 3. Fixtures. Two regimes, decided by the row-replication tell above:
+  //
+  //   - Binary without the tier: the account, profile, and device/key rows of
+  //     each account are copied verbatim to the other node, the same stand-in
+  //     as always.
+  //   - Binary with the tier: only the device and key-bundle rows are copied,
+  //     because devices and keys have no federation tier yet and the clients
+  //     seal for each other's devices. The account and profile rows must be
+  //     pulled across the mesh by the nodes themselves — the checks demand it.
   const fixtureAccount = (from: string, to: string, uuid: string, note: string): void => {
-    const account = mustRow<Record<string, unknown>>(
-      from,
-      `select row_to_json(t) from account t where account_id = '${uuid}'`,
-      `${note}'s account row`,
-    );
-    insertJson(to, 'account', account);
-    const profile = mustRow<Record<string, unknown>>(
-      from,
-      `select row_to_json(t) from profile t where account_id = '${uuid}'`,
-      `${note}'s profile row`,
-    );
-    // `show_last_seen = 2` (everyone) so the other node's watch of this
-    // account's presence topic is authorized without a friendship graph.
-    profile.show_last_seen = 2;
-    insertJson(to, 'profile', profile);
+    if (!rowsReplicate) {
+      const account = mustRow<Record<string, unknown>>(
+        from,
+        `select row_to_json(t) from account t where account_id = '${uuid}'`,
+        `${note}'s account row`,
+      );
+      insertJson(to, 'account', account);
+      const profile = mustRow<Record<string, unknown>>(
+        from,
+        `select row_to_json(t) from profile t where account_id = '${uuid}'`,
+        `${note}'s profile row`,
+      );
+      // `show_last_seen = 2` (everyone) so the other node's watch of this
+      // account's presence topic is authorized without a friendship graph.
+      profile.show_last_seen = 2;
+      insertJson(to, 'profile', profile);
+    } else {
+      log(
+        'fixture',
+        `${note}'s account and profile rows NOT copied ${from} → ${to}: this binary carries the row-replication tier and must pull them itself`,
+      );
+    }
+    // Devices and key bundles cross in both regimes: no tier carries them,
+    // and each node must serve the other account's devices for the clients
+    // to seal against.
     for (const table of ['device', 'identity_key', 'signed_prekey', 'one_time_prekey']) {
       const rows = rowsJson<Record<string, unknown>>(
         from,
@@ -289,7 +345,10 @@ async function main(): Promise<void> {
         insertJson(to, table, row);
       }
     }
-    log('fixture', `${note}'s account, profile, device, and key bundles copied ${from} → ${to}`);
+    log(
+      'fixture',
+      `${note}'s device and key bundles copied ${from} → ${to} (no device federation tier yet)`,
+    );
   };
 
   fixtureAccount(PG.db2, PG.db1, bobUuid, 'bob');
@@ -346,26 +405,42 @@ async function main(): Promise<void> {
   insertJson(PG.db1, 'room_member', membershipRow(bobUuid, RoomRole.Member));
   insertJson(PG.db2, 'room_member', membershipRow(aliceUuid, RoomRole.Owner));
 
-  // A friendship on BOTH nodes so the direct-message check is refused by
-  // neither privacy policy — it then measures federation, not permissions.
-  // The far node's gate is fail-closed: it answers bob's reply from its own
-  // rows, and without the edges there it can only refuse PRIVACY_RESTRICTED —
-  // the same refusal dm_federation's e2e lifted by crossing the edges.
-  for (const [a, b] of [
-    [aliceUuid, bobUuid],
-    [bobUuid, aliceUuid],
-  ]) {
-    for (const db of [PG.db1, PG.db2]) {
-      insertJson(db, 'relationship', {
-        account_id: a,
-        other_id: b,
-        kind: RelationshipKind.Friend,
-        created_at: now,
-        accepted_at: now,
-      });
+  // A friendship so the direct-message check is refused by neither privacy
+  // policy — it then measures federation, not permissions. The far node's
+  // gate is fail-closed: it answers from its own rows, and without the edges
+  // there it can only refuse PRIVACY_RESTRICTED. With the row-replication
+  // tier present, only each node's OWN-side edge is seeded (alice's
+  // `alice → bob` on node 1, bob's `bob → alice` on node 2) — exactly the
+  // state the store's own acceptance path would leave behind, because the
+  // friend handshake itself does not federate — and the cross edges are the
+  // tier's to carry: they arrive inside the account-rows answers the gates
+  // pull, and the checks below assert the far edge is there before relying
+  // on it. Without the tier, all four rows are seeded as before.
+  const friendshipAt = new Date().toISOString();
+  const friendship = (db: string, from: string, to: string): void => {
+    insertJson(db, 'relationship', {
+      account_id: from,
+      other_id: to,
+      kind: RelationshipKind.Friend,
+      created_at: friendshipAt,
+      accepted_at: friendshipAt,
+    });
+  };
+  if (rowsReplicate) {
+    friendship(PG.db1, aliceUuid, bobUuid);
+    friendship(PG.db2, bobUuid, aliceUuid);
+    log('fixture', 'own-side friendship edges seeded per node; cross edges must replicate');
+  } else {
+    const pairs: [string, string][] = [
+      [aliceUuid, bobUuid],
+      [bobUuid, aliceUuid],
+    ];
+    for (const [a, b] of pairs) {
+      friendship(PG.db1, a, b);
+      friendship(PG.db2, a, b);
     }
+    log('fixture', 'friendship rows written on both nodes');
   }
-  log('fixture', 'room membership and friendship rows written on both nodes');
 
   // 4. Subscriptions, before anything is sent. Alice's roster (node 1) now
   //    names bob, so her membership cache — the audience the first send seals
@@ -493,21 +568,29 @@ async function main(): Promise<void> {
 
   // CHECK 4: the 1:1 direct message, both directions. Alice opens a direct
   // conversation with bob on node 1 — node 1 becomes the conversation's home,
-  // stamped into the row's home_region at creation — and the row plus the
-  // whole membership are fixtured into node 2 the same way the room's were.
-  // Bob learns it from his conversation list there and watches it, which is the conversation tier's subscribe half:
-  // node 2 asks node 1 to watch the conversation. Alice's sealed message then
-  // rides the tiered fan-out (one federated copy per watching node), and
-  // bob's reply is handed by node 2 to the home node, which publishes it to
-  // alice's session from its own hub. Both directions must deliver *and
-  // decrypt*: the sealed envelope crosses every node on the way unopened.
+  // stamped into the row's home_region at creation. How the row plus the
+  // whole membership reach node 2 depends on the binary: with the
+  // row-replication tier, node 2 pulls them itself when bob's subscribe finds
+  // no local membership; without it, they are fixtured the same way the
+  // room's were. Bob learns it from his conversation list there and watches
+  // it, which is the conversation tier's subscribe half: node 2 asks node 1
+  // to watch the conversation. Alice's sealed message then rides the tiered
+  // fan-out (one federated copy per watching node), and bob's reply is handed
+  // by node 2 to the home node, which publishes it to alice's session from
+  // its own hub. Both directions must deliver *and decrypt*: the sealed
+  // envelope crosses every node on the way unopened.
   //
-  // The harness runs released binaries, and the conversation tier is in the
-  // tree before it is in a release. The stamp is the tell: a binary that has
-  // the tier stamps home_region at creation and must also carry the message
-  // across (a failure there is a real failure, exit non-zero); a binary that
-  // predates the tier writes no home_region at all, and the honest outcome is
-  // a reported gap, the same stance the presence tier's check takes.
+  // The harness runs released binaries, and the tiers are in the tree before
+  // they are in a release. The stamp is the tell: a binary that has the
+  // conversation tier stamps home_region at creation and must also carry the
+  // message across (a failure there is a real failure, exit non-zero); a
+  // binary that predates the tier writes no home_region at all, and the
+  // honest outcome is a reported gap, the same stance the presence tier's
+  // check takes. Within the stamped binaries, the replication counter is the
+  // second tell: a binary with the counter must pull the rows itself, and a
+  // binary between the two releases (stamped but counterless) gets the
+  // fixtures — which is why the fixture decision reads the counter and not
+  // the stamp.
   const direct = await alice.startConversation(ConversationKind.Direct, [bobId]);
   const directUuid = idToUuid(direct.conversationId);
   const directRow = mustRow<Record<string, unknown>>(
@@ -535,34 +618,115 @@ async function main(): Promise<void> {
         `the direct conversation's home_region is ${homeRegion}, not node 1's region`,
       );
     }
-    insertJson(PG.db2, 'conversation', directRow);
-    // The whole membership crosses, not bob's row alone: node 2's store
-    // answers the roster read his client makes when it chooses the reply's
-    // audience, and an audience without alice is an envelope alice can never
-    // open. The dm_federation e2e crosses the same rows for the same reason.
-    const directMembers = rowsJson<Record<string, unknown>>(
-      PG.db1,
-      `select * from conversation_member t where conversation_id = '${directUuid}'`,
-    );
-    if (directMembers.length !== 2) {
-      fail(
-        'check-4',
-        `a direct conversation seats exactly two, found ${directMembers.length} member rows`,
+    if (rowsReplicate) {
+      // CHECK 4, replication regime: no conversation fixtures at all. Alice's
+      // create already forced node 1's privacy gate to pull bob's account
+      // across the mesh (nothing else seats the profile the gate reads), so
+      // demand the proof straight from node 1's store: bob's account row, and
+      // the cross friendship edge the answer carried, both seated by the pull.
+      const bobOnNode1 = rowJson<Record<string, unknown>>(
+        PG.db1,
+        `select row_to_json(t) from account t where account_id = '${bobUuid}'`,
       );
+      if (bobOnNode1 === null) {
+        fail(
+          'check-4',
+          "alice's create did not pull bob's account row across the mesh (node 1's store still has no such row)",
+        );
+      }
+      const bobEdgeOnNode1 = rowJson<Record<string, unknown>>(
+        PG.db1,
+        `select row_to_json(t) from relationship t where account_id = '${bobUuid}' and other_id = '${aliceUuid}'`,
+      );
+      if (bobEdgeOnNode1 === null) {
+        fail(
+          'check-4',
+          "the replication answer did not seat bob's friendship edge toward alice on node 1",
+        );
+      }
+      log(
+        'check-4',
+        "bob's account row and friendship edge sit on node 1, pulled by the create's privacy gate",
+      );
+      proved.push(
+        'row replication: node 2 → node 1 (account, profile, and edges pulled through the gate)',
+      );
+      // Bob's watch is the pull's trigger on this side: the subscribe finds
+      // no local membership, node 2 asks the mesh, node 1 answers with the
+      // row and both member rows, and only then is the topic granted. The
+      // watch precedes the list on purpose — the list cannot show a
+      // conversation the store does not hold yet, and the pull is what seats
+      // it.
+      await bob.watchConversation(direct.conversationId);
+      const directOnNode2 = rowJson<Record<string, unknown>>(
+        PG.db2,
+        `select row_to_json(t) from conversation t where conversation_id = '${directUuid}'`,
+      );
+      if (directOnNode2 === null) {
+        fail(
+          'check-4',
+          "bob's watch did not pull the direct conversation row across the mesh (node 2's store still has no such row)",
+        );
+      }
+      const membersOnNode2 = rowsJson<Record<string, unknown>>(
+        PG.db2,
+        `select * from conversation_member t where conversation_id = '${directUuid}'`,
+      );
+      if (membersOnNode2.length !== 2) {
+        fail(
+          'check-4',
+          `the pulled conversation seats exactly two, found ${membersOnNode2.length} member rows on node 2`,
+        );
+      }
+      log(
+        'check-4',
+        'the direct conversation row and its membership sit on node 2, pulled by the watch',
+      );
+      proved.push(
+        'row replication: node 1 → node 2 (conversation row and membership pulled by the subscribe)',
+      );
+      // Bob's client still learns the conversation the way a real client on
+      // the far node does — his conversation list — which now serves it only
+      // because the pull seated the rows, and which primes his membership
+      // cache so his reply can choose its audience. The one honest gap this
+      // leaves: pull-on-demand answers a gate that already knows the id, so
+      // discovery — a client learning a new conversation exists — is still
+      // the fixture-shaped hole a push tier will have to fill.
+      const bobList = await bob.loadConversations(50);
+      if (!bobList.conversations.some((c) => c.conversationId === direct.conversationId)) {
+        fail('check-4', 'node 2 does not serve bob the direct conversation the pull seated');
+      }
+      log('check-4', "bob's conversation list on node 2 serves the pulled direct conversation");
+    } else {
+      insertJson(PG.db2, 'conversation', directRow);
+      // The whole membership crosses, not bob's row alone: node 2's store
+      // answers the roster read his client makes when it chooses the reply's
+      // audience, and an audience without alice is an envelope alice can never
+      // open. The dm_federation e2e crosses the same rows for the same reason.
+      const directMembers = rowsJson<Record<string, unknown>>(
+        PG.db1,
+        `select * from conversation_member t where conversation_id = '${directUuid}'`,
+      );
+      if (directMembers.length !== 2) {
+        fail(
+          'check-4',
+          `a direct conversation seats exactly two, found ${directMembers.length} member rows`,
+        );
+      }
+      for (const member of directMembers) {
+        insertJson(PG.db2, 'conversation_member', member);
+      }
+      // Bob's client learns the conversation the way a real client on the far
+      // node does: his conversation list. That both proves node 2 serves a
+      // conversation homed on node 1 and primes his membership cache, without
+      // which his reply bails with "membership is unknown" before it is sealed.
+      const bobList = await bob.loadConversations(50);
+      if (!bobList.conversations.some((c) => c.conversationId === direct.conversationId)) {
+        fail('check-4', 'node 2 does not serve bob the direct conversation homed on node 1');
+      }
+      log('check-4', "bob's conversation list on node 2 serves the direct conversation");
+      await bob.watchConversation(direct.conversationId);
     }
-    for (const member of directMembers) {
-      insertJson(PG.db2, 'conversation_member', member);
-    }
-    // Bob's client learns the conversation the way a real client on the far
-    // node does: his conversation list. That both proves node 2 serves a
-    // conversation homed on node 1 and primes his membership cache, without
-    // which his reply bails with "membership is unknown" before it is sealed.
-    const bobList = await bob.loadConversations(50);
-    if (!bobList.conversations.some((c) => c.conversationId === direct.conversationId)) {
-      fail('check-4', 'node 2 does not serve bob the direct conversation homed on node 1');
-    }
-    log('check-4', "bob's conversation list on node 2 serves the direct conversation");
-    await bob.watchConversation(direct.conversationId);
     log(
       'check-4',
       `direct conversation ${direct.conversationId} created on node 1 (home), bob watching it on node 2`,
@@ -616,13 +780,49 @@ async function main(): Promise<void> {
     }
     proved.push('direct message: node 2 → node 1 (delivered and decrypted)');
     log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
+
+    if (rowsReplicate) {
+      // The reply's send forced node 2's gate to pull alice's account the same
+      // way the create pulled bob's, so demand both proofs: the cross
+      // friendship edge the answer carried, and the applied-answer counters on
+      // both nodes. These close the loop the checks opened — the direct path
+      // crossed on replicated rows and nothing else.
+      const aliceEdgeOnNode2 = rowJson<Record<string, unknown>>(
+        PG.db2,
+        `select row_to_json(t) from relationship t where account_id = '${aliceUuid}' and other_id = '${bobUuid}'`,
+      );
+      if (aliceEdgeOnNode2 === null) {
+        fail(
+          'check-4',
+          "the replication answer did not seat alice's friendship edge toward bob on node 2",
+        );
+      }
+      for (const [label, origin] of [
+        ['node 1', NODE1_HTTP],
+        ['node 2', NODE2_HTTP],
+      ] as const) {
+        const replicated = await metric(origin, 'migo_mesh_rows_replicated_total');
+        if (replicated < 1) {
+          fail(
+            'check-4',
+            `${label} never applied a replicated row (migo_mesh_rows_replicated_total is still ${replicated})`,
+          );
+        }
+        log('check-4', `${label} applied ${replicated} replicated row answer(s)`);
+      }
+      proved.push('row replication: the direct-message path crossed on pulled rows, not fixtures');
+    }
   }
 
   // CHECK 5: a presence change crosses to a watcher on the peer node. Bob's
-  // watch of alice's user topic on node 2 is authorized by the fixtured
-  // account row; the granted watch is the user-topic tier's subscribe half —
-  // node 2 asks its peers to watch alice — and alice then changes presence on
-  // node 1, whose forward half carries one federated copy per watching node.
+  // watch of alice's user topic on node 2 is authorized by her profile row on
+  // that node — fixtured when the binary predates the row-replication tier,
+  // pulled across the mesh by bob's direct reply when it has the tier (his
+  // send gate read her profile, so it is seated before this subscribe asks
+  // about it) — and by the friendship the rows carry either way; the granted
+  // watch is the user-topic tier's subscribe half — node 2 asks its peers to
+  // watch alice — and alice then changes presence on node 1, whose forward
+  // half carries one federated copy per watching node.
   //
   // Both tiers (user-topic presence, conversation) shipped in the same
   // release, so the DM check's home_region stamp is this check's version tell

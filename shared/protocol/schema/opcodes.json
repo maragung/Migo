@@ -1165,6 +1165,54 @@
    "doc": "One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content."
   },
   {
+   "name": "FED_ACCOUNT_QUERY",
+   "code": 243,
+   "direction": "both",
+   "payload": "FedAccountQuery",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 2,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "A node broadcasts the account-to-node routing question: which peer owns this account's rows? Sent only from a fail-closed gate that found no local profile, with the local account whose edges with the subject the asker's privacy gate reads."
+  },
+  {
+   "name": "FED_ACCOUNT_ROWS",
+   "code": 244,
+   "direction": "both",
+   "payload": "FedAccountRows",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 0,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "The owning peer's answer: the account row, the profile row, and the edges between the account and the asker's local account, verbatim. Applied only by a node that asked and only where it held nothing, so the answer feeds a fail-closed gate rather than replacing local truth."
+  },
+  {
+   "name": "FED_CONVERSATION_QUERY",
+   "code": 245,
+   "direction": "both",
+   "payload": "FedConversationQuery",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 2,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "A node asks which peer owns a conversation's rows: the asker's membership read for a topic subscription came back empty, and on a mesh that may mean the row lives elsewhere. The home node answers; peers that hold nothing stay silent."
+  },
+  {
+   "name": "FED_CONVERSATION_ROWS",
+   "code": 246,
+   "direction": "both",
+   "payload": "FedConversationRows",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 0,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream."
+  },
+  {
    "name": "CALL_INVITE",
    "code": 224,
    "direction": "client_to_server",
