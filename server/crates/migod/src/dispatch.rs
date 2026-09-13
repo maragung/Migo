@@ -351,9 +351,67 @@ impl AppDispatcher {
             );
         }
         if let Some(account_id) = removed {
+            // The room's conversation loses the member with the room, and the
+            // typing mark they may hold there ends the same moment. Order is the
+            // point: the Stop publishes before the revocation takes the topics
+            // away, so the members who remain hear it on a topic they still
+            // hold, and the removed member's last frames are the departure and
+            // the end of their own indicator.
+            self.stop_room_typing(room_id, account_id, now).await;
             self.revoke_room_audience(room_id, account_id).await;
         }
         Ok(())
+    }
+
+    /// Ends a removed room member's typing mark on the room's conversation and
+    /// publishes the `Stop`, out of band.
+    ///
+    /// The rooms crate cannot do this itself: it holds no cache by design
+    /// (nothing in a room is cached), and the typing mark lives in the
+    /// messaging cache keyed by the conversation the room's chat runs on. The
+    /// dispatcher is the one place both facts meet — the same seam that revokes
+    /// the topics a line below its caller. No frame when the member was not
+    /// typing, which is section 156: a removal that ends no indicator owes no
+    /// frame about one.
+    async fn stop_room_typing(&self, room_id: Id, account_id: Id, now: Timestamp) {
+        let Ok(Some(room)) = self.store.room(room_id).await else {
+            return;
+        };
+        match self
+            .messaging
+            .stop_typing(room.conversation_id, account_id, now)
+            .await
+        {
+            Ok(Some(fanout)) => {
+                let MessageBroadcast::Typing(event) = fanout.event else {
+                    return;
+                };
+                let Some(typer) = event.user_id else {
+                    return;
+                };
+                if let Some(gateway) = self.gateway.get() {
+                    // The same topic, opcode, and coalescing key the member's
+                    // own `Start` was published under, so the pair collapses to
+                    // the latest for any subscriber whose queue is backed up.
+                    gateway.broadcast_to_topic_coalesced(
+                        &Topic {
+                            kind: TopicKind::Conversation,
+                            id: fanout.conversation_id,
+                        },
+                        Opcode::Typing,
+                        &event,
+                        stream_key(&(fanout.conversation_id, typer)),
+                        now,
+                    );
+                }
+            }
+            // Not typing: nothing owed, nothing sent.
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "cannot stop a removed room member's typing mark; the sweeper is the backstop"
+            ),
+        }
     }
 
     /// Publishes a messaging [`Fanout`](MessageFanout) and then, when it

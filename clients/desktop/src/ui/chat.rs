@@ -45,6 +45,14 @@ pub struct ChatState {
     pub names: HashMap<Id, String>,
     /// Who is currently typing, per conversation.
     pub typing: HashMap<Id, Vec<Id>>,
+    /// When each typing entry expires, keyed by `(conversation, typer)`.
+    ///
+    /// The local timeout brief section 15 demands: a `Start` that is never
+    /// followed by a `Stop` — a typer whose app died mid-word — must still
+    /// clear itself, because the server's own backstop can lag the deadline by
+    /// a tick and a client that waited for a frame would wait forever for a
+    /// client that cannot send one. The web client arms the same four seconds.
+    pub typing_expires: HashMap<(Id, Id), std::time::Instant>,
     /// The composer's contents, per conversation. A conversation is a window of its own now
     /// (see [`crate::ui::desktop`]), so a draft belongs to the conversation it was typed into —
     /// switching windows must not carry half a sentence from one thread into another, and
@@ -335,6 +343,70 @@ pub struct RoomNotice {
 pub const MAX_ROOM_NOTICES: usize = 50;
 
 impl ChatState {
+    /// How long a typing entry survives its last `Start` without a `Stop`.
+    ///
+    /// Four seconds, matching the web client's timer: long enough that a
+    /// continuous typer's refreshes (which the protocol sends every few
+    /// seconds) keep the line alive, short enough that a dead typer's ghost
+    /// is gone before anybody wonders.
+    pub const TYPING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+    /// Drops the typing entries whose local timeout passed, returning how long
+    /// until the next one expires (so the caller can schedule exactly the
+    /// repaint that will clear it).
+    ///
+    /// The deadline half of the typing indicator: the entry half is
+    /// [`ChatState::note_typing`], and the pair is brief section 15's
+    /// "penerima menerapkan timeout lokal" — the receiver ends an indicator on
+    /// its own, because the typer that would have ended it may not exist
+    /// anymore.
+    pub fn expire_typing(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let expired: Vec<(Id, Id)> = self
+            .typing_expires
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .map(|(key, _)| *key)
+            .collect();
+        for (conversation, typer) in expired {
+            self.typing_expires.remove(&(conversation, typer));
+            if let Some(who) = self.typing.get_mut(&conversation) {
+                who.retain(|id| *id != typer);
+                if who.is_empty() {
+                    self.typing.remove(&conversation);
+                }
+            }
+        }
+        self.typing_expires
+            .values()
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    /// Records one typing event, arming (or disarming) the local timeout that
+    /// ends it.
+    pub fn note_typing(&mut self, conversation: Id, typer: Id, typing: bool) {
+        if typing {
+            // Retain-then-push, not push alone: a repeated `Start` is a
+            // refresh (the protocol's own rule), and a refresh that duplicated
+            // its row would name the typer twice on the line.
+            let who = self.typing.entry(conversation).or_default();
+            who.retain(|id| *id != typer);
+            who.push(typer);
+            self.typing_expires.insert(
+                (conversation, typer),
+                std::time::Instant::now() + Self::TYPING_TIMEOUT,
+            );
+        } else {
+            self.typing_expires.remove(&(conversation, typer));
+            if let Some(who) = self.typing.get_mut(&conversation) {
+                who.retain(|id| *id != typer);
+                if who.is_empty() {
+                    self.typing.remove(&conversation);
+                }
+            }
+        }
+    }
+
     /// Replaces the conversation list, keeping the open conversation selected if it survived.
     pub fn set_conversations(&mut self, conversations: Vec<Conversation>) {
         self.conversations = conversations;
@@ -3201,6 +3273,88 @@ mod tests {
             hold_release(2_000, true),
             ReleaseDecision::Cancel,
             "the cancel zone wins over a long hold"
+        );
+    }
+
+    /// The typing line's own clock (brief section 15): a `Start` with no
+    /// `Stop` behind it must clear itself on the receiver's local timeout,
+    /// because the typer that would have sent the `Stop` may not exist
+    /// anymore — the app-death case the wire cannot answer.
+    #[test]
+    fn a_typing_entry_expires_on_its_own_without_a_stop() {
+        let mut state = ChatState::default();
+        let conversation = Id::from_bytes([0x11; 16]);
+        let typer = Id::from_bytes([0x22; 16]);
+        state.note_typing(conversation, typer, true);
+        assert_eq!(
+            state.typing.get(&conversation),
+            Some(&vec![typer]),
+            "the Start shows on the line"
+        );
+        let deadline = state.typing_expires[&(conversation, typer)];
+        // A moment before the timeout: the entry survives.
+        assert!(
+            state
+                .expire_typing(deadline - std::time::Duration::from_millis(1))
+                .is_some(),
+            "the next deadline is still owed"
+        );
+        assert_eq!(
+            state.typing.get(&conversation),
+            Some(&vec![typer]),
+            "an entry inside its timeout is not swept"
+        );
+        // At the timeout, with no Stop ever arriving: the entry goes.
+        assert!(
+            state.expire_typing(deadline).is_none(),
+            "nothing is left to expire"
+        );
+        assert!(
+            !state.typing.contains_key(&conversation),
+            "a Start that was never followed by a Stop still ends"
+        );
+    }
+
+    /// A repeated `Start` is a refresh, not a new row: the protocol sends one
+    /// every few seconds while a user keeps typing, and the line must neither
+    /// duplicate the typer nor expire under them.
+    #[test]
+    fn a_refreshed_typing_entry_survives_its_first_deadline() {
+        let mut state = ChatState::default();
+        let conversation = Id::from_bytes([0x11; 16]);
+        let typer = Id::from_bytes([0x22; 16]);
+        state.note_typing(conversation, typer, true);
+        let first = state.typing_expires[&(conversation, typer)];
+        state.note_typing(conversation, typer, true);
+        let second = state.typing_expires[&(conversation, typer)];
+        assert!(second > first, "the refresh moved the deadline");
+        assert_eq!(
+            state.typing.get(&conversation),
+            Some(&vec![typer]),
+            "a refresh does not name the typer twice"
+        );
+        // Past the first deadline but inside the refreshed one: still typing.
+        state.expire_typing(first);
+        assert_eq!(
+            state.typing.get(&conversation),
+            Some(&vec![typer]),
+            "a continuous typer's indicator does not blink off between refreshes"
+        );
+    }
+
+    /// A `Stop` clears the entry and its deadline at once, so the line ends
+    /// before the timeout when the typer said so themselves.
+    #[test]
+    fn a_stop_clears_the_entry_and_its_deadline() {
+        let mut state = ChatState::default();
+        let conversation = Id::from_bytes([0x11; 16]);
+        let typer = Id::from_bytes([0x22; 16]);
+        state.note_typing(conversation, typer, true);
+        state.note_typing(conversation, typer, false);
+        assert!(!state.typing.contains_key(&conversation));
+        assert!(
+            state.typing_expires.is_empty(),
+            "the Stop disarms the timeout too"
         );
     }
 }

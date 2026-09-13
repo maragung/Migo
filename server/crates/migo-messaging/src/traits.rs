@@ -302,6 +302,39 @@ pub trait Messaging: Send + Sync {
     /// Returns `None` when the mark did not change, which is section 156 again.
     async fn typing(&self, caller: &Caller, request: TypingEvent) -> Result<Option<Fanout>>;
 
+    /// Claims the typing marks whose TTL has lapsed and returns the `Stop`
+    /// frames the expiry owes.
+    ///
+    /// For the background sweeper, not a request handler: it takes no caller
+    /// because there is none. The mark's deadline always outlived the frames,
+    /// so until this existed the only party that could end an indicator was the
+    /// typer's own client — and a client that died mid-word, or a member
+    /// removed while typing, is exactly the client that never sends anything
+    /// again. The sweep is the node's half of section 15's "penerima menerapkan
+    /// timeout lokal": the receiver's timer is the floor, and this is the
+    /// server-side backstop that says so out loud.
+    ///
+    /// The claims are removed as they are found, so two sweeps against one
+    /// cache cannot publish the same expiry twice.
+    async fn sweep_typing(&self, now: Timestamp) -> Result<Vec<Fanout>>;
+
+    /// Ends one member's live typing mark, returning the `Stop` the removal
+    /// owes when there was one.
+    ///
+    /// For the removal paths — leave, kick, a vote that passed — where the
+    /// member whose indicator is on other members' screens is about to lose the
+    /// topic the indicator travels on. A removed member cannot be relied on to
+    /// send their own `Stop` (a kicked client may not even know yet), so the
+    /// node sends it for them, published before the revocation so the members
+    /// who remain hear it. Returns `None` when the member was not typing,
+    /// which is section 156: no frame for a fact that did not change.
+    async fn stop_typing(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<Fanout>>;
+
     /// Whether the caller is currently in this conversation.
     ///
     /// For the transport, which has to decide whether a session may subscribe to a

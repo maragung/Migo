@@ -1804,6 +1804,200 @@ async fn typing_needs_a_membership_and_a_known_state() {
     );
 }
 
+#[tokio::test]
+async fn the_sweep_publishes_the_stop_a_dead_typer_never_sent() {
+    let harness = Harness::new();
+    let conversation = harness.direct(MINUTE).await;
+    harness
+        .messaging
+        .typing(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            TypingEvent {
+                conversation_id: conversation,
+                state: TypingState::Start,
+                user_id: None,
+            },
+        )
+        .await
+        .expect("start is accepted");
+
+    // The typer's app dies here: no Stop is ever sent, and the only party left
+    // holding the deadline is the node. Past the TTL, the sweep claims the
+    // mark and hands back the frame the dead client owed.
+    let stops = harness
+        .messaging
+        .sweep_typing(ts(2 * MINUTE + 11 * SECOND))
+        .await
+        .expect("the sweep runs");
+    assert_eq!(stops.len(), 1, "exactly the one expired mark");
+    let fanout = &stops[0];
+    assert_eq!(fanout.conversation_id, conversation);
+    assert!(
+        fanout.exclude_device.is_none(),
+        "the sweep's frame has no author socket, so no device is excluded"
+    );
+    match &fanout.event {
+        Broadcast::Typing(event) => {
+            assert_eq!(event.conversation_id, conversation);
+            assert_eq!(event.state, TypingState::Stop);
+            assert_eq!(event.user_id, Some(id(ALICE)));
+        }
+        other => panic!("expected a typing broadcast, got {other:?}"),
+    }
+    assert!(
+        harness
+            .cache
+            .typing(conversation, ts(2 * MINUTE + 11 * SECOND))
+            .await
+            .expect("the cache can answer")
+            .is_empty(),
+        "the claim removed the mark, so the indicator is not the sweep's to end twice"
+    );
+    // And the claim is a claim: a second sweep has nothing to say.
+    let again = harness
+        .messaging
+        .sweep_typing(ts(2 * MINUTE + 12 * SECOND))
+        .await
+        .expect("the second sweep runs");
+    assert!(again.is_empty(), "an expired mark is claimed exactly once");
+}
+
+#[tokio::test]
+async fn leaving_ends_the_leaver_s_typing_mark_with_a_stop() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+    harness
+        .messaging
+        .typing(
+            &caller(CAROL, 103, 2 * MINUTE),
+            TypingEvent {
+                conversation_id: conversation,
+                state: TypingState::Start,
+                user_id: None,
+            },
+        )
+        .await
+        .expect("a member may type");
+
+    let fanouts = harness
+        .messaging
+        .leave(
+            &caller(CAROL, 103, 2 * MINUTE + SECOND),
+            migo_protocol::ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("a member may leave");
+    // The Stop travels ahead of the member event, so a screen still showing
+    // the leaver's indicator clears it in the same breath it learns they went.
+    let typing = fanouts
+        .iter()
+        .position(|fanout| matches!(fanout.event, Broadcast::Typing(_)))
+        .expect("the leave owes a Stop for a member who was typing");
+    let member = fanouts
+        .iter()
+        .position(|fanout| matches!(fanout.event, Broadcast::Member(_)))
+        .expect("the leave still announces the departure");
+    assert!(
+        typing < member,
+        "the Stop is published before the member event"
+    );
+    match &fanouts[typing].event {
+        Broadcast::Typing(event) => {
+            assert_eq!(event.state, TypingState::Stop);
+            assert_eq!(event.user_id, Some(id(CAROL)));
+        }
+        other => panic!("expected a typing broadcast, got {other:?}"),
+    }
+    assert!(harness
+        .cache
+        .typing(conversation, ts(2 * MINUTE + SECOND))
+        .await
+        .expect("the cache can answer")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_kick_ends_the_kicked_member_s_typing_mark_with_a_stop() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+    harness
+        .messaging
+        .typing(
+            &caller(CAROL, 103, 2 * MINUTE),
+            TypingEvent {
+                conversation_id: conversation,
+                state: TypingState::Start,
+                user_id: None,
+            },
+        )
+        .await
+        .expect("a member may type");
+
+    let fanouts = harness
+        .messaging
+        .kick(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE + SECOND),
+            migo_protocol::ConversationKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the founder may kick");
+    // The kicked member cannot be relied on to send their own Stop — their
+    // client may not even know yet — so the kick owes it for them, ahead of
+    // the event that names the removal.
+    let typing = fanouts
+        .iter()
+        .position(|fanout| matches!(fanout.event, Broadcast::Typing(_)))
+        .expect("the kick owes a Stop for a member who was typing");
+    let member = fanouts
+        .iter()
+        .position(|fanout| matches!(fanout.event, Broadcast::Member(_)))
+        .expect("the kick still announces the removal");
+    assert!(
+        typing < member,
+        "the Stop is published before the member event"
+    );
+    match &fanouts[typing].event {
+        Broadcast::Typing(event) => {
+            assert_eq!(event.state, TypingState::Stop);
+            assert_eq!(event.user_id, Some(id(CAROL)));
+        }
+        other => panic!("expected a typing broadcast, got {other:?}"),
+    }
+    assert!(harness
+        .cache
+        .typing(conversation, ts(2 * MINUTE + SECOND))
+        .await
+        .expect("the cache can answer")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_removal_of_a_member_who_was_not_typing_owes_no_stop() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+    let fanouts = harness
+        .messaging
+        .leave(
+            &caller(CAROL, 103, 2 * MINUTE),
+            migo_protocol::ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("a member may leave");
+    assert!(
+        fanouts
+            .iter()
+            .all(|fanout| !matches!(fanout.event, Broadcast::Typing(_))),
+        "section 156: a departure that ends no indicator owes no frame about one"
+    );
+}
+
 // --- observability -------------------------------------------------------------------
 
 #[tokio::test]

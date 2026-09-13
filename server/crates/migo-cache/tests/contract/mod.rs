@@ -875,6 +875,79 @@ pub async fn clearing_typing_takes_effect_at_once(f: &Fixture) {
     f.cache().clear_typing(conversation, f.id(1)).await.unwrap();
 }
 
+pub async fn sweeping_typing_claims_only_what_expired(f: &Fixture) {
+    let mut now = start();
+    let dying = f.id(50);
+    let living = f.id(51);
+    f.cache()
+        .set_typing(dying, f.id(1), brief(), now)
+        .await
+        .unwrap();
+    f.cache()
+        .set_typing(living, f.id(2), ample(), now)
+        .await
+        .unwrap();
+    advance(&mut now, 300).await;
+    // Only the mark whose deadline passed is claimed, and it is claimed as a
+    // pair: the sweep cannot publish a Stop without knowing both the
+    // conversation it belongs on and the typer it names. The claim is filtered
+    // to this case's corner, because the Redis backend sweeps a keyspace other
+    // parallel cases share. Note the claim is possible at all only because the
+    // physical storage outlives the mark: the in-memory backend has no expiry
+    // of its own, and the Redis hash's TTL is floored past the mark's
+    // deadline, so the evidence of the expiry is still there to take when the
+    // sweep comes for it — a hash that died with its mark would take the
+    // expiry with it, unanswered.
+    let mine = |claimed: Vec<(Id, Id)>| -> Vec<(Id, Id)> {
+        let mut mine: Vec<(Id, Id)> = claimed
+            .into_iter()
+            .filter(|(conversation, _)| *conversation == dying || *conversation == living)
+            .collect();
+        mine.sort();
+        mine
+    };
+    assert_eq!(
+        mine(f.cache().expired_typing(now).await.unwrap()),
+        vec![(dying, f.id(1))]
+    );
+    // The claim is a claim: a second sweep finds nothing left to take, so two
+    // sweeps against one backend cannot publish the same expiry twice.
+    assert!(mine(f.cache().expired_typing(now).await.unwrap()).is_empty());
+    // And the live mark in the other conversation is untouched by all of it.
+    assert_eq!(f.cache().typing(living, now).await.unwrap(), vec![f.id(2)]);
+}
+
+pub async fn a_refreshed_typing_mark_is_not_swept(f: &Fixture) {
+    let mut now = start();
+    let conversation = f.id(50);
+    f.cache()
+        .set_typing(conversation, f.id(1), brief(), now)
+        .await
+        .unwrap();
+    advance(&mut now, 100).await;
+    // The refresh: a second Start inside the first mark's lifetime moves the
+    // deadline, which is the whole reason a repeated Start is not suppressed
+    // as an unchanged fact.
+    f.cache()
+        .set_typing(conversation, f.id(1), ample(), now)
+        .await
+        .unwrap();
+    advance(&mut now, 100).await;
+    let claimed = f
+        .cache()
+        .expired_typing(now)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|(swept, _)| *swept == conversation)
+        .count();
+    assert_eq!(
+        claimed, 0,
+        "a refreshed mark must not be claimed before its new deadline"
+    );
+    assert_eq!(f.cache().typing(conversation, now).await.unwrap().len(), 1);
+}
+
 // --- routing --------------------------------------------------------------
 
 pub async fn a_route_points_at_the_node_that_bound_it(f: &Fixture) {
@@ -1086,6 +1159,8 @@ macro_rules! for_each_contract_case {
         $case!(typing_lists_everyone_currently_typing);
         $case!(typing_expires_on_its_own);
         $case!(clearing_typing_takes_effect_at_once);
+        $case!(sweeping_typing_claims_only_what_expired);
+        $case!(a_refreshed_typing_mark_is_not_swept);
         $case!(a_route_points_at_the_node_that_bound_it);
         $case!(an_unknown_device_has_no_route);
         $case!(rebinding_moves_a_device_to_the_new_node);

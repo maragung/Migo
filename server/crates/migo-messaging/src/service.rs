@@ -1508,6 +1508,19 @@ where
         }
 
         let mut fanouts = Vec::new();
+        // The leaver's typing mark goes with them, and the Stop that ends it
+        // travels ahead of the member event: a leaver's own client cannot be
+        // relied on to send it (the app may have died mid-word, and the goodbye
+        // frame is the one a dying client never sends), and the members who
+        // remain would otherwise watch an indicator for somebody who is gone.
+        // Brief section 15: the indicator ends when the typer leaves, whether or
+        // not the typer said so.
+        if let Some(stop) = self
+            .stop_typing(request.conversation_id, caller.account_id, caller.now)
+            .await?
+        {
+            fanouts.push(stop);
+        }
         // A vote aimed at the leaver closes as they go: the question it asked has
         // answered itself, and a tally still running against an empty seat is a
         // tally that could "pass" and remove nobody. The voters keep their record
@@ -1705,6 +1718,17 @@ where
             .count() as u32;
 
         let mut fanouts = Vec::new();
+        // The kicked member's typing mark ends here, not at its TTL: a removed
+        // member cannot be relied on to send their own Stop — their client may
+        // not even know yet — and the publisher walks this list before it takes
+        // the conversation topic away from them, so the Stop reaches the members
+        // who remain on a topic they still hold (brief section 15).
+        if let Some(stop) = self
+            .stop_typing(request.conversation_id, request.target_id, caller.now)
+            .await?
+        {
+            fanouts.push(stop);
+        }
         // A vote running against the target is moot now, and it closes with the
         // same frame an expiry gets: a `closed` tally, not a silent drop, so a
         // client still rendering the running count stops.
@@ -1925,6 +1949,15 @@ where
                 .remove_member(request.conversation_id, request.target_id, caller.now)
                 .await?;
             let count = member_count.saturating_sub(1);
+            // The tally's removal owes the same Stop a founder's kick does, for
+            // the same reason: the removed member's indicator is on the screens
+            // of everybody who stayed, and its author just lost the topic.
+            if let Some(stop) = self
+                .stop_typing(request.conversation_id, request.target_id, caller.now)
+                .await?
+            {
+                fanouts.push(stop);
+            }
             // The member event is the tally's closing: a `ConversationVoteEvent`
             // with `closed: false` would tell the group a vote ended, and the
             // removal it caused says that already, in the frame every client
@@ -2123,6 +2156,54 @@ where
                 // client-supplied subject would let any member claim that somebody
                 // else was typing.
                 user_id: Some(caller.account_id),
+            }),
+        )))
+    }
+
+    async fn sweep_typing(&self, now: Timestamp) -> Result<Vec<Fanout>> {
+        let expired = self.cache.expired_typing(now).await?;
+        // Unattributed, every device of every member included: the frame's author
+        // is the node, not a socket, and the member whose typing ended is the one
+        // whose client cannot be relied on to have sent this — that is the whole
+        // reason the sweep exists.
+        Ok(expired
+            .into_iter()
+            .map(|(conversation_id, account_id)| {
+                Fanout::unattributed(
+                    conversation_id,
+                    Broadcast::Typing(TypingEvent {
+                        conversation_id,
+                        state: TypingState::Stop,
+                        user_id: Some(account_id),
+                    }),
+                )
+            })
+            .collect())
+    }
+
+    async fn stop_typing(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<Fanout>> {
+        // Read-then-clear rather than a mutating `clear_typing` that reports, so
+        // the cache trait keeps its shape: the race between the read and the
+        // clear is benign in both directions — a mark that expires in between
+        // leaves a `Stop` for an indicator the sweep's own `Stop` is about to
+        // replace, and coalescing by conversation and user means the two frames
+        // collapse into the latest for any subscriber whose queue is backed up.
+        let typing = self.cache.typing(conversation_id, now).await?;
+        if !typing.contains(&account_id) {
+            return Ok(None);
+        }
+        self.cache.clear_typing(conversation_id, account_id).await?;
+        Ok(Some(Fanout::unattributed(
+            conversation_id,
+            Broadcast::Typing(TypingEvent {
+                conversation_id,
+                state: TypingState::Stop,
+                user_id: Some(account_id),
             }),
         )))
     }
