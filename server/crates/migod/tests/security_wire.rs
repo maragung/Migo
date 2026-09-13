@@ -11,14 +11,17 @@
 //!
 //! What is asserted is the refusal contract, not the implementation:
 //!
-//! * **The reserved span is terminal.** Every opcode in 243..=255 — not a
+//! * **The reserved span is terminal.** Every opcode in 247..=255 — not a
 //!   sample, the whole span — is answered `UNKNOWN_OPCODE` with the public
 //!   hint "reserved opcode", and the connection is closed.
 //! * **240 is not in that span.** It is allocated (`ENTITLEMENTS`, section
 //!   145's carve-out), so from an unauthenticated session it is refused by the
 //!   *phase* gate with `UNEXPECTED_OPCODE` and **no message at all** — whether
 //!   this build even knows the opcode is opt-in disclosure, and a stranger
-//!   gets neither the fact nor the reason.
+//!   gets neither the fact nor the reason. The conversation-federation pair
+//!   241-242 and the row-replication tier 243-246 are likewise allocated, and
+//!   their client-side refusals are proven by the gateway suite's range-gate
+//!   tests rather than repeated here.
 //! * **Unknown is answered, not fatal.** A never-allocated opcode gets
 //!   `UNKNOWN_OPCODE` and the session continues — a newer client is not a
 //!   protocol violation.
@@ -207,7 +210,7 @@ async fn assert_error_then_close(
     error
 }
 
-/// Every opcode in the never-allocated span 243-255 is refused with the public
+/// Every opcode in the never-allocated span 247-255 is refused with the public
 /// hint "reserved opcode" and closes the connection. The whole span, not a
 /// sample: a regression that frees one number at the tail is exactly as wrong
 /// as one at the head.
@@ -215,7 +218,7 @@ async fn assert_error_then_close(
 async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_connection() {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    for raw in 243u32..=255 {
+    for raw in 247u32..=255 {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
         send_frame(&mut stream, &frame).await;
@@ -464,8 +467,9 @@ async fn the_listener_still_serves_after_refusing_everything_above() {
     // One of each hostile shape, on separate connections: a reserved number,
     // the allocated head of the reserved range, and a server-to-client
     // opcode. All three are terminal, so the connection ends after the
-    // answer.
-    for hostile in [244u32, 240, Opcode::MessageEvent.to_wire()] {
+    // answer. 250 stands for the reserved span the way the gateway suite's
+    // own reserved test uses it.
+    for hostile in [250u32, 240, Opcode::MessageEvent.to_wire()] {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(
             migo_wire::FrameHeader::new(hostile, 7),

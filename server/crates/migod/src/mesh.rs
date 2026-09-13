@@ -1034,12 +1034,15 @@ impl IngestRouter {
         query: migo_protocol::FedAccountQuery,
     ) -> Result<()> {
         let now = self.clock.now();
+        // Captured before the relay takes the query, mirroring the rows routes:
+        // the trace below still names the account after the value has moved.
+        let account = query.account_id;
         if let Some(relay) = &self.replication {
             relay.answer_account(peer, query, now).await?;
         }
         tracing::debug!(
             from = %peer.to_text(),
-            account = %query.account_id.to_text(),
+            account = %account.to_text(),
             "account routing query ingested from the mesh"
         );
         Ok(())
@@ -1077,12 +1080,14 @@ impl IngestRouter {
         query: migo_protocol::FedConversationQuery,
     ) -> Result<()> {
         let now = self.clock.now();
+        // The same capture-before-move as the account query above.
+        let conversation = query.conversation_id;
         if let Some(relay) = &self.replication {
             relay.answer_conversation(peer, query, now).await?;
         }
         tracing::debug!(
             from = %peer.to_text(),
-            conversation = %query.conversation_id.to_text(),
+            conversation = %conversation.to_text(),
             "conversation routing query ingested from the mesh"
         );
         Ok(())
