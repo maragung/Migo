@@ -58,6 +58,17 @@ const FIELD_VALUE: &str = "v";
 /// the same per call, not per key.
 const TYPING_SCAN_PAGE: usize = 256;
 
+/// How long the typing hash itself lives, whatever the marks inside it say.
+///
+/// The marks are the semantics and their deadlines live in the field values;
+/// the hash is only the drawer they sit in. If the hash's own TTL matched the
+/// mark's, Redis would delete the evidence at the same moment it expired —
+/// before the sweeper's next tick — and the `Stop` the sweep owes a dead typer
+/// would never fire. One minute is far past any sweep interval and past any
+/// honest skew between this node's clock and Redis's, and it costs only one
+/// empty hash per conversation typed in during the last minute.
+const TYPING_HASH_FLOOR: Ttl = Ttl::from_millis(60_000);
+
 /// Sets a key only when its current value matches, and returns whether it wrote.
 static CAS: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
@@ -622,6 +633,10 @@ impl TypingCache for RedisCache {
         now: Timestamp,
     ) -> Result<()> {
         let mut conn = self.conn().await?;
+        // The hash's own TTL is floored past the mark's deadline (see
+        // `TYPING_HASH_FLOOR`), so the sweeper always finds the evidence of an
+        // expiry still in the drawer when it comes to claim it.
+        let hash_ttl = ttl.max(TYPING_HASH_FLOOR);
         HSET_TTL
             .key(typing_key(conversation_id).as_str())
             .arg(account_id.to_text())
@@ -629,7 +644,7 @@ impl TypingCache for RedisCache {
             // A typing mark has no other content, so a codec here would be one more
             // thing to keep in step for no gain.
             .arg(ttl.deadline(now).as_millis().to_string())
-            .arg(ttl.as_millis())
+            .arg(hash_ttl.as_millis())
             .invoke_async::<i64>(&mut conn)
             .await
             .map(|_| ())

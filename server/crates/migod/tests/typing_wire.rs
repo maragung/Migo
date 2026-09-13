@@ -185,8 +185,14 @@ impl LiveSession {
             .expect("connecting does not stall")
             .expect("the connection is accepted");
 
+        // The TYPING bit: the typing family is gated on the negotiated feature
+        // (brief section 72/148) — a session that never asked for it is answered
+        // FEATURE_NOT_NEGOTIATED for the request, and the hub withholds the
+        // family's frames from it besides. Every session in these tests sends
+        // and receives typing marks, so every handshake asks for the bit.
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features: migo_protocol::features::TYPING,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
@@ -297,16 +303,19 @@ async fn a_dead_typer_s_indicator_is_stopped_by_the_sweep() {
 
     let summary: migo_protocol::ConversationSummary = {
         // The conversation is created over the front door by the typer, so the
-        // mark the sweep will claim is born the way a real one is.
+        // mark the sweep will claim is born the way a real one is. A group,
+        // because the create's privacy gate refuses a direct conversation
+        // between two accounts with no friendship to stand on — the sweep's
+        // claim is the same in either kind, and this test is about the sweep.
         let mut creator = LiveSession::connect(addr, &typer).await;
         creator
             .ask(
                 Opcode::ConversationCreate,
                 11,
                 &ConversationCreateRequest {
-                    kind: ConversationKind::Direct,
+                    kind: ConversationKind::Group,
                     members: vec![reader.account_id],
-                    title: None,
+                    title: Some("The Silence After".to_string()),
                 },
             )
             .await

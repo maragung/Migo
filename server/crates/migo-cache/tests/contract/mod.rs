@@ -892,7 +892,12 @@ pub async fn sweeping_typing_claims_only_what_expired(f: &Fixture) {
     // pair: the sweep cannot publish a Stop without knowing both the
     // conversation it belongs on and the typer it names. The claim is filtered
     // to this case's corner, because the Redis backend sweeps a keyspace other
-    // parallel cases share.
+    // parallel cases share. Note the claim is possible at all only because the
+    // physical storage outlives the mark: the in-memory backend has no expiry
+    // of its own, and the Redis hash's TTL is floored past the mark's
+    // deadline, so the evidence of the expiry is still there to take when the
+    // sweep comes for it — a hash that died with its mark would take the
+    // expiry with it, unanswered.
     let mine = |claimed: Vec<(Id, Id)>| -> Vec<(Id, Id)> {
         let mut mine: Vec<(Id, Id)> = claimed
             .into_iter()
