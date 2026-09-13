@@ -9,15 +9,15 @@
  * session's running time, and the clock. The window buttons restore, focus, or minimize their
  * window in one click — the same toggle the reference's taskbar performs.
  *
- * The balance is read once per mount: this is the glance, not the ledger — the Wallet window is
- * the surface that refetches, and a failed read leaves the chip empty rather than showing a
- * zero the wallet never reported.
+ * The balance is live: it is read once per mount and re-read whenever the server says the
+ * wallet moved — this is the glance, not the ledger — and a failed read leaves the chip empty
+ * rather than showing a zero the wallet never reported.
  */
 
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { useMigo } from '@/lib/migo/use-migo.js';
+import { useBalance } from '@/lib/migo/use-balance.js';
 
 import { CoinMark } from './icons.js';
 import { Icon } from './icons.js';
@@ -49,9 +49,8 @@ export function Taskbar({
   pos: 'bottom' | 'top';
   onTogglePos: () => void;
 }): ReactNode {
-  const { client } = useMigo();
   const [now, setNow] = useState<Date | null>(null);
-  const [balance, setBalance] = useState<number | null>(null);
+  const balance = useBalance();
 
   // The clock starts on mount (never during a static render) and drifts no further than a
   // minute between ticks.
@@ -63,25 +62,6 @@ export function Taskbar({
       clearInterval(tick);
     };
   }, []);
-
-  // The balance: one round trip, best-effort — the chip says nothing rather than zero.
-  useEffect(() => {
-    if (!client) {
-      return;
-    }
-    let cancelled = false;
-    client.economy
-      .getBalance()
-      .then((wallet) => {
-        if (!cancelled) {
-          setBalance(wallet.balance);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [client]);
 
   const mins = now !== null ? Math.max(0, Math.floor((now.getTime() - onlineSince) / 60_000)) : 0;
 

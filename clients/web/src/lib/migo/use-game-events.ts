@@ -14,10 +14,11 @@
  *      somebody moved; the view is where the board lives. The hook fetches a view for a game it
  *      has not seen and refreshes it when an event says the board changed.
  *
- * The one flow that stitches both together is starting a game: `GAME_START` publishes nothing
- * (its reply *is* the announcement, to the caller alone), so {@link startGame} synthesizes the
- * "started" row locally from the reply's view. Other members hear of the game when its first
- * move publishes real events.
+ * The one flow that stitches both together is starting a game: `GAME_START`'s reply is the
+ * caller's own announcement, and the server's `started` delta is published to the conversation
+ * for everyone *else* — so {@link startGame} still synthesizes the local "started" row from the
+ * reply's view (this connection is excluded from the fan-out), and other members hear of the
+ * game the moment it begins rather than when its first move publishes.
  *
  * The guessing game's feedback needs one more read: `GAME_ACTION`'s reply is a bare ack, so
  * {@link submitGuess} re-fetches the view after the ack to learn the higher/lower/correct the
@@ -178,8 +179,9 @@ export function useGameEvents(conversationId: Id): GameActivity {
       if (!client) {
         throw new Error('not connected');
       }
-      // The reply is the opening view; the server publishes nothing on start, so the "started"
-      // row is this client's own synthesis, marked local to make its provenance legible.
+      // The reply is the opening view; the fan-out's `started` delta excludes this connection
+      // (the reply is its answer), so the "started" row remains this client's own synthesis,
+      // marked local to make its provenance legible.
       const view = await client.games.startGame(conversationId, slug);
       noteView(view);
       setRows((prev) =>
