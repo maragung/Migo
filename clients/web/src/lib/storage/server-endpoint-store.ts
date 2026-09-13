@@ -1,5 +1,5 @@
 /**
- * Persistence for the user's chosen {@link ServerEndpoint}.
+ * Persistence for the user's chosen {@link ServerEndpoint}, and the mode the choice was made in.
  *
  * The endpoint is the single piece of configuration that has to outlive a reload: a user who typed
  * a self-hosted address and rebooted would be otherwise be back on the build default. It is stored
@@ -7,8 +7,20 @@
  * snapshot applies here too, because a leak of the server address is the leak of where the user's
  * account lives. IndexedDB is the one store the bundle is allowed to write.
  *
- * The key is suffixed with `:v1` so a future shape change can introduce `:v2` and migrate, rather
- * than the silent corruption a bare `endpoint` would suffer when the field set shifts.
+ * The key is suffixed with `:v2` because the record grew a `mode` field beside the endpoint, and a
+ * future shape change introduces `:v3` and migrates the same way. `:v1` held a bare
+ * {@link ServerEndpoint}; it is still read (as a manual choice -- the mode a v1 user was in all
+ * along, so nobody loses their saved server) and deleted the next time a v2 record is written.
+ *
+ * The mode decides what the endpoint field means:
+ *
+ *   - `auto`: the endpoint is the *last resolution* of the "Otomatis" probe, not a commitment --
+ *     every load re-probes the deployment's server list (lib/auto-server.js) and uses the current
+ *     fastest, so a saved address here is display and fallback, never a pin. When nothing answers,
+ *     the mode stays `auto` and the sign-in attempt surfaces the connection error through the
+ *     normal path; the store never quietly converts a dead probe into a fixed address.
+ *   - `server`: one of the known nodes from the build's list, picked explicitly.
+ *   - `manual`: a hand-typed host/port/scheme.
  */
 
 import { config, defaultServerEndpoint } from '@/lib/config.js';
@@ -17,15 +29,52 @@ import type { ServerEndpoint } from '@migo/sdk';
 
 import { idbDelete, idbGet, idbSet } from './idb.js';
 
-const KEY = 'migo:server-endpoint:v1';
+const KEY_V1 = 'migo:server-endpoint:v1';
+const KEY_V2 = 'migo:server-endpoint:v2';
 
-/** Loads the persisted endpoint, or `undefined` on a first visit. */
-export async function loadServerEndpoint(): Promise<ServerEndpoint | undefined> {
-  const stored = await idbGet<ServerEndpoint>(KEY);
-  if (stored === undefined) {
+/** How the persisted endpoint was chosen. */
+export type ServerChoiceMode = 'auto' | 'server' | 'manual';
+
+/** The persisted record: an endpoint plus the mode that gives the endpoint its meaning. */
+export interface StoredServerChoice {
+  mode: ServerChoiceMode;
+  endpoint: ServerEndpoint;
+}
+
+/** Narrows an untrusted stored mode to the three this build knows; anything else is manual. */
+function asMode(value: unknown): ServerChoiceMode {
+  return value === 'auto' || value === 'server' || value === 'manual' ? value : 'manual';
+}
+
+/** Whether a stored v2 record has the shape this build wrote. */
+function isStoredChoice(value: unknown): value is StoredServerChoice {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'mode' in value &&
+    'endpoint' in value &&
+    typeof (value as { endpoint: unknown }).endpoint === 'object'
+  );
+}
+
+/**
+ * Loads the persisted choice, or `undefined` on a first visit.
+ *
+ * A v1 record (a bare endpoint from a build before modes existed) reads back as a manual choice
+ * with the same healing it always got, so an upgrade costs a user nothing. The migration is
+ * read-only on purpose: the v2 record is written by the next save, not by a load that might be
+ * a visitor who never signs in.
+ */
+export async function loadServerChoice(): Promise<StoredServerChoice | undefined> {
+  const v2 = await idbGet<unknown>(KEY_V2);
+  if (v2 !== undefined && isStoredChoice(v2)) {
+    return { mode: asMode(v2.mode), endpoint: healStaleEndpoint(v2.endpoint) };
+  }
+  const v1 = await idbGet<ServerEndpoint>(KEY_V1);
+  if (v1 === undefined) {
     return undefined;
   }
-  return healStaleEndpoint(stored);
+  return { mode: 'manual', endpoint: healStaleEndpoint(v1) };
 }
 
 /**
@@ -85,12 +134,20 @@ export function healStaleEndpoint(
   return healed;
 }
 
-/** Persists the user's chosen endpoint so the next load picks it up. */
-export function saveServerEndpoint(endpoint: ServerEndpoint): Promise<void> {
-  return idbSet(KEY, endpoint);
+/**
+ * Persists the user's choice so the next load picks it up.
+ *
+ * The v1 key is deleted alongside the write: the v1 record is a second copy of where the user's
+ * account lives, and keeping it alive after the migration only preserves a stale address for a
+ * build that will never read it again.
+ */
+export async function saveServerChoice(choice: StoredServerChoice): Promise<void> {
+  await idbSet(KEY_V2, choice);
+  await idbDelete(KEY_V1);
 }
 
-/** Removes the persisted endpoint (e.g. on sign-out, when the user wants a clean slate). */
-export function clearServerEndpoint(): Promise<void> {
-  return idbDelete(KEY);
+/** Removes the persisted choice (e.g. on sign-out, when the user wants a clean slate). */
+export async function clearServerChoice(): Promise<void> {
+  await idbDelete(KEY_V2);
+  await idbDelete(KEY_V1);
 }

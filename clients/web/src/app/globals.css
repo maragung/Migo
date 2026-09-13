@@ -2425,6 +2425,49 @@ main {
   padding: 4px 8px;
   font-size: 12px;
 }
+/* The mode control (Otomatis / each known server / Manual…) sits above the transport because it
+   decides what the rest of the sheet even means. Rows, not a segmented strip: the list is as long
+   as the deployment names doors, and the chosen row inverts the same way the transport's active
+   segment does, so one visual rule covers both controls. */
+.server-form-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.server-form-mode {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.server-form-mode:hover {
+  border-color: var(--accent-border);
+}
+.server-form-mode.active {
+  background: var(--accent-soft-strong);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.server-form-mode-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-form-mode-note {
+  flex: none;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.75;
+}
 .server-form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

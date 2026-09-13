@@ -12,9 +12,11 @@ import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
-import { defaultServerEndpoint } from '@/lib/config.js';
+import { defaultServerEndpoint, knownServers } from '@/lib/config.js';
+import { resolveServerChoice } from '@/lib/auto-server.js';
 import { RESTORE_FAILED } from '@/lib/account-file.js';
-import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
+import { loadServerChoice, saveServerChoice } from '@/lib/storage/server-endpoint-store.js';
+import type { ServerChoiceMode } from '@/lib/storage/server-endpoint-store.js';
 import { loadKeyFiles, removeKeyFile } from '@/lib/storage/key-file-store.js';
 import type { SavedKeyFile } from '@/lib/storage/key-file-store.js';
 
@@ -50,11 +52,15 @@ export default function LoginPage(): ReactNode {
   const [imported, setImported] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
+  const [mode, setMode] = useState<ServerChoiceMode>('manual');
   const [endpointReady, setEndpointReady] = useState(false);
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const submitting = status === 'connecting';
+  // The doors this build names; stable for the page's life so the picker's probe effect is not
+  // re-armed by a fresh array identity on every render.
+  const [servers] = useState(() => knownServers());
 
   useEffect(() => {
     if (status === 'ready') {
@@ -83,20 +89,30 @@ export default function LoginPage(): ReactNode {
     };
   }, []);
 
-  // Pre-fill the server from the persisted endpoint, falling back to the build's default — a first
-  // visit has no stored endpoint, and without the fallback the card would render no server link
-  // and a Sign-in button that can never be pressed.
+  // Pre-fill the server from the persisted choice, falling back to the build's default — a first
+  // visit has no stored choice, and without the fallback the card would render no server link
+  // and a Sign-in button that can never be pressed. A saved auto choice (and a first visit on a
+  // build with a server list) is re-resolved here: the probe runs again and the current fastest
+  // node is what the card shows, so the persisted address is only ever the last resolution.
   useEffect(() => {
     let cancelled = false;
-    void loadServerEndpoint().then((stored) => {
-      if (cancelled) return;
-      setEndpoint(stored ?? defaultServerEndpoint());
-      setEndpointReady(true);
-    });
+    void loadServerChoice()
+      .then((stored) => resolveServerChoice(stored, servers))
+      .then((resolved) => {
+        if (cancelled) return;
+        setEndpoint(resolved.endpoint);
+        setMode(resolved.mode);
+        setEndpointReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setEndpoint(defaultServerEndpoint());
+        setEndpointReady(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [servers]);
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>): void {
     const picked = event.target.files?.[0] ?? null;
@@ -127,10 +143,12 @@ export default function LoginPage(): ReactNode {
     if (submitting || endpoint === null || source === null) {
       return;
     }
-    // Persist the chosen endpoint *before* the ceremony, so a mid-flight failure can be retried
-    // against the same server without the form losing the address the user just confirmed.
+    // Persist the chosen mode and endpoint *before* the ceremony, so a mid-flight failure can be
+    // retried against the same server without the form losing the address the user just confirmed.
+    // In auto mode the endpoint is the last resolution, not a pin: nothing here turns a dead probe
+    // into a fixed address, and the next load re-probes regardless.
     try {
-      await saveServerEndpoint(endpoint);
+      await saveServerChoice({ mode, endpoint });
     } catch {
       // Best-effort: a failed local write is not a reason to refuse the in-flight attempt.
     }
@@ -159,15 +177,21 @@ export default function LoginPage(): ReactNode {
 
   // The server choice commits from the sheet, not from the card: the card keeps only the small
   // bottom-corner link that opens it, and every host/port/scheme change happens in the sheet and
-  // lands here at once. A transport tap inside the sheet also lands here, immediately.
-  function onServerCommit(next: ServerEndpoint): void {
+  // lands here at once. A transport tap inside the sheet also lands here, immediately, and keeps
+  // the mode untouched — transport is orthogonal to which door it opens.
+  function onServerCommit(next: ServerEndpoint, nextMode: ServerChoiceMode): void {
     setEndpoint(next);
+    setMode(nextMode);
     setValidationError(null);
   }
 
-  function onServerConfirmed(next: ServerEndpoint): void {
-    onServerCommit(next);
+  function onServerConfirmed(next: ServerEndpoint, nextMode: ServerChoiceMode): void {
+    onServerCommit(next, nextMode);
     setServerSheetOpen(false);
+  }
+
+  function onTransportCommit(next: ServerEndpoint): void {
+    setEndpoint(next);
   }
 
   const source = selected();
@@ -296,7 +320,11 @@ export default function LoginPage(): ReactNode {
               className="auth-server-link"
               onClick={() => setServerSheetOpen(true)}
             >
-              Server · {endpoint.host}:{endpoint.port} · {transportLabel(endpoint.transport)}
+              Server ·{' '}
+              {mode === 'auto'
+                ? `Otomatis · ${endpoint.host}:${endpoint.port}`
+                : `${endpoint.host}:${endpoint.port}`}{' '}
+              · {transportLabel(endpoint.transport)}
             </button>
           </div>
         ) : null}
@@ -306,8 +334,10 @@ export default function LoginPage(): ReactNode {
         <BottomSheet title="Server" onClose={() => setServerSheetOpen(false)}>
           <ServerForm
             value={endpoint}
+            mode={mode}
+            servers={servers}
             onCommit={onServerConfirmed}
-            onTransportPick={onServerCommit}
+            onTransportPick={onTransportCommit}
           />
         </BottomSheet>
       ) : null}
