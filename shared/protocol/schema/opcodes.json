@@ -384,6 +384,17 @@
    "doc": "A founder renames a group."
   },
   {
+   "name": "GROUP_KEY_DISTRIBUTE",
+   "code": 53,
+   "direction": "both",
+   "payload": "GroupKeyDistribution",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Relays one member's sealed sender-key distribution to one member device, sealed for the target's pairwise session (section 163). The server routes the frame between the distributor's device and the named member's user topic and never opens it: one frame per target device, never coalesced, because a member who missed theirs is stranded on a dead chain."
+  },
+  {
    "name": "PRESENCE_SET",
    "code": 64,
    "direction": "client_to_server",

@@ -10590,6 +10590,8 @@ pub struct ConversationMemberEvent {
     pub user_id: Id,
     pub change: MemberChange,
     pub member_count: u32,
+    /// The membership generation this change produced (section 163). Present on every event a group's own membership operations emit, so a client that missed a redistribution can tell by comparing against the generation its keys carry.
+    pub group_key_epoch: Option<u32>,
 }
 
 impl Encode for ConversationMemberEvent {
@@ -10599,7 +10601,14 @@ impl Encode for ConversationMemberEvent {
         w.write_id(&self.user_id);
         w.write_u32(self.change.to_wire());
         w.write_u32(self.member_count);
-        w.write_u32(0);
+        let present = usize::from(self.group_key_epoch.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.group_key_epoch {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10613,6 +10622,57 @@ impl Decode for ConversationMemberEvent {
         out.user_id = r.read_id()?;
         out.change = MemberChange::from_wire(r.read_u32()?);
         out.member_count = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.group_key_epoch = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Relays one member's sealed sender-key distribution to one member device (section 163). The server routes it and never opens it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GroupKeyDistribution {
+    pub conversation_id: Id,
+    /// The distributing member's device.
+    pub from_device: Id,
+    /// The member the distribution is for.
+    pub to_account: Id,
+    /// The member device the distribution is sealed for.
+    pub to_device: Id,
+    /// E2E-sealed sender-key distribution, sealed for the target device's pairwise session with the distributor.
+    pub sealed_distribution: Vec<u8>,
+}
+
+impl Encode for GroupKeyDistribution {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.from_device);
+        w.write_id(&self.to_account);
+        w.write_id(&self.to_device);
+        w.write_bytes(&self.sealed_distribution)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GroupKeyDistribution {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.from_device = r.read_id()?;
+        out.to_account = r.read_id()?;
+        out.to_device = r.read_id()?;
+        out.sealed_distribution = r.read_bytes()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this
@@ -11097,6 +11157,8 @@ pub enum Opcode {
     ConversationMemberEvent = 50,
     /// A founder renames a group.
     ConversationUpdate = 51,
+    /// Relays one member's sealed sender-key distribution to one member device, sealed for the target's pairwise session (section 163). The server routes the frame between the distributor's device and the named member's user topic and never opens it: one frame per target device, never coalesced, because a member who missed theirs is stranded on a dead chain.
+    GroupKeyDistribute = 53,
     PresenceSet = 64,
     /// Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost.
     PresenceEvent = 65,
@@ -11287,6 +11349,7 @@ impl Opcode {
             49 => Self::ConversationVoteEvent,
             50 => Self::ConversationMemberEvent,
             51 => Self::ConversationUpdate,
+            53 => Self::GroupKeyDistribute,
             64 => Self::PresenceSet,
             65 => Self::PresenceEvent,
             80 => Self::RoomJoin,
@@ -11421,6 +11484,7 @@ impl Opcode {
             Self::ConversationVoteEvent => "CONVERSATION_VOTE_EVENT",
             Self::ConversationMemberEvent => "CONVERSATION_MEMBER_EVENT",
             Self::ConversationUpdate => "CONVERSATION_UPDATE",
+            Self::GroupKeyDistribute => "GROUP_KEY_DISTRIBUTE",
             Self::PresenceSet => "PRESENCE_SET",
             Self::PresenceEvent => "PRESENCE_EVENT",
             Self::RoomJoin => "ROOM_JOIN",
@@ -11555,6 +11619,7 @@ impl Opcode {
             Self::ConversationVoteEvent => 0,
             Self::ConversationMemberEvent => 0,
             Self::ConversationUpdate => 5,
+            Self::GroupKeyDistribute => 3,
             Self::PresenceSet => 1,
             Self::PresenceEvent => 0,
             Self::RoomJoin => 20,
@@ -11688,6 +11753,7 @@ impl Opcode {
             Self::ConversationVoteEvent => DeliveryClass::Coalescable,
             Self::ConversationMemberEvent => DeliveryClass::Critical,
             Self::ConversationUpdate => DeliveryClass::Critical,
+            Self::GroupKeyDistribute => DeliveryClass::Critical,
             Self::PresenceSet => DeliveryClass::Coalescable,
             Self::PresenceEvent => DeliveryClass::Coalescable,
             Self::RoomJoin => DeliveryClass::Critical,
@@ -11825,6 +11891,7 @@ impl Opcode {
             Self::ConversationVoteEvent => false,
             Self::ConversationMemberEvent => false,
             Self::ConversationUpdate => false,
+            Self::GroupKeyDistribute => false,
             Self::PresenceSet => false,
             Self::PresenceEvent => true,
             Self::RoomJoin => false,
@@ -11966,6 +12033,7 @@ impl Opcode {
             Self::ConversationVoteEvent => AuthLevel::User,
             Self::ConversationMemberEvent => AuthLevel::User,
             Self::ConversationUpdate => AuthLevel::User,
+            Self::GroupKeyDistribute => AuthLevel::User,
             Self::PresenceSet => AuthLevel::User,
             Self::PresenceEvent => AuthLevel::User,
             Self::RoomJoin => AuthLevel::User,
@@ -12183,6 +12251,7 @@ impl Opcode {
             Self::ConversationVoteEvent => Direction::ServerToClient,
             Self::ConversationMemberEvent => Direction::ServerToClient,
             Self::ConversationUpdate => Direction::ClientToServer,
+            Self::GroupKeyDistribute => Direction::Both,
             Self::PresenceSet => Direction::ClientToServer,
             Self::PresenceEvent => Direction::ServerToClient,
             Self::RoomJoin => Direction::ClientToServer,
@@ -12317,6 +12386,7 @@ impl Opcode {
             Self::ConversationVoteEvent => false,
             Self::ConversationMemberEvent => false,
             Self::ConversationUpdate => false,
+            Self::GroupKeyDistribute => false,
             Self::PresenceSet => false,
             Self::PresenceEvent => false,
             Self::RoomJoin => false,
@@ -12458,6 +12528,7 @@ impl Opcode {
         Self::ConversationVoteEvent,
         Self::ConversationMemberEvent,
         Self::ConversationUpdate,
+        Self::GroupKeyDistribute,
         Self::PresenceSet,
         Self::PresenceEvent,
         Self::RoomJoin,

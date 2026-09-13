@@ -6975,6 +6975,8 @@ export interface ConversationMemberEvent {
   userId: Id;
   change: MemberChange;
   memberCount: number;
+  /** The membership generation this change produced (section 163). Present on every event a group's own membership operations emit, so a client that missed a redistribution can tell by comparing against the generation its keys carry. */
+  groupKeyEpoch?: number;
 }
 
 export function encodeConversationMemberEvent(w: Writer, v: ConversationMemberEvent): void {
@@ -6983,7 +6985,10 @@ export function encodeConversationMemberEvent(w: Writer, v: ConversationMemberEv
   w.id(v.userId);
   w.u32(v.change);
   w.u32(v.memberCount);
-  w.u32(0);
+  let present = 0;
+  if (v.groupKeyEpoch !== undefined) present++;
+  w.u32(present);
+  if (v.groupKeyEpoch !== undefined) { const value = v.groupKeyEpoch; w.optional(1, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -6994,6 +6999,50 @@ export function decodeConversationMemberEvent(r: Reader): ConversationMemberEven
   const change = r.u32() as MemberChange;
   const memberCount = r.u32();
   const out: ConversationMemberEvent = { conversationId, userId, change, memberCount } as ConversationMemberEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.groupKeyEpoch = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Relays one member's sealed sender-key distribution to one member device (section 163). The server routes it and never opens it. */
+export interface GroupKeyDistribution {
+  conversationId: Id;
+  /** The distributing member's device. */
+  fromDevice: Id;
+  /** The member the distribution is for. */
+  toAccount: Id;
+  /** The member device the distribution is sealed for. */
+  toDevice: Id;
+  /** E2E-sealed sender-key distribution, sealed for the target device's pairwise session with the distributor. */
+  sealedDistribution: Uint8Array;
+}
+
+export function encodeGroupKeyDistribution(w: Writer, v: GroupKeyDistribution): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.fromDevice);
+  w.id(v.toAccount);
+  w.id(v.toDevice);
+  w.bytes(v.sealedDistribution);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGroupKeyDistribution(r: Reader): GroupKeyDistribution {
+  r.enter();
+  const conversationId = r.id();
+  const fromDevice = r.id();
+  const toAccount = r.id();
+  const toDevice = r.id();
+  const sealedDistribution = r.bytes();
+  const out: GroupKeyDistribution = { conversationId, fromDevice, toAccount, toDevice, sealedDistribution } as GroupKeyDistribution;
   const optionalCount = r.u32();
   // No optional fields in this version of the struct. Each entry is length-delimited,
   // so reading it is skipping it, and a newer peer may well have sent one.
@@ -7341,6 +7390,8 @@ export const OP = {
   CONVERSATION_MEMBER_EVENT: 50,
   /** A founder renames a group. */
   CONVERSATION_UPDATE: 51,
+  /** Relays one member's sealed sender-key distribution to one member device, sealed for the target's pairwise session (section 163). The server routes the frame between the distributor's device and the named member's user topic and never opens it: one frame per target device, never coalesced, because a member who missed theirs is stranded on a dead chain. */
+  GROUP_KEY_DISTRIBUTE: 53,
   PRESENCE_SET: 64,
   /** Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost. */
   PRESENCE_EVENT: 65,
@@ -7539,6 +7590,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   49: { code: 49, name: 'CONVERSATION_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationVoteEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: [] },
   50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent', paced: false, suppressOn: [] },
   51: { code: 51, name: 'CONVERSATION_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationUpdateRequest', response: 'ConversationSummary', paced: false, suppressOn: [] },
+  53: { code: 53, name: 'GROUP_KEY_DISTRIBUTE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'GroupKeyDistribution', response: 'Acknowledged', paced: false, suppressOn: [] },
   64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'PRESENCE' },
   65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id', paced: true, suppressOn: [], feature: 'PRESENCE' },
   80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse', paced: false, suppressOn: [], feature: 'ROOMS' },

@@ -81,11 +81,11 @@ use migo_protocol::{
     ConversationInviteRequest, ConversationKickRequest, ConversationLeaveRequest,
     ConversationListRequest, ConversationMemberEvent, ConversationMuteRequest,
     ConversationRosterRequest, ConversationUpdateRequest, ConversationVoteKickRequest, Encode,
-    Frame, GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
-    KeyPublish, KeyPublishResult, MemberChange, MessageDelete, MessageEdit, MessageKind,
-    MessageReceipt, MessageSend, Opcode, PresenceScope, PresenceUpdate, ProfileRequest,
-    ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest,
-    Topic, TopicKind, TypingEvent, UserProfile,
+    Frame, GameAction, GameEvent, GroupKeyDistribution, KeyBundle as WireBundle, KeyBundleRequest,
+    KeyBundleResponse, KeyPublish, KeyPublishResult, MemberChange, MessageDelete, MessageEdit,
+    MessageKind, MessageReceipt, MessageSend, Opcode, PresenceScope, PresenceUpdate,
+    ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest,
+    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -784,6 +784,50 @@ impl Dispatcher for AppDispatcher {
                 for fanout in fanouts {
                     self.publish_messaging(context, caller.account_id, fanout)
                         .await?;
+                }
+                Ok(())
+            }
+            Opcode::GroupKeyDistribute => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: GroupKeyDistribution = from_frame(frame).map_err(fault::from_wire)?;
+                // The service's half is authorization only — the distributor is
+                // a member, the target still is one, the sealed blob is within
+                // the envelope bound — and the relay is the other half: the
+                // same frame, still sealed, published to the target member's
+                // own user topic, which reaches every device that account has
+                // connected. One frame per target device is the client's job to
+                // send; a member with two devices is owed two differently-sealed
+                // envelopes, and the server has no way to make one out of the
+                // other (section 163).
+                self.messaging
+                    .distribute_key(&caller, request.clone())
+                    .await?;
+                context.reply(&Acknowledged { ok: true })?;
+                let topic = Topic {
+                    kind: TopicKind::User,
+                    id: request.to_account,
+                };
+                if let Err(error) = context.publish_excluding_self(
+                    &topic,
+                    Opcode::GroupKeyDistribute,
+                    &request,
+                    None,
+                ) {
+                    // The acknowledgement above already promised the sender the
+                    // frame was accepted, and a delivery hiccup is not grounds
+                    // to unring it: the client retries a distribution the
+                    // target reports missing, which is cheaper than lying about
+                    // either half.
+                    tracing::warn!(
+                        %error,
+                        target = %request.to_account.to_text(),
+                        "cannot publish a sealed key distribution to its member"
+                    );
                 }
                 Ok(())
             }

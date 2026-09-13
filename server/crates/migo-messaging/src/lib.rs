@@ -70,6 +70,7 @@ pub mod cursor;
 pub mod fanout;
 mod metrics;
 pub mod model;
+pub mod redistribution;
 pub mod service;
 pub mod traits;
 
@@ -78,6 +79,7 @@ pub use crate::model::{
     Caller, MessagingConfig, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS,
     MEMBER_PREVIEW, TYPING_TTL_MS,
 };
+pub use crate::redistribution::{Redistribution, RedistributionBook};
 pub use crate::service::{open, Messages, SharedMessaging};
 pub use crate::traits::{
     FreeKicks, KickTariff, MessageGate, Messaging, OpenGate, RoomSpeak, SharedKickTariff,
