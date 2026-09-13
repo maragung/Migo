@@ -222,7 +222,10 @@ impl App {
         if !self.auth.server_choice.auto_on() {
             return;
         }
-        match answer {
+        // Flattened: the outer layer is "did the channel deliver at all" — a probe thread that
+        // died without answering files as a failure — and the inner is "did any node answer",
+        // so only a real endpoint reaches the resolution arm.
+        match answer.flatten() {
             Some(endpoint) => {
                 self.auth.server_choice.auto = AutoStatus::Resolved(endpoint.clone());
                 self.auth.apply_server(endpoint.clone());

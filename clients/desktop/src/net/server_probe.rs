@@ -56,7 +56,9 @@ pub fn pick_fastest(latencies: &[Option<Duration>]) -> Option<usize> {
 /// responder — or `None` when no candidate answered in time.
 ///
 /// The transport is a closure so tests can answer without opening a socket: the function under
-/// test is the racing and the picking, not the HTTP.
+/// test is the racing and the picking, not the HTTP. The closure receives the endpoint by
+/// reference but its future must own everything it awaits on — clone inside the closure —
+/// because all the futures share one type and none of them may borrow from a probe call.
 pub async fn resolve<F, Fut>(candidates: &[ServerEndpoint], probe: F) -> Option<ServerEndpoint>
 where
     F: Fn(&ServerEndpoint) -> Fut,
@@ -107,8 +109,12 @@ pub fn spawn(
                     .build()
                     .ok()?;
                 Some(runtime.block_on(resolve(&candidates, |endpoint| {
+                    // The future owns what it needs: the transport signature lets the closure
+                    // borrow the endpoint only for the call, so anything the probe body awaits
+                    // on is cloned here rather than captured by reference.
                     let http = http.clone();
-                    async move { health_latency(&http, endpoint).await }
+                    let endpoint = endpoint.clone();
+                    async move { health_latency(&http, &endpoint).await }
                 })))
             })()
             .flatten();
@@ -168,11 +174,16 @@ mod tests {
         let candidates = parse_server_list(
             "http://node1.example.com:8080,http://node2.example.com:8080,http://node3.example.com:8080",
         );
-        let picked = resolve(&candidates, |endpoint| async move {
-            match endpoint.host.as_str() {
-                "node1.example.com" => Some(Duration::from_millis(200)),
-                "node2.example.com" => Some(Duration::from_millis(80)),
-                _ => None,
+        let picked = resolve(&candidates, |endpoint| {
+            // Cloned out of the borrow: the injected transport's future owns its inputs, the
+            // same shape the real transport's future has.
+            let host = endpoint.host.clone();
+            async move {
+                match host.as_str() {
+                    "node1.example.com" => Some(Duration::from_millis(200)),
+                    "node2.example.com" => Some(Duration::from_millis(80)),
+                    _ => None,
+                }
             }
         })
         .await;
