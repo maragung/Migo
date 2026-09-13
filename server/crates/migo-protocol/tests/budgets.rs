@@ -31,10 +31,10 @@ use migo_protocol::{
     to_frame, Ack, Acknowledged, Authenticate, Authenticated, CallAnswer, CallIce, CallInvite,
     CallInviteResult, CallStateEvent, CallStats, ClientInfo, ConversationKind,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EncryptionMode, FedAck,
-    FedConversationEvent, FedConversationRouting, FedForward, Frame, Hello, Limits, MessageEvent,
-    MessageKind, MessageReceipt, MessageSend, NodeInfo, Opcode, Ping, Pong, PresenceEvent,
-    PresenceState, PresenceUpdate, ReceiptKind, ResumeRequest, RoomStateEvent, SyncResponse,
-    SyncStatus, TypingEvent, TypingState, Welcome,
+    FedConversationEvent, FedConversationRouting, FedForward, FedUserEvent, FedUserWatch, Frame,
+    Hello, Limits, MessageEvent, MessageKind, MessageReceipt, MessageSend, NodeInfo, Opcode, Ping,
+    Pong, PresenceEvent, PresenceState, PresenceUpdate, ReceiptKind, ResumeRequest, RoomStateEvent,
+    SyncResponse, SyncStatus, TypingEvent, TypingState, Welcome,
 };
 
 /// Migo-epoch milliseconds for a September 2026 instant: 6 varint bytes on the
@@ -756,6 +756,55 @@ fn federation_frames_fit_their_budgets() {
     );
     assert!(ack <= 48, "FED_ACK is {ack} bytes, budget 48 (section 171)");
 
+    // FED_USER_SUBSCRIBE is the whole of the user-topic tier's ask: an epoch
+    // and the subject's raw 16-byte id, once per subject per process. The
+    // budget is 32 bytes — the frame is mostly the id itself.
+    let watch = frame_size(
+        Opcode::FedUserSubscribe,
+        1,
+        &FedUserWatch {
+            epoch: 500,
+            user_id: f.user,
+        },
+    );
+    assert!(
+        watch <= 32,
+        "FED_USER_SUBSCRIBE is {watch} bytes, budget 32 (section 171)"
+    );
+
+    // FED_USER_EVENT's overhead is measured the same way FED_FORWARD's is:
+    // everything around the sealed inner frame, which here is a typical
+    // presence event — one state change, no custom status, the last_seen the
+    // offline transition carries.
+    let presence_inner = to_frame(
+        Opcode::PresenceEvent.to_wire(),
+        1,
+        &PresenceEvent {
+            user_id: f.user,
+            state: PresenceState::Away,
+            custom_status: None,
+            last_seen: Some(NOW),
+        },
+    )
+    .unwrap_or_else(|e| panic!("the inner presence frame must encode: {e}"));
+    let presence_inner_bytes = presence_inner
+        .encode()
+        .unwrap_or_else(|e| panic!("the inner presence frame must encode: {e}"))
+        .to_vec();
+    let user_event = frame_size(
+        Opcode::FedUserEvent,
+        1,
+        &FedUserEvent {
+            user_id: f.user,
+            payload: presence_inner_bytes.clone(),
+        },
+    );
+    let user_event_overhead = user_event - presence_inner_bytes.len();
+    assert!(
+        user_event_overhead <= 64,
+        "FED_USER_EVENT overhead is {user_event_overhead} bytes, budget 64 (section 171)"
+    );
+
     // FED_CONVERSATION_SUBSCRIBE is the conversation tier's ask (section
     // 170): one per conversation per process, so its cost is a control
     // frame's — the routing epoch, the home region label, and the
@@ -793,8 +842,11 @@ fn federation_frames_fit_their_budgets() {
     );
 
     println!(
-        "federation: forward overhead {forward_overhead} bytes around a {}-byte payload, ack {ack}, \
-         conversation subscribe {subscribe}, conversation event overhead {event_overhead}",
-        inner_bytes.len()
+        "federation: forward overhead {forward_overhead} bytes around a {}-byte payload, ack \
+         {ack}, user watch {watch}, user event overhead {user_event_overhead} bytes around a \
+         {}-byte presence frame, conversation subscribe {subscribe}, conversation event overhead \
+         {event_overhead}",
+        inner_bytes.len(),
+        presence_inner_bytes.len()
     );
 }

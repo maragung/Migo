@@ -896,6 +896,12 @@ async fn dispatcher() -> DispatcherHarness {
             app.federation.clone(),
             app_store.clone(),
         )),
+        // The user-topic tier over the same mesh, for the same reason: the asks it makes
+        // on a granted user-topic SUBSCRIBE are what a real node would make, and no peer
+        // ever answers here.
+        std::sync::Arc::new(migod::presence_relay::PresenceRelay::new(
+            app.federation.clone(),
+        )),
     );
     DispatcherHarness { app, dispatcher }
 }

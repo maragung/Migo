@@ -60,9 +60,7 @@ use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::{FederatedEvent, PeerView};
 use migo_federation::SharedMesh;
 use migo_messaging::{Broadcast as MessageBroadcast, Fanout as MessageFanout};
-use migo_protocol::{
-    fault, from_frame, to_frame, FedConversationEvent, FedConversationRouting, Frame, Opcode,
-};
+use migo_protocol::{fault, to_frame, FedConversationEvent, FedConversationRouting, Frame, Opcode};
 use migo_store::model::Conversation;
 use migo_store::SharedStore;
 
@@ -454,7 +452,7 @@ mod tests {
     use migo_crypto::NodeSecret;
     use migo_federation::{MeshService, NewPeerSpec};
     use migo_messaging::Broadcast;
-    use migo_protocol::{EncryptionMode, MessageEvent, MessageKind};
+    use migo_protocol::{from_frame, EncryptionMode, MessageEvent, MessageKind};
     use migo_store::MemoryStore;
     use std::sync::Arc;
 

@@ -12,12 +12,16 @@
  *     2. a room message alice sends on node 1 arrives and decrypts on bob's
  *        node 2 subscriber — and the reply comes back the other way;
  *     3. bob's typing signal in the room's conversation reaches alice;
- *     4. a 1:1 direct message crosses the link both ways: the conversation is
- *        created on node 1 (its home), bob watches it on node 2, and each
- *        side's sealed message reaches and decrypts on the other.
+ *     4. a 1:1 direct message crosses the link both ways — demanded when the
+ *        running binary carries the conversation tier (the conversation row's
+ *        home_region is stamped at creation), which is how the harness tells
+ *        a release that has the tier from one that does not.
  *
- *   REPORTED (expected NOT to cross; the report is the point, not a failure):
- *     5. presence does not federate — user topics stay local.
+ *   REPORTED (expected NOT to cross until a release carries the tier; the
+ *   report is the point, not a failure):
+ *     5. presence does not federate — user topics stay local;
+ *     6. direct messages do not federate either, when the running binary
+ *        predates the conversation tier (no home_region column).
  *
  * Accounts, devices, key bundles, and room membership rows do not replicate
  * across nodes today. To keep the proof about the *link* and the tiered
@@ -492,6 +496,13 @@ async function main(): Promise<void> {
   // bob's reply is handed by node 2 to the home node, which publishes it to
   // alice's session from its own hub. Both directions must deliver *and
   // decrypt*: the sealed envelope crosses every node on the way unopened.
+  //
+  // The harness runs released binaries, and the conversation tier is in the
+  // tree before it is in a release. The stamp is the tell: a binary that has
+  // the tier stamps home_region at creation and must also carry the message
+  // across (a failure there is a real failure, exit non-zero); a binary that
+  // predates the tier writes no home_region at all, and the honest outcome is
+  // a reported gap, the same stance the presence tier's check takes.
   const direct = await alice.startConversation(ConversationKind.Direct, [bobId]);
   const directUuid = idToUuid(direct.conversationId);
   const directRow = mustRow<Record<string, unknown>>(
@@ -499,79 +510,102 @@ async function main(): Promise<void> {
     `select row_to_json(t) from conversation t where conversation_id = '${directUuid}'`,
     'the direct conversation row',
   );
-  if (String(directRow.home_region) !== 'nnode-1') {
-    fail(
+  const homeRegion =
+    directRow.home_region === undefined || directRow.home_region === null
+      ? ''
+      : String(directRow.home_region);
+  let dmReported = false;
+  if (homeRegion === '') {
+    log(
+      'gap-dm',
+      'the conversation row has no home_region, so this binary predates the conversation federation tier',
+    );
+    log(
+      'gap-dm',
+      'CONFIRMED GAP: direct messages do not cross the link in these released binaries (the tier ships with the next release; flipping this check to demand them is the release follow-up)',
+    );
+    dmReported = true;
+  } else {
+    if (homeRegion !== 'nnode-1') {
+      fail(
+        'check-4',
+        `the direct conversation's home_region is ${homeRegion}, not node 1's region`,
+      );
+    }
+    insertJson(PG.db2, 'conversation', directRow);
+    insertJson(
+      PG.db2,
+      'conversation_member',
+      mustRow<Record<string, unknown>>(
+        PG.db1,
+        `select row_to_json(t) from conversation_member t
+          where conversation_id = '${directUuid}' and account_id = '${bobUuid}'`,
+        "bob's direct conversation membership",
+      ),
+    );
+    await bob.watchConversation(direct.conversationId);
+    log(
       'check-4',
-      `the direct conversation's home_region is ${String(directRow.home_region)}, not node 1's region`,
+      `direct conversation ${direct.conversationId} created on node 1 (home), bob watching it on node 2`,
     );
-  }
-  insertJson(PG.db2, 'conversation', directRow);
-  insertJson(
-    PG.db2,
-    'conversation_member',
-    mustRow<Record<string, unknown>>(
-      PG.db1,
-      `select row_to_json(t) from conversation_member t
-        where conversation_id = '${directUuid}' and account_id = '${bobUuid}'`,
-      "bob's direct conversation membership",
-    ),
-  );
-  await bob.watchConversation(direct.conversationId);
-  log(
-    'check-4',
-    `direct conversation ${direct.conversationId} created on node 1 (home), bob watching it on node 2`,
-  );
 
-  // Let the FED_CONVERSATION_SUBSCRIBE drain through the outbox before the
-  // first send, the same drain the room's subscribe got: a send that leaves
-  // before the home node recorded the watcher is simply not fanned out.
-  await sleep(3_000);
+    // Let the FED_CONVERSATION_SUBSCRIBE drain through the outbox before the
+    // first send, the same drain the room's subscribe got: a send that leaves
+    // before the home node recorded the watcher is simply not fanned out.
+    await sleep(3_000);
 
-  const dmText = `direct hello across the mesh (${stamp})`;
-  log('alice', `sending "${dmText}" into the direct conversation`);
-  await alice.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmText });
-  const check4a = await waitFor(
-    () =>
-      bobMessages.some(
-        (m) =>
-          m.senderId === aliceId && m.text === dmText && m.conversationId === direct.conversationId,
-      ),
-    DELIVERY_TIMEOUT_MS,
-  );
-  if (!check4a) {
-    fail(
-      'check-4a',
-      `the direct message did not cross the mesh link; bob observed: ${JSON.stringify(bobMessages)}`,
+    const dmText = `direct hello across the mesh (${stamp})`;
+    log('alice', `sending "${dmText}" into the direct conversation`);
+    await alice.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmText });
+    const check4a = await waitFor(
+      () =>
+        bobMessages.some(
+          (m) =>
+            m.senderId === aliceId &&
+            m.text === dmText &&
+            m.conversationId === direct.conversationId,
+        ),
+      DELIVERY_TIMEOUT_MS,
     );
-  }
-  proved.push('direct message: node 1 → node 2 (delivered and decrypted)');
-  log('check-4a', `PROVED: bob received and decrypted "${dmText}"`);
+    if (!check4a) {
+      fail(
+        'check-4a',
+        `the direct message did not cross the mesh link; bob observed: ${JSON.stringify(bobMessages)}`,
+      );
+    }
+    proved.push('direct message: node 1 → node 2 (delivered and decrypted)');
+    log('check-4a', `PROVED: bob received and decrypted "${dmText}"`);
 
-  const dmReply = `direct reply across the mesh (${stamp})`;
-  log('bob', `sending "${dmReply}" back`);
-  await bob.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmReply });
-  const check4b = await waitFor(
-    () =>
-      aliceMessages.some(
-        (m) =>
-          m.senderId === bobId && m.text === dmReply && m.conversationId === direct.conversationId,
-      ),
-    DELIVERY_TIMEOUT_MS,
-  );
-  if (!check4b) {
-    fail(
-      'check-4b',
-      `the direct reply did not reach node 1; alice observed: ${JSON.stringify(aliceMessages)}`,
+    const dmReply = `direct reply across the mesh (${stamp})`;
+    log('bob', `sending "${dmReply}" back`);
+    await bob.messaging.send(direct.conversationId, { type: ContentType.Text, text: dmReply });
+    const check4b = await waitFor(
+      () =>
+        aliceMessages.some(
+          (m) =>
+            m.senderId === bobId &&
+            m.text === dmReply &&
+            m.conversationId === direct.conversationId,
+        ),
+      DELIVERY_TIMEOUT_MS,
     );
+    if (!check4b) {
+      fail(
+        'check-4b',
+        `the direct reply did not reach node 1; alice observed: ${JSON.stringify(aliceMessages)}`,
+      );
+    }
+    proved.push('direct message: node 2 → node 1 (delivered and decrypted)');
+    log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
   }
-  proved.push('direct message: node 2 → node 1 (delivered and decrypted)');
-  log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
 
-  // KNOWN GAP A: presence. User topics are deliberately not federated (section
-  // 170 tiers fan-out to room conversations only), and presence is ephemeral
-  // node-local state besides. Bob's watch of alice's user topic on node 2 is
-  // authorized by the fixtured account row; alice then changes presence on
-  // node 1. The honest expectation is that bob's subscriber hears nothing.
+  // KNOWN GAP A: presence. The tree carries the user-topic tier
+  // (presence_relay, FED_USER_SUBSCRIBE / FED_USER_EVENT), but this harness
+  // runs released binaries, so until a release carries the tier the honest
+  // observation is that the event does not cross. Bob's watch of alice's user
+  // topic on node 2 is authorized by the fixtured account row; alice then
+  // changes presence on node 1. If it crosses, that is a release note, not a
+  // failure — the demand flip is the release follow-up.
   const presenceHeard: { userId: Id; state: PresenceState }[] = [];
   bob.presence.onPresence((event) => {
     presenceHeard.push({ userId: event.userId, state: event.state });
@@ -597,8 +631,8 @@ async function main(): Promise<void> {
     log(
       'gap-presence',
       crossed
-        ? 'UNEXPECTED: a presence event crossed the link — user topics are not supposed to federate'
-        : 'CONFIRMED GAP: presence did not cross the link (user topics are node-local by design)',
+        ? 'NOTE: a presence event crossed the link — the released binaries carry the user-topic tier; flip this check to demand it'
+        : 'CONFIRMED GAP: presence did not cross the link (the user-topic tier is in the tree but not in the released binaries yet)',
     );
   }
 
@@ -622,7 +656,14 @@ async function main(): Promise<void> {
   for (const line of proved) {
     console.log(`  PROVED   ${line}`);
   }
-  console.log('  REPORTED presence does not cross the link (by design; user topics stay local)');
+  console.log(
+    '  REPORTED presence does not cross the link (the user-topic tier is in the tree, not in the released binaries yet)',
+  );
+  if (dmReported) {
+    console.log(
+      '  REPORTED direct messages do not cross the link (the conversation tier is in the tree, not in the released binaries yet)',
+    );
+  }
   console.log('');
   log(
     'result',

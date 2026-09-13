@@ -2340,6 +2340,32 @@
       ]
     },
     {
+      "name": "FedUserWatch",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "user_id",
+          "type": "id"
+        }
+      ]
+    },
+    {
+      "name": "FedUserEvent",
+      "fields": [
+        {
+          "name": "user_id",
+          "type": "id"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
       "name": "FedConversationEvent",
       "fields": [
         {

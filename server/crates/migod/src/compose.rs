@@ -342,8 +342,9 @@ pub struct App {
     /// federation listener. The server-to-server segment's own bind (section 169),
     /// advertised through the `FEDERATION` feature bit only while it is serving. Held
     /// for the same reason the QUIC and TCP binds are: a test that builds several
-    /// nodes in one process must hand each node's real address to its peers' allow-lists,
-    /// and port zero is how those tests keep off each other's sockets.
+    /// nodes in one process, or an operator's tool that links nodes, must name the
+    /// address a peer's `federation.peers` entry points at — and port zero binds an
+    /// ephemeral one that keeps such tests off each other's sockets.
     pub mesh_bind: Option<SocketAddr>,
     /// Authentication: register, sign in, refresh, sign out, and access-token verification.
     pub auth: SharedAuth,
@@ -372,6 +373,12 @@ pub struct App {
     pub bots: SharedBots,
     /// Federation: the server-to-server mesh of trusted, allow-listed peer nodes.
     pub federation: SharedMesh,
+    /// The presence half of the mesh: which subjects this node's sessions watch, and the
+    /// peers asked to forward each subject's stream. Held for the same reason `federation`
+    /// is: a test or an operator's tool that links nodes needs the one place the user-topic
+    /// tier's watch table lives (section 170), and the relay has no listener of its own to
+    /// name an address by.
+    pub presence_relay: Arc<crate::presence_relay::PresenceRelay>,
     /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
     pub calls: SharedCallkeeper,
 }
@@ -733,6 +740,17 @@ impl App {
             store.clone(),
         ));
 
+        // The user-topic tier of the same fan-out (section 170): the relay the
+        // presence publish paths forward through and the mesh transport's
+        // ingest path registers watchers into. It holds no store and no
+        // gateway handle of its own — a presence change's origin is the node
+        // whose session caused it, so the forward half never needs to ask
+        // where a row lives, and the ingest half publishes through the same
+        // gateway the room tier's events do.
+        let presence_relay = Arc::new(crate::presence_relay::PresenceRelay::new(
+            federation.clone(),
+        ));
+
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
@@ -761,6 +779,7 @@ impl App {
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),
             Arc::clone(&conversation_relay),
+            Arc::clone(&presence_relay),
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
@@ -857,6 +876,7 @@ impl App {
             Some(Arc::clone(&gateway)),
             Some(Arc::clone(&room_relay)),
             Some(Arc::clone(&conversation_relay)),
+            Some(Arc::clone(&presence_relay)),
             &registry,
             clock.clone(),
             config.federation.handshake_timeout_ms,
@@ -931,6 +951,7 @@ impl App {
             games,
             bots,
             federation,
+            presence_relay,
             calls,
         })
     }
