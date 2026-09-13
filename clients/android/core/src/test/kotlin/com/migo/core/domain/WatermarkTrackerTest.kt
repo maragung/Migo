@@ -152,8 +152,10 @@ class WatermarkTrackerTest {
         val tracker = harness.build()
         tracker.track(event(6L))
         tracker.track(event(9L))
-        // The 9 was dispatched live, above the hole; the page that later fills 7 to 9 must not
-        // deliver it twice.
+        // The 9 was dispatched live, above the hole — in the domain's own order: track, the
+        // duplicate check, then this remember, then the route.
+        tracker.rememberDispatch(event(9L))
+        // The page that later fills 7 to 9 must not deliver it twice.
         assertTrue(tracker.alreadyDispatched(event(9L)))
         // The memory is consumed: the same seq a second time is the page's own duplicate of a
         // duplicate, and the caller's dedup owns it from here.
@@ -166,6 +168,7 @@ class WatermarkTrackerTest {
         val tracker = harness.build()
         tracker.track(event(6L))
         tracker.track(event(9L))
+        tracker.rememberDispatch(event(9L))
         // The watermark catches up to and past the remembered 9 — a later lookup prunes it,
         // because an entry at or below the watermark can never be fetched again.
         for (seq in 7L..10L) {

@@ -4959,7 +4959,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         },
-    }
+    )
 
     /**
      * The section 158 resync's two actions, as the phone-free suite pins them: the list re-read
