@@ -28,7 +28,13 @@ import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { BootstrapClient, MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import {
+  BootstrapClient,
+  MigoClient,
+  Platform,
+  BandwidthMode,
+  serverEndpointFromUrl,
+} from '@migo/sdk';
 import type { CaptchaProof, Grant, Id, ServerEndpoint } from '@migo/sdk';
 
 const HOST = 'migo.test';
@@ -128,7 +134,10 @@ function registerBodyOf(calls: CapturedCall[]): Record<string, unknown> {
 
 test('the server form renders the picker body: transport, host, port, scheme, and the commit control', async () => {
   const { ServerForm } = await import('../src/components/server-form.js');
-  const markup = renderToStaticMarkup(<ServerForm value={ENDPOINT} onCommit={() => undefined} />);
+  // A single known server: no mode control, the plain manual form the picker always was.
+  const markup = renderToStaticMarkup(
+    <ServerForm value={ENDPOINT} mode="manual" servers={[ENDPOINT]} onCommit={() => undefined} />,
+  );
   assert.ok(markup.includes('class="server-form"'), 'the picker body must render its shell');
   assert.ok(
     markup.includes('aria-label="Realtime transport"'),
@@ -139,8 +148,40 @@ test('the server form renders the picker body: transport, host, port, scheme, an
   assert.ok(markup.includes('placeholder="migo.example.com"'), 'the host field must be present');
   assert.ok(markup.includes('placeholder="18080"'), 'the port field must be present');
   assert.ok(
+    !markup.includes('aria-label="Server choice"'),
+    'a single-server build offers no mode control',
+  );
+  assert.ok(
     markup.includes('Use this server'),
     'the commit control must name what it does with the choice',
+  );
+});
+
+test('the server form offers Otomatis, each known server, and Manual on a multi-server build', async () => {
+  const { ServerForm } = await import('../src/components/server-form.js');
+  const nodeA = serverEndpointFromUrl('http://10.0.0.1:8080');
+  const nodeB = serverEndpointFromUrl('http://10.0.0.2:8080');
+  // Static markup never runs the probe effect, so the auto row shows its idle note — the
+  // resolution itself is the live browser's business, tested in auto-server.test.ts.
+  const markup = renderToStaticMarkup(
+    <ServerForm value={nodeA} mode="auto" servers={[nodeA, nodeB]} onCommit={() => undefined} />,
+  );
+  assert.ok(
+    markup.includes('aria-label="Server choice"'),
+    'the mode control must be a labelled radiogroup',
+  );
+  assert.ok(markup.includes('Otomatis'), 'the auto mode must be offered');
+  assert.ok(markup.includes('10.0.0.1:8080'), 'each known server must be an explicit pick');
+  assert.ok(markup.includes('10.0.0.2:8080'), 'each known server must be an explicit pick');
+  assert.ok(markup.includes('Manual…'), 'the manual door must stay open');
+  // Exactly one radio is the checked one, and it is the auto row (its button carries the
+  // active class and the checked state; the server and manual rows carry neither).
+  const checked = markup.match(/aria-checked="true"/g) ?? [];
+  assert.equal(checked.length, 1, 'exactly one mode radio is selected');
+  assert.ok(markup.includes('class="server-form-mode active"'), 'the selected row is highlighted');
+  assert.ok(
+    !markup.includes('placeholder="migo.example.com"'),
+    'the manual fields are hidden while a non-manual mode is selected',
   );
 });
 

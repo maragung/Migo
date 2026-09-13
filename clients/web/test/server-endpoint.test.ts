@@ -1,38 +1,43 @@
 /**
- * The server-endpoint flow on the auth form.
+ * The server-choice flow on the auth form.
  *
- * The form persists the user's chosen endpoint to IndexedDB and reads it back on the next visit;
- * the SDK now uses that structured endpoint in place of the old `baseUrl`/`gatewayUrl` pair. The
- * test that follows proves the three pieces of that contract:
+ * The form persists the user's chosen endpoint *and mode* to IndexedDB and reads them back on
+ * the next visit; the SDK uses that structured endpoint in place of the old `baseUrl`/`gatewayUrl`
+ * pair. The tests prove the pieces of that contract:
  *
- *   1. The persistence helpers round-trip a {@link ServerEndpoint} through IndexedDB, byte for
- *      byte -- so a real user with a real typed address will see the same value come back, and
- *      the `migo:server-endpoint:v1` key is the one and only place the value lives.
+ *   1. The persistence helpers round-trip a choice through IndexedDB under the `:v2` key — the
+ *      record is the one and only place the choice lives — and a v1 record from a build before
+ *      modes existed migrates on read, so nobody loses their saved server.
  *   2. The form's {@link buildFromForm} function rejects the shapes the field validates against
  *      (empty host, port out of range, scheme/transport mismatch) with the same form-level error
  *      message the rest of the form uses, and accepts the well-formed shapes it should.
- *   3. The persisted endpoint is read by the same `loadServerEndpoint` the page uses on mount,
- *      so the snapshot a previous visit wrote is what the next visit's disclosure pre-fills from.
+ *   3. The healing rules that reconcile a stale snapshot with the deployment it belongs to keep
+ *      their narrow, self-hoster-respecting shape.
  */
 
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import { defaultLoopbackServerEndpoint } from '@migo/sdk';
+import { defaultLoopbackServerEndpoint, serverEndpointFromUrl } from '@migo/sdk';
 import type { ServerEndpoint } from '@migo/sdk';
 
 import { buildFromForm } from '../src/components/server-form.js';
 import {
-  clearServerEndpoint,
+  clearServerChoice,
   healStaleEndpoint,
-  loadServerEndpoint,
-  saveServerEndpoint,
+  loadServerChoice,
+  saveServerChoice,
 } from '../src/lib/storage/server-endpoint-store.js';
+import type { StoredServerChoice } from '../src/lib/storage/server-endpoint-store.js';
+import { idbSet } from '../src/lib/storage/idb.js';
 import {
   installFakeIndexedDb,
   installFakeWindow,
   installRecordingWebStorage,
 } from './support/dom-stubs.js';
+
+const KEY_V1 = 'migo:server-endpoint:v1';
+const KEY_V2 = 'migo:server-endpoint:v2';
 
 let idb: ReturnType<typeof installFakeIndexedDb>;
 
@@ -44,31 +49,94 @@ afterEach(() => {
   idb.restore();
 });
 
-test('a ServerEndpoint round-trips through IndexedDB under the documented key', async () => {
-  const stored: ServerEndpoint = {
-    host: 'migo.example.com',
-    port: 8443,
-    gatewayPort: 8444,
-    transport: 'WebSocket',
-    scheme: 'Wss',
-    restScheme: 'Https',
+const MANUAL: ServerEndpoint = {
+  host: 'migo.example.com',
+  port: 8443,
+  gatewayPort: 8444,
+  transport: 'WebSocket',
+  scheme: 'Wss',
+  restScheme: 'Https',
+};
+
+test('a choice round-trips through IndexedDB under the documented v2 key', async () => {
+  const choice: StoredServerChoice = { mode: 'auto', endpoint: MANUAL };
+  await saveServerChoice(choice);
+  const read = await loadServerChoice();
+  assert.deepEqual(read, choice);
+  // The v2 snapshot is the only entry in the store, so a stray write to a third key would be caught.
+  assert.deepEqual([...idb.store.keys()].sort(), [KEY_V2]);
+});
+
+test('each mode round-trips without the store rewriting it', async () => {
+  for (const mode of ['auto', 'server', 'manual'] as const) {
+    await saveServerChoice({ mode, endpoint: MANUAL });
+    const read = await loadServerChoice();
+    assert.equal(read?.mode, mode, `mode ${mode} must survive the round-trip`);
+    assert.deepEqual(read?.endpoint, MANUAL);
+  }
+});
+
+test('the first visit has no persisted choice', async () => {
+  assert.equal(await loadServerChoice(), undefined);
+});
+
+test('clearing the choice removes the snapshot', async () => {
+  await saveServerChoice({ mode: 'manual', endpoint: defaultLoopbackServerEndpoint('localhost') });
+  await clearServerChoice();
+  assert.equal(await loadServerChoice(), undefined);
+  assert.deepEqual([...idb.store.keys()], []);
+});
+
+// --- the v1 -> v2 migration ---
+
+test('a v1 record from a build before modes reads back as a manual choice', async () => {
+  await idbSet(KEY_V1, MANUAL);
+  const read = await loadServerChoice();
+  assert.deepEqual(read, { mode: 'manual', endpoint: MANUAL });
+});
+
+test('a v2 record takes precedence over a stale v1 record beside it', async () => {
+  await idbSet(KEY_V1, MANUAL);
+  const fresh: StoredServerChoice = {
+    mode: 'server',
+    endpoint: serverEndpointFromUrl('http://152.53.102.150:8080'),
   };
-  await saveServerEndpoint(stored);
-  const read = await loadServerEndpoint();
-  assert.deepEqual(read, stored);
-  // The snapshot is the only entry in the store, so a stray write to a third key would be caught.
-  assert.deepEqual([...idb.store.keys()].sort(), ['migo:server-endpoint:v1']);
+  await saveServerChoice(fresh);
+  // saveServerChoice deletes the v1 record as part of the write, so the stale address does not
+  // linger in a second copy.
+  assert.deepEqual([...idb.store.keys()].sort(), [KEY_V2]);
+  const read = await loadServerChoice();
+  assert.deepEqual(read, fresh);
 });
 
-test('the first visit has no persisted endpoint', async () => {
-  assert.equal(await loadServerEndpoint(), undefined);
+test('clearing removes a leftover v1 record too', async () => {
+  await idbSet(KEY_V1, MANUAL);
+  await clearServerChoice();
+  assert.deepEqual([...idb.store.keys()], []);
 });
 
-test('clearing the endpoint removes the snapshot', async () => {
-  await saveServerEndpoint(defaultLoopbackServerEndpoint('localhost'));
-  await clearServerEndpoint();
-  assert.equal(await loadServerEndpoint(), undefined);
+test('a corrupt v2 mode narrows to manual rather than throwing', async () => {
+  await idbSet(KEY_V2, { mode: 'what', endpoint: MANUAL });
+  const read = await loadServerChoice();
+  assert.equal(read?.mode, 'manual');
+  assert.deepEqual(read?.endpoint, MANUAL);
 });
+
+test('the server choice never lands in localStorage, sessionStorage, or a cookie', async () => {
+  const web = installRecordingWebStorage();
+  try {
+    const choice: StoredServerChoice = { mode: 'auto', endpoint: MANUAL };
+    await saveServerChoice(choice);
+    const read = await loadServerChoice();
+    assert.deepEqual(read, choice);
+    assert.deepEqual(web.writes(), []);
+    assert.deepEqual(web.accesses, []);
+  } finally {
+    web.restore();
+  }
+});
+
+// --- buildFromForm (the manual fields' validation) ---
 
 test('buildFromForm returns a valid WebSocket endpoint from a typed form', () => {
   const endpoint = buildFromForm({
@@ -187,26 +255,7 @@ test('buildFromForm accepts a QUIC transport with a QUIC-TLS scheme', () => {
   assert.equal(endpoint.scheme, 'QuicTls');
 });
 
-test('the server endpoint never lands in localStorage, sessionStorage, or a cookie', async () => {
-  const web = installRecordingWebStorage();
-  try {
-    const stored: ServerEndpoint = {
-      host: 'migo.example.com',
-      port: 8443,
-      gatewayPort: 8444,
-      transport: 'WebSocket',
-      scheme: 'Wss',
-      restScheme: 'Https',
-    };
-    await saveServerEndpoint(stored);
-    const read = await loadServerEndpoint();
-    assert.deepEqual(read, stored);
-    assert.deepEqual(web.writes(), []);
-    assert.deepEqual(web.accesses, []);
-  } finally {
-    web.restore();
-  }
-});
+// --- healing a stale snapshot against the deployment ---
 
 // The deployment this build belongs to, for the healing tests below: the single-port plain-HTTP
 // posture the production server answers on.

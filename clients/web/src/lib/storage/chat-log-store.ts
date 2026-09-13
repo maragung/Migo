@@ -16,8 +16,8 @@
  * deletes `chat-logs:v1` and nothing else. The keys this module must never touch are listed in
  * {@link PROTECTED_KEYS} as documentation of the boundary — `keystore-snapshot`,
  * `keystore-snapshot:v1`, `keystore-master` (the device's sealed identity), and
- * `migo:server-endpoint:v1` (the chosen server) — and none of this module's code paths reference
- * them, so a bug here can cost a saved log, never a session.
+ * `migo:server-endpoint:v1`/`migo:server-endpoint:v2` (the chosen server) — and none of this
+ * module's code paths reference them, so a bug here can cost a saved log, never a session.
  *
  * # The toggle
  *
@@ -46,6 +46,7 @@ export const PROTECTED_KEYS: readonly string[] = [
   'keystore-snapshot:v1',
   'keystore-master',
   'migo:server-endpoint:v1',
+  'migo:server-endpoint:v2',
 ];
 
 /** Where the auto-save toggle persists; a plain string, never key material. */

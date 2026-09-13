@@ -13,8 +13,10 @@ import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
-import { defaultServerEndpoint } from '@/lib/config.js';
-import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
+import { defaultServerEndpoint, knownServers } from '@/lib/config.js';
+import { resolveServerChoice } from '@/lib/auto-server.js';
+import { loadServerChoice, saveServerChoice } from '@/lib/storage/server-endpoint-store.js';
+import type { ServerChoiceMode } from '@/lib/storage/server-endpoint-store.js';
 import { loadKeyFiles } from '@/lib/storage/key-file-store.js';
 
 import type { CaptchaChallenge, CaptchaProof, ServerEndpoint } from '@migo/sdk';
@@ -49,6 +51,7 @@ export default function RegisterPage(): ReactNode {
   const [email, setEmail] = useState('');
   const [gender, setGender] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
+  const [mode, setMode] = useState<ServerChoiceMode>('manual');
   const [endpointReady, setEndpointReady] = useState(false);
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
   const [saveOfferOpen, setSaveOfferOpen] = useState(false);
@@ -59,29 +62,44 @@ export default function RegisterPage(): ReactNode {
   const [freshCaptcha, setFreshCaptcha] = useState<CaptchaChallenge | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
+  // The doors this build names; stable for the page's life so the picker's probe effect is not
+  // re-armed by a fresh array identity on every render.
+  const [servers] = useState(() => knownServers());
 
   useEffect(() => {
     let cancelled = false;
-    void loadServerEndpoint().then((stored) => {
-      if (cancelled) return;
-      // A fresh visitor (no stored endpoint) still gets a working form against the build's
-      // default host, and the submit button is enabled; the user can open the server sheet to
-      // point at a self-hosted server without ever leaving the page in a disabled state.
-      setEndpoint(stored ?? defaultServerEndpoint());
-      setEndpointReady(true);
-    });
+    void loadServerChoice()
+      .then((stored) => resolveServerChoice(stored, servers))
+      .then((resolved) => {
+        if (cancelled) return;
+        // A fresh visitor (no stored choice) still gets a working form against the build's
+        // default host, and the submit button is enabled; the user can open the server sheet to
+        // point at a self-hosted server without ever leaving the page in a disabled state. A
+        // saved auto choice is re-resolved: the probe runs again and the current fastest node
+        // is what the form authenticates against.
+        setEndpoint(resolved.endpoint);
+        setMode(resolved.mode);
+        setEndpointReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setEndpoint(defaultServerEndpoint());
+        setEndpointReady(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [servers]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (submitting || endpoint === null) {
       return;
     }
+    // Persist the chosen mode and endpoint before the ceremony; in auto mode the endpoint is
+    // the last resolution, not a pin — the next load re-probes regardless.
     try {
-      await saveServerEndpoint(endpoint);
+      await saveServerChoice({ mode, endpoint });
     } catch {
       // Best-effort, see login.
     }
@@ -112,15 +130,21 @@ export default function RegisterPage(): ReactNode {
   }
 
   // Same shape as the sign-in card: the server choice lives in a sheet behind a bottom-corner
-  // link, and a commit from the sheet is the only thing that changes the endpoint here.
-  function onServerCommit(next: ServerEndpoint): void {
+  // link, and a commit from the sheet is the only thing that changes the endpoint here. A
+  // transport tap keeps the mode untouched — transport is orthogonal to which door it opens.
+  function onServerCommit(next: ServerEndpoint, nextMode: ServerChoiceMode): void {
     setEndpoint(next);
+    setMode(nextMode);
     setValidationError(null);
   }
 
-  function onServerConfirmed(next: ServerEndpoint): void {
-    onServerCommit(next);
+  function onServerConfirmed(next: ServerEndpoint, nextMode: ServerChoiceMode): void {
+    onServerCommit(next, nextMode);
     setServerSheetOpen(false);
+  }
+
+  function onTransportCommit(next: ServerEndpoint): void {
+    setEndpoint(next);
   }
 
   /**
@@ -246,7 +270,11 @@ export default function RegisterPage(): ReactNode {
               className="auth-server-link"
               onClick={() => setServerSheetOpen(true)}
             >
-              Server · {endpoint.host}:{endpoint.port} · {transportLabel(endpoint.transport)}
+              Server ·{' '}
+              {mode === 'auto'
+                ? `Otomatis · ${endpoint.host}:${endpoint.port}`
+                : `${endpoint.host}:${endpoint.port}`}{' '}
+              · {transportLabel(endpoint.transport)}
             </button>
           </div>
         ) : null}
@@ -256,8 +284,10 @@ export default function RegisterPage(): ReactNode {
         <BottomSheet title="Server" onClose={() => setServerSheetOpen(false)}>
           <ServerForm
             value={endpoint}
+            mode={mode}
+            servers={servers}
             onCommit={onServerConfirmed}
-            onTransportPick={onServerCommit}
+            onTransportPick={onTransportCommit}
           />
         </BottomSheet>
       ) : null}
