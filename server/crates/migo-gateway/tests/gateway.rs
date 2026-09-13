@@ -3877,10 +3877,11 @@ async fn a_message_body_that_will_not_decode_is_counted_by_error_symbol() {
         1,
         &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
     );
-    // A well-formed frame header carrying the PONG opcode, but a body that
-    // decodes as neither a Pong nor a Ping: the frame parsed, the message did
-    // not — the decode path that closes a ready session.
-    let bogus = to_frame(Opcode::Pong.to_wire(), 7, &hello())
+    // A well-formed frame header carrying the PING opcode — the one opcode the
+    // Pong reply also rides (section 139) — but a body that decodes as neither
+    // a Pong nor a Ping: the frame parsed, the message did not — the decode
+    // path that closes a ready session.
+    let bogus = to_frame(Opcode::Ping.to_wire(), 7, &hello())
         .expect("the scripted frame must encode")
         .encode()
         .expect("the scripted frame must encode");

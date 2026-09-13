@@ -368,9 +368,44 @@ fn per_variant<T>(
         .collect()
 }
 
+/// Registers the three section-174 series — reconnects by cause, decode failures by error
+/// symbol, and the coarse frame-size histogram — and hands them back for `Meters::new` to
+/// store. Split out so the constructor stays under clippy's line budget.
+fn section_174_series(
+    registry: &Registry,
+) -> (Vec<Arc<Counter>>, Vec<Arc<Counter>>, Arc<Histogram>) {
+    (
+        per_variant(
+            registry,
+            "migo_reconnect_total",
+            "Sessions resumed after a disconnect, by the reason the previous session closed.",
+            "reason",
+            &Reconnect::ALL,
+            |reason| reason.label(),
+        ),
+        per_variant(
+            registry,
+            "migo_decode_errors_total",
+            "Frames or message bodies that failed to decode, by error symbol.",
+            "error",
+            &DecodeFailure::ALL,
+            |failure| failure.label(),
+        ),
+        registry.histogram(
+            "migo_frame_bytes",
+            "Bytes per frame received from clients. Bucket bounds are deliberately coarse: \
+             the first bound swallows every text-sized frame, so the series reads transport \
+             scale, never message length.",
+            &[],
+            FRAME_BYTES_BUCKETS,
+        ),
+    )
+}
+
 impl Meters {
     /// Registers every series at zero up front.
     pub(crate) fn new(registry: &Registry) -> Self {
+        let (reconnect, decode_errors, frame_bytes) = section_174_series(registry);
         Self {
             sessions_opened: registry.counter(
                 "migo_gateway_sessions_opened_total",
@@ -439,30 +474,9 @@ impl Meters {
                 &Refused::ALL,
                 |reason| reason.label(),
             ),
-            reconnect: per_variant(
-                registry,
-                "migo_reconnect_total",
-                "Sessions resumed after a disconnect, by the reason the previous session closed.",
-                "reason",
-                &Reconnect::ALL,
-                |reason| reason.label(),
-            ),
-            decode_errors: per_variant(
-                registry,
-                "migo_decode_errors_total",
-                "Frames or message bodies that failed to decode, by error symbol.",
-                "error",
-                &DecodeFailure::ALL,
-                |failure| failure.label(),
-            ),
-            frame_bytes: registry.histogram(
-                "migo_frame_bytes",
-                "Bytes per frame received from clients. Bucket bounds are deliberately coarse: \
-                 the first bound swallows every text-sized frame, so the series reads transport \
-                 scale, never message length.",
-                &[],
-                FRAME_BYTES_BUCKETS,
-            ),
+            reconnect,
+            decode_errors,
+            frame_bytes,
             sessions_live: registry.gauge(
                 "migo_gateway_sessions_live",
                 "Sessions currently connected.",
@@ -488,6 +502,9 @@ impl Meters {
         self.sessions_live.dec();
     }
 
+    /// Frame byte counts are bounded by the wire limit (well under 2^53), so widening to f64
+    /// loses nothing; the buckets' own bounds are f64 anyway.
+    #[allow(clippy::cast_precision_loss)]
     pub(crate) fn frame_in(&self, bytes: usize) {
         self.frames_in.inc();
         self.frame_bytes.observe(bytes as f64);
