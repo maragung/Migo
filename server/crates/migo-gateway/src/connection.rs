@@ -419,7 +419,7 @@ impl<T: Transport> Connection<'_, T> {
         match gateway.take_resume(request.session_id) {
             Some(buffer) if buffer.covers(request.last_frame_seq, now) => Some(Plan::Resume {
                 session_id: request.session_id,
-                reconnect: Reconnect::of(buffer.closed),
+                reconnect: Reconnect::of(buffer.closed()),
                 buffer,
                 last_seq: request.last_frame_seq,
             }),

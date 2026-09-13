@@ -148,6 +148,12 @@ impl ResumeBuffer {
     pub(crate) fn expired(&self, now: Timestamp) -> bool {
         now.as_unix_ms() > self.expires_at.as_unix_ms()
     }
+
+    /// Why the session this buffer belonged to closed, so a served resume can label the
+    /// reconnect with its cause (section 174).
+    pub(crate) fn closed(&self) -> Closed {
+        self.closed
+    }
 }
 
 /// The mutable state, behind one lock.
