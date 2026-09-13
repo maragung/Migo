@@ -36,7 +36,7 @@
 //!   whose socket dies cannot send the end — nothing is running to send it —
 //!   so the node ends the departed account's calls on the session edge and
 //!   publishes `Ended(Network)` to the survivor's user topic, prompt instead
-//!   of a client-side media timeout. The fifth test kills the callee's socket
+//!   of a client-side media timeout. The sixth test kills the callee's socket
 //!   mid-call and asserts the caller hears it.
 
 use std::net::SocketAddr;

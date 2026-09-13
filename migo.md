@@ -5661,7 +5661,7 @@ pernah membukanya — janji mail-slot relay 1-on-1 yang diperluas dari dua devic
 menjadi satu roster. Tidak ada bidang media yang melintasi crate ini dan tidak ada byte
 tersegel yang dibaca; MCU/transcoding tetap terlarang dan tidak punya kode untuk hidup di
 dalamnya. Client-side SFU (roster UI dan kunci frame antar peserta) tetap SPEC.
-24 test yang menutup siklus hidup penuh, idempotensi, relay, gate, dan sweep, termasuk
+40 test yang menutup siklus hidup penuh, idempotensi, relay, gate, dan sweep, termasuk
 tiga test kematian sesi: kursi yang dicap lalu disapu setelah grace, re-join di dalam
 jendela yang mempertahankan kursi, dan panggilan terhubung yang berakhir Network bagi
 penyintasnya; dua test wire di migod (sfu_wire dan calls_wire, socket TCP nyata) membuktikan
