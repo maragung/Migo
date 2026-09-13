@@ -386,7 +386,6 @@ async fn try_recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) ->
 /// A scripted client: a real TCP session speaking the length-prefixed framing.
 struct Client {
     stream: tokio::net::TcpStream,
-    session_id: Id,
     node: String,
     region: String,
     correlation: u32,
@@ -450,7 +449,6 @@ impl Client {
                 );
                 return Self {
                     stream,
-                    session_id: welcome.session_id,
                     node: welcome.node.node_id,
                     region: welcome.node.region,
                     correlation: 2,
