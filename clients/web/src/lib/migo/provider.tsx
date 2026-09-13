@@ -39,7 +39,8 @@ import type {
   ServerEndpoint,
 } from '@migo/sdk';
 
-import { defaultServerEndpoint } from '@/lib/config.js';
+import { knownServers } from '@/lib/config.js';
+import { resolveServerChoice } from '@/lib/auto-server.js';
 import { RESTORE_FAILED, containerFileName } from '@/lib/account-file.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
@@ -52,11 +53,7 @@ import {
   saveKeyStoreSnapshot,
 } from '@/lib/storage/keystore-store.js';
 import { clearSession, loadSession, saveSession } from '@/lib/storage/session-store.js';
-import {
-  clearServerEndpoint,
-  loadServerEndpoint,
-  saveServerEndpoint,
-} from '@/lib/storage/server-endpoint-store.js';
+import { clearServerChoice, loadServerChoice } from '@/lib/storage/server-endpoint-store.js';
 
 /** The overall authentication lifecycle, distinct from the transport's {@link ConnectionState}. */
 export type AuthStatus = 'initializing' | 'anonymous' | 'connecting' | 'ready';
@@ -300,13 +297,9 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     ): Promise<void> => {
       setError(null);
       setStatus('connecting');
-      // Persist the new endpoint *before* opening a socket, so a mid-flight failure can be retried
-      // against the same server without the form losing the address the user just typed.
-      try {
-        await saveServerEndpoint(server);
-      } catch {
-        // Persistence is best-effort: a failed write will not block the in-flight attempt.
-      }
+      // The endpoint's persistence is the caller's: the pages save the full choice (mode and
+      // endpoint) right before they call in, so a mid-flight failure is still retried against
+      // the same server, and the provider does not overwrite the mode with one it never knew.
       try {
         // A registration is the founding device of a brand-new account (§182): the root is minted
         // here, the E2EE identity is derived from the root's E2EE domain, and both seal into the
@@ -371,11 +364,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     ): Promise<void> => {
       setError(null);
       setStatus('connecting');
-      try {
-        await saveServerEndpoint(server);
-      } catch {
-        // Best-effort, see register above.
-      }
+      // The caller persists the choice before calling in, for the same reason as register.
       try {
         // One container, one credential: the passphrase that sealed the file at registration opens
         // it now (§182 — the reader cannot tell a wrong passphrase from a tampered file, and the
@@ -583,12 +572,16 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     let cancelled = false;
 
     async function restore(): Promise<void> {
-      const [session, snapshot, endpoint] = await Promise.all([
+      const [session, snapshot, stored] = await Promise.all([
         loadSession(),
         loadKeyStoreSnapshot(),
-        loadServerEndpoint(),
+        loadServerChoice(),
       ]);
-      const server = endpoint ?? defaultServerEndpoint();
+      // A stored auto choice is re-resolved here the same way the sign-in pages resolve it: the
+      // probe runs again, and the current fastest node is where the session resumes. The stored
+      // endpoint is only the last resolution; a manual or exact-server choice stands as typed.
+      const resolved = await resolveServerChoice(stored, knownServers());
+      const server = resolved.endpoint;
       if (!session || !snapshot) {
         if (!cancelled) {
           setStatus('anonymous');
@@ -685,4 +678,4 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
 }
 
 // Reserved for a future "forget server" affordance; kept exported to make the import non-dead.
-export { clearServerEndpoint };
+export { clearServerChoice };
