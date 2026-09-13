@@ -938,9 +938,10 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomLeaveRequest = from_frame(frame).map_err(fault::from_wire)?;
+                let room_id = request.room_id;
                 // Leaving is room state too: the member list the home node sequences is
                 // the one every node must agree on, partition or not.
-                self.room_relay.ensure_writable(request.room_id).await?;
+                self.room_relay.ensure_writable(room_id).await?;
                 let fanout = self.rooms.leave(&caller, request).await?;
                 // Publish and revoke before the reply, and reply unconditionally. The service
                 // returns Ok(None) for an idempotent no-op leave (not a member, or already gone),
@@ -954,8 +955,7 @@ impl Dispatcher for AppDispatcher {
                 if let Some(fanout) = fanout {
                     self.publish_rooms(context, fanout).await?;
                 } else {
-                    self.revoke_room_audience(request.room_id, caller.account_id)
-                        .await;
+                    self.revoke_room_audience(room_id, caller.account_id).await;
                 }
                 context.reply(&Acknowledged { ok: true })?;
                 Ok(())

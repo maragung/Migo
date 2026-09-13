@@ -53,7 +53,7 @@ use crate::dispatch::{ClientContext, TopicRequest};
 use crate::metrics::{
     Closed, DecodeFailure, HandshakeReject, Meters, Reconnect, Refused, ResumeOutcome,
 };
-use crate::outbound::{Outbound, PushOutcome, ResumeBuffer};
+use crate::outbound::{Outbound, PushOutcome};
 use crate::session::{Phase, SessionHandle};
 use crate::transport::{Transport, TransportError};
 use crate::GatewayInner;
@@ -170,31 +170,7 @@ impl<T: Transport> Connection<'_, T> {
         let session_id = plan.session_id();
 
         // Admission control: every established session, fresh or resumed, takes one slot.
-        if !self.gateway.try_admit() {
-            if let Plan::Resume {
-                session_id,
-                retained,
-                ..
-            } = plan
-            {
-                // Hand the retained state back so a later, less loaded moment can still resume it.
-                self.gateway.store_resume(session_id, retained);
-            }
-            // Section 160: a node past its ceiling answers OVERLOADED, not a silent drop. The
-            // 1600 class tells the client to retry with backoff — the honest instruction for a
-            // ceiling that other sessions' disconnects will relieve — and the resume buffer was
-            // handed back above so a returning client can still bridge its gap.
-            let error = fault::error(codes::OVERLOADED, "node session ceiling reached")
-                .public("server overloaded");
-            self.reject(
-                HandshakeReject::Overloaded,
-                Opcode::Hello.to_wire(),
-                correlation,
-                &error,
-            )
-            .await;
-            return None;
-        }
+        let plan = self.admit_or_hand_back(plan, correlation).await?;
 
         // The slot is now held. The only exits below are a failed WELCOME (which releases it and
         // returns None) and success (which hands it to the session, released in teardown).
@@ -303,20 +279,15 @@ impl<T: Transport> Connection<'_, T> {
             Plan::Resume { retained, .. } => retained.topics,
             Plan::Fresh { .. } => Vec::new(),
         };
-        let mut pending_topics = pending_topics;
-        if !pending_topics.is_empty() {
-            if let Some(identity) = identity.as_ref() {
-                let topics = std::mem::take(&mut pending_topics);
-                self.restore_resumed_topics(
-                    identity,
-                    &topics,
-                    session_id,
-                    hello.bandwidth_mode,
-                    now,
-                )
-                .await;
-            }
-        }
+        let pending_topics = self
+            .apply_pending_topics(
+                identity.as_ref(),
+                pending_topics,
+                session_id,
+                hello.bandwidth_mode,
+                now,
+            )
+            .await;
 
         Some(Established {
             session_id,
@@ -327,6 +298,58 @@ impl<T: Transport> Connection<'_, T> {
             lifecycle_started,
             pending_topics,
         })
+    }
+
+    /// Admission control for a plan about to become a session: a node past its ceiling answers
+    /// OVERLOADED, not a silent drop, and closes the connection. A refused resume first hands its
+    /// retained state back, so a later, less loaded moment can still resume it — the 1600 class
+    /// tells the client to retry with backoff, the honest instruction for a ceiling that other
+    /// sessions' disconnects will relieve. `Some(plan)` means the slot is held and the caller owns
+    /// releasing it.
+    async fn admit_or_hand_back(&mut self, plan: Plan, correlation: u32) -> Option<Plan> {
+        if self.gateway.try_admit() {
+            return Some(plan);
+        }
+        if let Plan::Resume {
+            session_id,
+            retained,
+            ..
+        } = plan
+        {
+            self.gateway.store_resume(session_id, retained);
+        }
+        let error = fault::error(codes::OVERLOADED, "node session ceiling reached")
+            .public("server overloaded");
+        self.reject(
+            HandshakeReject::Overloaded,
+            Opcode::Hello.to_wire(),
+            correlation,
+            &error,
+        )
+        .await;
+        None
+    }
+
+    /// Applies the resumed session's retained topics through the dispatcher's authorization,
+    /// returning whatever had to stay pending — an unauthenticated resume holds its topics for
+    /// `AUTHENTICATE`, where the identity arrives and the same authorization runs.
+    async fn apply_pending_topics(
+        &self,
+        identity: Option<&Identity>,
+        mut topics: Vec<Topic>,
+        session_id: Id,
+        mode: migo_protocol::BandwidthMode,
+        now: Timestamp,
+    ) -> Vec<Topic> {
+        if topics.is_empty() {
+            return topics;
+        }
+        if let Some(identity) = identity {
+            let applied = std::mem::take(&mut topics);
+            self.restore_resumed_topics(identity, &applied, session_id, mode, now)
+                .await;
+        }
+        topics
     }
 
     /// Re-applies a resumed session's retained topics, through authorization.
