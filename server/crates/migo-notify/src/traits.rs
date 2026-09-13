@@ -208,7 +208,7 @@ pub trait Notifier: Send + Sync {
 /// The payload arrives complete, because the wire event is this crate's to build:
 /// `title` and `body` are empty by the same rule that empties them everywhere else
 /// (the client writes the sentence, in the reader's language), and every field the
-/// frame can carry comes straight off the [`Event`](crate::model::Event) being
+/// frame can carry comes straight off the [`Event`] being
 /// delivered. `subject_id` is not among them — it is the inbox row's pointer, not the
 /// bell's.
 ///
