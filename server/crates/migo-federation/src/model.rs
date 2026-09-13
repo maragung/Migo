@@ -37,6 +37,7 @@ pub const CONVERSATION_OPCODE_MAX: i32 = 242;
 /// A frame on the mesh must never be mistaken for a client frame, and equally a client
 /// opcode must never be enqueued toward a peer, so [`enqueue`](crate::Mesh::enqueue)
 /// refuses anything outside both bands.
+#[must_use]
 pub const fn is_federation_opcode(opcode: i32) -> bool {
     (opcode >= FEDERATION_OPCODE_MIN && opcode <= FEDERATION_OPCODE_MAX)
         || (opcode >= CONVERSATION_OPCODE_MIN && opcode <= CONVERSATION_OPCODE_MAX)
