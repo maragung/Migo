@@ -42,6 +42,13 @@ class SessionHooks(
     val onState: (ConnectionState) -> Unit = {},
     /** Called when a reconnect attempt fails. The client keeps retrying; this is for the banner. */
     val onError: (Throwable) -> Unit = {},
+    /**
+     * Called when a reconnect could not resume and a fresh session was opened instead. The core
+     * has already re-sent every tracked topic subscription before this fires; what it cannot do
+     * is re-read the application's own surfaces, so this is the shell's cue to run its section
+     * 158 resync -- the conversation list, and the open chat's gap from its watermark.
+     */
+    val onReset: () -> Unit = {},
 )
 
 /**
@@ -625,6 +632,7 @@ class MigoSession private constructor(
                 groupPersistence = store,
                 onConnectionError = hooks.onError,
                 onStateChange = hooks.onState,
+                onReset = hooks.onReset,
             ),
         )
 

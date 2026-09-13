@@ -23,19 +23,29 @@
 //! empty request is an empty request, and the IDL froze before a second one was worth
 //! its own struct.
 //!
-//! # Why start and abandon publish nothing
+//! # What start and abandon publish
 //!
-//! `start` and `abandon` return a view and no deltas, and the house rule is that the
-//! return type decides: a payload is answered, a fanout is published, and a method
-//! that returns only the payload has said the conversation hears nothing. A player
-//! who wants the fresh state has it in the reply; a spectator asks `GAME_VIEW`. That
-//! is the service's decision, not this module's, and the one place a frame is
-//! published for a game remains `GAME_ACTION`, whose service method does return
-//! deltas.
+//! `start` and `abandon` return a view and no deltas, and the service is right to keep it that
+//! way — the registry's answers are a projection, and a service that returned a fan-out plan for
+//! a method with no move would be inventing events. But *the dispatcher* owns the wire, and on
+//! the wire section 137 makes `GAME_EVENT` mandatory-binary realtime with no fetch-only escape
+//! hatch: a conversation's members must hear that a game began without asking `GAME_VIEW` for
+//! it. So each handler synthesises the one delta the members cannot live without and hands it
+//! to [`publish_game`](super::publish_game):
+//!
+//! * `GAME_START` publishes `Started` *excluding the starting connection* — the reply already
+//!   carried the caller the full opening view, which is the section 156 rule — so the other
+//!   members and the starter's other devices learn the game exists the moment it does.
+//! * `GAME_ABANDON` publishes `Finished` with `NoContest` *including the abandoning
+//!   connection*, the same deliberate exception `GAME_ACTION` holds: the reply is a bare
+//!   `Acknowledged`, so without the fan-out the abandoner's own devices would never learn the
+//!   game ended. `NoContest` carries no winner, because a win-by-forfeit is a collusion farm.
 
 use migo_core::Error;
 use migo_games::model::Feedback;
-use migo_games::{Caller as GameCaller, GameKind, GameView, Hand, Mark, Render, SharedReferee};
+use migo_games::{
+    Caller as GameCaller, Event, GameKind, GameView, Hand, Mark, Outcome, Render, SharedReferee,
+};
 use migo_gateway::ClientContext;
 use migo_protocol::{
     fault, from_frame, Acknowledged, Frame, GameCatalogueEntry, GameCatalogueResponse, GameId,
@@ -57,6 +67,11 @@ use migo_protocol::{
 /// answer for a request that cannot say who the other player is. Inventing an opponent
 /// here (the other member, the first member) would be this module deciding who gets
 /// pulled into a game, which is a rule, and rules are the service's.
+///
+/// The reply is the opening view, so the `started` delta is published with
+/// [`publish_game`](super::publish_game)'s `to_caller` false: every *other* subscriber of the
+/// conversation — the members who never asked, and this caller's other devices — hears the game
+/// began, while the connection that asked already holds the view the delta would only gesture at.
 pub(crate) async fn handle_game_start(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -74,7 +89,12 @@ pub(crate) async fn handle_game_start(
     let view = svc
         .start(&caller, request.conversation_id, kind, &[])
         .await?;
-    ctx.reply(&wire_view(&view))
+    let started = [Event::Started {
+        game_id: view.game_id,
+        kind: view.kind,
+    }];
+    ctx.reply(&wire_view(&view))?;
+    super::publish_game(ctx, &view, &started, false)
 }
 
 /// Reads one game as the caller is allowed to see it and replies with the view.
@@ -101,10 +121,12 @@ pub(crate) async fn handle_game_view(
 /// Abandons an open game the caller is playing and acknowledges.
 ///
 /// The service ends the game with no winner and no reward — a forfeit pays nobody, so
-/// that abandoning cannot be farmed — and returns the final view, which the registry's
-/// `Acknowledged` answer leaves nowhere to go. The caller knows what it asked for; the
-/// other player learns the game is over by the next `GAME_VIEW`, and publishing a
-/// frame here would be this module overruling a service method that returned no deltas.
+/// that abandoning cannot be farmed — and returns the final view, which this handler
+/// projects onto the one delta the conversation is owed: `Finished` with `NoContest`.
+/// The reply is a bare `Acknowledged`, so the delta is published *including* the
+/// abandoning connection — the same exception `GAME_ACTION` holds — or the abandoner's
+/// own devices would never learn the game ended and would keep offering a guess at a
+/// board the referee has closed.
 pub(crate) async fn handle_game_abandon(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -118,8 +140,13 @@ pub(crate) async fn handle_game_abandon(
         request_id: None,
     };
     let request: GameId = from_frame(frame).map_err(fault::from_wire)?;
-    let _view = svc.abandon(&caller, request.game_id).await?;
-    ctx.reply(&Acknowledged { ok: true })
+    let view = svc.abandon(&caller, request.game_id).await?;
+    let finished = [Event::Finished {
+        game_id: view.game_id,
+        outcome: Outcome::NoContest,
+    }];
+    ctx.reply(&Acknowledged { ok: true })?;
+    super::publish_game(ctx, &view, &finished, true)
 }
 
 /// Lists the games this node can play.

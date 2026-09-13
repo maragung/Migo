@@ -39,6 +39,7 @@ import {
   decodeRelationshipListReq,
   decodeSearchReq,
   encodeAcknowledged,
+  encodeEconomyEvent,
   encodeFriendEvent,
   encodeGiftCatalogueResponse,
   encodeGiftSendResult,
@@ -53,7 +54,7 @@ import {
   encodeUserProfile,
   encodeWalletView,
 } from '@migo/protocol';
-import type { InboxItem, UserProfile } from '@migo/protocol';
+import type { EconomyEvent, InboxItem, UserProfile } from '@migo/protocol';
 
 import { RecordingTransport, idOf } from './harness.js';
 
@@ -220,6 +221,29 @@ test('social: onFriendEvent delivers decoded events once started, and stops clea
   transport.emit(
     OP.FRIEND_EVENT,
     encodeBody(encodeFriendEvent, { userId: OTHER, state: 'request' }),
+  );
+  assert.equal(seen.length, 1, 'an event after stop() must not be delivered');
+  off();
+});
+
+test('economy: onEconomyEvent delivers the live balance tick once started, and stops cleanly', () => {
+  const { transport, economy } = rig(new Map());
+  const seen: EconomyEvent[] = [];
+  const off = economy.onEconomyEvent((event) => seen.push(event));
+
+  economy.start();
+  // The frame the server publishes to the caller's own user topic after a spend: a cue
+  // that the wallet moved, carrying no balance to render.
+  transport.emit(
+    OP.ECONOMY_EVENT,
+    encodeBody(encodeEconomyEvent, { kind: 'gift_sent', amount: 10, currency: 'coins' }),
+  );
+  assert.deepEqual(seen, [{ kind: 'gift_sent', amount: 10, currency: 'coins' }]);
+
+  economy.stop();
+  transport.emit(
+    OP.ECONOMY_EVENT,
+    encodeBody(encodeEconomyEvent, { kind: 'purchase', amount: 3, currency: 'coins' }),
   );
   assert.equal(seen.length, 1, 'an event after stop() must not be delivered');
   off();

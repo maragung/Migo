@@ -764,8 +764,20 @@ pub enum Event {
         room_id: Id,
         title: String,
     },
-    /// A leave was accepted; the rooms pane drops the room from its joined set.
-    RoomLeft { room_id: Id },
+    /// A leave (or a removal) took the room away from this account: the rooms pane drops the
+    /// room from its joined set, and when the bridge map still knew the conversation, the
+    /// thread's window closes the way a group's own departure closes it — everything the
+    /// worker held under that conversation was dropped before this event crossed the channel.
+    ///
+    /// `self_left` separates the two wordings the toast owes: a leave the person asked for
+    /// ("Left the room") and a removal done to them ("You were removed from the room"). The
+    /// conversation is `None` only when the bridge map had already forgotten the room, in
+    /// which case there is no thread left to close either.
+    RoomLeft {
+        room_id: Id,
+        conversation_id: Option<Id>,
+        self_left: bool,
+    },
     /// Someone came, went, dropped, came back, or was removed in a room this account watches.
     ///
     /// Carries the room's own wire event as far as the room id, member id, the change enum, and the
@@ -791,6 +803,26 @@ pub enum Event {
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
     AlertPushed,
+    /// A game in a watched conversation moved: started, played, or finished.
+    ///
+    /// The published delta as the wire put it, with the IDL's `room_id` already read as the
+    /// conversation it names (one subject, two names). It is a delta, not a state — the board
+    /// lives in GAME_VIEW's answer — so the only honest consumer is a feed that appends the line,
+    /// and a surface that wants the score asks for the view.
+    GamePushed {
+        conversation_id: Id,
+        game_id: Id,
+        event: String,
+        actor_id: Option<Id>,
+        /// The board version every event of one move shares, for a consumer that orders by it.
+        state_version: u64,
+    },
+    /// The caller's wallet moved on the server: a spend made from any session of the account.
+    ///
+    /// The economy twin of [`Event::AlertPushed`]: a cue to re-read, never a fact. The wire's
+    /// event names the kind and the amount but never the resulting balance, so the only honest
+    /// reaction is to ask for the wallet again.
+    EconomyPushed,
     /// The caller's wallet: the MIG coin balance, the points balance, and the Kick Point balance.
     ///
     /// `kick_points` is optional the way the wire's field is: a node that predates the currency
@@ -6127,6 +6159,24 @@ impl Worker {
         }
         // The conversation id the room maps to, remembered from the join: the leave ack names
         // only the room, but the crypto state is keyed by conversation.
+        let conversation_id = self.forget_room(room_id);
+        self.sink.send(Event::RoomLeft {
+            room_id,
+            conversation_id,
+            self_left: true,
+        });
+        self.request_conversations().await;
+    }
+
+    /// Drops every piece of worker state a room owns: the topic watch, the room-to-conversation
+    /// bridge, and — when the bridge still knew the conversation — the crypto state keyed under
+    /// it (the outbound sender-key chain, the pairwise ratchets, the messages held awaiting a
+    /// distribution). The room twin of [`Self::forget_group`], read through the bridge map
+    /// because a room's crypto state is keyed by the conversation that carries its messages.
+    ///
+    /// Returns the conversation the room mapped to, so the caller can tell the UI which thread
+    /// to close; `None` when the map had already forgotten the room.
+    fn forget_room(&mut self, room_id: Id) -> Option<Id> {
         let conversation = self
             .signed
             .as_ref()
@@ -6140,8 +6190,7 @@ impl Worker {
                 signed.pending.retain(|(id, _), _| *id != conversation);
             }
         }
-        self.sink.send(Event::RoomLeft { room_id });
-        self.request_conversations().await;
+        conversation
     }
 
     /// A member event off a watched room's topic: someone came, went, dropped, or was removed.
@@ -6149,7 +6198,14 @@ impl Worker {
     /// Forwarded whole rather than reduced to a sentence here: the display name is a profile
     /// fetch away and belongs with the chat pane's other name lookups, and the change enum and
     /// member total are the two facts both a notice line and a live count are drawn from.
-    fn on_room_member(&mut self, frame: &migo_protocol::Frame) {
+    ///
+    /// A removal naming *this* account is the kicked member's one last frame — the server
+    /// publishes the event and then takes the room's topics away — so it ends the room for this
+    /// device the same way a leave's ack does: the keys go, the window's copy of the thread
+    /// goes, and the list re-reads so the row stops being offered. Without this the room would
+    /// sit in the list with a composer whose every send can only fail server-side (audit area
+    /// 4: the kicked member must lose the surface, not just the delivery).
+    async fn on_room_member(&mut self, frame: &migo_protocol::Frame) {
         let Ok(event) = gateway::decode::<migo_protocol::RoomMemberEvent>(frame) else {
             return;
         };
@@ -6190,6 +6246,30 @@ impl Worker {
                     cached.apply_change(event.user_id, change);
                 }
             }
+        }
+        // This account's own departure. The wire's `Left` reaches this device only when another
+        // device of the same account left (the acting socket is excluded from the fan-out), so
+        // it is the multi-device twin of the leave button's own teardown rather than a second
+        // copy of it; `Kicked` and `Banned` are the paths with no local echo at all.
+        if matches!(
+            change,
+            migo_protocol::MemberChange::Left
+                | migo_protocol::MemberChange::Kicked
+                | migo_protocol::MemberChange::Banned
+        ) && self
+            .signed
+            .as_ref()
+            .is_some_and(|signed| signed.account.account_id == event.user_id)
+        {
+            let room_id = event.room_id;
+            let conversation_id = self.forget_room(room_id);
+            self.sink.send(Event::RoomLeft {
+                room_id,
+                conversation_id,
+                self_left: change == migo_protocol::MemberChange::Left,
+            });
+            self.request_conversations().await;
+            return;
         }
         self.sink.send(Event::RoomMember {
             room_id: event.room_id,
@@ -6457,6 +6537,32 @@ impl Worker {
             return;
         };
         self.sink.send(Event::AlertPushed);
+    }
+
+    /// A game event was pushed: one delta from the referee, handed to the games pane's feed.
+    ///
+    /// The decode is the whole job. The pane owns no board to patch, because a delta is not a
+    /// state: a client that wants the score asks GAME_VIEW, and the feed only says that the game
+    /// moved.
+    fn on_game_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::GameEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::GamePushed {
+            conversation_id: event.room_id,
+            game_id: event.game_id,
+            event: event.event,
+            actor_id: event.actor_id,
+            state_version: event.state_version,
+        });
+    }
+
+    /// An economy event was pushed: the cue to re-read the wallet. See [`Event::EconomyPushed`].
+    fn on_economy_pushed(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(_event) = gateway::decode::<migo_protocol::EconomyEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::EconomyPushed);
     }
 
     /// The wallet came back.
@@ -6779,10 +6885,19 @@ impl Worker {
             Opcode::RoomList => self.on_rooms(&frame),
             Opcode::RoomJoin | Opcode::RoomCreate => self.on_room_joined(&frame).await,
             Opcode::RoomLeave => self.on_room_left(&frame).await,
-            Opcode::RoomMemberEvent => self.on_room_member(&frame),
+            Opcode::RoomMemberEvent => self.on_room_member(&frame).await,
             Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),
             Opcode::NotificationEvent => self.on_alert_pushed(&frame),
+            // A game's delta, published to the conversation's subscribers by the referee after a
+            // move, a start, or an abandon. The starting connection is excluded from a start's
+            // fan-out — its reply is the opening view — and included in every other event's, so
+            // this arm hears the games the account's other sessions and the other members play.
+            Opcode::GameEvent => self.on_game_event(&frame),
+            // The caller's own wallet moved: a spend from any session of the account, pushed on
+            // the user topic every session holds from its handshake. A cue to re-read, the same
+            // contract as the notification push above.
+            Opcode::EconomyEvent => self.on_economy_pushed(&frame),
             Opcode::BalanceFetch => self.on_balance(&frame),
             Opcode::LedgerHistory => self.on_ledger(&frame),
             Opcode::Progression => self.on_progression(&frame),
