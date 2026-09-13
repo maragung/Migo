@@ -1778,6 +1778,10 @@ pub struct MeshTransport {
 }
 
 impl MeshTransport {
+    /// One optional service per fan-out the ingest path can publish into, plus the store the
+    /// revocation half reads — ten facts the composition root holds at once, and grouping them
+    /// behind a struct would only move the list, not shorten it.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mesh: SharedMesh,
         gateway: Option<Arc<Gateway>>,

@@ -319,6 +319,10 @@ impl LiveSession {
     /// FIN, so the server reads a transport error and not a client saying "I am done" — the
     /// difference between a resume the gateway retains (section 150) and one it keeps nothing
     /// for.
+    // `set_linger` is deprecated for the nonzero timeouts, which block the thread on drop; a
+    // zero-second linger is exactly the RST this severs with and blocks nothing, and there is
+    // no other portable way to ask the kernel for one.
+    #[allow(deprecated)]
     fn sever(self) {
         // A zero-second linger turns the close into an RST: the kernel discards the unsent
         // tail and the peer's read fails, which is the involuntary death the retention exists
