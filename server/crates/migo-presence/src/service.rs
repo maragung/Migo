@@ -13,7 +13,11 @@
 //! section 14 says a client must not be trusted to hide its own presence. Every
 //! frame this crate produces carries the *projected* state from
 //! [`crate::state::visible_state`], and Invisible projects to Offline before a
-//! frame exists. There is no code path that publishes Invisible.
+//! frame exists. There is no code path that publishes Invisible. The preference
+//! itself is durable on the device row: `set` stamps it before anything is
+//! fanned out, and the arriving state reads it back, because the cache entry
+//! that carried it expires with the socket — a preference that forgot itself
+//! would flash the user Online to every contact on the next reconnect.
 //!
 //! **Nothing is sent when nothing changed.** Brief section 156. Every mutating
 //! method computes the account's visible state before and after its own write and
@@ -21,9 +25,11 @@
 //! and of every disconnect that is not the last one.
 //!
 //! **Presence is the only thing losing the cache loses.** Brief section 173. All
-//! state here lives in the cache with a TTL; the store is touched for two things
-//! only, both of them reads about somebody else's privacy settings, plus one write
-//! that records when a device was last seen.
+//! state here lives in the cache with a TTL; the store is touched for a handful
+//! of things only, all of them durable facts that are not presence: two reads
+//! about somebody else's privacy settings, the write that records when a device
+//! was last seen, and the device's own invisibility preference — read when a
+//! device arrives and written when its owner chooses, both on the device row.
 //!
 //! # Why the minimum interval is advertised here and enforced elsewhere
 //!
@@ -226,12 +232,37 @@ where
     }
 
     /// The state a connecting or reviving device should take.
-    fn arriving_state(&self, caller: &Caller, entries: &[PresenceEntry]) -> PresenceState {
+    ///
+    /// Two places can say Invisible, and both are consulted. Another live
+    /// device of the account may have declared it — the cache half, which a
+    /// reconnecting client has no way to declare before its socket is up. And
+    /// this device itself may have chosen it before the current entry existed:
+    /// the preference is read from the device row, because the entry that
+    /// carried it expires with the socket and a preference that forgets itself
+    /// flashes the user Online to every contact on the next reconnect.
+    ///
+    /// A store that cannot answer is a store the preference cannot be read
+    /// from, and the answer `Online` would be a guess the other direction. The
+    /// error propagates instead: `connected` is best-effort at its caller, and
+    /// a session it declines to record is a session nobody was told about.
+    async fn arriving_state(
+        &self,
+        caller: &Caller,
+        entries: &[PresenceEntry],
+    ) -> Result<PresenceState> {
         if any_invisible(entries, caller.device_id, caller.now) {
+            return Ok(PresenceState::Invisible);
+        }
+        let hidden = self
+            .store
+            .device_by_id(caller.device_id)
+            .await?
+            .is_some_and(|device| device.invisible);
+        Ok(if hidden {
             PresenceState::Invisible
         } else {
             PresenceState::Online
-        }
+        })
     }
 
     /// When a subject was last seen, if this viewer is allowed to know.
@@ -315,7 +346,7 @@ where
     async fn connected(&self, caller: &Caller) -> Result<Option<Fanout>> {
         Self::require_identity(caller)?;
         let entries = self.cache.presence(caller.account_id, caller.now).await?;
-        let state = self.arriving_state(caller, &entries);
+        let state = self.arriving_state(caller, &entries).await?;
         let fanout = self.write(caller, state, &entries).await?;
         self.meters.session(SessionEvent::Connected);
         Ok(fanout)
@@ -329,8 +360,12 @@ where
         // A heartbeat from a device with no entry means the entry expired while the
         // socket stayed up — a paused mobile app, a suspended laptop. Recreating it
         // is right; guessing a state for it is not, so it arrives the same way a new
-        // connection does, invisibility included.
-        let state = existing.unwrap_or_else(|| self.arriving_state(caller, &entries));
+        // connection does, invisibility included — both halves of it, the other
+        // devices' and the device row's own.
+        let state = match existing {
+            Some(state) => state,
+            None => self.arriving_state(caller, &entries).await?,
+        };
         let fanout = self.write(caller, state, &entries).await?;
         self.meters.heartbeat(revived);
         Ok(fanout)
@@ -357,6 +392,16 @@ where
             return Err(error);
         }
 
+        // The preference is written before the entry and before any fan-out,
+        // fail-closed on purpose: a store that cannot record the hiding is a
+        // store the hiding did not happen on, and answering success while the
+        // row still says visible is how a user gets flashed Online by their own
+        // next reconnect. Every non-Invisible choice writes the flag off, so
+        // the row never remembers a preference its owner has replaced.
+        self.store
+            .set_device_invisible(caller.device_id, request.state == PresenceState::Invisible)
+            .await?;
+
         let entries = self.cache.presence(caller.account_id, caller.now).await?;
         let fanout = self.write(caller, request.state, &entries).await?;
         self.meters.update(if fanout.is_some() {
@@ -379,7 +424,10 @@ where
         // records when a device was last seen. Authentication stamps it on the way
         // in; a heartbeat deliberately does not, because a row write per device per
         // heartbeat is a large amount of write amplification for a field rendered as
-        // "last seen 2 hours ago".
+        // "last seen 2 hours ago". The invisibility preference is deliberately not
+        // touched here: it lives on the same row, but it outlives the connection —
+        // clearing it on the way out would make hiding last exactly as long as the
+        // socket did.
         self.store
             .touch_device(caller.device_id, caller.now)
             .await?;

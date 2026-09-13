@@ -626,6 +626,97 @@ async fn a_reconnecting_device_inherits_invisibility_instead_of_flashing_online(
 }
 
 #[tokio::test]
+async fn an_invisible_device_stays_hidden_when_only_itself_remembers() {
+    let harness = Harness::new();
+    harness
+        .person(ALICE, "alice", ALICE_PHONE, Visibility::Everyone)
+        .await;
+    harness
+        .presence
+        .connected(&caller(ALICE, ALICE_PHONE, MINUTE))
+        .await
+        .unwrap();
+    harness
+        .presence
+        .set(
+            &caller(ALICE, ALICE_PHONE, MINUTE),
+            PresenceUpdate {
+                state: PresenceState::Invisible,
+                custom_status: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The choice is on the row, where the socket cannot take it.
+    assert!(
+        harness
+            .store
+            .device_by_id(id(ALICE_PHONE))
+            .await
+            .unwrap()
+            .unwrap()
+            .invisible,
+        "the preference is stamped before the fan-out it governs"
+    );
+
+    // The socket dies and the entry with it: the account has no live device
+    // left, which is the one shape the inheritance rule cannot cover.
+    silent(
+        harness
+            .presence
+            .disconnected(&caller(ALICE, ALICE_PHONE, 2 * MINUTE))
+            .await
+            .unwrap(),
+    );
+
+    // The same device comes back. Nothing else of the account is live to
+    // inherit from; the row is the only place the choice survives, and the
+    // reconnect must read it instead of arriving Online.
+    silent(
+        harness
+            .presence
+            .connected(&caller(ALICE, ALICE_PHONE, 3 * MINUTE))
+            .await
+            .expect("the device may reconnect"),
+    );
+    let entries = harness
+        .presence
+        .devices(&caller(ALICE, ALICE_PHONE, 3 * MINUTE))
+        .await
+        .unwrap();
+    assert_eq!(
+        entry(&entries, ALICE_PHONE).state,
+        PresenceState::Invisible,
+        "a hidden user's own reconnect is not the moment they are exposed"
+    );
+
+    // And coming back is still the user's decision: the visible choice writes
+    // the flag off, so the row does not outvote them on the next reconnect.
+    harness
+        .presence
+        .set(
+            &caller(ALICE, ALICE_PHONE, 4 * MINUTE),
+            PresenceUpdate {
+                state: PresenceState::Online,
+                custom_status: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !harness
+            .store
+            .device_by_id(id(ALICE_PHONE))
+            .await
+            .unwrap()
+            .unwrap()
+            .invisible,
+        "choosing to be seen clears the preference"
+    );
+}
+
+#[tokio::test]
 async fn coming_back_from_invisible_is_the_users_own_decision() {
     let harness = Harness::new();
     harness

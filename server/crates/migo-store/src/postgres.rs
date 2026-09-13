@@ -413,6 +413,9 @@ struct DeviceRow {
     last_seen_at: OffsetDateTime,
     /// Set when the device was revoked.
     revoked_at: Option<OffsetDateTime>,
+    /// The invisibility preference `PRESENCE_SET` stamps and the arriving
+    /// state reads back.
+    invisible: bool,
 }
 
 impl From<DeviceRow> for Device {
@@ -430,6 +433,7 @@ impl From<DeviceRow> for Device {
             created_at: instant_of(row.created_at),
             last_seen_at: instant_of(row.last_seen_at),
             revoked_at: row.revoked_at.map(instant_of),
+            invisible: row.invisible,
         }
     }
 }
@@ -1166,6 +1170,10 @@ impl DeviceStore for PostgresStore {
             created_at: stamp_of(new.created_at),
             last_seen_at: stamp_of(new.created_at),
             revoked_at: None,
+            // The column's own default: a device starts visible, and only
+            // `PRESENCE_SET` ever says otherwise. Left unset in the insert so
+            // the database and this row agree without the insert naming it.
+            invisible: false,
         };
         entity::device::Entity::insert(entity::device::ActiveModel {
             device_id: Set(row.device_id),
@@ -1305,6 +1313,27 @@ impl DeviceStore for PostgresStore {
             .exec(&self.db)
             .await
             .context("set_device_credential")?;
+        if updated.rows_affected == 0 {
+            return Err(fault::not_found("device"));
+        }
+        Ok(())
+    }
+
+    async fn set_device_invisible(&self, device_id: Id, invisible: bool) -> Result<()> {
+        // Same posture as `set_device_credential`: a preference for a row that
+        // does not exist is a caller bug. The write is unconditional rather
+        // than guarded on the old value — `PRESENCE_SET` is a user action, not
+        // a heartbeat, and one single-row write per deliberate choice is the
+        // cost of a preference that survives its own cache entry.
+        let updated = entity::device::Entity::update_many()
+            .filter(entity::device::Column::DeviceId.eq(uuid_of(device_id)))
+            .set(entity::device::ActiveModel {
+                invisible: Set(invisible),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("set_device_invisible")?;
         if updated.rows_affected == 0 {
             return Err(fault::not_found("device"));
         }

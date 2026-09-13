@@ -78,6 +78,7 @@ impl MigratorTrait for Migrator {
             Box::new(ProfileCustomStatus),
             Box::new(RoomRevision),
             Box::new(ConversationHomeRegion),
+            Box::new(DeviceInvisible),
         ]
     }
 }
@@ -502,6 +503,38 @@ impl MigrationTrait for ConversationHomeRegion {
         Err(DbErr::Migration(
             "0013_conversation_home_region cannot be rolled back: create a new database instead"
                 .to_owned(),
+        ))
+    }
+}
+
+/// `0014_device_invisible` -- the per-device invisibility preference, so a
+/// user who chose to hide stays hidden across a presence entry's expiry and a
+/// reconnect instead of being flashed Online by the arriving state. See
+/// `server/migrations/0014_device_invisible.sql`.
+struct DeviceInvisible;
+
+impl MigrationName for DeviceInvisible {
+    fn name(&self) -> &str {
+        "0014_device_invisible"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for DeviceInvisible {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0014_device_invisible.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0014_device_invisible cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

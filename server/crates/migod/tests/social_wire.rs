@@ -1,6 +1,6 @@
 //! The SOCIAL opcodes answered on the wire, where the handler layer lives.
 //!
-//! Six behaviours only the dispatcher can get wrong, because the service under it is
+//! Seven behaviours only the dispatcher can get wrong, because the service under it is
 //! correct in isolation:
 //! * **A full friends page must not hide the request behind it.** The combined
 //!   relationship listing once truncated the concatenated answer to the caller's
@@ -46,6 +46,17 @@
 //!   is the quietest member of the family: the muter's other device hears the
 //!   switch flip both ways, and the muted account hears nothing, because a volume
 //!   control is not a verdict.
+//! * **A hidden member stays hidden across a reconnect.** The invisibility
+//!   preference once lived only in the connection cache's presence entry, which
+//!   the disconnect clears — so the very next reconnect answered the arriving
+//!   state with Online, unless another *live* device of the account happened to
+//!   be invisible, and every watching contact was flashed the member's return.
+//!   The preference is now a durable fact on the device row: `PRESENCE_SET`
+//!   stamps it before any fan-out, and the arriving state reads it back. The
+//!   last test drives the whole arc over TCP — hide, reset, reconnect with the
+//!   same device — and reads the friend through a PING to make the missing
+//!   Online frame a deterministic fact rather than a timeout that proves
+//!   nothing.
 //!
 //! Every test uses the reply rule as its clock: every frame it waits for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -317,6 +328,24 @@ impl LiveSession {
             1,
             "the peer's user topic is accepted for a friend"
         );
+    }
+
+    /// Drops the connection the way a flaky network does: abruptly, with a reset
+    /// rather than a FIN, so the server reads a transport error and not a client
+    /// saying "I am done". The difference matters to presence: the disconnect
+    /// path runs either way, but a reset is the death the invisibility
+    /// preference has to outlive.
+    // `set_linger` is deprecated for the nonzero timeouts, which block the thread on
+    // drop; a zero-second linger is exactly the RST this severs with and blocks
+    // nothing, and there is no other portable way to ask the kernel for one.
+    #[allow(deprecated)]
+    fn sever(self) {
+        // A zero-second linger turns the close into an RST: the kernel discards
+        // the unsent tail and the peer's read fails, which is the involuntary
+        // death the retention exists for. On a clean FIN the server would
+        // rightly keep nothing.
+        let _ = self.stream.set_linger(Some(Duration::from_secs(0)));
+        drop(self.stream);
     }
 }
 
@@ -1373,5 +1402,112 @@ async fn a_presence_frame_is_withheld_from_a_session_that_did_not_ask_for_the_bi
     assert!(
         !pong.header.is_error(),
         "the bitless session keeps serving the frames it did negotiate"
+    );
+}
+
+/// A hidden member stays hidden across a reconnect: the preference is read from
+/// the device row and not from the presence entry that died with the socket.
+///
+/// The arc is the one the bug lived in. The subject hides, which the friend sees
+/// as the projected Offline — the change the fan-out cannot skip, and the proof
+/// the subscription carries the family's frames before the reconnect makes their
+/// absence the assertion. The subject's connection then dies with a reset, which
+/// is the moment the cache entry is cleared and the preference has to come from
+/// somewhere else. The reconnect uses the same account, the same device, and the
+/// same token, because a new device would be a new row with no preference on it.
+///
+/// The old code answered the reconnect with an Online frame to every watcher:
+/// the arriving state could only inherit Invisible from another *live* device of
+/// the account, and the disconnect had just removed the only one that was. The
+/// friend pings and reads to its PONG — the spurious Online, if the preference
+/// had been lost, is queued ahead of the reply this PING earns, so finding the
+/// PONG without it is the assertion and the session answering at all is the
+/// second one.
+#[tokio::test]
+async fn an_invisible_member_stays_hidden_across_a_reconnect() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let subject_grant = registered_grant(&app, "kate").await;
+    let friend_grant = registered_grant(&app, "liam").await;
+
+    let mut subject =
+        LiveSession::connect_with_features(addr, &subject_grant, migo_protocol::features::PRESENCE)
+            .await;
+    let mut friend =
+        LiveSession::connect_with_features(addr, &friend_grant, migo_protocol::features::PRESENCE)
+            .await;
+
+    // Friendship, by crossing requests: the peer's user topic is only served to
+    // a friend, so the subscription below needs the relationship settled first.
+    subject.friend_request(10, friend_grant.account_id).await;
+    friend.friend_request(11, subject_grant.account_id).await;
+    friend.subscribe_to_user(12, subject_grant.account_id).await;
+
+    // The subject hides, and the friend sees the projected Offline.
+    let _: Acknowledged = subject
+        .ask(
+            Opcode::PresenceSet,
+            20,
+            &PresenceUpdate {
+                state: PresenceState::Invisible,
+                custom_status: None,
+            },
+        )
+        .await;
+    let offline = loop {
+        let frame = recv_within(&mut friend.stream, STEP).await;
+        if Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent) {
+            let event: PresenceEvent = from_frame(&frame).expect("the event decodes");
+            if event.user_id == subject_grant.account_id {
+                break event;
+            }
+        }
+    };
+    assert_eq!(
+        offline.state,
+        PresenceState::Offline,
+        "hiding projects to offline for everyone but the hider"
+    );
+
+    // The drop: a reset, so the server reads a transport error and clears the
+    // presence entry now — the exact moment the preference must outlive it.
+    subject.sever();
+
+    // The reconnect: same account, same device, same token. Every session takes
+    // the 1500ms spacing the constructor gives the shared pre-auth bucket, which
+    // is also the room the server needs to read the reset.
+    let _subject_again =
+        LiveSession::connect_with_features(addr, &subject_grant, migo_protocol::features::PRESENCE)
+            .await;
+
+    // The friend pings and reads to its PONG. Any PRESENCE_EVENT about the
+    // subject in front of it is the flash the preference exists to prevent;
+    // frames about the friend's own account are none of this test's business.
+    send(
+        &mut friend.stream,
+        Opcode::Ping,
+        30,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut friend.stream, STEP).await;
+        if Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent) {
+            let event: PresenceEvent = from_frame(&frame).expect("the event decodes");
+            assert_ne!(
+                event.user_id, subject_grant.account_id,
+                "a hidden member is not flashed online by their own reconnect"
+            );
+            continue;
+        }
+        if frame.header.correlation == 30 {
+            break frame;
+        }
+    };
+    assert!(
+        !pong.header.is_error(),
+        "the friend's session keeps serving the frames it did negotiate"
     );
 }

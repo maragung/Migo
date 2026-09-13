@@ -825,6 +825,40 @@ pub async fn a_pending_device_is_invisible_until_activated(store: &SharedStore) 
     );
 }
 
+/// The invisibility preference is a durable fact on the row: written by
+/// `PRESENCE_SET`, read by the arriving state, and outliving every cache entry
+/// that carries the state itself.
+pub async fn an_invisibility_preference_is_written_and_read_on_the_row(store: &SharedStore) {
+    let account_id = seed_account(store, 2, "bob").await;
+    seed_device(store, account_id, 21).await;
+
+    // A device starts visible — the column's default is the honest record of a
+    // device nobody has asked to hide, including every row that predates it.
+    let device = store.device_by_id(id(21)).await.unwrap().unwrap();
+    assert!(!device.invisible, "a fresh device is visible");
+
+    // The preference lands and reads back.
+    store.set_device_invisible(id(21), true).await.unwrap();
+    assert!(
+        store.device_by_id(id(21)).await.unwrap().unwrap().invisible,
+        "the preference is on the row, not in the cache"
+    );
+
+    // And it is replaced, not merely set: a visible choice writes the flag off,
+    // so the row never remembers a preference its owner has replaced.
+    store.set_device_invisible(id(21), false).await.unwrap();
+    assert!(
+        !store.device_by_id(id(21)).await.unwrap().unwrap().invisible,
+        "choosing to be seen clears the flag"
+    );
+
+    // An unknown device is an error, not a silent no-op.
+    expect_code(
+        store.set_device_invisible(id(99), true).await,
+        codes::NOT_FOUND,
+    );
+}
+
 // --- sessions -------------------------------------------------------------
 
 pub async fn a_rotated_token_cannot_be_exchanged_twice(store: &SharedStore) {
@@ -4015,6 +4049,7 @@ macro_rules! for_each_contract_case {
         $case!(a_login_challenge_is_consumed_exactly_once);
         $case!(wallet_registration_is_idempotent_per_address);
         $case!(a_pending_device_is_invisible_until_activated);
+        $case!(an_invisibility_preference_is_written_and_read_on_the_row);
         $case!(a_rotated_token_cannot_be_exchanged_twice);
         $case!(a_session_carries_its_own_authentication_time);
         $case!(reuse_detection_kills_the_whole_family);

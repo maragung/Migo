@@ -577,6 +577,12 @@ pub struct Device {
     pub last_seen_at: Timestamp,
     /// When the device was revoked, if it was.
     pub revoked_at: Option<Timestamp>,
+    /// The invisibility preference, stamped by `PRESENCE_SET` and read back by
+    /// a connecting or reviving device. A durable fact on the row because the
+    /// connection cache's presence entry — the only place it used to live —
+    /// expires with the socket, and a preference that forgets itself flashes
+    /// the user Online to every contact on the next reconnect.
+    pub invisible: bool,
 }
 
 /// Everything needed to register a device.

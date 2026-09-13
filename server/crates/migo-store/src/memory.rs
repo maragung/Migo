@@ -631,6 +631,7 @@ impl DeviceStore for MemoryStore {
             created_at: new.created_at,
             last_seen_at: new.created_at,
             revoked_at: None,
+            invisible: false,
         };
         s.devices.insert(device.device_id, device.clone());
         Ok(device)
@@ -689,6 +690,15 @@ impl DeviceStore for MemoryStore {
             return Err(fault::not_found("device"));
         };
         device.public_credential = Some(public_key.to_vec());
+        Ok(())
+    }
+
+    async fn set_device_invisible(&self, device_id: Id, invisible: bool) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(device) = s.devices.get_mut(&device_id) else {
+            return Err(fault::not_found("device"));
+        };
+        device.invisible = invisible;
         Ok(())
     }
 

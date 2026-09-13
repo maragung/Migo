@@ -187,6 +187,15 @@ pub trait DeviceStore: Send + Sync {
     /// write must not be an error.
     async fn set_device_credential(&self, device_id: Id, public_key: &[u8]) -> Result<()>;
 
+    /// Stamps the device's invisibility preference.
+    ///
+    /// Written by `PRESENCE_SET` before any fan-out, so a store that refuses
+    /// the write also refuses the hiding — the safe direction for a preference
+    /// whose whole job is not being seen. A missing device is an error, the
+    /// same posture as [`set_device_credential`](Self::set_device_credential):
+    /// a preference for a row that does not exist is a caller bug.
+    async fn set_device_invisible(&self, device_id: Id, invisible: bool) -> Result<()>;
+
     /// Revokes a device. Its sessions must be revoked by the caller in the same
     /// operation; the store does not do it implicitly, because a silent cascade
     /// is the kind of behaviour that surprises people during an incident.
