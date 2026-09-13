@@ -3426,12 +3426,11 @@ async fn a_carried_vote_queues_the_redistribution_to_the_roster_that_remains() {
         )
         .await
         .expect("the group grows to four");
-    assert_eq!(
+    assert!(
         fanouts
             .iter()
             .map(member_of)
             .all(|event| event.change == MemberChange::Joined),
-        true,
         "an invite seats; it removes nobody"
     );
 

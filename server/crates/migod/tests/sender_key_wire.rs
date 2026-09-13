@@ -540,11 +540,13 @@ async fn a_membership_change_carries_a_new_distribution_to_every_remaining_membe
 
     // A group message under the epoch-1 chain, so the chain has something to
     // lose when the membership moves.
-    let epoch_one_message = sender.encrypt(
-        &founder_identity,
-        conversation_id.as_bytes(),
-        b"sealed under the first chain",
-    );
+    let epoch_one_message = sender
+        .encrypt(
+            &founder_identity,
+            conversation_id.as_bytes(),
+            b"sealed under the first chain",
+        )
+        .expect("the first chain seals");
     let _: migo_protocol::MessageAccepted = founder_session
         .ask(
             Opcode::MessageSend,
@@ -638,11 +640,13 @@ async fn a_membership_change_carries_a_new_distribution_to_every_remaining_membe
 
     // A message under the new chain opens with the adopted state — the whole
     // point of the redistribution.
-    let epoch_two_message = sender.encrypt(
-        &founder_identity,
-        conversation_id.as_bytes(),
-        b"sealed under the rotated chain",
-    );
+    let epoch_two_message = sender
+        .encrypt(
+            &founder_identity,
+            conversation_id.as_bytes(),
+            b"sealed under the rotated chain",
+        )
+        .expect("the rotated chain seals");
     let _: migo_protocol::MessageAccepted = founder_session
         .ask(
             Opcode::MessageSend,
@@ -850,7 +854,7 @@ async fn a_mid_call_joiner_asks_the_holder_and_receives_the_key_sealed_for_them(
         heard.sealed_sdp, sealed_reply,
         "the sealed first key arrives byte for byte"
     );
-    let mut joiner_key =
+    let joiner_key =
         CallKeyState::from_join_distribution(&holder_joiner_secret, call_id, &heard.sealed_sdp)
             .expect("the joiner's own session opens their first key");
     assert_eq!(joiner_key.epoch(), 2);
