@@ -34,6 +34,7 @@ use crate::ui::chat::{
 };
 use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
+use crate::ui::games::{GameRow, GamesState};
 use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
 use crate::ui::server_form::AutoStatus;
@@ -67,6 +68,7 @@ pub struct App {
     rooms: RoomsState,
     space: SpaceState,
     alerts: AlertsState,
+    games: GamesState,
     search: SearchState,
     wallet: WalletState,
     /// The call overlay's subject: the one call this device is in, as the worker last projected
@@ -168,6 +170,7 @@ impl App {
             rooms: RoomsState::default(),
             space: SpaceState::default(),
             alerts: AlertsState::default(),
+            games: GamesState::default(),
             search: SearchState::default(),
             wallet: WalletState::default(),
             call: None,
@@ -614,11 +617,38 @@ impl App {
                     self.toasts.push(Toast::success(format!("Joined {title}")));
                     self.open_conversation(conversation_id);
                 }
-                Event::RoomLeft { room_id } => {
+                Event::RoomLeft {
+                    room_id,
+                    conversation_id,
+                    self_left,
+                } => {
                     self.rooms.joined.remove(&room_id);
-                    self.toasts.push(Toast::info("Left the room"));
+                    self.toasts.push(Toast::info(if self_left {
+                        "Left the room"
+                    } else {
+                        "You were removed from the room"
+                    }));
                     // The conversation is closed server-side; its notice tail goes with it.
                     self.chat.room_notices.remove(&room_id);
+                    // The thread's own closure, the same teardown a group's departure performs:
+                    // this account can no longer read the room, and a thread (or a list row, or
+                    // a member sheet) it cannot read must not stay on screen offering sends the
+                    // server can only refuse. The list re-read the worker already fired is what
+                    // settles the row; this clears everything held above it.
+                    if let Some(conversation_id) = conversation_id {
+                        self.chat.group_notices.remove(&conversation_id);
+                        self.chat.rosters.remove(&conversation_id);
+                        self.chat.votes.remove(&conversation_id);
+                        self.chat.roster_open.remove(&conversation_id);
+                        self.chat.messages.remove(&conversation_id);
+                        self.chat
+                            .conversations
+                            .retain(|c| c.conversation_id != conversation_id);
+                        if self.chat.selected == Some(conversation_id) {
+                            self.chat.selected = None;
+                        }
+                        self.desktop.close_chat(conversation_id);
+                    }
                 }
                 // A membership change in a watched room: the notice line lands in the room's
                 // thread, and the member total — when the event carries it — folds into the
@@ -794,6 +824,36 @@ impl App {
                 Event::AlertPushed => {
                     // The push is the cue to re-read whatever inbox-shaped surface is showing.
                     self.commands.push(Command::Notifications);
+                }
+                Event::EconomyPushed => {
+                    // The same cue for the wallet: the event carries no balance, so the honest
+                    // reaction is the read, not arithmetic on a number the server did not vouch
+                    // for. The wallet place refreshes on entry too, so this lands on the taskbar
+                    // and whatever wallet surface is open alike.
+                    self.commands.push(Command::Wallet);
+                }
+                Event::GamePushed {
+                    conversation_id,
+                    game_id,
+                    event,
+                    actor_id,
+                    state_version,
+                } => {
+                    // Arrival time is the row's clock: the wire carries none a client may quote,
+                    // and the feed orders by arrival while the game itself orders by the version
+                    // the row also carries.
+                    self.games.push(GameRow {
+                        key: format!(
+                            "{game_id}:{state_version}:{event}:{}",
+                            actor_id.map(|actor| actor.to_text()).unwrap_or_default()
+                        ),
+                        conversation_id,
+                        game_id,
+                        event,
+                        actor_id,
+                        state_version,
+                        at: migo_core::Timestamp::now(),
+                    });
                 }
                 Event::Balance {
                     coins,
@@ -1528,7 +1588,7 @@ impl App {
             Place::Wallet => crate::ui::wallet::show(ui, &mut context, &mut self.wallet),
             Place::Profile => crate::ui::profile::show(ui, &mut context, &mut self.profile_panel),
             Place::Admins => crate::ui::admins::show(ui, &mut context, &mut self.admins_panel),
-            Place::Games => crate::ui::games::show(ui, &context),
+            Place::Games => crate::ui::games::show(ui, &context, &mut self.games),
             Place::Settings => {
                 crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
             }

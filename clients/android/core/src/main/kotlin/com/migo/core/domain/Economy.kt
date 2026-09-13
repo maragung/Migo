@@ -3,6 +3,7 @@ package com.migo.core.domain
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.BadgesReq
 import com.migo.core.protocol.BadgesResponse
+import com.migo.core.protocol.EconomyEvent
 import com.migo.core.protocol.GiftCatalogueReq
 import com.migo.core.protocol.GiftCatalogueResponse
 import com.migo.core.protocol.GiftListing
@@ -44,10 +45,49 @@ import com.migo.core.wire.Id
  * [getProgression] and [getBadges] serve any account id, not only the caller's own -- the caller's
  * own wallet ([getBalance], [getLedger]) is the only private half, and the server never serves one
  * account's ledger to another.
+ *
+ * # The live balance tick
+ *
+ * Every spend the caller makes -- a gift sent, a store purchase, a Kick Point pack -- is answered
+ * by an [EconomyEvent] on the caller's own user topic, the topic every session subscribes to at
+ * its handshake. The event is a cue, not a fact: it names the kind and the amount but never the
+ * resulting balance, so the handler for it is "re-read my wallet" ([getBalance]), never arithmetic
+ * applied to a number the server did not vouch for. It is what makes the wallet live on a second
+ * device and the sender's own balance tick after a send, without either client polling.
  */
 class EconomyDomain(
     private val rpc: Rpc,
+    onEventError: EventErrorHandler? = null,
 ) {
+    private val listeners = ListenerSet<EconomyEvent>(Op.ECONOMY_EVENT, onEventError)
+
+    @Volatile
+    private var subscription: Subscription? = null
+
+    /** Begins delivering economy events to registered handlers. Idempotent. */
+    fun start() {
+        if (subscription != null) return
+        subscription = rpc.on(Op.ECONOMY_EVENT, { r -> EconomyEvent.decode(r) }) { event, _ ->
+            listeners.deliver(event)
+        }
+    }
+
+    /** Stops delivery. Registered handlers are kept for a later [start]. */
+    fun stop() {
+        val live = subscription ?: return
+        subscription = null
+        live.cancel()
+    }
+
+    /**
+     * Registers a handler for the caller's own economy events.
+     *
+     * Every event this build's server publishes -- `gift_sent`, `purchase`, `kick_points_bought` --
+     * means the caller's own wallet moved, so the handler is "refresh my wallet state", not a switch
+     * over kinds: the resulting balance is never in the event and always one [getBalance] away.
+     */
+    fun onEvent(listener: Listener<EconomyEvent>): Subscription = listeners.add(listener)
+
     /** Reads the caller's wallet: the coin balance and the points balance. */
     suspend fun getBalance(): WalletView {
         val request = WalletReq()

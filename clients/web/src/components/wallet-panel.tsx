@@ -8,7 +8,8 @@
  * or a global catalogue, so every fetch is a plain read on mount plus a refresh after the one
  * mutation ({@link sendGift} moves the balance and appends a ledger line; the panel re-reads
  * both rather than patching local state, because the server's arithmetic is the only arithmetic
- * worth showing).
+ * worth showing) and again whenever the server's ECONOMY_EVENT says the wallet moved from any
+ * of the account's devices.
  *
  * The coin is $MIG — the same ticker message text highlights as a token reference — so the
  * balance card leads with the mark and the statement's lines are plain facts about it. The
@@ -589,6 +590,18 @@ export function WalletPanel(): ReactNode {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // The live balance tick: every spend this account makes — a gift from this browser, a purchase
+  // from the phone, a Kick Point pack from anywhere — is answered by an ECONOMY_EVENT on our own
+  // user topic, and the money-side facts re-read rather than patch, because the server's
+  // arithmetic is the only arithmetic worth showing. The catalogue rides along because the
+  // reload is one function, and a catalogue row is cheaper than a second subscription.
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+    return client.economy.onEconomyEvent(() => void reload());
+  }, [client, reload]);
 
   /** Sends the picked gift; on success the picker closes and the money-side facts re-read. */
   const sendTo = useCallback(
