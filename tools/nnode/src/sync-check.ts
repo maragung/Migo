@@ -510,10 +510,8 @@ async function main(): Promise<void> {
     `select row_to_json(t) from conversation t where conversation_id = '${directUuid}'`,
     'the direct conversation row',
   );
-  const homeRegion =
-    directRow.home_region === undefined || directRow.home_region === null
-      ? ''
-      : String(directRow.home_region);
+  const homeRegionRaw = directRow.home_region;
+  const homeRegion = typeof homeRegionRaw === 'string' ? homeRegionRaw : '';
   let dmReported = false;
   if (homeRegion === '') {
     log(

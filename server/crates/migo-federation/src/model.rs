@@ -38,8 +38,8 @@ pub const CONVERSATION_OPCODE_MAX: i32 = 242;
 /// opcode must never be enqueued toward a peer, so [`enqueue`](crate::Mesh::enqueue)
 /// refuses anything outside both bands.
 pub const fn is_federation_opcode(opcode: i32) -> bool {
-    (FEDERATION_OPCODE_MIN..=FEDERATION_OPCODE_MAX).contains(&opcode)
-        || (CONVERSATION_OPCODE_MIN..=CONVERSATION_OPCODE_MAX).contains(&opcode)
+    (opcode >= FEDERATION_OPCODE_MIN && opcode <= FEDERATION_OPCODE_MAX)
+        || (opcode >= CONVERSATION_OPCODE_MIN && opcode <= CONVERSATION_OPCODE_MAX)
 }
 
 /// How long a handshake nonce is remembered, in milliseconds.
