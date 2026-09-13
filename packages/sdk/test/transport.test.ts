@@ -556,3 +556,138 @@ test('a WELCOME without an identity falls back to AUTHENTICATE and still reaches
   );
   transport.close();
 });
+
+test('wire bytes count exactly what the socket carried, both directions', async () => {
+  // §171's runtime measurement: the client-local counter of bytes per session. The rule pinned
+  // here is honesty — the counter may never disagree with the socket. What went out is counted
+  // at the frame's whole wire size (header included, post-compression, since that is what the
+  // wire carries), and what came in is counted at the WebSocket message's full size.
+  const { transport, socket } = await connectReady();
+  try {
+    // The handshake alone: one HELLO out, one WELCOME in, nothing else has happened yet.
+    const hello = socket.sent[0];
+    assert.ok(hello instanceof Uint8Array, 'no HELLO was sent');
+    const welcome = welcomeFrame();
+    assert.deepEqual(transport.wireBytes, {
+      sent: hello.byteLength,
+      received: welcome.byteLength,
+    });
+
+    // An app frame out: the counter grows by the whole frame, not just the payload — the
+    // header is bytes on the wire too, and the §56 budgets are quoted payload-plus-header.
+    const payload = new Uint8Array(32);
+    await transport.notify(OP.TYPING, payload);
+    const notifyFrame = socket.sent.at(-1);
+    assert.ok(notifyFrame instanceof Uint8Array, 'no TYPING frame was sent');
+    assert.ok(
+      notifyFrame.byteLength > payload.byteLength,
+      'the frame header vanished from the sent frame',
+    );
+    assert.equal(transport.wireBytes.sent, hello.byteLength + notifyFrame.byteLength);
+
+    // An event in: the counter grows by exactly the frame the server pushed.
+    const event = encodeFrame({
+      header: frameHeader(OP.MESSAGE_EVENT, 0),
+      payload: new Uint8Array([1, 2, 3]),
+    });
+    socket.deliver(event);
+    await tick();
+    assert.equal(transport.wireBytes.received, welcome.byteLength + event.byteLength);
+  } finally {
+    transport.close();
+  }
+});
+
+test('wire byte counters survive a reconnect and count its handshake too', async () => {
+  // §171 asks the per-session counter to be honest across reconnect boundaries: this transport
+  // keeps accumulating rather than splitting, and the reconnect's own HELLO/WELCOME is counted,
+  // because those bytes are a real cost the client paid (the §56 reconnect budget exists to
+  // keep that cost small). The proof: after a drop and a pulled-forward reconnect, the counter
+  // equals the sum of every byte both sockets carried.
+  const sockets: FakeSocket[] = [];
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    webSocketFactory: (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+
+  const ready = transport.connect();
+  const first = sockets[0];
+  assert.ok(first !== undefined, 'the transport did not build a socket synchronously');
+  first.fireOpen();
+  await tick();
+  first.deliver(welcomeFrame());
+  await ready;
+
+  // The network drops the socket; reconnectNow pulls the next attempt forward past the backoff.
+  first.close(1006, 'network drop');
+  transport.reconnectNow();
+  await tick();
+  const second = sockets[1];
+  assert.ok(second !== undefined, 'the reconnect did not open a new socket');
+  second.fireOpen();
+  await tick();
+  second.deliver(welcomeFrame());
+  await tick();
+  assert.equal(transport.state, 'ready', 'the reconnect did not reach Ready');
+
+  // The counter spans both sockets: it did not reset at the reconnect, and it did not miss the
+  // second handshake either.
+  const carried = (socket: FakeSocket): number =>
+    socket.sent.reduce<number>(
+      (total, frame) => total + (frame instanceof Uint8Array ? frame.byteLength : 0),
+      0,
+    );
+  assert.equal(transport.wireBytes.sent, carried(first) + carried(second));
+  assert.equal(transport.wireBytes.received, 2 * welcomeFrame().byteLength);
+  transport.close();
+});
+
+test('a transport that has never connected reads as zero wire bytes', () => {
+  // The zero state is a stated fact, not a placeholder: before the first socket, nothing has
+  // been measured, and the getter must not throw or invent a reading.
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    webSocketFactory: () => new FakeSocket('wss://node.example/ws') as unknown as WebSocket,
+  });
+
+  assert.deepEqual(transport.wireBytes, { sent: 0, received: 0 });
+  transport.close();
+});
