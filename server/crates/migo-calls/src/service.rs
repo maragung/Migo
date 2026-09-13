@@ -15,7 +15,12 @@
 //! an end: the sweep retires expired invites as `NoAnswer`, an answer that
 //! arrives one millisecond late retires the ring and says so, and a decline
 //! or a cancel ends the call from any live state rather than erroring and
-//! leaving a ring nobody can stop.
+//! leaving a ring nobody can stop. The same rule reaches past the ring: a
+//! *connected* party whose last session died gets its calls ended as
+//! `Network` ([`Callkeeper::end_disconnected`]), and a group seat whose
+//! session died is stamped by [`Callkeeper::group_session_ended`] and
+//! vacated by [`Callkeeper::group_sweep`] once the grace window passes —
+//! a seat nobody can relay through is a zombie the roster must not render.
 //!
 //! **The server reads headers, never payloads.** The relay methods validate
 //! `call_id`, `from_device`, and `to_device` against the call row and return
@@ -877,6 +882,18 @@ where
             .find(|participant| participant.device_id == caller.device_id)
         {
             if seat.sealed_offer == sealed_offer {
+                // A join is live traffic from a session that is up, so a seat
+                // still carrying a session-death mark from an earlier socket
+                // has the mark cleared: the grace window existed for exactly
+                // this re-join, and it arrived.
+                if seat.gone_since.is_some() {
+                    for seat in &mut call.participants {
+                        if seat.device_id == caller.device_id {
+                            seat.gone_since = None;
+                        }
+                    }
+                    self.groups.put(&call).await?;
+                }
                 self.meters.group_join(GroupJoinKind::Duplicate);
                 return Ok((GroupJoinOutcome::Duplicate, call, Vec::new()));
             }
@@ -910,6 +927,7 @@ where
                 replaced.account_id,
                 replaced.device_id,
                 call.participants.len() as u32,
+                EndReason::ByCaller,
             ));
         }
 
@@ -917,6 +935,7 @@ where
             account_id: caller.account_id,
             device_id: caller.device_id,
             joined_at: caller.now,
+            gone_since: None,
             sealed_offer,
         };
         call.participants.push(participant.clone());
@@ -961,6 +980,7 @@ where
             leaving.account_id,
             leaving.device_id,
             call.participants.len() as u32,
+            EndReason::ByCaller,
         )))
     }
 
@@ -1062,6 +1082,88 @@ where
         // subscriber still rotated the call for everyone it did reach.
         self.meters.group_rekeyed();
         Ok(audience)
+    }
+
+    async fn end_disconnected(&self, account_id: Id, now: Timestamp) -> Result<Vec<Call>> {
+        let mut ended = Vec::new();
+        for mut call in self.store.live_for(account_id).await? {
+            // The store filtered by party, so the other side always exists
+            // here; the check is the same paranoia `end` carries, kept so a
+            // store backend that answers more than it was asked cannot turn
+            // this loop into a publication to nobody.
+            if call.other_party(account_id).is_none() {
+                continue;
+            }
+            let _ = self.terminate(&mut call, EndReason::Network, now).await?;
+            ended.push(call);
+        }
+        Ok(ended)
+    }
+
+    async fn group_session_ended(
+        &self,
+        account_id: Id,
+        device_id: Id,
+        now: Timestamp,
+    ) -> Result<()> {
+        for mut call in self.groups.all().await? {
+            // The mark, not the removal: the grace window belongs to the
+            // re-join that may still come, and only the sweep — with the
+            // window behind it — may vacate the seat.
+            if !call.participants.iter().any(|participant| {
+                participant.account_id == account_id && participant.device_id == device_id
+            }) {
+                continue;
+            }
+            for participant in &mut call.participants {
+                if participant.account_id == account_id && participant.device_id == device_id {
+                    participant.gone_since = Some(now);
+                }
+            }
+            self.groups.put(&call).await?;
+        }
+        Ok(())
+    }
+
+    async fn group_sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>> {
+        let mut departures = Vec::new();
+        for mut call in self.groups.all().await? {
+            let grace_ends =
+                |gone_since: Timestamp| gone_since.saturating_add_millis(self.config.seat_grace_ms);
+            let expired: Vec<usize> = call
+                .participants
+                .iter()
+                .enumerate()
+                .filter_map(|(index, participant)| {
+                    participant
+                        .gone_since
+                        .filter(|&gone| now.is_at_or_after(grace_ends(gone)))
+                        .map(|_| index)
+                })
+                .collect();
+            if expired.is_empty() {
+                continue;
+            }
+            // Removed from the back so the indices collected against the
+            // roster as it stood stay valid as it shrinks.
+            for index in expired.iter().rev() {
+                let retired = call.participants.remove(*index);
+                self.meters.group_left();
+                departures.push(group_leave_event(
+                    &call,
+                    retired.account_id,
+                    retired.device_id,
+                    call.participants.len() as u32,
+                    EndReason::Network,
+                ));
+            }
+            if call.participants.is_empty() {
+                call.ended_at = Some(now);
+            }
+            self.groups.put(&call).await?;
+            self.groups.retire_if_empty(call.call_id).await?;
+        }
+        Ok(departures)
     }
 }
 

@@ -614,7 +614,9 @@ impl App {
         // another. The store is the in-memory one — a call row's useful life is one ring,
         // and the production backend plugs in behind the same trait. Expired invites are
         // swept inside each invite rather than by a background task, so v1 needs no timer
-        // to keep the store free of dead rings. The ring timeout and the TURN relays come
+        // to keep the store free of dead rings; group seats are the exception, because a
+        // seat dies with a session edge no invite can ride, and the call sweeper retires
+        // those on its tick. The ring timeout, the seat grace, and the TURN relays come
         // from the core `[calls]` section, mapped onto the wire's TURN shape, so an
         // operator tunes a ring without a recompile and a relayless deployment gets the
         // honest empty list.
@@ -625,6 +627,7 @@ impl App {
             &registry,
             CallsConfig {
                 ring_ttl_ms: config.calls.ring_ttl_ms,
+                seat_grace_ms: config.calls.seat_grace_ms,
                 turn_servers: config
                     .calls
                     .turn_servers

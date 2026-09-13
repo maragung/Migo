@@ -716,6 +716,12 @@ impl Default for RateLimitConfig {
 pub struct CallsConfig {
     /// How long a ring lives before expiring unanswered, in milliseconds.
     pub ring_ttl_ms: i64,
+    /// How long a group-call seat outlives the session that held it, in milliseconds.
+    ///
+    /// The seat sweep retires a roster seat this long after its session ended without a
+    /// re-join, so a participant whose client died leaves the roster in bounded time
+    /// instead of lingering until somebody else's explicit frame retires them.
+    pub seat_grace_ms: i64,
     /// TURN relay servers. Each entry has url, username, credential, ttl_seconds, region.
     pub turn_servers: Vec<TurnServerConfig>,
 }
@@ -740,6 +746,7 @@ impl Default for CallsConfig {
     fn default() -> Self {
         Self {
             ring_ttl_ms: 30_000,
+            seat_grace_ms: 30_000,
             turn_servers: Vec::new(),
         }
     }
@@ -1086,6 +1093,12 @@ impl Config {
             problems.push(format!(
                 "calls.ring_ttl_ms must be within 5000..=120000, got {}",
                 self.calls.ring_ttl_ms
+            ));
+        }
+        if !(1_000..=600_000).contains(&self.calls.seat_grace_ms) {
+            problems.push(format!(
+                "calls.seat_grace_ms must be within 1000..=600000, got {}",
+                self.calls.seat_grace_ms
             ));
         }
 
@@ -1841,6 +1854,23 @@ mod tests {
             .expect("builds");
         let rendered = config.validate().expect_err("must refuse").to_string();
         assert!(rendered.contains("calls.ring_ttl_ms"), "{rendered}");
+    }
+
+    #[test]
+    fn out_of_range_seat_graces_are_rejected() {
+        let config = Config::from_sources(&[], &env(&[("MIGO_CALLS__SEAT_GRACE_MS", "100")]))
+            .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("calls.seat_grace_ms"), "{rendered}");
+    }
+
+    #[test]
+    fn the_seat_grace_defaults_and_can_be_tuned() {
+        let config = Config::from_sources(&[], &env(&[("MIGO_CALLS__SEAT_GRACE_MS", "1500")]))
+            .expect("builds");
+        config.validate().expect("a tuned grace is valid");
+        assert_eq!(config.calls.seat_grace_ms, 1_500);
+        assert_eq!(CallsConfig::default().seat_grace_ms, 30_000);
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub use group_store::{
 pub use model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig, EndReason,
     GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome, TurnServerWire, MAX_SEALED_LEN,
-    MEDIA_AUDIO, MEDIA_VIDEO, RING_TTL_MS,
+    MEDIA_AUDIO, MEDIA_VIDEO, RING_TTL_MS, SEAT_GRACE_MS,
 };
 pub use service::{open, Calls};
 pub use store::{CallStore, MemoryCallStore, SharedCallStore};
