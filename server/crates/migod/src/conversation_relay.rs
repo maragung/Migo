@@ -456,6 +456,7 @@ mod tests {
     use migo_messaging::Broadcast;
     use migo_protocol::{EncryptionMode, MessageEvent, MessageKind};
     use migo_store::MemoryStore;
+    use std::sync::Arc;
 
     const NOW: i64 = 1_700_000_000_000;
 

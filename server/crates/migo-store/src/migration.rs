@@ -77,6 +77,7 @@ impl MigratorTrait for Migrator {
             Box::new(PassphraseRename),
             Box::new(ProfileCustomStatus),
             Box::new(RoomRevision),
+            Box::new(ConversationHomeRegion),
         ]
     }
 }
@@ -467,6 +468,40 @@ impl MigrationTrait for RoomRevision {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0012_room_revision cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0013_conversation_home_region` -- the home node label a conversation row
+/// carries for the tiered fan-out of section 170: the node that creates the
+/// conversation stamps it once, and every node holding a copy of the row reads
+/// the same answer about where the watch table lives. See
+/// `server/migrations/0013_conversation_home_region.sql`.
+struct ConversationHomeRegion;
+
+impl MigrationName for ConversationHomeRegion {
+    fn name(&self) -> &str {
+        "0013_conversation_home_region"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ConversationHomeRegion {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0013_conversation_home_region.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0013_conversation_home_region cannot be rolled back: create a new database instead"
+                .to_owned(),
         ))
     }
 }
