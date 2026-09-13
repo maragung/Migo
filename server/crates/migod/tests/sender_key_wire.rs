@@ -580,7 +580,7 @@ async fn a_membership_change_carries_a_new_distribution_to_every_remaining_membe
     app.economy
         .grant(migo_economy::Grant {
             account_id: founder.account_id,
-            currency: migo_economy::Currency::Coins,
+            currency: migo_store::model::Currency::Coins,
             amount: 1,
             reason: migo_economy::Reason::Grant,
             ref_id: None,
