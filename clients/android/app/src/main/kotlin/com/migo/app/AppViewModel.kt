@@ -53,11 +53,13 @@ import com.migo.app.model.TrackingChainTx
 import com.migo.app.model.VoiceNotePreview
 import com.migo.app.model.VoteTally
 import com.migo.app.model.WindowTab
+import com.migo.app.model.departedRoomConversation
 import com.migo.app.model.gameEventLine
 import com.migo.app.model.gameLabelOf
 import com.migo.app.model.groupMemberLine
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
+import com.migo.app.session.ResetResync
 import com.migo.app.session.SessionHooks
 import com.migo.core.ConnectionState
 import com.migo.core.account.AVALANCHE_MAINNET
@@ -4783,7 +4785,55 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 signedIn { it.copy(failure = readable(failure)) }
             }
         },
+        // A fresh session was opened behind a reconnect the server could not resume. The SDK has
+        // already re-subscribed every tracked topic; what it cannot do is re-read this shell's
+        // own surfaces, so the section 158 resync runs here -- the list, and the open chat's gap
+        // from its watermark. Hopped to the main dispatcher first, because the state and the
+        // transcript cache this reads are main-thread state, and the hook fires on whichever
+        // thread the SDK noticed the reset on.
+        onReset = {
+            viewModelScope.launch {
+                val open = signedInState?.open?.conversationId
+                resetResync.run(open) { conversationId ->
+                    transcripts[conversationId]?.lastOrNull()?.seq
+                }
+            }
+        },
     )
+
+    /**
+     * The section 158 resync's two actions, as the phone-free suite pins them: the list re-read
+     * and the open chat's watermark-keyed catch-up. Constructed once so the hook that fires it
+     * is the same object every reset, not a fresh closure each sign-in.
+     */
+    private val resetResync = ResetResync(
+        reloadConversations = { refreshConversations() },
+        catchUpOpenChat = { conversationId, haveSeq -> catchUpAfterReset(conversationId, haveSeq) },
+    )
+
+    /**
+     * Fetches the open chat's gap after a fresh-session reset, from the highest sequence the
+     * transcript cache holds.
+     *
+     * The replays arrive on the ordinary message listener, exactly the way [open]'s catch-up
+     * lands, so the open chat updates, the unread rows bump, and the read receipts ride along
+     * with the same preference-gated path the live stream uses. A failure is quiet: the
+     * reconnect banner is the outage's own story, and the held transcript stays on screen
+     * either way -- the next open's catch-up is the retry.
+     */
+    private fun catchUpAfterReset(conversationId: Id, haveSeq: Long) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                live.client.catchUp(conversationId, haveSeq, HISTORY_LIMIT)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The transcript this shell already holds stays; the gap stays with it until the
+                // next open re-fetches it.
+            }
+        }
+    }
 
     private fun arrived(message: IncomingMessage) {
         val live = session ?: return
@@ -4989,9 +5039,48 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * write must happen once.
      */
     private fun roomMember(event: RoomMemberEvent) {
+        val live = session ?: return
         val self = (_state.value as? AppState.SignedIn)?.accountId
         val change = event.change?.takeIf { it != MemberChange.Unknown }
             ?: if (event.joined) MemberChange.Joined else MemberChange.Left
+        // A removal naming *this* account is the kicked member's one last frame -- the server
+        // publishes the event and then takes the room's topics away -- so it ends the room for
+        // this device exactly the way [leaveRoom]'s acknowledgement does: the cached summary
+        // goes, the list and the window strip stop offering the conversation, and the open chat
+        // (if it is this room's) closes with it. The wire's `Left` names this account only when
+        // another device of ours left (the acting socket is excluded from the fan-out), so it is
+        // the multi-device twin of the leave button's own teardown; `Kicked` and `Banned` are
+        // the paths with no local echo at all.
+        val current = _state.value as? AppState.SignedIn
+        val departed = departedRoomConversation(
+            event,
+            self,
+            current?.conversations ?: emptyList(),
+            current?.windows ?: emptyList(),
+            current?.open,
+        )
+        if (departed != null) {
+            roomInfo.remove(event.roomId)
+            viewModelScope.launch {
+                try {
+                    live.client.messaging.forget(departed)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // The room is already gone from the screen; the crypto state it held is
+                    // sealed on disk and a failed forget costs nothing the next sign-in will
+                    // not re-derive.
+                }
+            }
+            signedIn { state ->
+                state.copy(
+                    conversations = state.conversations.filterNot { it.conversationId == departed },
+                    windows = state.windows.filterNot { it.conversationId == departed },
+                    open = if (state.open?.conversationId == departed) null else state.open,
+                )
+            }
+            return
+        }
         roomInfo[event.roomId]?.let { summary ->
             roomInfo[event.roomId] = summary.copy(
                 memberCount = event.memberCount ?: summary.memberCount,
