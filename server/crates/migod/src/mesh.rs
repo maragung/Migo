@@ -1221,12 +1221,24 @@ impl IngestRouter {
         Ok(applied)
     }
     ///
-    /// The inner payload is itself an encoded frame — the presence event as the origin
+    /// The inner payload is itself an encoded frame — the event as the origin
     /// node's session would have pushed it — and the subject's user topic is the one place
     /// it belongs, named by the envelope's `user_id` the same way a room lifecycle event
     /// is placed by its envelope's room id: the peer is authenticated and the envelope is
     /// the fact the watcher registered, while the frame's own `user_id` is data the
     /// publish does not need to re-derive a topic from.
+    ///
+    /// Which frames may ride the envelope is an allow-list, not a free choice:
+    /// a user topic's audience is the subject's own devices and their watchers,
+    /// and only the frames the origin's own publish path puts on that topic
+    /// belong there. Presence started the tier; the bell's notification, the
+    /// social graph's friend hint, and a sealed group-key distribution ride it
+    /// too, each coalesced exactly as the origin's local publish coalesced it
+    /// (section 154) — presence and the bell keyed by the subject, the hint
+    /// and the key distribution delivered whole, because a graph move and a
+    /// sealed envelope are facts, not states. Anything else sealed inside the
+    /// envelope is refused: publishing it would deliver a frame the local
+    /// publish path would never have sent there.
     ///
     /// The coalescing mirrors the origin node's publish path exactly (section 154): keyed
     /// by the subject, so a backed-up consumer keeps only the latest state — which also
@@ -1243,29 +1255,41 @@ impl IngestRouter {
         let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
         let inner_opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known user event"))?;
-        if inner_opcode != Opcode::PresenceEvent {
-            // The envelope names a presence stream; anything else sealed inside it is not
-            // this tier's to place, and publishing it to a user topic would deliver a
-            // frame the local publish path would never have sent there.
-            return Err(fault::validation(
-                "opcode",
-                "a user event envelope carries a presence event",
-            ));
-        }
+        let coalesce = match inner_opcode {
+            // The two per-subject state streams: presence, and the bell's
+            // notification, whose key is the same hash the gateway's
+            // out-of-band ring derives — so an in-band and an out-of-band
+            // copy of one recipient's burst collapse into one stream for a
+            // subscriber watching both halves.
+            Opcode::PresenceEvent | Opcode::NotificationEvent => {
+                Some(crate::dispatch::coalesce_key_of(&user_id))
+            }
+            // Facts, delivered whole: a graph move names one edge, and a
+            // sealed key distribution names one device's envelope — collapsing
+            // either would lose an arrival, not a stale state.
+            Opcode::FriendEvent | Opcode::GroupKeyDistribute => None,
+            _ => {
+                return Err(fault::validation(
+                    "opcode",
+                    "a user event envelope carries a user-topic event",
+                ));
+            }
+        };
         let now = self.clock.now();
         if let Some(gateway) = &self.gateway {
             gateway.broadcast_frame_to_topic(
                 &user_topic(user_id),
                 inner_opcode,
                 &payload,
-                Some(crate::dispatch::coalesce_key_of(&user_id)),
+                coalesce,
                 now,
             );
         }
         tracing::debug!(
             from = %peer.to_text(),
             subject = %user_id.to_text(),
-            "user-topic presence event ingested from the mesh"
+            opcode = inner_opcode.name(),
+            "user-topic event ingested from the mesh"
         );
 
         self.note(inner.header.opcode, inner.payload.len());

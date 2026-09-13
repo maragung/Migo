@@ -1,4 +1,4 @@
-//! User-topic presence fanout across nodes (brief sections 170, 14).
+//! User-topic fanout across nodes (brief sections 170, 14).
 //!
 //! A room is not the only thing whose audience spans nodes: a user topic is a
 //! presence stream, and bob watching alice's topic from a node alice never
@@ -58,6 +58,23 @@
 //! re-sends the asks on the next granted `SUBSCRIBE` and re-anchors the
 //! peers' tables.
 //!
+//! # What else rides this tier
+//!
+//! Presence was the first frame a user topic carried, but the topic's audience
+//! is the same for every frame a local publish puts there: the subject's own
+//! devices and whoever watches them, wherever those sessions connected. So the
+//! same envelope carries the other user-topic frames — the bell's
+//! `NOTIFICATION_EVENT`, the social graph's `FRIEND_EVENT` hints, and the
+//! sealed `GROUP_KEY_DISTRIBUTE` a group member's device hands a far member's
+//! device (section 163) — through [`PresenceRelay::forward_frame`], and the
+//! ingest side places them by the same envelope fact and with the same
+//! coalescing rule the origin's own publish used. None of them is presence;
+//! all of them are user-topic frames, which is the only question the tier
+//! asks. Call signaling does *not* ride this envelope: it has its own
+//! allocated opcode (`FED_CALL_RELAY`), reached through
+//! [`PresenceRelay::forward_call`] so the two streams stay separable in
+//! metrics and in an operator's allow-list thinking.
+//!
 //! # What does not ride this tier
 //!
 //! The *stored* presence the read path serves stays node-local: this tier
@@ -65,19 +82,80 @@
 //! presence after the fact still asks the node he is on. The periodic
 //! aggregated `FED_PRESENCE_DIGEST` remains the design for that aggregation;
 //! what this tier adds is the demand-gated per-subject stream, which cannot
-//! be a digest because a watcher must see the state, not a summary of it.
+//! be a digest because a watcher must see the state, not a summary of it. The
+//! inbox rows and push registrations a notification leaves behind are stored
+//! rows, not frames, and stay on the node that wrote them — the tier carries
+//! the ring, not the record.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::FederatedEvent;
 use migo_federation::SharedMesh;
-use migo_protocol::{fault, to_frame, Encode, FedUserEvent, FedUserWatch, Frame, Opcode};
+use migo_protocol::{fault, to_frame, Encode, FedEvent, FedUserEvent, FedUserWatch, Frame, Opcode};
 
 /// How many allow-list rows one subscribe-half scan reads. The page clamp the
 /// directory answers with, reused because a peer scan is the same bounded
 /// read.
 const PEER_SCAN_LIMIT: u16 = 256;
+
+/// A late-bound handle to the relay.
+///
+/// The bell is wired before the relay is: the notifier opens early in the
+/// composition root, and the user-topic tier needs the mesh, which opens
+/// later. This is the same one-slot cell [`GatewayHandle`](crate::room_presence::GatewayHandle)
+/// fills for the same reason — bound empty here, filled the moment the relay
+/// exists, and until then every federated half it would carry is a no-op,
+/// which is correct for the startup window before any peer can be linked.
+pub(crate) struct RelayHandle {
+    relay: OnceLock<Arc<PresenceRelay>>,
+}
+
+impl RelayHandle {
+    /// An empty handle, to be filled once the relay is built.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            relay: OnceLock::new(),
+        }
+    }
+
+    /// Binds the relay. The first call wins and later calls are ignored,
+    /// because a process has exactly one user-topic relay.
+    pub(crate) fn set(&self, relay: Arc<PresenceRelay>) {
+        let _ = self.relay.set(relay);
+    }
+
+    /// The relay, once bound; `None` during the startup window before it is.
+    pub(crate) fn get(&self) -> Option<&Arc<PresenceRelay>> {
+        self.relay.get()
+    }
+
+    /// Forwards one user-topic frame, once the relay is bound.
+    ///
+    /// A no-op before the binding — the startup window again — because there
+    /// is no mesh to enqueue onto yet and therefore no node that could have
+    /// missed the frame.
+    pub(crate) async fn forward_frame<E: Encode>(
+        &self,
+        subject_id: Id,
+        opcode: Opcode,
+        event: &E,
+        now: Timestamp,
+    ) -> Result<()> {
+        match self.relay.get() {
+            Some(relay) => relay.forward_frame(subject_id, opcode, event, now).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Default for RelayHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Which peer nodes hold subscribers of which user topics, and the subscribe
 /// half that keeps the table honest from the other side.
@@ -209,19 +287,41 @@ impl PresenceRelay {
         fanout: &migo_presence::Fanout,
         now: Timestamp,
     ) -> Result<()> {
+        self.forward_frame(fanout.subject_id, fanout.opcode(), &fanout.event, now)
+            .await
+    }
+
+    /// The forward half for any user-topic frame: one federated copy of the
+    /// sealed `event` per watching node, inside the same `FED_USER_EVENT`
+    /// envelope a presence change rides.
+    ///
+    /// The tier's question is where the audience is, not what the frame says:
+    /// a notification the bell rings, a friend-graph hint, and a sealed key
+    /// distribution all reach a user topic through the same local publish the
+    /// dispatcher performs, so they reach the far nodes' hubs through the same
+    /// envelope — placed by the `user_id` it carries, coalesced (or not) by
+    /// the rule the receiving side applies per opcode. A subject with no
+    /// watchers is the same no-op it is for presence, which keeps a
+    /// single-node deployment exactly as quiet as it was.
+    pub(crate) async fn forward_frame<E: Encode>(
+        &self,
+        subject_id: Id,
+        opcode: Opcode,
+        event: &E,
+        now: Timestamp,
+    ) -> Result<()> {
         let targets = self
             .watchers
             .lock()
-            .get(&fanout.subject_id)
+            .get(&subject_id)
             .cloned()
             .unwrap_or_default();
         if targets.is_empty() {
             return Ok(());
         }
-        let inner =
-            to_frame(fanout.opcode().to_wire(), 0, &fanout.event).map_err(fault::from_wire)?;
+        let inner = to_frame(opcode.to_wire(), 0, event).map_err(fault::from_wire)?;
         let envelope = FedUserEvent {
-            user_id: fanout.subject_id,
+            user_id: subject_id,
             payload: inner.encode().map_err(fault::from_wire)?.to_vec(),
         };
         let payload = encode_envelope(Opcode::FedUserEvent, &envelope)?;
@@ -231,6 +331,68 @@ impl PresenceRelay {
                     FederatedEvent {
                         target_node: node,
                         opcode: Opcode::FedUserEvent.to_wire() as i32,
+                        payload: payload.clone(),
+                    },
+                    now,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The forward half for call signaling: one federated copy per watching
+    /// node, inside the `FED_CALL_RELAY` envelope the registry allocated for
+    /// exactly this traffic (section 169).
+    ///
+    /// The envelope a call event rides is deliberately not the user-event one,
+    /// even though the audience question is the same and the watch table is
+    /// the same: the registry gave call signaling its own opcode so an
+    /// operator can reason about (and a meter can count) the two streams
+    /// separately, and so the ingest side can hold call frames to a call
+    /// allow-list rather than widening the user-topic one to cover them. The
+    /// audience a call event names is an account — the callee whose phone is
+    /// ringing, the party who hung up — so the copy is addressed by the same
+    /// watch table presence uses: the node holding that account's sessions is
+    /// always registered there, because a session's own self-subscription is
+    /// what makes the ask.
+    ///
+    /// The sealed payload is the frame itself, wrapped in a `FedUserEvent` so
+    /// the receiving node learns whose topic the frame places itself on — the
+    /// outer `FedEvent` names the origin region and the wire kind for the log,
+    /// and carries no routing fact beyond the blob.
+    pub(crate) async fn forward_call<E: Encode>(
+        &self,
+        audience: Id,
+        opcode: Opcode,
+        event: &E,
+        now: Timestamp,
+    ) -> Result<()> {
+        let targets = self
+            .watchers
+            .lock()
+            .get(&audience)
+            .cloned()
+            .unwrap_or_default();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let inner = to_frame(opcode.to_wire(), 0, event).map_err(fault::from_wire)?;
+        let envelope = FedUserEvent {
+            user_id: audience,
+            payload: inner.encode().map_err(fault::from_wire)?.to_vec(),
+        };
+        let relay = FedEvent {
+            from: self.mesh.region().to_string(),
+            kind: opcode.name().to_string(),
+            payload: encode_envelope(Opcode::FedUserEvent, &envelope)?,
+        };
+        let payload = encode_envelope(Opcode::FedCallRelay, &relay)?;
+        for node in targets {
+            self.mesh
+                .enqueue(
+                    FederatedEvent {
+                        target_node: node,
+                        opcode: Opcode::FedCallRelay.to_wire() as i32,
                         payload: payload.clone(),
                     },
                     now,
@@ -559,5 +721,143 @@ mod tests {
         let event: PresenceEvent = migo_protocol::from_frame(&inner).expect("the event decodes");
         assert_eq!(event.user_id, subject);
         assert_eq!(event.state, PresenceState::Away);
+    }
+
+    /// Any user-topic frame rides the same envelope presence does: the bell's
+    /// notification crosses as a `FED_USER_EVENT` naming the recipient, sealed
+    /// as a local subscriber would have seen it, and nothing at all crosses
+    /// for a recipient nobody watches.
+    #[tokio::test]
+    async fn a_user_topic_frame_is_one_federated_copy_per_watching_node() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let relay = PresenceRelay::new(Arc::clone(&mesh));
+        let subject = Id::from(0x1111);
+        let watch = FedUserWatch {
+            epoch: mesh.epoch(),
+            user_id: subject,
+        };
+        relay
+            .register_watcher(peer, &watch)
+            .expect("a current epoch admits the watch");
+
+        let event = migo_protocol::NotificationEvent {
+            kind: migo_protocol::NotificationKind::FriendRequest,
+            at: Timestamp::from_millis(NOW),
+            title: None,
+            body: None,
+            conversation_id: None,
+            room_id: None,
+            actor_id: Some(Id::from(0x0707)),
+        };
+        relay
+            .forward_frame(
+                subject,
+                Opcode::NotificationEvent,
+                &event,
+                Timestamp::from_millis(NOW),
+            )
+            .await
+            .expect("the watched subject forwards");
+        let due = mesh
+            .due(Timestamp::from_millis(NOW + 60_000))
+            .await
+            .expect("the queue reads");
+        assert_eq!(due.len(), 1, "one copy for the one watching node");
+
+        let outer = Frame::decode(bytes::Bytes::from(due[0].payload.clone()))
+            .expect("an outbox payload is an encoded frame");
+        assert_eq!(
+            Opcode::from_wire(outer.header.opcode),
+            Some(Opcode::FedUserEvent),
+            "the copy is the same user event envelope presence rides"
+        );
+        let envelope: FedUserEvent =
+            migo_protocol::from_frame(&outer).expect("the envelope decodes");
+        assert_eq!(envelope.user_id, subject);
+        let inner =
+            Frame::decode(bytes::Bytes::from(envelope.payload)).expect("the inner frame decodes");
+        assert_eq!(
+            Opcode::from_wire(inner.header.opcode),
+            Some(Opcode::NotificationEvent),
+            "carrying the bell's own frame, sealed as a local subscriber would have seen it"
+        );
+    }
+
+    /// Call signaling rides its own allocated envelope: the same watch table
+    /// answers the audience question, but the copy is a `FED_CALL_RELAY`
+    /// carrying a `FedEvent` whose payload is the user-event envelope, so the
+    /// receiving node learns whose topic the sealed frame places itself on.
+    #[tokio::test]
+    async fn a_call_event_is_one_federated_copy_on_the_call_relay_envelope() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let relay = PresenceRelay::new(Arc::clone(&mesh));
+        let callee = Id::from(0x1111);
+        let watch = FedUserWatch {
+            epoch: mesh.epoch(),
+            user_id: callee,
+        };
+        relay
+            .register_watcher(peer, &watch)
+            .expect("a current epoch admits the watch");
+
+        let event = migo_protocol::CallStateEvent {
+            call_id: Id::from(0x7777),
+            state: migo_calls::CallState::Ringing.to_wire(),
+            reason: None,
+            conversation_id: None,
+            user_id: None,
+            device_id: None,
+            participant_count: None,
+            sealed_offer: None,
+            participants: None,
+        };
+        relay
+            .forward_call(
+                callee,
+                Opcode::CallStateEvent,
+                &event,
+                Timestamp::from_millis(NOW),
+            )
+            .await
+            .expect("the watched callee forwards");
+        let due = mesh
+            .due(Timestamp::from_millis(NOW + 60_000))
+            .await
+            .expect("the queue reads");
+        assert_eq!(due.len(), 1, "one copy for the one watching node");
+
+        let outer = Frame::decode(bytes::Bytes::from(due[0].payload.clone()))
+            .expect("an outbox payload is an encoded frame");
+        assert_eq!(
+            Opcode::from_wire(outer.header.opcode),
+            Some(Opcode::FedCallRelay),
+            "the copy is the call relay envelope the registry allocated"
+        );
+        let relayed: FedEvent = migo_protocol::from_frame(&outer).expect("the envelope decodes");
+        assert_eq!(relayed.from, "region-1", "the envelope names its origin");
+        assert_eq!(
+            relayed.kind, "CALL_STATE_EVENT",
+            "and the wire kind it carries"
+        );
+        let envelope = Frame::decode(bytes::Bytes::from(relayed.payload))
+            .expect("the nested user event frame decodes");
+        assert_eq!(
+            Opcode::from_wire(envelope.header.opcode),
+            Some(Opcode::FedUserEvent)
+        );
+        let user_event: FedUserEvent =
+            migo_protocol::from_frame(&envelope).expect("the user event decodes");
+        assert_eq!(
+            user_event.user_id, callee,
+            "the nested envelope names whose topic the sealed frame places itself on"
+        );
+        let inner =
+            Frame::decode(bytes::Bytes::from(user_event.payload)).expect("the inner frame decodes");
+        assert_eq!(
+            Opcode::from_wire(inner.header.opcode),
+            Some(Opcode::CallStateEvent)
+        );
     }
 }

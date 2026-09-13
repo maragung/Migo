@@ -894,6 +894,31 @@ impl Dispatcher for AppDispatcher {
                         "cannot publish a sealed key distribution to its member"
                     );
                 }
+                // The federated half of the same distribution: the target
+                // member's devices may hold their sessions on another node,
+                // and the sealed envelope reaches their user topic there the
+                // same way it reached this node's hub — through the user-topic
+                // tier (section 170), sealed exactly as the local publish
+                // sealed it, because the sender already holds an
+                // acknowledgement that promises the distribution was taken. A
+                // failure to enqueue is logged rather than failed, for the
+                // same reason the local publish above is.
+                if let Err(error) = self
+                    .presence_relay
+                    .forward_frame(
+                        request.to_account,
+                        Opcode::GroupKeyDistribute,
+                        &request,
+                        now,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        target = %request.to_account.to_text(),
+                        "cannot enqueue the federated half of a sealed key distribution"
+                    );
+                }
                 Ok(())
             }
             Opcode::ConversationUpdate => {
@@ -1187,12 +1212,28 @@ impl Dispatcher for AppDispatcher {
 
             // --- social ---
             Opcode::FriendRequest => {
-                social::handle_friend_request(context, frame, &self.social, &self.notify).await
+                social::handle_friend_request(
+                    context,
+                    frame,
+                    &self.social,
+                    &self.presence_relay,
+                    &self.notify,
+                )
+                .await
             }
             Opcode::FriendRespond => {
-                social::handle_friend_respond(context, frame, &self.social, &self.notify).await
+                social::handle_friend_respond(
+                    context,
+                    frame,
+                    &self.social,
+                    &self.presence_relay,
+                    &self.notify,
+                )
+                .await
             }
-            Opcode::BlockSet => social::handle_block_set(context, frame, &self.social).await,
+            Opcode::BlockSet => {
+                social::handle_block_set(context, frame, &self.social, &self.presence_relay).await
+            }
             Opcode::MuteSet => social::handle_mute_set(context, frame, &self.social).await,
             Opcode::RelationshipList => {
                 social::handle_relationship_list(context, frame, &self.social).await

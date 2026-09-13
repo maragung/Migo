@@ -553,8 +553,17 @@ impl App {
         // during that startup window is quietly dropped: the row is still written and
         // the push still queued, and no socket exists yet to have missed anything.
         let bell_gateway = Arc::new(GatewayHandle::new());
-        let bell: migo_notify::SharedBell =
-            Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway)));
+        // The bell also carries the notification frame to the recipient's
+        // watchers on other nodes over the user-topic tier (section 170), so a
+        // bell that rings on the home node rings on every node the member has
+        // a session on. The relay is another one-slot cell: the notify service
+        // opens before the mesh does, so the cell is bound here, empty, and
+        // filled once the presence relay exists — before the listener opens.
+        let bell_relay = Arc::new(crate::presence_relay::RelayHandle::new());
+        let bell: migo_notify::SharedBell = Arc::new(crate::ports::FederatedBell::new(
+            Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway))),
+            Arc::clone(&bell_relay),
+        ));
         let notify = migo_notify::open(
             store.clone(),
             cache.clone(),
@@ -795,6 +804,11 @@ impl App {
         let presence_relay = Arc::new(crate::presence_relay::PresenceRelay::new(
             federation.clone(),
         ));
+        // The bell's cell can be filled now, ahead of the listener: any ring
+        // that lands before this point stayed local by design (the row and
+        // the push are the notifier's to finish), and every ring after it
+        // carries the frame to the recipient's watching nodes as well.
+        bell_relay.set(Arc::clone(&presence_relay));
 
         // The row-replication tier (section 170's account-to-node routing map):
         // the ask half the fail-closed reads above trigger, and the answer half

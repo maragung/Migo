@@ -46,7 +46,7 @@ use migo_games::Rewards;
 use migo_media::{Grant, Head, Storage, SNIFF_BYTES};
 use migo_messaging::KickTariff;
 use migo_moderation::{Powers, Roster};
-use migo_protocol::{fault, NotificationEvent};
+use migo_protocol::{fault, NotificationEvent, Opcode};
 
 /// A filesystem-backed [`Storage`]: object bytes as files under one root directory.
 ///
@@ -637,5 +637,53 @@ impl migo_notify::Bell for GatewayBell {
         if let Some(gateway) = self.gateway.get() {
             gateway.emit_notification(recipient, event, now);
         }
+    }
+}
+
+/// A [`Bell`](migo_notify::Bell) that rings locally and, when the recipient's
+/// user topic has watchers on other nodes, carries the same notification frame
+/// there over the user-topic tier (FED_USER_EVENT, section 170).
+///
+/// The notify service opens before the mesh does, so the relay is held in the
+/// same kind of one-slot cell the gateway handle uses: until the composition
+/// root fills it, a ring stays local, which is the pre-mesh startup window and
+/// costs a member nothing — the row and the push are already the notifier's to
+/// finish. Because `Bell::ring` is synchronous, the federated half runs on its
+/// own task; it is best-effort and logged, never a reason to unring the local
+/// one.
+pub struct FederatedBell {
+    bell: migo_notify::SharedBell,
+    relay: Arc<crate::presence_relay::RelayHandle>,
+}
+
+impl FederatedBell {
+    /// Builds the ring over the local bell and a cell the composition root
+    /// fills with the user-topic relay once the mesh is up.
+    #[must_use]
+    pub fn new(
+        bell: migo_notify::SharedBell,
+        relay: Arc<crate::presence_relay::RelayHandle>,
+    ) -> Self {
+        Self { bell, relay }
+    }
+}
+
+impl migo_notify::Bell for FederatedBell {
+    fn ring(&self, recipient: Id, event: &NotificationEvent, now: Timestamp) {
+        self.bell.ring(recipient, event, now);
+        let relay = Arc::clone(&self.relay);
+        let event = event.clone();
+        tokio::spawn(async move {
+            if let Err(error) = relay
+                .forward_frame(recipient, Opcode::NotificationEvent, &event, now)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    recipient = %recipient.to_text(),
+                    "cannot enqueue the federated half of a notification bell"
+                );
+            }
+        });
     }
 }
