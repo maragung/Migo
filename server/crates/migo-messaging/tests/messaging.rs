@@ -3447,10 +3447,10 @@ async fn a_carried_vote_queues_the_redistribution_to_the_roster_that_remains() {
         .expect("the first voice opens the vote");
     assert!(response.open, "one voice of four is not a majority");
     assert!(
-        fanouts
+        !fanouts
             .iter()
-            .all(|f| member_of(f).change != MemberChange::Kicked),
-        "a vote that has not carried is not a membership change"
+            .any(|f| matches!(f.event, Broadcast::Member(_))),
+        "a vote that has not carried emits the tally, not a membership change"
     );
     let (response, fanouts) = harness
         .messaging
@@ -3464,9 +3464,16 @@ async fn a_carried_vote_queues_the_redistribution_to_the_roster_that_remains() {
         .await
         .expect("the second voice carries it");
     assert!(!response.open, "two of four carries a strict majority");
+    // The member event is the tally's closing, so it is the only broadcast a
+    // carried vote emits; the search still skips anything that is not a
+    // member broadcast, so it names what it wants rather than tripping over
+    // whatever else a future tally may say.
     let removal = fanouts
         .iter()
-        .map(member_of)
+        .filter_map(|f| match &f.event {
+            Broadcast::Member(event) => Some(event),
+            _ => None,
+        })
         .find(|event| event.change == MemberChange::Kicked)
         .expect("the carried vote emits the removal");
     assert_eq!(removal.user_id, id(CAROL));

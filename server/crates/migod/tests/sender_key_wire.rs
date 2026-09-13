@@ -569,10 +569,27 @@ async fn a_membership_change_carries_a_new_distribution_to_every_remaining_membe
         b"sealed under the first chain"
     );
 
-    // The membership change: the founder removes one member. The member event
+    // The membership change: the founder removes one member. A kick is not
+    // free even for a founder — one Kick Point or one coin — and this founder
+    // holds neither, so the coin is granted through the same treasurer the
+    // node charges through: the scene under test is the redistribution the
+    // kick triggers, not the price of the kick itself. The member event
     // on the conversation topic carries the generation this change produced —
     // the trigger, visible on the wire, that tells every remaining client a
     // redistribution is owed.
+    app.economy
+        .grant(migo_economy::Grant {
+            account_id: founder.account_id,
+            currency: migo_economy::Currency::Coins,
+            amount: 1,
+            reason: migo_economy::Reason::Grant,
+            ref_id: None,
+            idempotency_key: "skw-kick-funding".to_string(),
+            created_by: None,
+            at: app.clock.now(),
+        })
+        .await
+        .expect("the founder can afford the kick");
     let _: Acknowledged = founder_session
         .ask(
             Opcode::ConversationKick,
