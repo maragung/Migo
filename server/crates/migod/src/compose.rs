@@ -401,6 +401,12 @@ pub struct App {
     /// tier's watch table lives (section 170), and the relay has no listener of its own to
     /// name an address by.
     pub presence_relay: Arc<crate::presence_relay::PresenceRelay>,
+    /// The room half of the mesh: which rooms this node's sessions watch and — when this node
+    /// homes a room — the table of every peer that watches it (section 170). Held for the same
+    /// reason `presence_relay` is: a cross-node test needs the one place the room tier's watch
+    /// table lives to wait out the mesh hop deterministically, and the relay has no listener
+    /// of its own to name an address by.
+    pub room_relay: Arc<crate::room_relay::RoomRelay>,
     /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
     pub calls: SharedCallkeeper,
 }
@@ -797,6 +803,23 @@ impl App {
             store.clone(),
         ));
 
+        // The room-presence tally: which accounts hold live sessions, and through it each
+        // room's online count as this node serves it. Built beside the room relay because
+        // its publisher is the federated one — a disconnect or a reconnect this node
+        // announces owes every watching node a copy — and passed to both of its consumers:
+        // the dispatcher, whose connection edges drive it, and the mesh transport, whose
+        // ingest path is the only window onto members whose sessions live on other nodes.
+        let room_presence = Arc::new(crate::room_presence::RoomPresence::new(
+            store.clone(),
+            rooms.clone(),
+            Arc::new(crate::room_relay::FederatedPublisher::new(
+                Arc::new(crate::room_presence::GatewayPublisher::new(Arc::clone(
+                    &gateway_handle,
+                ))),
+                Arc::clone(&room_relay),
+            )),
+        ));
+
         // The user-topic tier of the same fan-out (section 170): the relay the
         // presence publish paths forward through and the mesh transport's
         // ingest path registers watchers into. It holds no store and no
@@ -851,6 +874,7 @@ impl App {
             federation.clone(),
             bots.clone(),
             calls.clone(),
+            room_presence.clone(),
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),
             Arc::clone(&conversation_relay),
@@ -966,6 +990,10 @@ impl App {
             clock.clone(),
             config.federation.handshake_timeout_ms,
         ));
+        // The ingest path's tally half, bound before any listener or runner can run: a
+        // member event that crosses from here on must reach the room-presence bookkeeping
+        // the dispatcher's connection edges also drive.
+        mesh_transport.set_room_presence(Arc::clone(&room_presence));
         let mut mesh_bind: Option<SocketAddr> = None;
         if let Some(bind) = config.node.mesh_bind.as_deref() {
             let bound = mesh_transport
@@ -1037,6 +1065,7 @@ impl App {
             bots,
             federation,
             presence_relay,
+            room_relay,
             calls,
         })
     }

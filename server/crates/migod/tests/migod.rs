@@ -877,6 +877,14 @@ async fn dispatcher() -> DispatcherHarness {
         app.federation.clone(),
         app.bots.clone(),
         app.calls.clone(),
+        // The room-presence tally over the same store and rooms handle, publishing through
+        // an unbound gateway handle: these tests exercise dispatch and topic authorization,
+        // so its out-of-band publishes are the correct no-ops, and no federation rides them.
+        migod::room_presence::RoomPresence::local(
+            app_store.clone(),
+            app.rooms.clone(),
+            std::sync::Arc::new(migod::room_presence::GatewayHandle::new()),
+        ),
         // An unbound gateway handle: these tests exercise dispatch and topic authorization, not
         // the out-of-band publish path, so its publishes are the correct no-ops.
         std::sync::Arc::new(migod::room_presence::GatewayHandle::new()),

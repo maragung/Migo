@@ -67,7 +67,7 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -623,6 +623,14 @@ pub(crate) struct IngestRouter {
     conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
     presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
     replication: Option<Arc<crate::replication::ReplicationRelay>>,
+    /// The room-presence tally (section 170): the same member events this path publishes into
+    /// the hub are the only window a node has onto who is online on the nodes a frame came
+    /// from, so the ingest half hands each one to the tally before it finishes. Late-bound
+    /// rather than a constructor argument because the tally is assembled beside the
+    /// dispatcher, after this transport — the same cycle the tally's own gateway handle
+    /// exists to break — and an unset cell leaves the tally blind to remote members, which
+    /// is the pre-federation behaviour rather than a wrong answer.
+    room_presence: OnceLock<Arc<crate::room_presence::RoomPresence>>,
     /// The local rows, for the one ingest question the wire event cannot answer: which
     /// conversation speaks for a room whose member just left. A removal that arrives over
     /// the mesh must take the removed account's topics away on *this* node too — the
@@ -653,6 +661,7 @@ impl IngestRouter {
             conversations,
             presence,
             replication,
+            room_presence: OnceLock::new(),
             store,
             meters: MeshMeters::new(registry),
             clock,
@@ -1001,6 +1010,22 @@ impl IngestRouter {
         // revocation only reached the sessions it holds).
         if let Some(account_id) = removed {
             self.revoke_room_member(room_id, account_id).await;
+        }
+        // The tally's half: a member event that crossed the mesh is the only word this node
+        // gets about members whose sessions live on the sending side (section 170). A join or
+        // a reconnect puts them in the room's online count as served here; a disconnect is
+        // either recorded as owed — the sender owns the grace — or repaired on the spot when
+        // the account still holds sessions here, because then the member never went dark and
+        // the origin's announcement was a frame for a change that did not happen (section
+        // 156). The decode is the same one the removal gate above already proved valid.
+        if inner_opcode == Opcode::RoomMemberEvent {
+            let event: migo_protocol::RoomMemberEvent =
+                from_frame(&inner).map_err(fault::from_wire)?;
+            if let Some(room_presence) = self.room_presence.get() {
+                room_presence
+                    .note_remote_member(room_id, event.user_id, event.change, now)
+                    .await;
+            }
         }
         // The home node's second obligation: the event came from a peer that
         // already delivered it locally, so the other watching nodes are the
@@ -1835,6 +1860,16 @@ impl MeshTransport {
             clock,
             budget,
         }
+    }
+
+    /// Hands the ingest path the room-presence tally.
+    ///
+    /// Late-bound for the same reason the tally's own gateway handle is: the transport is
+    /// built before the dispatcher, and the tally is glue the composition root assembles
+    /// beside it. Until the cell is filled the ingest path leaves the tally unchanged,
+    /// which is the pre-federation behaviour rather than a wrong one.
+    pub fn set_room_presence(&self, presence: Arc<crate::room_presence::RoomPresence>) {
+        let _ = self.router.room_presence.set(presence);
     }
 
     /// Binds the mesh listener and spawns its accept loop, returning the bound address —

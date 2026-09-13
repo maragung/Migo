@@ -40,6 +40,19 @@
 //! cancellation — no timer handle to track, no lock held across the wait, and a
 //! reconnect-then-redisconnect (which re-arms with a newer generation) leaves the stale timer
 //! harmless.
+//!
+//! # What crosses the mesh (section 170)
+//!
+//! The tally is per-node by nature — it counts the sessions this node's gateway reported — but
+//! the room tier's member events are its window onto everyone else: a `Disconnected` or a
+//! `Reconnected` is published by the node whose socket moved, and the federated copy that
+//! crosses to this node is handed to
+//! [`note_remote_member`](RoomPresence::note_remote_member) as proof of where the member's
+//! aliveness now lives. That is what keeps two things honest multi-node: an online count served
+//! here includes members whose sessions live elsewhere, and a grace timer armed here is
+//! cancelled by a reconnect that happened on another node — the generation bump the remote
+//! `Reconnected` carries is the same one a local reconnect carries. The node whose socket
+//! dropped owns the timeout; every other node only records.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -210,6 +223,13 @@ struct AccountPresence {
     /// reconnect consults to decide which rooms are owed a `Reconnected`, and what stops a
     /// second disconnect from announcing one twice.
     announced_offline: HashSet<Id>,
+    /// The account holds sessions on other nodes, by the member events that crossed the mesh
+    /// (section 170): a join, a self-leave, or a reconnect observed remotely is proof it is
+    /// alive somewhere this node cannot see. What a room listing's online count consults
+    /// alongside live sessions — a member online elsewhere is online in every room they are
+    /// in — and what [`RoomPresence::reachable`](RoomPresence::reachable) reads to know an
+    /// account whose last local socket dropped is still up.
+    online_elsewhere: bool,
 }
 
 /// The per-account presence tally and everything it needs to act on an edge.
@@ -230,7 +250,7 @@ struct Shared {
 ///
 /// Holds an `Arc<Shared>` so a grace timer can be spawned with its own owning reference and
 /// outlive the call that armed it.
-pub(crate) struct RoomPresence {
+pub struct RoomPresence {
     shared: Arc<Shared>,
 }
 
@@ -252,6 +272,17 @@ impl RoomPresence {
         }
     }
 
+    /// A tally that publishes through the late-bound gateway and nothing else.
+    ///
+    /// The composition root wraps the same shape in the federated publisher before handing it
+    /// to the dispatcher; this bare constructor is the seam for a caller that wants the tally
+    /// and the local hub with no federation at all — the dispatcher test harness, whose
+    /// out-of-band publishes are the correct no-ops of an unbound handle.
+    #[must_use]
+    pub fn local(store: SharedStore, rooms: SharedRooms, gateway: Arc<GatewayHandle>) -> Self {
+        Self::new(store, rooms, Arc::new(GatewayPublisher::new(gateway)))
+    }
+
     /// A session for `account_id` came up.
     pub(crate) async fn on_session_started(&self, account_id: Id, now: Timestamp) {
         self.shared.on_session_started(account_id, now).await;
@@ -269,18 +300,34 @@ impl RoomPresence {
         self.shared.online_count(room_id).await
     }
 
-    /// How many live sessions an account holds right now, as this node's tally knows it.
+    /// A room member event that crossed the mesh, as this node's tally must see it.
     ///
-    /// The one question the dispatcher's session edges ask beyond rooms: whether a socket
-    /// that just went down was the account's last. Zero means the account is unreachable
-    /// through this node — the fact a connected call's survivor needs told, and the one a
-    /// departing socket cannot deliver itself.
-    pub(crate) fn session_count(&self, account_id: Id) -> u32 {
+    /// The room tier's frames are the only word this node gets about members whose sessions
+    /// live on the sending side (section 170): the origin of a `Disconnected` or a
+    /// `Reconnected` is the node whose socket moved, and every other node learns the fact
+    /// only when the copy crosses. Ingesting it here is what keeps the online count a room
+    /// listing serves on this node honest, and what cancels a grace timer this node armed
+    /// for an account that came back somewhere else.
+    pub(crate) async fn note_remote_member(
+        &self,
+        room_id: Id,
+        account_id: Id,
+        change: Option<MemberChange>,
+        now: Timestamp,
+    ) {
         self.shared
-            .state
-            .lock()
-            .get(&account_id)
-            .map_or(0, |entry| entry.sessions)
+            .note_remote_member(room_id, account_id, change, now)
+            .await;
+    }
+
+    /// Whether the account is reachable right now, as this node's tally knows it.
+    ///
+    /// Wider than the local session count: an account whose last socket *here* dropped but
+    /// whose member events say is online on another node is still reachable, so a survivor
+    /// of their call must not be told the network died — and an account that is reachable
+    /// nowhere is the one whose calls this node must end.
+    pub(crate) fn reachable(&self, account_id: Id) -> bool {
+        self.shared.reachable(account_id)
     }
 }
 
@@ -351,12 +398,17 @@ impl Shared {
 
         // Re-check under the lock after the async read. If a session came up while we read the
         // roster, this disconnect is void: we have announced nothing yet, so abandoning here
-        // leaves the two views consistent, with the racing connect owning the state.
+        // leaves the two views consistent, with the racing connect owning the state. The same
+        // abandonment owes itself to a member the tally knows is online on another node — this
+        // drop took the last socket *here*, not the account's aliveness, and the node that
+        // holds their other sockets owns the announcement when they drop too.
         let announce = {
             let mut state = self.state.lock();
             let still_offline = matches!(
                 state.get(&account_id),
-                Some(entry) if entry.sessions == 0 && entry.generation == generation
+                Some(entry) if entry.sessions == 0
+                    && entry.generation == generation
+                    && !entry.online_elsewhere
             );
             if !still_offline {
                 false
@@ -453,16 +505,124 @@ impl Shared {
             }
         }
 
-        // If the account is offline and owes no room a follow-up, forget it. Under the same lock
-        // as the check so a reconnect racing this cannot have its fresh entry dropped.
+        // If the account is offline, owes no room a follow-up, and is known online nowhere
+        // else, forget it. Under the same lock as the check so a reconnect racing this
+        // cannot have its fresh entry dropped.
         let mut state = self.state.lock();
         let drop_it = matches!(
             state.get(&account_id),
-            Some(entry) if entry.sessions == 0 && entry.announced_offline.is_empty()
+            Some(entry) if entry.sessions == 0
+                && entry.announced_offline.is_empty()
+                && !entry.online_elsewhere
         );
         if drop_it {
             state.remove(&account_id);
         }
+    }
+
+    /// The remote half of the tally: a member event that crossed the mesh, sorted into the
+    /// bookkeeping this node keeps.
+    ///
+    /// * `Joined`, `Left`, `Reconnected` — the account acted from another node, which proves
+    ///   it is alive somewhere this node cannot see: every room it is in counts it online as
+    ///   served here, the room the event names is owed nothing, and the generation bump
+    ///   cancels any grace timer this node armed — the same bump a local reconnect carries.
+    /// * `Disconnected` — the account went dark on the sending node. If it still holds
+    ///   sessions here, the member did not go dark at all and the announcement is repaired on
+    ///   the spot; if not, the room is recorded as owed and the *sender* owns the grace —
+    ///   this node arms nothing, so a member offline everywhere is timed out exactly once,
+    ///   by the node that saw the drop.
+    /// * `Kicked`, `Banned` — the seat is gone. Nothing here proves the account is up — a
+    ///   kick is someone else's hand — so the elsewhere-record stands, but the room is owed
+    ///   nothing more and a local grace timer must not add its own ending to a departure
+    ///   another node already made real.
+    async fn note_remote_member(
+        &self,
+        room_id: Id,
+        account_id: Id,
+        change: Option<MemberChange>,
+        now: Timestamp,
+    ) {
+        match change {
+            Some(MemberChange::Joined | MemberChange::Left | MemberChange::Reconnected) => {
+                let mut state = self.state.lock();
+                let entry = state.entry(account_id).or_default();
+                entry.online_elsewhere = true;
+                entry.announced_offline.remove(&room_id);
+                entry.generation += 1;
+            }
+            Some(MemberChange::Disconnected) => {
+                let repair = {
+                    let mut state = self.state.lock();
+                    let entry = state.entry(account_id).or_default();
+                    entry.online_elsewhere = false;
+                    if entry.sessions > 0 {
+                        true
+                    } else {
+                        entry.announced_offline.insert(room_id);
+                        entry.generation += 1;
+                        false
+                    }
+                };
+                if repair {
+                    self.publish_repair_reconnected(room_id, account_id, now)
+                        .await;
+                }
+            }
+            Some(MemberChange::Kicked | MemberChange::Banned) => {
+                let mut state = self.state.lock();
+                if let Some(entry) = state.get_mut(&account_id) {
+                    entry.announced_offline.remove(&room_id);
+                    entry.generation += 1;
+                }
+            }
+            // `Unknown` or absent: nothing this tally can act on, and an unknown
+            // discriminant must not break an old tally — the same leniency the wire decode
+            // grants a variant it has never met.
+            _ => {}
+        }
+    }
+
+    /// Answers a remote `Disconnected` that arrived while the account holds sessions here.
+    ///
+    /// The member never went dark — they went dark on the sending node only — so the room is
+    /// told they are back, exactly as a local reconnect would tell it, and the federated copy
+    /// carries the correction to every watching node including the one that announced
+    /// wrongly. It terminates there: the far tally's reconnect handling clears its owed set
+    /// and cancels its grace, which is what a real reconnect would have done.
+    async fn publish_repair_reconnected(&self, room_id: Id, account_id: Id, now: Timestamp) {
+        // The member must still hold an active seat, and the event wants the room's total
+        // count, so both are read fresh. A failed read is not a reason to invent an event —
+        // the next edge or listing carries the truth.
+        if !matches!(
+            self.store.room_member(room_id, account_id).await,
+            Ok(Some(member)) if member.is_active()
+        ) {
+            return;
+        }
+        let Ok(Some(room)) = self.store.room(room_id).await else {
+            return;
+        };
+        let event = member_event(
+            room_id,
+            account_id,
+            true,
+            view::count(room.member_count),
+            MemberChange::Reconnected,
+        );
+        self.publisher.publish_member(room_id, &event, now);
+        let count = self.online_count(room_id).await;
+        self.publisher
+            .publish_state(room_id, &state_delta(room_id, count), now);
+    }
+
+    /// Whether the account is reachable, by a live session here or by the tally's remote
+    /// record of one elsewhere.
+    fn reachable(&self, account_id: Id) -> bool {
+        self.state
+            .lock()
+            .get(&account_id)
+            .is_some_and(|entry| entry.sessions > 0 || entry.online_elsewhere)
     }
 
     /// How many of a room's members hold a live session right now.
@@ -471,7 +631,9 @@ impl Shared {
     /// a running per-room number, because a running number drifts: a join, a kick, or a role
     /// change while online all move it, and those paths are not connection edges this component
     /// observes. Rooms are small and the tally is in memory, so the read is bounded and touches
-    /// no presence query (section 14).
+    /// no presence query (section 14). A member the tally knows is online on another node
+    /// counts too: an account that holds a session anywhere is online in every room it is in,
+    /// which is the fact the mesh's member events are this component's only way of knowing.
     async fn online_count(&self, room_id: Id) -> u32 {
         let mut online: u32 = 0;
         let mut after: Option<Id> = None;
@@ -490,7 +652,7 @@ impl Shared {
                 for member in &members {
                     if state
                         .get(&member.account_id)
-                        .is_some_and(|entry| entry.sessions > 0)
+                        .is_some_and(|entry| entry.sessions > 0 || entry.online_elsewhere)
                     {
                         online = online.saturating_add(1);
                     }
@@ -929,5 +1091,175 @@ mod tests {
             "both members online"
         );
         assert_eq!(fixture.recorder.latest_online(room), Some(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_remote_reconnect_cancels_the_grace_and_counts_elsewhere() {
+        let fixture = Fixture::new();
+        let room = fixture.room_with_bob().await;
+
+        fixture
+            .presence
+            .on_session_started(id(BOB), ts(NOW + 10))
+            .await;
+        fixture
+            .presence
+            .on_session_ended(id(BOB), ts(NOW + 20))
+            .await;
+        // Bob comes back — on another node, which this tally learns from the member event
+        // that crosses the mesh.
+        fixture
+            .presence
+            .note_remote_member(room, id(BOB), Some(MemberChange::Reconnected), ts(NOW + 30))
+            .await;
+        settle().await; // let the armed timer register its sleep
+        tokio::time::advance(Duration::from_millis(RECONNECT_GRACE_MS + 1)).await;
+        settle().await; // let it wake and find the generation moved
+
+        assert!(
+            fixture.recorder.members_with(MemberChange::Left).is_empty(),
+            "a grace armed here is cancelled by a reconnect that happened elsewhere"
+        );
+        assert!(
+            fixture.is_member(room, BOB).await,
+            "the seat was never given up"
+        );
+        assert_eq!(
+            fixture.presence.online_count(room).await,
+            1,
+            "the member online elsewhere is in the room's count as this node serves it"
+        );
+        assert!(
+            fixture.presence.reachable(id(BOB)),
+            "and the account is reachable, so no survivor of theirs is told the network died"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_remote_disconnect_arms_no_timer_here() {
+        let fixture = Fixture::new();
+        let room = fixture.room_with_bob().await;
+
+        // Bob's sessions live on another node; this node only hears about the drop.
+        fixture
+            .presence
+            .note_remote_member(
+                room,
+                id(BOB),
+                Some(MemberChange::Disconnected),
+                ts(NOW + 10),
+            )
+            .await;
+        settle().await;
+        tokio::time::advance(Duration::from_millis(RECONNECT_GRACE_MS * 3)).await;
+        settle().await;
+
+        assert!(
+            fixture.recorder.members_with(MemberChange::Left).is_empty(),
+            "the node that saw the drop owns the timeout; this one only records"
+        );
+        assert!(
+            fixture.is_member(room, BOB).await,
+            "the seat is the sender's to empty, not this node's"
+        );
+        assert!(
+            !fixture.presence.reachable(id(BOB)),
+            "offline here and, by the event, offline there too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_disconnect_while_locally_online_is_repaired() {
+        let fixture = Fixture::new();
+        let room = fixture.room_with_bob().await;
+
+        // Bob holds a session here, and one on another node that drops: the announcement
+        // that crosses describes a departure that did not happen.
+        fixture
+            .presence
+            .on_session_started(id(BOB), ts(NOW + 10))
+            .await;
+        fixture
+            .presence
+            .note_remote_member(
+                room,
+                id(BOB),
+                Some(MemberChange::Disconnected),
+                ts(NOW + 20),
+            )
+            .await;
+
+        let repairs = fixture.recorder.members_with(MemberChange::Reconnected);
+        assert_eq!(
+            repairs.len(),
+            1,
+            "the wrong announcement is repaired on the spot"
+        );
+        assert_eq!(repairs[0].user_id, id(BOB));
+        assert!(
+            repairs[0].joined,
+            "the member reads as present, because they are"
+        );
+        assert_eq!(
+            fixture.presence.online_count(room).await,
+            1,
+            "the count never lost a member who never went dark"
+        );
+        assert_eq!(
+            fixture.recorder.latest_online(room),
+            Some(1),
+            "and the room was told so"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_removal_clears_the_reconnect_that_was_owed() {
+        let fixture = Fixture::new();
+        let room = fixture.room_with_bob().await;
+
+        fixture
+            .presence
+            .note_remote_member(
+                room,
+                id(BOB),
+                Some(MemberChange::Disconnected),
+                ts(NOW + 10),
+            )
+            .await;
+        // The sender's grace expires and the departure it made real crosses back.
+        fixture
+            .presence
+            .note_remote_member(room, id(BOB), Some(MemberChange::Left), ts(NOW + 20))
+            .await;
+        // Bob connects here afterwards: the room is owed nothing, because the seat is gone.
+        fixture
+            .presence
+            .on_session_started(id(BOB), ts(NOW + 30))
+            .await;
+
+        assert!(
+            fixture
+                .recorder
+                .members_with(MemberChange::Reconnected)
+                .is_empty(),
+            "a room the member was removed from is owed no reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_join_puts_the_member_in_this_nodes_count() {
+        let fixture = Fixture::new();
+        let room = fixture.room_with_bob().await;
+
+        // Bob's seat was taken through a session on another node.
+        fixture
+            .presence
+            .note_remote_member(room, id(BOB), Some(MemberChange::Joined), ts(NOW + 10))
+            .await;
+        assert_eq!(
+            fixture.presence.online_count(room).await,
+            1,
+            "a member whose join crossed the mesh is online as this node serves it"
+        );
     }
 }

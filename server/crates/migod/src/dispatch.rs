@@ -98,8 +98,8 @@ use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial
 use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
 use crate::replication::ReplicationRelay;
-use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
-use crate::room_relay::{FederatedPublisher, RoomRelay};
+use crate::room_presence::{GatewayHandle, RoomPresence};
+use crate::room_relay::RoomRelay;
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -150,9 +150,10 @@ pub struct AppDispatcher {
     bots: SharedBots,
     calls: SharedCallkeeper,
     /// The per-account session tally behind room online counts and the reconnect grace. Built
-    /// here rather than passed in, because it is glue this dispatcher owns and nothing else
-    /// holds — it reads the same store and rooms handle the dispatcher already has, and it
-    /// publishes through the same late-bound gateway.
+    /// by the composition root rather than here, because the mesh transport's ingest path
+    /// shares the same tally — a member event that crossed the mesh is the only word this
+    /// node gets about who is online on the nodes it came from — and neither the dispatcher
+    /// nor the transport may own the other.
     room_presence: Arc<RoomPresence>,
     /// The late-bound gateway, filled by the composition root once the gateway is open. Used to
     /// publish presence and room lifecycle events out of band — with no client request in hand —
@@ -207,25 +208,13 @@ impl AppDispatcher {
         federation: SharedMesh,
         bots: SharedBots,
         calls: SharedCallkeeper,
+        room_presence: Arc<RoomPresence>,
         gateway: Arc<GatewayHandle>,
         room_relay: Arc<RoomRelay>,
         conversation_relay: Arc<ConversationRelay>,
         presence_relay: Arc<PresenceRelay>,
         replication: Arc<ReplicationRelay>,
     ) -> Self {
-        // The room-presence component reads the same store and rooms handle and publishes through
-        // the same gateway handle, so it is assembled from what this call already holds rather
-        // than threaded through as one more argument. Its publisher is wrapped in the
-        // federated one, so an out-of-band room event owes its federated copy — the tiered
-        // fanout of section 170 — without the room-presence component knowing a mesh exists.
-        let room_presence = Arc::new(RoomPresence::new(
-            migo_store::SharedStore::clone(&store),
-            SharedRooms::clone(&rooms),
-            Arc::new(FederatedPublisher::new(
-                Arc::new(GatewayPublisher::new(Arc::clone(&gateway))),
-                Arc::clone(&room_relay),
-            )),
-        ));
         Self {
             store,
             messaging,
@@ -1411,11 +1400,13 @@ impl Dispatcher for AppDispatcher {
     /// Two call facts ride the same edge. A group seat held by the departing device is stamped
     /// gone — the seat sweep retires it once the grace window passes without a re-join, so a
     /// roster never renders a participant whose session died (audit area 6, section 166). And an
-    /// account whose *last* session went down mid-call cannot end the call itself — nothing is
-    /// running to send the end — so the node ends its answered calls as `Network` and tells the
-    /// survivor now, rather than leaving them to a client-side media timeout (section 180). Both
-    /// are best-effort, logged rather than failed, for the same reason the presence fan-out is:
-    /// the socket is already gone, and there is no request to fail.
+    /// account whose last session *anywhere* went down mid-call cannot end the call itself —
+    /// nothing is running to send the end — so the node ends its answered calls as `Network` and
+    /// tells the survivor now, rather than leaving them to a client-side media timeout (section
+    /// 180). "Anywhere" is the tally's to answer: a member whose last socket *here* dropped but
+    /// who is online on another node (section 170) is reachable still, and their calls are not
+    /// this node's to end. Both are best-effort, logged rather than failed, for the same reason
+    /// the presence fan-out is: the socket is already gone, and there is no request to fail.
     async fn session_ended(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
         let account_id = identity.account_id();
         let caller =
@@ -1431,12 +1422,13 @@ impl Dispatcher for AppDispatcher {
         {
             tracing::warn!(%error, "cannot tell the call service a group seat's session ended");
         }
-        // The last socket of the account: the calls above are calls nobody on
-        // this account can speak for anymore. The tally is read after the
-        // decrement above, and a session that comes up a moment later is the
-        // reconnect this cannot see — the call it lost is a call its client
-        // must re-dial, which is what a network death already meant.
-        if self.room_presence.session_count(account_id) == 0 {
+        // The last socket of the account, here or anywhere: the calls above are calls
+        // nobody on this account can speak for anymore. The tally is read after the
+        // decrement above — and a session that comes up a moment later is the reconnect
+        // this cannot see, exactly as one that is already up on another node is. The call
+        // it lost is a call its client must re-dial, which is what a network death already
+        // meant.
+        if !self.room_presence.reachable(account_id) {
             match self.calls.end_disconnected(account_id, now).await {
                 Ok(retired) => self.publish_network_ends(account_id, &retired, now),
                 Err(error) => {
