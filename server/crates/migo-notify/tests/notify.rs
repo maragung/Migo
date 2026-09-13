@@ -60,6 +60,7 @@ const NOW: i64 = 1_700_000_000 * SECOND;
 const ALICE: u128 = 1;
 const BOB: u128 = 2;
 const CAROL: u128 = 3;
+const DAVE: u128 = 4;
 
 const ALICE_PHONE: u128 = 101;
 const ALICE_TABLET: u128 = 102;
@@ -1941,7 +1942,9 @@ async fn every_recipient_of_a_fan_out_rings_their_own_bell() {
     harness.account(ALICE, "alice").await;
     harness.account(BOB, "bob").await;
     harness.account(CAROL, "carol").await;
-    let event = Event::new(Id::NIL, NotificationKind::Gift, ts(NOW)).by(id(ALICE));
+    // DAVE is the actor, not a recipient: every fan-out recipient is then a
+    // bystander, so no bell may be dropped by the self-inflicted rule.
+    let event = Event::new(Id::NIL, NotificationKind::Gift, ts(NOW)).by(id(DAVE));
 
     harness
         .notify
@@ -1953,7 +1956,7 @@ async fn every_recipient_of_a_fan_out_rings_their_own_bell() {
     let rung: Vec<Id> = rings.iter().map(|(recipient, _)| *recipient).collect();
     assert_eq!(rung, vec![id(ALICE), id(BOB), id(CAROL)]);
     for (_recipient, frame) in &rings {
-        assert_eq!(frame.actor_id, Some(id(ALICE)));
+        assert_eq!(frame.actor_id, Some(id(DAVE)));
         assert_eq!(frame.kind, NotificationKind::Gift);
     }
 }

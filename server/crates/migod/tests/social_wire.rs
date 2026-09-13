@@ -474,13 +474,37 @@ async fn a_friend_request_rings_exactly_one_bell() {
     };
     assert!(!pong.header.is_error());
 
-    // Alice asked, so nobody rings hers: her session was answered by the
-    // acknowledgement, and the only frame her own topic owes her is the echo hint,
-    // which is not a notification.
-    let echo = next_event_of(&mut alice.stream, Opcode::FriendEvent).await;
-    let echo: FriendEvent = from_frame(&echo).expect("the echo decodes");
-    assert_eq!(echo.user_id, bob_grant.account_id);
-    assert_eq!(echo.state, "request");
+    // Alice asked, so nobody rings hers: the session that acted is answered by the
+    // acknowledgement alone. The echo hint is owed to her *other* devices (section
+    // 156 keeps it off the session that just acted), so the assertion here is an
+    // absence: a PING, and no FRIEND_EVENT may arrive in front of its PONG.
+    send(
+        &mut alice.stream,
+        Opcode::Ping,
+        22,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut alice.stream, STEP).await;
+        let opcode = Opcode::from_wire(frame.header.opcode);
+        assert_ne!(
+            opcode,
+            Some(Opcode::FriendEvent),
+            "the session that asked is not handed the echo it was already answered with"
+        );
+        assert_ne!(
+            opcode,
+            Some(Opcode::NotificationEvent),
+            "the asker's own devices are not an audience of her own ask"
+        );
+        if frame.header.correlation == 22 {
+            break frame;
+        }
+    };
+    assert!(!pong.header.is_error());
 }
 
 /// The acceptance's other half: the acceptor's own second device.
@@ -523,7 +547,16 @@ async fn an_acceptance_reaches_the_acceptors_other_device() {
     assert_eq!(accepted.state, "accepted");
 
     // The acceptor's other device hears the same move as an echo on the acceptor's
-    // own topic, naming the new friend.
+    // own topic, naming the new friend. It has been subscribed since before the ask,
+    // so its queue holds the whole story in order: first the incoming request —
+    // the other device learns of the ask itself here — and then the acceptance the
+    // sibling session just made.
+    let asked: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the acceptor's other device heard the ask");
+    assert_eq!(asked.user_id, alice_grant.account_id);
+    assert_eq!(asked.state, "request");
+
     let echo: FriendEvent =
         from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
             .expect("the acceptor's other device gets an event");
@@ -642,6 +675,14 @@ async fn a_decline_moves_the_graph_for_both_parties() {
     );
 
     // The decliner's other device: the incoming list it renders lost the same row.
+    // It has held a subscription since before the ask, so its queue carries the story
+    // in order — the incoming request first, then the decline that removed it.
+    let asked: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the decliner's other device heard the ask");
+    assert_eq!(asked.user_id, alice_grant.account_id);
+    assert_eq!(asked.state, "request");
+
     let echo: FriendEvent =
         from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
             .expect("the decliner's other device gets an event");
@@ -712,6 +753,13 @@ async fn a_block_tears_the_friendship_down_live_on_both_sides() {
             },
         )
         .await;
+    // Bob's other device was subscribed through the ask as well, so its queue holds
+    // the incoming request ahead of the acceptance; both are drained in order.
+    let bob_device_asked: FriendEvent =
+        from_frame(&next_event_of(&mut bob_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the acceptor's other device heard the ask");
+    assert_eq!(bob_device_asked.user_id, alice_grant.account_id);
+    assert_eq!(bob_device_asked.state, "request");
     let accepted: FriendEvent =
         from_frame(&next_event_of(&mut alice.stream, Opcode::FriendEvent).await)
             .expect("the asker's acceptance decodes");
