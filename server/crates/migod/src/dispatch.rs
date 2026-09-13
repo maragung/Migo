@@ -485,14 +485,28 @@ impl AppDispatcher {
             }
         }
         if let Some(account_id) = removed {
-            if let Some(gateway) = self.gateway.get() {
-                gateway.revoke_subscriptions(
-                    account_id,
-                    &[Topic {
-                        kind: TopicKind::Conversation,
-                        id: conversation_id,
-                    }],
-                );
+            // The same re-join race the room path guards against: a member who
+            // left a group and was re-invited before this fanout reached their
+            // other devices holds a subscription the fresh invite granted, and
+            // the removal that triggered this is no longer the last word on
+            // their standing. One membership read at the last moment decides;
+            // a read that fails revokes anyway, because the removal already
+            // happened and a store fault is not evidence of a re-join.
+            let still_removed = !self
+                .store
+                .is_member(conversation_id, account_id)
+                .await
+                .unwrap_or(false);
+            if still_removed {
+                if let Some(gateway) = self.gateway.get() {
+                    gateway.revoke_subscriptions(
+                        account_id,
+                        &[Topic {
+                            kind: TopicKind::Conversation,
+                            id: conversation_id,
+                        }],
+                    );
+                }
             }
         }
         Ok(())
@@ -505,6 +519,18 @@ impl AppDispatcher {
     /// one place that knows which conversation speaks for it. A missing row —
     /// archived mid-flight, or a store fault — still revokes the room topic;
     /// the message topic is the bonus, not the floor.
+    ///
+    /// The membership is re-read here, at the last moment before the
+    /// revocation, because the removal that called this can be overtaken by a
+    /// re-join: a member who leaves and comes back — on another socket, or on
+    /// another node whose copy of the departure arrives late — holds a
+    /// subscription the fresh join granted, and revoking it would cut an
+    /// active member off from a room they are entitled to. Every room
+    /// membership write (join, leave, kick, vote, ban) mirrors the account's
+    /// standing into the room conversation's member rows, so one `is_member`
+    /// read answers for both topics at once. A read that fails revokes
+    /// anyway: the removal already happened, and a store fault is not
+    /// evidence of a re-join.
     async fn revoke_room_audience(&self, room_id: Id, account_id: Id) {
         let Some(gateway) = self.gateway.get() else {
             return;
@@ -514,6 +540,14 @@ impl AppDispatcher {
             id: room_id,
         }];
         if let Ok(Some(room)) = self.store.room(room_id).await {
+            if self
+                .store
+                .is_member(room.conversation_id, account_id)
+                .await
+                .unwrap_or(false)
+            {
+                return;
+            }
             topics.push(Topic {
                 kind: TopicKind::Conversation,
                 id: room.conversation_id,
