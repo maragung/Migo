@@ -273,6 +273,7 @@ export type {
   ConversationVoteEvent,
   ConversationVoteKickResponse,
   Entitlement,
+  EconomyEvent,
   FriendEvent,
   GameCatalogueEntry,
   GameEvent,
