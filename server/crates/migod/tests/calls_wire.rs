@@ -32,6 +32,12 @@
 //!   only the relay — the `Connected` state event every client listens for
 //!   never went out. The fourth test relays the answer and asserts both
 //!   parties hear `Connected`.
+//! * **A dead session ends the connected call for the survivor.** A party
+//!   whose socket dies cannot send the end — nothing is running to send it —
+//!   so the node ends the departed account's calls on the session edge and
+//!   publishes `Ended(Network)` to the survivor's user topic, prompt instead
+//!   of a client-side media timeout. The sixth test kills the callee's socket
+//!   mid-call and asserts the caller hears it.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -45,8 +51,9 @@ use migo_calls::{CallState, EndReason};
 use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_protocol::{
     from_frame, to_frame, CallAnswer, CallDecline, CallInvite, CallInviteEvent, CallInviteResult,
-    CallSdp, CallStateEvent, Encode, Frame, Hello, Opcode, Platform, RoomJoinRequest, RoomKind,
-    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    CallSdp, CallStateEvent, Encode, Frame, Hello, NotificationEvent, NotificationKind, Opcode,
+    Platform, RoomJoinRequest, RoomKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
+    Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -550,6 +557,94 @@ async fn a_call_answered_on_one_device_stops_the_ring_on_the_other() {
 }
 
 #[tokio::test]
+async fn an_incoming_call_rings_the_bell_on_every_device() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "bellcaller").await;
+    let callee = registered_grant(&app, "bellcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "bell-room").await;
+
+    let laptop = second_device_grant(&app, "bellcallee").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut phone = LiveSession::connect(addr, &callee).await;
+    let mut laptop_session = LiveSession::connect(addr, &laptop).await;
+
+    let call_id = Id::from_bytes([0xB3; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            95,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x44; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+
+    // The semantic ring each screen reacts to, on both of the callee's devices.
+    let invite_frame = next_event_of(&mut phone.stream, Opcode::CallInviteEvent, STEP).await;
+    let invite: CallInviteEvent = from_frame(&invite_frame).expect("the phone's invite decodes");
+    assert_eq!(invite.call_id, call_id);
+    let invite_frame =
+        next_event_of(&mut laptop_session.stream, Opcode::CallInviteEvent, STEP).await;
+    let invite: CallInviteEvent = from_frame(&invite_frame).expect("the laptop's invite decodes");
+    assert_eq!(invite.call_id, call_id);
+
+    // The bell. The notification the invite hands to the notifier used to be a row and
+    // a (future) push only — no frame — so a callee watching their screen learned
+    // nothing until the invite event itself arrived, and a client that renders the
+    // bell from NOTIFICATION_EVENT learned nothing at all. The notifier's seam now
+    // rings it on the recipient's user topic, which both devices are subscribed to.
+    let bell_frame = next_event_of(&mut phone.stream, Opcode::NotificationEvent, STEP).await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the phone's bell decodes");
+    assert_eq!(bell.kind, NotificationKind::IncomingCall);
+    assert_eq!(bell.actor_id, Some(caller.account_id));
+    assert_eq!(bell.title, None, "the client writes the sentence");
+    assert_eq!(bell.body, None, "the client writes the sentence");
+    let bell_frame =
+        next_event_of(&mut laptop_session.stream, Opcode::NotificationEvent, STEP).await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the laptop's bell decodes");
+    assert_eq!(bell.kind, NotificationKind::IncomingCall);
+    assert_eq!(bell.actor_id, Some(caller.account_id));
+
+    // The caller rang somebody else's bell, not their own. A PING is the next frame
+    // their session is owed, and any notification queued ahead of it would be read
+    // here — which is the assertion.
+    send(
+        &mut caller_session.stream,
+        Opcode::Ping,
+        96,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    loop {
+        let frame = recv_within(&mut caller_session.stream, STEP).await;
+        if frame.header.correlation == 96 {
+            assert!(
+                !frame.header.is_error(),
+                "a PING is always answerable: {:?}",
+                from_frame::<migo_protocol::Error>(&frame)
+            );
+            break;
+        }
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::NotificationEvent),
+            "the caller's session is owed no bell for the ring they started"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_busy_decline_reaches_the_caller_as_busy() {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the TCP listener is bound");
@@ -690,6 +785,94 @@ async fn the_answer_relay_tells_both_parties_the_call_connected() {
     // out before it. Nothing further is owed to the callee's own session, and
     // that is the design — the answering device's truth is its reply and its
     // own screen state, not an event it must wait for.
+}
+
+/// A connected party's socket dies — no `CALL_END`, just a closed connection —
+/// and the survivor hears the call ended from the *server*, promptly, instead
+/// of waiting out a client-side media timeout (audit area 6, section 180).
+/// Before the session edge ended the departed account's calls, the survivor's
+/// only clock was its own reconnect window: tens of seconds of one-way media
+/// to a peer that no longer exists. The frame waited for below is the fix —
+/// `Ended(Network)`, published by the node on the edge that always knows.
+#[tokio::test]
+async fn a_dead_session_s_connected_call_ends_for_the_survivor() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "survivorcaller").await;
+    let callee = registered_grant(&app, "survivorcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "survivor-room").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut callee_session = LiveSession::connect(addr, &callee).await;
+
+    // The call to Connected, exactly as the answer-relay test builds it: ring,
+    // answer, and the callee's first sealed SDP relay.
+    let call_id = Id::from_bytes([0xD4; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            121,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x88; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+    let _ = next_event_of(&mut callee_session.stream, Opcode::CallInviteEvent, STEP).await;
+
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallAnswer,
+            122,
+            &CallAnswer {
+                call_id,
+                callee_device: callee.device_id,
+                sealed_answer: vec![0x99; 48],
+            },
+        )
+        .await;
+    let _ = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallSdp,
+            123,
+            &CallSdp {
+                call_id,
+                from_device: callee.device_id,
+                to_device: caller.device_id,
+                sealed_sdp: vec![0xAA; 48],
+            },
+        )
+        .await;
+    let connected = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&connected).expect("the caller's event decodes");
+    assert_eq!(state.state, CallState::Connected.to_wire());
+    let _ = next_event_of(&mut caller_session.stream, Opcode::CallSdp, STEP).await;
+
+    // The callee's socket dies — the whole account, its only session, gone
+    // with no leave and no end. The caller stays connected.
+    drop(callee_session);
+
+    // The survivor is told, and told *why*: `Network`, the reason that claims
+    // connectivity was lost rather than a hang-up nobody sent. The timeout is
+    // the assertion — on the code this test was written against, nothing came,
+    // and the caller's screen waited out its media timeout alone.
+    let ended = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&ended).expect("the survivor's event decodes");
+    assert_eq!(state.call_id, call_id);
+    assert_eq!(state.state, CallState::Ended.to_wire());
+    assert_eq!(
+        state.reason,
+        Some(EndReason::Network.to_wire()),
+        "the server says the network died, not that anybody hung up"
+    );
 }
 
 #[tokio::test]

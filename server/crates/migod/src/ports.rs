@@ -38,6 +38,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
 use crate::replication::ReplicationHandle;
+use crate::room_presence::GatewayHandle;
 use migo_calls::CallGate;
 use migo_core::{Id, Result, Timestamp};
 use migo_economy::{Award, Badge, BadgeGrant, SharedTreasurer, Source};
@@ -45,7 +46,7 @@ use migo_games::Rewards;
 use migo_media::{Grant, Head, Storage, SNIFF_BYTES};
 use migo_messaging::KickTariff;
 use migo_moderation::{Powers, Roster};
-use migo_protocol::fault;
+use migo_protocol::{fault, NotificationEvent};
 
 /// A filesystem-backed [`Storage`]: object bytes as files under one root directory.
 ///
@@ -561,14 +562,16 @@ impl migo_messaging::MessageGate for StoreMessageGate {
 // --- the economy's notifications --------------------------------------------------
 //
 // `migo-economy` tells the world what happened through its `Announcer` port; the
-// composition root decides what telling means here. This adapter stores a notification
-// row for every announcement — the inbox half. The realtime half (a `NOTIFICATION_EVENT`
-// broadcast) cannot live here: the port fires inside the service, mid-transaction, with
-// no connection context to publish from, so the dispatcher publishes it for the paths a
-// user can watch (gifts) and everything else waits in the inbox until the client asks.
+// composition root decides what telling means here. This adapter hands every
+// announcement to the notifier, which finishes all three halves itself: the inbox row,
+// the push wake-up, and the realtime bell. The bell used to be the dispatcher's to
+// hand-roll for the one path a user could watch (gifts), which left every other
+// announcement frameless — the row waited in the inbox until the client asked. The
+// notifier's own seam (below) rings it for every kind, from one place, with one
+// per-recipient coalescing rule.
 
-/// An [`Announcer`](migo_economy::Announcer) that stores every announcement as a
-/// notification row.
+/// An [`Announcer`](migo_economy::Announcer) that turns every announcement into a
+/// notification.
 pub struct NotifyingAnnouncer {
     notifier: migo_notify::SharedNotifier,
 }
@@ -590,6 +593,7 @@ impl migo_economy::Announcer for NotifyingAnnouncer {
             actor_id: announcement.actor_id,
             room_id: None,
             subject_id: announcement.subject_id,
+            conversation_id: announcement.conversation_id,
             at: announcement.at,
         };
         // The notifier treats a delivery failure as Ok (logged, counted); an Err here
@@ -600,5 +604,38 @@ impl migo_economy::Announcer for NotifyingAnnouncer {
             tracing::warn!(code = error.code(), "economy notification dropped");
         }
         Ok(())
+    }
+}
+
+// --- the notifier's realtime half --------------------------------------------------
+//
+// `migo-notify` rings a bell for every event it accepts, and the bell is a port because
+// the fan-outs that raise notifications run where no connection context exists to
+// publish from. This is the production ring: the gateway's broadcast, reached through
+// the same one-slot cell the room relay holds, because the gateway is handed the
+// dispatcher and so cannot exist before the notifier does. Until the cell is filled —
+// a startup window measured in the same milliseconds it takes to open a listener — a
+// ring is quietly dropped, which is the right failure: the row is written, the push is
+// queued, and no notification the process owes anybody is raised before it can serve a
+// socket anyway.
+
+/// The production [`Bell`](migo_notify::Bell): the gateway, once it exists.
+pub struct GatewayBell {
+    gateway: Arc<GatewayHandle>,
+}
+
+impl GatewayBell {
+    /// Builds the ring over an empty handle the composition root will fill.
+    #[must_use]
+    pub fn new(gateway: Arc<GatewayHandle>) -> Self {
+        Self { gateway }
+    }
+}
+
+impl migo_notify::Bell for GatewayBell {
+    fn ring(&self, recipient: Id, event: &NotificationEvent, now: Timestamp) {
+        if let Some(gateway) = self.gateway.get() {
+            gateway.emit_notification(recipient, event, now);
+        }
     }
 }

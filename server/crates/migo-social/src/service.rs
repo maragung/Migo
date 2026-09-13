@@ -64,9 +64,9 @@ use migo_store::{SharedStore, Store};
 
 use crate::metrics::{EdgeKind, GateOutcome, Meters, RequestOutcome, ResponseOutcome};
 use crate::model::{
-    query_is_usable, strictest, Caller, Edge, Found, FriendOutcome, Interaction, Pending,
-    ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE, MAX_FAVORITES,
-    MAX_MUTUAL_SCAN, MAX_PAGE, MAX_PROFILE_BATCH,
+    query_is_usable, strictest, BlockOutcome, Caller, Edge, Found, FriendOutcome, Interaction,
+    Pending, ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE,
+    MAX_FAVORITES, MAX_MUTUAL_SCAN, MAX_PAGE, MAX_PROFILE_BATCH,
 };
 use crate::notice::Notice;
 use crate::traits::Graph;
@@ -905,7 +905,7 @@ where
         Ok(())
     }
 
-    async fn block(&self, caller: &Caller, subject_id: Id) -> Result<()> {
+    async fn block(&self, caller: &Caller, subject_id: Id) -> Result<BlockOutcome> {
         Self::require_identity(caller)?;
         Self::require_other(caller, subject_id)?;
         self.charge(caller, EDGE_COST).await?;
@@ -917,15 +917,42 @@ where
         )
         .await?;
 
-        // What the block is about to undo, read before it is undone. Four keyed reads on
+        // What the block is about to undo, read before it is undone. Seven keyed reads on
         // an operation a person performs by hand, so that the removal counters keep
         // meaning "an edge that existed is gone" rather than "a block happened": most
         // blocks are of strangers, and counting a friendship removal for every one of
         // those would leave the friend series unable to answer the single question it
-        // exists for.
+        // exists for. The same reads answer who holds a stale copy of the graph, which
+        // is what [`BlockOutcome`] reports: the pending rows and the subject's own
+        // follow of the caller are read separately from the caller's follow of the
+        // subject because they live on the *subject's* side of the pair, and the
+        // subject's devices are the ones that need to hear the graph moved.
         let was_friend = self
             .store
             .relationship(caller.account_id, subject_id, RelationshipKind::Friend)
+            .await?
+            .is_some();
+        let was_pending = self
+            .store
+            .relationship(
+                caller.account_id,
+                subject_id,
+                RelationshipKind::PendingIncoming,
+            )
+            .await?
+            .is_some()
+            || self
+                .store
+                .relationship(
+                    caller.account_id,
+                    subject_id,
+                    RelationshipKind::PendingOutgoing,
+                )
+                .await?
+                .is_some();
+        let was_followed_by = self
+            .store
+            .relationship(subject_id, caller.account_id, RelationshipKind::Follow)
             .await?
             .is_some();
         let was_following = self
@@ -933,11 +960,7 @@ where
             .relationship(caller.account_id, subject_id, RelationshipKind::Follow)
             .await?
             .is_some()
-            || self
-                .store
-                .relationship(subject_id, caller.account_id, RelationshipKind::Follow)
-                .await?
-                .is_some();
+            || was_followed_by;
         let was_favorite = self
             .store
             .relationship(caller.account_id, subject_id, RelationshipKind::Favorite)
@@ -946,6 +969,11 @@ where
         let was_muted = self
             .store
             .relationship(caller.account_id, subject_id, RelationshipKind::Mute)
+            .await?
+            .is_some();
+        let was_blocked = self
+            .store
+            .relationship(caller.account_id, subject_id, RelationshipKind::Block)
             .await?
             .is_some();
 
@@ -1002,7 +1030,22 @@ where
         if !was_muted {
             self.meters.added(EdgeKind::Mute);
         }
-        Ok(())
+        // Who holds a stale copy of the graph now. The subject's devices when an edge
+        // they could observe is gone — a friendship, a pending request either way, or
+        // their follow of the caller; the caller's *other* devices when the caller's
+        // own graph moved at all. The second is false only for the pure no-op (already
+        // blocked, already muted, nothing else between the two), and section 156's
+        // closing rule — state that did not change produces no frame — is why it is
+        // computed rather than assumed.
+        Ok(BlockOutcome {
+            severed: was_friend || was_pending || was_followed_by,
+            moved: !was_blocked
+                || !was_muted
+                || was_friend
+                || was_pending
+                || was_following
+                || was_favorite,
+        })
     }
 
     async fn unblock(&self, caller: &Caller, subject_id: Id) -> Result<()> {

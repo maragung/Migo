@@ -59,6 +59,17 @@ pub trait CallStore: Send + Sync {
     /// check, a call-waiting screen) sees the most urgent ring first.
     async fn active_for_callee(&self, callee_id: Id, now: Timestamp) -> Result<Vec<Call>>;
 
+    /// The answered calls `account_id` is a party to, either side.
+    ///
+    /// `Connecting` and `Connected` only: a ring the account placed is the
+    /// ring sweep's business (its own deadline retires it), and a ring the
+    /// account is running from dies of `NoAnswer` without anybody's help.
+    /// This is the read the disconnect path asks — which established calls
+    /// just lost their party — and the answer is ordered by deadline for the
+    /// same reason `active_for_callee` is, so a caller with several rows
+    /// renders the most urgent first.
+    async fn live_for(&self, account_id: Id) -> Result<Vec<Call>>;
+
     /// Ends every expired invite at `now`, returning the calls it retired.
     ///
     /// Idempotent by construction: a second sweep finds the calls it already
@@ -123,6 +134,21 @@ impl CallStore for MemoryCallStore {
             .collect();
         active.sort_by_key(|call| (call.expires_at, call.call_id));
         Ok(active)
+    }
+
+    async fn live_for(&self, account_id: Id) -> Result<Vec<Call>> {
+        let mut live: Vec<Call> = self
+            .calls
+            .lock()
+            .values()
+            .filter(|call| {
+                (call.caller_id == account_id || call.callee_id == account_id)
+                    && matches!(call.state, CallState::Connecting | CallState::Connected)
+            })
+            .cloned()
+            .collect();
+        live.sort_by_key(|call| (call.expires_at, call.call_id));
+        Ok(live)
     }
 
     async fn sweep_expired(&self, now: Timestamp) -> Result<Vec<Call>> {

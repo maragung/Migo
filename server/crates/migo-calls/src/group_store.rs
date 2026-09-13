@@ -52,6 +52,16 @@ pub trait GroupCallStore: Send + Sync {
     /// run at the moment of the last leave rather than on a timer, because the
     /// last leave is the one event that always knows.
     async fn retire_if_empty(&self, call_id: Id) -> Result<Option<GroupCall>>;
+
+    /// Every roster the store holds, for the sweep.
+    ///
+    /// The seat sweep cannot name the calls it must look at — a dead session's
+    /// account may hold a seat in any of them — so the store hands over the
+    /// whole working set and the service decides per seat. A backend that can
+    /// answer "which rosters hold this account" in one indexed query should
+    /// grow that question instead; the in-memory backend's clone of a handful
+    /// of live calls is the behaviour to beat.
+    async fn all(&self) -> Result<Vec<GroupCall>>;
 }
 
 /// A shared, fully erased group-call store.
@@ -94,6 +104,10 @@ impl GroupCallStore for MemoryGroupCallStore {
             Some(call) if call.participants.is_empty() => Ok(calls.remove(&call_id)),
             _ => Ok(None),
         }
+    }
+
+    async fn all(&self) -> Result<Vec<GroupCall>> {
+        Ok(self.calls.lock().values().cloned().collect())
     }
 }
 
@@ -148,21 +162,25 @@ pub fn group_join_event(
 
 /// Builds the departure event the roster hears: `Ended` naming the leaver and
 /// the size after the change — `Ended` because the wire's vocabulary has no
-/// "left" state, and the reason slot carries
-/// [`EndReason::ByCaller`](crate::model::EndReason::ByCaller)'s number
-/// so a client rendering the optional reason still renders something honest
-/// (the participant withdrew themselves).
+/// "left" state, and the reason slot carries the departure's own truth:
+/// [`EndReason::ByCaller`](crate::model::EndReason::ByCaller) for a leave the
+/// participant sent, so a client rendering the optional reason still renders
+/// something honest (the participant withdrew themselves), and
+/// [`EndReason::Network`](crate::model::EndReason::Network) for the sweep's
+/// retirement of a seat whose session died, so the same slot does not claim a
+/// withdrawal nobody made.
 #[must_use]
 pub fn group_leave_event(
     call: &GroupCall,
     leaver: Id,
     device: Id,
     count: u32,
+    reason: crate::model::EndReason,
 ) -> migo_protocol::CallStateEvent {
     migo_protocol::CallStateEvent {
         call_id: call.call_id,
         state: GROUP_STATE_ENDED,
-        reason: Some(crate::model::EndReason::ByCaller.to_wire()),
+        reason: Some(reason.to_wire()),
         conversation_id: Some(call.conversation_id),
         user_id: Some(leaver),
         device_id: Some(device),

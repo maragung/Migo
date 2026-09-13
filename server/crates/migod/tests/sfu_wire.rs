@@ -3,7 +3,7 @@
 //!
 //! The SFU this node serves is a *forwarding* one (brief section 166): the
 //! roster, its events, and sealed descriptions moved between seated devices.
-//! The eight tests here drive real TCP sessions against a bound migod and pin
+//! The nine tests here drive real TCP sessions against a bound migod and pin
 //! the properties the service's own tests cannot see:
 //!
 //! * **The joiner hears their roster.** The reply frame is a TURN list (the
@@ -37,6 +37,11 @@
 //!   refuses the media from before the join, and the joiner rides the next
 //!   rotation like every other seat (section 163's "sealed for them at
 //!   join", as code rather than convention).
+//! * **A dead session's seat is retired.** A socket that closes without a
+//!   leave is stamped gone on the session edge, and the sweep retires the
+//!   seat once the grace window passes without a re-join, announcing the
+//!   departure to the conversation as `Ended(Network)` — the roster never
+//!   renders a participant whose session is dead (audit area 6).
 //!
 //! Each test uses the reply rule as its clock: every frame waited for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -72,6 +77,25 @@ async fn build_app() -> App {
         &[
             ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
             ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+        ],
+    )
+    .expect("configuration should parse");
+    App::build(&config)
+        .await
+        .expect("a development configuration must build against in-memory backends")
+}
+
+/// The same development app with a seat grace short enough to observe inside
+/// one test step: the seat-sweep test waits out the grace window plus one
+/// sweep tick, and the production default's thirty seconds belongs to an
+/// operator's patience, not a test's budget.
+async fn build_app_with_short_seat_grace() -> App {
+    let config = Config::from_sources(
+        &[],
+        &[
+            ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
+            ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+            ("MIGO_CALLS__SEAT_GRACE_MS".to_string(), "1500".to_string()),
         ],
     )
     .expect("configuration should parse");
@@ -302,6 +326,44 @@ impl LiveSession {
                 return from_frame(&frame).expect("the error decodes");
             }
         }
+    }
+
+    /// `ask` for a request that can land inside the limiter's window: a test's
+    /// setup burst is several frames in one second, and a request sent soon
+    /// after them is answered "retry in N ms" — the server talking, not the
+    /// server broken — so the session waits exactly as long as it is told and
+    /// asks again, the same politeness the handshake backoff practices above.
+    async fn ask_against_the_window<M: Encode, R: migo_protocol::Decode>(
+        &mut self,
+        opcode: Opcode,
+        correlation: u32,
+        message: &M,
+    ) -> R {
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            send(&mut self.stream, opcode, correlation, message).await;
+            loop {
+                let frame = recv_within(&mut self.stream, STEP).await;
+                if frame.header.correlation != correlation {
+                    continue;
+                }
+                if !frame.header.is_error() {
+                    return from_frame(&frame).expect("the reply decodes");
+                }
+                let refusal: migo_protocol::Error =
+                    from_frame(&frame).expect("the refusal decodes");
+                assert!(
+                    refusal.code == migo_protocol::codes::RATE_LIMITED,
+                    "the request is refused outright: {refusal:?}"
+                );
+                backoff = u64::from(refusal.retry_after_ms.unwrap_or(1000));
+                break;
+            }
+        }
+        panic!("the request never succeeds even after backing off as instructed");
     }
 }
 
@@ -675,7 +737,7 @@ async fn a_group_call_with_two_seats(
     call_id: migo_core::Id,
     founder_name: &str,
     second_name: &str,
-) -> (LiveSession, LiveSession, Grant, Grant) {
+) -> (LiveSession, LiveSession, migo_core::Id, Grant, Grant) {
     let addr = app.tcp_bind.expect("the TCP listener is bound");
     let founder = registered_grant(app, founder_name).await;
     let second = registered_grant(app, second_name).await;
@@ -714,14 +776,20 @@ async fn a_group_call_with_two_seats(
     let _ = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
     let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
 
-    (founder_session, second_session, founder, second)
+    (
+        founder_session,
+        second_session,
+        conversation_id,
+        founder,
+        second,
+    )
 }
 
 #[tokio::test]
 async fn a_group_key_rotation_reaches_the_seat_that_did_not_mint_it() {
     let app = build_app().await;
     let call_id = migo_core::Id::from(0x5f05u128);
-    let (mut founder_session, mut second_session, _founder, _second) =
+    let (mut founder_session, mut second_session, _conversation, _founder, _second) =
         a_group_call_with_two_seats(&app, call_id, "sfurekeyfounder", "sfurekeysecond").await;
 
     // The rotation the founder's device mints. It names no target — a
@@ -752,7 +820,7 @@ async fn a_group_key_rotation_reaches_the_seat_that_did_not_mint_it() {
 async fn a_group_relay_lands_on_the_named_seat_and_refuses_a_stranger() {
     let app = build_app().await;
     let call_id = migo_core::Id::from(0x5f06u128);
-    let (mut founder_session, mut second_session, founder, second) =
+    let (mut founder_session, mut second_session, _conversation, founder, second) =
         a_group_call_with_two_seats(&app, call_id, "sfurelayfounder", "sfurelaysecond").await;
 
     // The addressed frame: the roster, not a pair, says whether `to_device`
@@ -950,4 +1018,77 @@ async fn a_mid_call_joiner_receives_the_current_key_sealed_for_them() {
         joiner_key.open_frame(&third).expect("opens"),
         b"third epoch media"
     );
+}
+
+/// A participant's session dies — the socket closes with no `CALL_END`, the
+/// way a crashed client or a dropped network dies — and the seat does not
+/// linger on the roster forever (audit area 6, section 166). Within the grace
+/// window plus one sweep tick, the sweep retires the seat and the founder,
+/// still connected and subscribed to the conversation, hears the departure
+/// announced as `Ended(Network)`; the roster a fresh join renders no longer
+/// contains the dead participant. On the code this test was written against,
+/// nothing retired the seat and nothing was announced: the founder waits out
+/// the frame below until STEP expires and the test fails on silence.
+#[tokio::test]
+async fn a_dead_session_s_seat_is_retired_and_the_roster_told() {
+    let app = build_app_with_short_seat_grace().await;
+    // The sweeper `App::serve` spawns in production, started by hand because
+    // this app never serves — the departure it publishes is the whole point.
+    let _sweeper = app.spawn_call_sweeper();
+    let call_id = migo_core::Id::from(0x5f07u128);
+    let (mut founder_session, second_session, conversation_id, founder, second) =
+        a_group_call_with_two_seats(&app, call_id, "sfudeadfounder", "sfudeadsecond").await;
+
+    // The second participant's socket dies. No leave, no goodbye — just a
+    // closed TCP connection, which is the only honest signal a dead client
+    // ever sends. The founder stays connected and keeps its subscriptions.
+    drop(second_session);
+
+    // The departure the sweep announces to the conversation's topic: the
+    // leaver named, the roster shrunk to one, and the reason telling the truth
+    // about a departure nobody chose to send — `Network`, not `ByCaller`.
+    let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+    let event: CallStateEvent = from_frame(&frame).expect("the departure event decodes");
+    assert_eq!(event.call_id, call_id);
+    assert_eq!(event.conversation_id, Some(conversation_id));
+    assert_eq!(event.user_id, Some(second.account_id));
+    assert_eq!(event.device_id, Some(second.device_id));
+    assert_eq!(event.participant_count, Some(1));
+    assert_eq!(
+        event.state, 4,
+        "the wire's Ended state, as a leave announces"
+    );
+    assert_eq!(
+        event.reason,
+        Some(5),
+        "Network: the session died, nobody withdrew"
+    );
+
+    // The roster no longer contains the stale participant. A duplicate re-join
+    // from the founder's own seat re-publishes the roster snapshot to the
+    // founder's user topic, and the proof is read off that snapshot — not off
+    // the announcement above, which could have said anything. The re-join is
+    // the founder's fifth frame inside the limiter's window — the burst that
+    // seated both participants ran in the same second — so it goes out with
+    // the backoff manners a rate-limited client owes, not as a demand.
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask_against_the_window(Opcode::CallSfuJoin, 19, &sfu_join(call_id, conversation_id))
+        .await;
+    // The re-join is a duplicate, so the conversation topic hears nothing from
+    // it; the one frame the founder's user topic carries is the snapshot
+    // itself, and the loop hands it straight out — the snapshot is the only
+    // way out of it.
+    let roster_frame = loop {
+        let frame = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+        let event: CallStateEvent = from_frame(&frame).expect("the roster event decodes");
+        if event.user_id == Some(founder.account_id) && event.participants.is_some() {
+            break event;
+        }
+    };
+    let roster = roster_frame
+        .participants
+        .expect("the snapshot carries the roster");
+    assert_eq!(roster.len(), 1, "the dead seat is gone from the roster");
+    assert_eq!(roster[0].user_id, founder.account_id);
+    assert!(roster.iter().all(|seat| seat.user_id != second.account_id));
 }

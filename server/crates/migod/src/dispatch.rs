@@ -1351,20 +1351,74 @@ impl Dispatcher for AppDispatcher {
     /// the account's *last* device dropping, the room-presence tally tells each of its rooms the
     /// member went dark and arms the two-minute reconnect grace (section 184). Membership is not
     /// touched here; only the grace expiring with the account still gone removes it.
+    ///
+    /// Two call facts ride the same edge. A group seat held by the departing device is stamped
+    /// gone — the seat sweep retires it once the grace window passes without a re-join, so a
+    /// roster never renders a participant whose session died (audit area 6, section 166). And an
+    /// account whose *last* session went down mid-call cannot end the call itself — nothing is
+    /// running to send the end — so the node ends its answered calls as `Network` and tells the
+    /// survivor now, rather than leaving them to a client-side media timeout (section 180). Both
+    /// are best-effort, logged rather than failed, for the same reason the presence fan-out is:
+    /// the socket is already gone, and there is no request to fail.
     async fn session_ended(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
-        let caller = PresenceCaller::new(
-            identity.account_id(),
-            identity.device_id(),
-            identity.tier,
-            mode,
-            now,
-        );
+        let account_id = identity.account_id();
+        let caller =
+            PresenceCaller::new(account_id, identity.device_id(), identity.tier, mode, now);
         if let Ok(Some(fanout)) = self.presence.disconnected(&caller).await {
             self.publish_presence(&fanout, now);
         }
-        self.room_presence
-            .on_session_ended(identity.account_id(), now)
-            .await;
+        self.room_presence.on_session_ended(account_id, now).await;
+        if let Err(error) = self
+            .calls
+            .group_session_ended(account_id, identity.device_id(), now)
+            .await
+        {
+            tracing::warn!(%error, "cannot tell the call service a group seat's session ended");
+        }
+        // The last socket of the account: the calls above are calls nobody on
+        // this account can speak for anymore. The tally is read after the
+        // decrement above, and a session that comes up a moment later is the
+        // reconnect this cannot see — the call it lost is a call its client
+        // must re-dial, which is what a network death already meant.
+        if self.room_presence.session_count(account_id) == 0 {
+            match self.calls.end_disconnected(account_id, now).await {
+                Ok(retired) => self.publish_network_ends(account_id, &retired, now),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot end the calls of a departing last session")
+                }
+            }
+        }
+    }
+}
+
+impl AppDispatcher {
+    /// Publishes the `Ended(Network)` events for calls a last session left behind.
+    ///
+    /// Out of band, through the late-bound gateway, exactly as the ring sweeper publishes
+    /// its `NoAnswer` ends: there is no request in hand, and the one party who still
+    /// cares — the survivor — is reached on their user topic. The departed account's own
+    /// topic gets nothing; it holds no session to receive it, and its next client learns
+    /// the call's state from the row the end wrote.
+    fn publish_network_ends(&self, departed: Id, retired: &[migo_calls::Call], now: Timestamp) {
+        let Some(gateway) = self.gateway.get() else {
+            return;
+        };
+        for call in retired {
+            let Some(other) = call.other_party(departed) else {
+                continue;
+            };
+            let event = call.ended_event();
+            gateway.broadcast_to_topic(
+                &Topic {
+                    kind: TopicKind::User,
+                    id: other,
+                },
+                Opcode::CallStateEvent,
+                &event,
+                now,
+            );
+            tracing::info!(call_id = %call.call_id, "a last session died mid-call; the survivor told");
+        }
     }
 }
 

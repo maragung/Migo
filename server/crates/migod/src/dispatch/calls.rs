@@ -90,9 +90,12 @@ use migo_protocol::{
 /// did produce two.
 ///
 /// A ring the gate accepted is also handed to the notifier as an
-/// `IncomingCall` event: the realtime topic only reaches devices that are
-/// connected, and the inbox row (and the push, once a sender is wired) is
-/// what wakes a callee whose every device is offline.
+/// `IncomingCall` event, which finishes the notification's own three halves: the
+/// bell (a `NOTIFICATION_EVENT` on the callee's user topic, rung by the seam every
+/// notification rides), the inbox row, and the push (once a sender is wired) for a
+/// callee whose every device is offline. The `CallInviteEvent` above remains the
+/// semantic event the ringing screen reacts to; the notification is the bell and the
+/// record, not a second copy of the ring.
 pub(crate) async fn handle_invite(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -130,6 +133,7 @@ pub(crate) async fn handle_invite(
             actor_id: Some(caller.account_id),
             room_id: None,
             subject_id: Some(call_id),
+            conversation_id: None,
             at: caller.now,
         };
         if let Err(error) = notify.notify(notification).await {

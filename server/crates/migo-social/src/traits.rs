@@ -61,8 +61,8 @@ use migo_core::{Id, Result};
 use migo_protocol::RelationshipKind;
 
 use crate::model::{
-    Caller, Edge, Found, FriendOutcome, Interaction, Pending, ProfileCard, RespondOutcome,
-    Standing, Suggestion,
+    BlockOutcome, Caller, Edge, Found, FriendOutcome, Interaction, Pending, ProfileCard,
+    RespondOutcome, Standing, Suggestion,
 };
 use crate::notice::Notice;
 
@@ -137,7 +137,12 @@ pub trait Graph: Send + Sync {
     /// members, so the blocked account's room chatter keeps reaching the blocker's
     /// screen until their client hides it — and the client's hiding mechanism is the
     /// mute list.
-    async fn block(&self, caller: &Caller, subject_id: Id) -> Result<()>;
+    ///
+    /// Returns [`BlockOutcome`], the account of who still holds a stale copy of the
+    /// graph: the blocked account when an edge they could observe was torn down, the
+    /// blocker's other devices when the blocker's own graph moved. The dispatcher
+    /// turns each flag into a `FRIEND_EVENT` hint; neither becomes a bell.
+    async fn block(&self, caller: &Caller, subject_id: Id) -> Result<BlockOutcome>;
 
     /// Lifts a block. Idempotent.
     ///

@@ -1,4 +1,5 @@
-//! The notification inbox, and push as a wake-up that cannot carry a message.
+//! The notification inbox, push as a wake-up that cannot carry a message, and the bell
+//! a connected device hears.
 //!
 //! Brief section 44 lists fourteen kinds of notification and then constrains all of them
 //! with one sentence: *"Payload push TIDAK BOLEH memuat plaintext pesan, plaintext audio
@@ -61,6 +62,17 @@
 //! [`migo_store::model::notification_kind::is_storable`] is where the list lives — checked
 //! by both storage backends, so it is enforced rather than remembered.
 //!
+//! # The bell, the row, and the push
+//!
+//! A delivery has three halves, and they exist for three different recipients. The
+//! inbox row is for the person who comes back later; the push is for the device that is
+//! asleep; the `NOTIFICATION_EVENT` frame is for the session that is connected right
+//! now and would otherwise learn nothing until it refreshed by hand. The first two are
+//! this crate's own work; the third is [`Bell`], a port the composition root binds to
+//! the gateway's broadcast, because the fan-outs that raise notifications run where no
+//! connection context exists to publish from. One seam, one per-recipient coalescing
+//! rule, and no dispatcher hand-rolling its own bell.
+//!
 //! # A wake-up withheld is not a failure
 //!
 //! Four things stop a push, and none of them is an error:
@@ -107,6 +119,7 @@
 //!     cache,
 //!     limiter,
 //!     Arc::new(FirebaseSender::new(credentials)),
+//!     bell, // the realtime half: Arc<dyn Bell>, bound by the composition root
 //!     Box::new(OsRandom),
 //!     config.signing_secret.expose().as_bytes(),
 //!     NotifyConfig::default(),
@@ -137,5 +150,6 @@ pub use crate::model::{
 pub use crate::service::{open, Notifications};
 pub use crate::token::TokenKeeper;
 pub use crate::traits::{
-    NoPush, Notifier, PushSender, Sent, SharedNotifier, SharedPushSender, Target,
+    Bell, NoBell, NoPush, Notifier, PushSender, Sent, SharedBell, SharedNotifier, SharedPushSender,
+    Target,
 };

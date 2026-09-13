@@ -52,6 +52,10 @@ pub struct Announcement {
     pub actor_id: Option<Id>,
     /// What it is about — the gift, the badge — where there is a subject.
     pub subject_id: Option<Id>,
+    /// The conversation it happened in, where it happened in one — a gift names the
+    /// chat it was given in, so the notification's tap target opens the right screen.
+    /// `None` for the self-authored kinds: a level up belongs to no conversation.
+    pub conversation_id: Option<Id>,
     /// When it happened.
     pub at: Timestamp,
 }

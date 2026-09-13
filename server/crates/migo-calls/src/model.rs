@@ -45,6 +45,17 @@ pub const MEDIA_AUDIO: u32 = 0;
 /// A call carries voice and video.
 pub const MEDIA_VIDEO: u32 = 1;
 
+/// How long a seat stays after the session that held it dies.
+///
+/// Thirty seconds, the same order as the ring's own patience. A seat whose
+/// session ended is a seat nobody can relay through — every frame its owner
+/// still sends arrives on a new connection with no seat — so the only reason
+/// to keep it at all is the reconnect that re-joins: a client that blips and
+/// comes back should not find its seat already vacated. Thirty seconds
+/// covers the blip and retires the ghost well before a roster renders a
+/// participant nobody can hear.
+pub const SEAT_GRACE_MS: i64 = 30_000;
+
 /// The `CallInviteResult.status` vocabulary.
 pub mod invite_status {
     /// The invite is ringing; the callee has until `expires_at`.
@@ -357,6 +368,12 @@ pub type TurnServerWire = TurnServer;
 pub struct CallsConfig {
     /// How long an unanswered invite rings. Defaults to [`RING_TTL_MS`].
     pub ring_ttl_ms: i64,
+    /// How long a group-call seat outlives the session that held it.
+    ///
+    /// Defaults to [`SEAT_GRACE_MS`]. The sweep retires a seat this long
+    /// after its session ended without a re-join, so an operator with
+    /// flintier clients can widen the window without a recompile.
+    pub seat_grace_ms: i64,
     /// The TURN relays a fetch may return.
     ///
     /// Empty until credentials are configured: an honest empty list is better
@@ -369,6 +386,7 @@ impl Default for CallsConfig {
     fn default() -> Self {
         Self {
             ring_ttl_ms: RING_TTL_MS,
+            seat_grace_ms: SEAT_GRACE_MS,
             turn_servers: Vec::new(),
         }
     }
@@ -398,6 +416,14 @@ pub struct GroupParticipant {
     pub device_id: Id,
     /// When they joined, for the roster's own ordering.
     pub joined_at: Timestamp,
+    /// When the session that seated this device ended, if it has.
+    ///
+    /// `None` while the seat is live. The dispatcher's `session_ended` edge
+    /// sets it, a re-join clears it (a re-join is a new seat anyway), and the
+    /// sweep retires the seat once [`SEAT_GRACE_MS`] has passed without the
+    /// clearing re-join — the group twin of the ring's `expires_at`, armed by
+    /// the one event that always knows the seat is dead.
+    pub gone_since: Option<Timestamp>,
     /// Their sealed media description, passed through unopened.
     pub sealed_offer: Vec<u8>,
 }
