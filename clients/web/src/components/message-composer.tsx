@@ -15,6 +15,15 @@ import { VoiceRecorder } from './voice-recorder.js';
 const TYPING_IDLE_MS = 2500;
 
 /**
+ * Re-signal "typing" at this cadence while the keys keep moving. A receiver's indicator lives on
+ * a short local timeout — brief section 15's rule that a Start never followed by a Stop still
+ * disappears on its own — so a continuous typer has to keep the mark alive: each repeat is
+ * another Start, which the server reads as a TTL refresh, not a new claim. Inside the idle gap on
+ * purpose, so the refresh only ever fires while the user is genuinely still typing.
+ */
+const TYPING_REFRESH_MS = 3000;
+
+/**
  * The lifetime the composer's disappearing toggle arms: eight hours, the middle of the pack a
  * messenger usually offers (a minute is a gimmick, a day is a kept message with extra steps). The
  * value is stated in the control's tooltip, so what vanishes and when is agreed before the send.
@@ -102,6 +111,7 @@ export function MessageComposer({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const typingActiveRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -142,6 +152,10 @@ export function MessageComposer({
       clearTimeout(idleTimerRef.current);
       idleTimerRef.current = null;
     }
+    if (refreshTimerRef.current) {
+      clearInterval(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
     if (typingActiveRef.current) {
       typingActiveRef.current = false;
       onTyping(false);
@@ -157,7 +171,34 @@ export function MessageComposer({
       clearTimeout(idleTimerRef.current);
     }
     idleTimerRef.current = setTimeout(stopTyping, TYPING_IDLE_MS);
+    // The keep-alive: while keystrokes keep pushing the idle timer forward, a Start goes out
+    // every few seconds so the receivers' short local timeouts never expire under a typer
+    // who is plainly still going. stopTyping tears it down with everything else.
+    if (refreshTimerRef.current === null) {
+      refreshTimerRef.current = setInterval((): void => {
+        if (typingActiveRef.current) {
+          onTyping(true);
+        }
+      }, TYPING_REFRESH_MS);
+    }
   }, [onTyping, stopTyping]);
+
+  // The timers are this component's own; an unmount mid-typing must not leave the interval
+  // firing at a composer whose onTyping callback belongs to a gone window. No Stop is sent
+  // here — the receivers' local timeout and the server's sweep end the indicator — only the
+  // side that would otherwise outlive the composer is torn down.
+  useEffect(() => {
+    return () => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = null;
+      }
+      if (refreshTimerRef.current) {
+        clearInterval(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const submit = useCallback(async (): Promise<void> => {
     const value = text.trim();

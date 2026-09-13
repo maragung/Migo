@@ -406,6 +406,34 @@ impl TypingCache for MemoryCache {
         }
         Ok(())
     }
+
+    async fn expired_typing(&self, now: Timestamp) -> Result<Vec<(Id, Id)>> {
+        let mut inner = self.inner.write();
+        let mut claimed = Vec::new();
+        let mut empty = Vec::new();
+        for (conversation_id, bucket) in &mut inner.typing {
+            let expired: Vec<Id> = bucket
+                .fields
+                .iter()
+                .filter(|(_, expires_at)| now.is_at_or_after(**expires_at))
+                .map(|(account_id, _)| *account_id)
+                .collect();
+            for account_id in expired {
+                bucket.fields.remove(&account_id);
+                claimed.push((*conversation_id, account_id));
+            }
+            if bucket.fields.is_empty() {
+                empty.push(*conversation_id);
+            }
+        }
+        // A conversation whose every mark expired leaves no bucket behind: the
+        // map is the sweeper's whole universe, and a key that lingers empty is
+        // a key the next sweep walks for nothing.
+        for conversation_id in empty {
+            inner.typing.remove(&conversation_id);
+        }
+        Ok(claimed)
+    }
 }
 
 #[async_trait]

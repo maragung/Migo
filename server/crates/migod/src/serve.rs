@@ -78,6 +78,11 @@ impl App {
         // only party that can let the row go.
         let message_sweeper = self.spawn_message_sweeper();
 
+        // The typing sweeper takes the third seat in that row: a typing mark whose
+        // TTL lapsed has no client left to stop it, and an indicator that only the
+        // typer could end is an indicator that outlives a typer who died mid-word.
+        let typing_sweeper = self.spawn_typing_sweeper();
+
         let state = GatewayState {
             gateway: self.gateway,
             clock: self.clock,
@@ -98,10 +103,11 @@ impl App {
         .await
         .context("server stopped abnormally")?;
 
-        // Both sweepers heard the same shutdown signal; this await is so a fully
-        // stopped node leaves no task behind it.
+        // All three sweepers heard the same shutdown signal; this await is so a
+        // fully stopped node leaves no task behind it.
         let _ = sweeper.await;
         let _ = message_sweeper.await;
+        let _ = typing_sweeper.await;
 
         tracing::info!("server stopped");
         Ok(())

@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.media.MediaExtractor
 import android.net.Uri
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -76,6 +77,7 @@ import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
+import com.migo.core.domain.TypingTimeouts
 import com.migo.core.domain.chatLogFilename
 import com.migo.core.domain.formatAllChatsLog
 import com.migo.core.domain.formatChatLog
@@ -283,6 +285,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The undo window's closer: the few seconds a cancelled note stays recoverable. */
     private var noteUndoJob: Job? = null
+
+    /**
+     * The typing indicator's own clock, on the receiving side. Brief section 15's rule — a
+     * `Start` that is never followed by a `Stop` still disappears on its own — kept as pure
+     * bookkeeping in [TypingTimeouts]: one deadline per `(conversation, typer)`, re-armed by each
+     * refresh, claimed by the ticker below. The typer whose app died mid-word cannot send the
+     * `Stop`, and the server's sweep is a backstop rather than a floor, so this screen ends the
+     * indicator on its own four seconds — the same budget the web client arms.
+     *
+     * Mutated only from the main dispatcher (the event pump hands [typing] its events there via
+     * [viewModelScope]), which is what a plain `HashMap` inside it needs.
+     */
+    private var typingTimeouts = TypingTimeouts(TYPING_TIMEOUT_MS)
+
+    /**
+     * The ticker that ends expired indicators: sleeps until the next deadline [TypingTimeouts]
+     * names, claims whatever has run out, and clears those typers from the open chat. One job
+     * instead of a timer per entry, because the map is usually empty and the ticker dies with it.
+     */
+    private var typingTickJob: Job? = null
 
     /**
      * Whether the recording stands paused by an interruption — a call, a lock, the app going to
@@ -4760,6 +4782,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pendingNote = null
         abandonNoteFocus()
         stagedVoiceNote = null
+        // The session's half-finished indicators die with it: the deadlines belong to events
+        // this account's streams carried, and the next session's Start frames arm their own.
+        // The ticker ends itself once the map is empty, so it needs no cancel of its own.
+        typingTimeouts.expire(Long.MAX_VALUE)
         _callState.value = CallUiState()
         _groupCallState.value = GroupCallUiState()
         subscriptions.forEach { it.cancel() }
@@ -4931,12 +4957,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun typing(event: TypingEvent) {
         val who = event.userId ?: return
-        inChat(event.conversationId) { chat ->
-            val next = when (event.state) {
-                TypingState.Start -> chat.typing + who
-                else -> chat.typing - who
+        // The whole indicator — the line and its clock — is applied on the main
+        // dispatcher, together: the set update and the deadline it arms must not
+        // be separable by the ticker, or a refresh arriving just as an old
+        // deadline expires could be undone by the claim it was about to replace.
+        viewModelScope.launch {
+            inChat(event.conversationId) { chat ->
+                val next = when (event.state) {
+                    TypingState.Start -> chat.typing + who
+                    else -> chat.typing - who
+                }
+                chat.copy(typing = next)
             }
-            chat.copy(typing = next)
+            when (event.state) {
+                TypingState.Start -> typingTimeouts.start(
+                    event.conversationId,
+                    who,
+                    SystemClock.elapsedRealtime(),
+                )
+                else -> typingTimeouts.stop(event.conversationId, who)
+            }
+            startTypingTicker()
+        }
+    }
+
+    /**
+     * Ensures the expiry ticker is running while any typing deadline is pending. Idempotent: a
+     * Start arriving under a live ticker just re-arms its entry, and the ticker outlives the last
+     * Start by exactly its remaining time before ending itself.
+     */
+    private fun startTypingTicker() {
+        if (typingTickJob?.isActive == true) return
+        typingTickJob = viewModelScope.launch {
+            while (isActive) {
+                val wait = typingTimeouts.nextDelay(SystemClock.elapsedRealtime()) ?: break
+                delay(wait)
+                val expired = typingTimeouts.expire(SystemClock.elapsedRealtime())
+                for ((conversation, typer) in expired) {
+                    inChat(conversation) { it.copy(typing = it.typing - typer) }
+                }
+            }
         }
     }
 
@@ -5592,6 +5652,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         /** How long a cancelled note stays recoverable: brief 179's undo window. */
         const val NOTE_UNDO_MS = 5_000L
+
+        /**
+         * How long a received typing indicator outlives its last `Start`: brief section 15's
+         * receiver-side timeout, the same four seconds the web client arms. Short of the server's
+         * ten-second mark TTL on purpose — a receiver that waited the full server budget would
+         * show "typing…" long after the typer's own refresh cadence had gone quiet.
+         */
+        const val TYPING_TIMEOUT_MS = 4_000L
 
         /** Catch up from the beginning: there is no local store to have a high-water mark in. */
         const val HISTORY_FROM = 0L

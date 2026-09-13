@@ -479,11 +479,11 @@ impl App {
                     user_id,
                     typing,
                 } => {
-                    let who = self.chat.typing.entry(conversation_id).or_default();
-                    who.retain(|id| *id != user_id);
-                    if typing {
-                        who.push(user_id);
-                    }
+                    // The line, and its clock: the entry records the fact while
+                    // `note_typing` arms the local timeout that ends it when no
+                    // Stop ever comes (brief section 15 — a dead typer's
+                    // indicator must not outlive the typer).
+                    self.chat.note_typing(conversation_id, user_id, typing);
                 }
                 Event::Names(names) => {
                     merge_names(&mut self.chat.names, names.clone());
@@ -1819,6 +1819,12 @@ impl eframe::App for App {
         // points at the same context, not a copy of it.
         let ctx = ui.ctx().clone();
         let delta = ctx.input(|i| i.stable_dt).min(0.25);
+        // The typing indicator's own clock: entries whose local timeout passed
+        // go now, and the repaint is asked for exactly when the next one is
+        // due, so the line clears on time even on an otherwise quiet screen.
+        if let Some(until_next) = self.chat.expire_typing(std::time::Instant::now()) {
+            ctx.request_repaint_after(until_next);
+        }
         if self.age_toasts(delta) {
             // The one unconditional repaint request in the program, and it is scoped to the one thing
             // that animates without input.

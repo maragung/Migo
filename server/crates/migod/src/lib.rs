@@ -24,6 +24,7 @@ pub mod presence_relay;
 pub mod replication;
 pub mod room_presence;
 pub mod room_relay;
+pub mod typing_sweep;
 
 mod compose;
 pub mod mesh;

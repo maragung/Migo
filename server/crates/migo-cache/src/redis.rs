@@ -39,7 +39,7 @@ use redis::aio::ConnectionManager;
 use redis::{Client, Script};
 use tokio::sync::OnceCell;
 
-use crate::key::{CacheKey, SCOPE_PRESENCE, SCOPE_ROUTE, SCOPE_ROUTE_INDEX, SCOPE_TYPING};
+use crate::key::{CacheKey, PREFIX, SCOPE_PRESENCE, SCOPE_ROUTE, SCOPE_ROUTE_INDEX, SCOPE_TYPING};
 use crate::model::{BucketSpec, BucketVerdict, Counted, PresenceEntry, SessionRoute, Ttl};
 use crate::traits::{
     Cache, CounterCache, KeyValueCache, PresenceCache, RoutingCache, TokenBucketCache, TypingCache,
@@ -50,6 +50,13 @@ use crate::traits::{
 const FIELD_NODE: &str = "n";
 /// Hash field holding a route's encoded body.
 const FIELD_VALUE: &str = "v";
+
+/// How many keys one `SCAN` page of the typing sweep may ask Redis about.
+///
+/// Typing hashes are per-conversation and die on their own TTL, so the live
+/// keyspace is small; the page exists so a burst of conversations still costs
+/// the same per call, not per key.
+const TYPING_SCAN_PAGE: usize = 256;
 
 /// Sets a key only when its current value matches, and returns whether it wrote.
 static CAS: LazyLock<Script> = LazyLock::new(|| {
@@ -160,6 +167,31 @@ if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[3]) then
   redis.call('PEXPIRE', KEYS[1], ARGV[3])
 end
 return 1
+",
+    )
+});
+
+/// Removes every typing field whose deadline has passed, returning the fields it
+/// took.
+///
+/// The sweeper's half of the claim: the script is what makes taking a field and
+/// reporting it one atomic step, so two nodes sweeping the same shared Redis
+/// cannot both publish the same expiry — the second finds the field gone. The
+/// loop is over one conversation's fields (a handful at the very most) and not
+/// over the keyspace, so it stays inside the "no control flow beyond a single
+/// comparison" discipline the module header promises.
+static TYPING_CLAIM: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local removed = {}
+local entries = redis.call('HGETALL', KEYS[1])
+for i = 1, #entries, 2 do
+  if tonumber(entries[i + 1]) <= tonumber(ARGV[1]) then
+    redis.call('HDEL', KEYS[1], entries[i])
+    table.insert(removed, entries[i])
+  end
+end
+return removed
 ",
     )
 });
@@ -630,6 +662,60 @@ impl TypingCache for RedisCache {
             .await
             .map(|_| ())
             .map_err(|error| redis_failed("HDEL", error))
+    }
+
+    async fn expired_typing(&self, now: Timestamp) -> Result<Vec<(Id, Id)>> {
+        let mut conn = self.conn().await?;
+        // The sweep is the one operation that has to cross conversations rather
+        // than address one, so it is also the only `SCAN` in the crate. The
+        // page keeps each call's work bounded, the cursor walks to completion so
+        // a keyspace larger than one page is still swept whole, and the pattern
+        // is built from the same prefix and scope every typing key is written
+        // under, so the match can never drift from the write.
+        let prefix = format!("{PREFIX}:{SCOPE_TYPING}:");
+        let pattern = format!("{prefix}*");
+        let mut cursor: u64 = 0;
+        let mut claimed = Vec::new();
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(TYPING_SCAN_PAGE)
+                .query_async(&mut conn)
+                .await
+                .map_err(|error| redis_failed("SCAN typing", error))?;
+            for key in keys {
+                // A key the pattern matched but this build cannot name — a newer
+                // node's vocabulary, or a foreign writer in a shared database —
+                // is skipped rather than failed: the sweep is a janitor, and a
+                // janitor that stops on one odd key never reaches the rest of
+                // the floor.
+                let Some(tail) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Ok(conversation_id) = Id::parse(tail) else {
+                    continue;
+                };
+                let fields: Vec<String> = TYPING_CLAIM
+                    .key(key.as_str())
+                    .arg(now.as_millis())
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(|error| redis_failed("typing claim script", error))?;
+                for field in fields {
+                    if let Ok(account_id) = Id::parse(&field) {
+                        claimed.push((conversation_id, account_id));
+                    }
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(claimed)
     }
 }
 

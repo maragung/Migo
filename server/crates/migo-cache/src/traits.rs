@@ -239,6 +239,20 @@ pub trait TypingCache: Send + Sync {
 
     /// Clears the mark, for the client that stopped typing before its TTL ran out.
     async fn clear_typing(&self, conversation_id: Id, account_id: Id) -> Result<()>;
+
+    /// Claims every typing mark whose deadline has passed, removing each one it
+    /// returns.
+    ///
+    /// For the background sweeper, not a request handler: expiry used to be
+    /// silent because the mark lived and died inside the cache with nobody
+    /// watching, and a client whose typer vanished mid-word had only its own
+    /// patience to end the indicator. Removing as well as returning is what
+    /// makes the operation a *claim* — two sweeps running against one backend
+    /// cannot both publish the same expiry, because the first to run leaves
+    /// nothing for the second to find.
+    ///
+    /// Each pair is `(conversation, account)`, in no guaranteed order.
+    async fn expired_typing(&self, now: Timestamp) -> Result<Vec<(Id, Id)>>;
 }
 
 /// Which node holds which socket.
