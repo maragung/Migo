@@ -30,9 +30,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from 'react';
 
 import { MemberChange } from '@migo/sdk';
-import type { Id, RoomJoinResponse, RoomStateEvent } from '@migo/sdk';
+import type { Id, RoomJoinResponse, RoomMemberEvent, RoomStateEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
+import { useConversations } from './conversations-provider.js';
+import { closeConversation, useOpenConversation } from './use-open-conversation.js';
 import { clearRoomInfo, loadRoomInfo, saveRoomInfo } from '@/lib/storage/room-info-store.js';
 
 /** The room-side facts a Room-kind conversation's row and header show. */
@@ -111,6 +113,40 @@ export function applyRoomState(info: RoomInfo, delta: RoomStateEvent): RoomInfo 
 }
 
 /**
+ * The room a membership change takes away from *this* account, when it names one.
+ *
+ * Pure, so a test can pin it. The server publishes a removal [`RoomMemberEvent`] naming the
+ * removed member and then takes the room's topics away (`migod`'s `publish_rooms`: publish
+ * first, revoke second) — so a `Kicked`, `Banned`, or `Left` naming this account is the one
+ * last frame the shell ever hears about a room it can no longer read, and the only word that
+ * the room must leave the list and the screen. `Joined` and `Reconnected` keep the account
+ * seated, and a `Disconnected` revokes nothing server-side — a flaky connection is not a
+ * departure, so the room stays. A departure naming someone else is the room's business, not
+ * this shell's; a room the map does not hold was never watched, so no frame for it can arrive.
+ *
+ * Returns both halves the cleanup needs — the room id the record and watch are keyed by, and
+ * the conversation id the list row and the open thread are keyed by — because the wire names
+ * only the first and the join's bridge map is the one place that knows the second.
+ */
+export function departedRoomOf(
+  event: RoomMemberEvent,
+  accountId: Id | null,
+  byRoomId: ReadonlyMap<Id, Id>,
+): { roomId: Id; conversationId: Id } | null {
+  if (
+    accountId === null ||
+    event.userId !== accountId ||
+    (event.change !== MemberChange.Kicked &&
+      event.change !== MemberChange.Banned &&
+      event.change !== MemberChange.Left)
+  ) {
+    return null;
+  }
+  const conversationId = byRoomId.get(event.roomId);
+  return conversationId === undefined ? null : { roomId: event.roomId, conversationId };
+}
+
+/**
  * The room capacity line: online out of the ceiling, as in "2/33".
  *
  * Pure, so a test can pin it. The ceiling is the honest part — a room with no `maxMembers` on the
@@ -128,6 +164,8 @@ export function capacityLabel(online: number | undefined, max: number | undefine
 
 export function RoomsProvider({ children }: { children: ReactNode }): ReactNode {
   const { client, accountId, resetNonce } = useMigo();
+  const { forgetConversation } = useConversations();
+  const openConversationId = useOpenConversation();
 
   // The state exists for its re-render: `infoFor` reads the ref (always current), and each
   // commit swaps the context value so every consumer re-renders and re-reads.
@@ -261,6 +299,14 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
     return off;
   }, [client, resetNonce, commit]);
 
+  // The removal this account cannot read past: a room member event naming this account with
+  // Kicked, Banned, or Left is the last frame the server sends before it takes the room's
+  // topics away, so it must cost the room its whole surface here — the record and its watch
+  // (forgetRoom), the sidebar's row (forgetConversation, the same drop a leave's ack performs),
+  // and the open thread, which closes exactly the way a group's own removal closes it. Without
+  // this the row would keep offering a room whose sends can only fail server-side: audit area
+  // 4's rule that a kicked member loses the surface, not just the delivery.
+
   // The join's other half, and rooms owe conversations the same doorbell. A `Joined` naming
   // *this* account, for a room the shell does not know, arrives on our own user topic — the
   // one frame the server sends a member who cannot be a subscriber of the room yet: the join
@@ -272,6 +318,24 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
   // the room nothing, so no other member sees a phantom join), then the conversation start and
   // the records, so this device hears everything the room says next. Anything else — another
   // user's join, or a join for a room this shell already knows — is not ours to act on.
+  useEffect(() => {
+    if (!client || accountId === null) {
+      return;
+    }
+    const off = client.rooms.onMember((event: RoomMemberEvent) => {
+      const gone = departedRoomOf(event, accountId, byRoomId.current);
+      if (gone === null) {
+        return;
+      }
+      forgetRoom(gone.roomId);
+      forgetConversation(gone.conversationId);
+      if (openConversationId === gone.conversationId) {
+        closeConversation();
+      }
+    });
+    return off;
+  }, [client, accountId, resetNonce, forgetRoom, forgetConversation, openConversationId]);
+
   useEffect(() => {
     if (!client || accountId === null) {
       return;

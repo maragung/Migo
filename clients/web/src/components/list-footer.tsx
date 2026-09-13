@@ -15,15 +15,15 @@
  * because a figure stated twice in one column is a figure someone has to reconcile. The me bar
  * above owns who you are; the band below owns what you have.
  *
- * The read is one round trip per session — the resting glance, not the ledger — and a failed read
- * leaves the half empty rather than showing a zero the wallet never reported. The Wallet window is
- * the place that refetches, and it is one click away.
+ * The read is one round trip per session plus one per economy event — the resting glance, not
+ * the ledger — and a failed read leaves the half empty rather than showing a zero the wallet
+ * never reported. The Wallet window is the place that refetches in full, and it is one click
+ * away.
  */
 
-import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { useMigo } from '@/lib/migo/use-migo.js';
+import { useBalance } from '@/lib/migo/use-balance.js';
 
 import { CoinMark } from './icons.js';
 
@@ -50,26 +50,7 @@ const TAB_HINTS: Readonly<Record<ListTab, string>> = {
  * @param hint Overrides the tab's stock hint — the phone's home names the tap, not the click.
  */
 export function ListFooter({ tab, hint }: { tab: ListTab; hint?: string }): ReactNode {
-  const { client } = useMigo();
-  const [balance, setBalance] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!client) {
-      return;
-    }
-    let cancelled = false;
-    client.economy
-      .getBalance()
-      .then((wallet) => {
-        if (!cancelled) {
-          setBalance(wallet.balance);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [client]);
+  const balance = useBalance();
 
   return (
     <div className="list-footer">

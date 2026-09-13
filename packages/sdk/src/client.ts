@@ -580,6 +580,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.notifications.stop();
     ctx.social.stop();
     ctx.games.stop();
+    ctx.economy.stop();
     ctx.transport.close();
     for (const unsubscribe of this.#unsubscribes.splice(0)) {
       unsubscribe();
@@ -1393,7 +1394,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
       social: new SocialDomain(rpc, this.#options.onEventError),
-      economy: new EconomyDomain(rpc),
+      economy: new EconomyDomain(rpc, this.#options.onEventError),
       games: new GamesDomain(rpc, this.#options.onEventError),
     };
     this.#ctx = ctx;
@@ -1409,6 +1410,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();
+    ctx.economy.start();
 
     // Membership movement keeps the membership cache true, so the sender-key audience the next
     // send builds is the group as it stands, not the group as a list row previewed it. A join or

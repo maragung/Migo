@@ -59,6 +59,7 @@ import com.migo.core.protocol.ConversationMemberEvent
 import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.ConversationVoteEvent
+import com.migo.core.protocol.EconomyEvent
 import com.migo.core.protocol.Feature
 import com.migo.core.protocol.FriendEvent
 import com.migo.core.protocol.GameEvent
@@ -374,6 +375,7 @@ class MigoClient private constructor(
     private val notificationListeners =
         ListenerSet<NotificationEvent>(Op.NOTIFICATION_EVENT, options.onEventError)
     private val gameListeners = ListenerSet<GameEvent>(Op.GAME_EVENT, options.onEventError)
+    private val economyListeners = ListenerSet<EconomyEvent>(Op.ECONOMY_EVENT, options.onEventError)
     private val incomingCallListeners =
         ListenerSet<CallInviteEvent>(Op.CALL_INVITE_EVENT, options.onEventError)
     private val callStateListeners = ListenerSet<CallStateEvent>(Op.CALL_STATE_EVENT, options.onEventError)
@@ -549,6 +551,15 @@ class MigoClient private constructor(
 
     /** Registers a handler for authoritative game events. */
     fun onGameEvent(listener: Listener<GameEvent>): Subscription = gameListeners.add(listener)
+
+    /**
+     * Registers a handler for the caller's own economy events, bridged across reconnects.
+     *
+     * Every event means this account's wallet moved -- a gift sent, a purchase, a Kick Point pack,
+     * from any of the account's devices -- so the handler is "refresh my wallet state"; the
+     * resulting balance is never in the event and always one `economy.getBalance()` away.
+     */
+    fun onEconomy(listener: Listener<EconomyEvent>): Subscription = economyListeners.add(listener)
 
     /** Registers a handler for inbound call invites: another account is calling this one. */
     fun onIncomingCall(listener: Listener<CallInviteEvent>): Subscription = incomingCallListeners.add(listener)
@@ -1484,7 +1495,7 @@ class MigoClient private constructor(
             notifications = NotificationsDomain(rpc, options.onEventError),
             games = GamesDomain(rpc, options.onEventError),
             social = SocialDomain(rpc, options.onEventError),
-            economy = EconomyDomain(rpc),
+            economy = EconomyDomain(rpc, options.onEventError),
             media = MediaDomain(rpc, rest),
             calls = CallsDomain(rpc, deviceId, options.onEventError),
             groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
@@ -1511,6 +1522,7 @@ class MigoClient private constructor(
         session.rooms.onVote { roomVoteListeners.deliver(it) }
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
+        session.economy.onEvent { economyListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }
         session.conversations.onMember { conversationMemberListeners.deliver(it) }
         session.conversations.onVote { conversationVoteListeners.deliver(it) }
@@ -1780,6 +1792,7 @@ private class Session(
         conversations.start()
         notifications.start()
         games.start()
+        economy.start()
         social.start()
         calls.start()
         groupCalls.start()
@@ -1794,6 +1807,7 @@ private class Session(
         conversations.stop()
         notifications.stop()
         games.stop()
+        economy.stop()
         social.stop()
         calls.stop()
         groupCalls.stop()
