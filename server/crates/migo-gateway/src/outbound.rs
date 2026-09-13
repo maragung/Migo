@@ -58,7 +58,7 @@ use tokio::sync::Notify;
 use migo_core::Timestamp;
 use migo_protocol::{cadence_for, BandwidthMode, Cadence, DeliveryClass, Opcode};
 
-use crate::metrics::Dropped;
+use crate::metrics::{Closed, Dropped};
 
 /// A frame waiting to be written to the client.
 struct Queued {
@@ -109,6 +109,9 @@ pub(crate) struct ResumeBuffer {
     frames: Vec<Retained>,
     next_seq: u64,
     expires_at: Timestamp,
+    /// Why the session this buffer belonged to closed, carried so the reconnect that consumes
+    /// the buffer can be labelled with its cause (section 174).
+    closed: Closed,
 }
 
 impl ResumeBuffer {
@@ -144,6 +147,12 @@ impl ResumeBuffer {
     /// taking up room in the node's resume store.
     pub(crate) fn expired(&self, now: Timestamp) -> bool {
         now.as_unix_ms() > self.expires_at.as_unix_ms()
+    }
+
+    /// Why the session this buffer belonged to closed, so a served resume can label the
+    /// reconnect with its cause (section 174).
+    pub(crate) fn closed(&self) -> Closed {
+        self.closed
     }
 }
 
@@ -413,13 +422,15 @@ impl Outbound {
         }
     }
 
-    /// Detaches the resume state for retention after the session disconnects.
-    pub(crate) fn resume_buffer(&self, now: Timestamp) -> ResumeBuffer {
+    /// Detaches the resume state for retention after the session disconnects, carrying the
+    /// close reason so a later reconnect can be labelled by its cause.
+    pub(crate) fn resume_buffer(&self, now: Timestamp, closed: Closed) -> ResumeBuffer {
         let inner = self.inner.lock();
         ResumeBuffer {
             frames: inner.ring.iter().cloned().collect(),
             next_seq: inner.next_seq,
             expires_at: now.saturating_add_millis(inner.resume_window_ms),
+            closed,
         }
     }
 

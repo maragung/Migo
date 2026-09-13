@@ -1,5 +1,6 @@
 //! Counters and gauges for the transport: sessions opened and closed, frames in and out,
-//! frames dropped under backpressure, resume attempts, and handshakes refused.
+//! frames dropped under backpressure, resume attempts, handshakes refused, reconnects served,
+//! decode failures, and the byte size of inbound frames.
 //!
 //! # What may label a series here, and what may never
 //!
@@ -18,7 +19,8 @@
 
 use std::sync::Arc;
 
-use migo_core::metrics::{Counter, Gauge, Registry};
+use migo_core::metrics::{Counter, Gauge, Histogram, Registry};
+use migo_core::Error as CoreError;
 
 /// Why a session ended, for the `migo_gateway_sessions_closed_total` series.
 ///
@@ -209,6 +211,128 @@ impl HandshakeReject {
     }
 }
 
+/// Bucket bounds for `migo_frame_bytes`, in bytes, capped at
+/// [`MAX_FRAME_BYTES`](migo_wire::limits::MAX_FRAME_BYTES). Deliberately coarse: the first
+/// bound swallows everything a text-sized frame can be, so the series can tell a PING from a
+/// media-sized burst without ever telling a one-word reply from a paragraph — the distinction
+/// section 174's side-channel rule exists to keep off the metrics endpoint.
+pub(crate) const FRAME_BYTES_BUCKETS: &[f64] = &[1024.0, 4096.0, 16_384.0, 65_536.0, 262_144.0];
+
+/// Why a client had to come back, for the `migo_reconnect_total` series: the reason its
+/// previous session closed, carried by the retained resume buffer and counted only when the
+/// reconnect is actually served.
+///
+/// Exactly the reasons a close retains a resume buffer (the same membership as
+/// `retains_resume` in the connection driver), and no more: a close that keeps nothing can
+/// never produce a reconnect, so a series for its reasons would only ever read zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reconnect {
+    /// The node shut down or drained, and told the client to come back.
+    ServerShutdown,
+    /// The node drained before a planned stop.
+    NodeDraining,
+    /// The writer could not keep up with the client's connection.
+    SessionLagging,
+    /// Two heartbeat intervals passed with no frame from the client.
+    HeartbeatTimeout,
+    /// The transport failed underneath the session.
+    TransportError,
+    /// The client was asked to move to another node.
+    Rebalance,
+}
+
+impl Reconnect {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::ServerShutdown,
+        Self::NodeDraining,
+        Self::SessionLagging,
+        Self::HeartbeatTimeout,
+        Self::TransportError,
+        Self::Rebalance,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::ServerShutdown => "server_shutdown",
+            Self::NodeDraining => "node_draining",
+            Self::SessionLagging => "session_lagging",
+            Self::HeartbeatTimeout => "heartbeat_timeout",
+            Self::TransportError => "transport_error",
+            Self::Rebalance => "rebalance",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The label for a close reason, or `None` for a close that retains no resume buffer —
+    /// and so can never be followed by a counted reconnect.
+    pub(crate) fn of(closed: Closed) -> Option<Self> {
+        match closed {
+            Closed::ServerShutdown => Some(Self::ServerShutdown),
+            Closed::NodeDraining => Some(Self::NodeDraining),
+            Closed::SessionLagging => Some(Self::SessionLagging),
+            Closed::HeartbeatTimeout => Some(Self::HeartbeatTimeout),
+            Closed::TransportError => Some(Self::TransportError),
+            Closed::Rebalance => Some(Self::Rebalance),
+            _ => None,
+        }
+    }
+}
+
+/// How a frame or message body failed to decode, for the `migo_decode_errors_total` series.
+///
+/// The label is the error symbol the wire layer maps the failure onto — the same symbol the
+/// client is handed in its `ERROR` frame — restricted to the four codes a decode failure can
+/// carry. Before this series, a decode failure was visible only as a session closed
+/// `protocol_violation`; now the operator can tell a client sending oversized frames from one
+/// speaking a mangled dialect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeFailure {
+    /// The bytes did not parse as the frame or message they claimed to be.
+    DecodeFailed,
+    /// The frame exceeded the byte budget the WELCOME advertised.
+    FrameTooLarge,
+    /// The frame's version byte named a version this node does not speak.
+    UnsupportedVersion,
+    /// The frame's header set a reserved flag bit.
+    UnsupportedFlag,
+}
+
+impl DecodeFailure {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::DecodeFailed,
+        Self::FrameTooLarge,
+        Self::UnsupportedVersion,
+        Self::UnsupportedFlag,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::DecodeFailed => "decode_failed",
+            Self::FrameTooLarge => "frame_too_large",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::UnsupportedFlag => "unsupported_flag",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Maps the error the wire layer raised onto the label, by code, so the series and the
+    /// `ERROR` frame the client receives can never disagree about what failed.
+    pub(crate) fn of(error: &CoreError) -> Self {
+        match error.code() {
+            migo_protocol::codes::FRAME_TOO_LARGE => Self::FrameTooLarge,
+            migo_protocol::codes::PROTOCOL_VERSION_UNSUPPORTED => Self::UnsupportedVersion,
+            migo_protocol::codes::UNSUPPORTED_FLAG => Self::UnsupportedFlag,
+            _ => Self::DecodeFailed,
+        }
+    }
+}
+
 /// Every series this crate publishes.
 pub(crate) struct Meters {
     sessions_opened: Arc<Counter>,
@@ -221,6 +345,9 @@ pub(crate) struct Meters {
     handshake_rejected: Vec<Arc<Counter>>,
     rate_limited: Arc<Counter>,
     subscriptions_refused: Vec<Arc<Counter>>,
+    reconnect: Vec<Arc<Counter>>,
+    decode_errors: Vec<Arc<Counter>>,
+    frame_bytes: Arc<Histogram>,
     sessions_live: Arc<Gauge>,
     subscriptions_live: Arc<Gauge>,
 }
@@ -241,9 +368,44 @@ fn per_variant<T>(
         .collect()
 }
 
+/// Registers the three section-174 series — reconnects by cause, decode failures by error
+/// symbol, and the coarse frame-size histogram — and hands them back for `Meters::new` to
+/// store. Split out so the constructor stays under clippy's line budget.
+fn section_174_series(
+    registry: &Registry,
+) -> (Vec<Arc<Counter>>, Vec<Arc<Counter>>, Arc<Histogram>) {
+    (
+        per_variant(
+            registry,
+            "migo_reconnect_total",
+            "Sessions resumed after a disconnect, by the reason the previous session closed.",
+            "reason",
+            &Reconnect::ALL,
+            |reason| reason.label(),
+        ),
+        per_variant(
+            registry,
+            "migo_decode_errors_total",
+            "Frames or message bodies that failed to decode, by error symbol.",
+            "error",
+            &DecodeFailure::ALL,
+            |failure| failure.label(),
+        ),
+        registry.histogram(
+            "migo_frame_bytes",
+            "Bytes per frame received from clients. Bucket bounds are deliberately coarse: \
+             the first bound swallows every text-sized frame, so the series reads transport \
+             scale, never message length.",
+            &[],
+            FRAME_BYTES_BUCKETS,
+        ),
+    )
+}
+
 impl Meters {
     /// Registers every series at zero up front.
     pub(crate) fn new(registry: &Registry) -> Self {
+        let (reconnect, decode_errors, frame_bytes) = section_174_series(registry);
         Self {
             sessions_opened: registry.counter(
                 "migo_gateway_sessions_opened_total",
@@ -312,6 +474,9 @@ impl Meters {
                 &Refused::ALL,
                 |reason| reason.label(),
             ),
+            reconnect,
+            decode_errors,
+            frame_bytes,
             sessions_live: registry.gauge(
                 "migo_gateway_sessions_live",
                 "Sessions currently connected.",
@@ -337,8 +502,12 @@ impl Meters {
         self.sessions_live.dec();
     }
 
-    pub(crate) fn frame_in(&self) {
+    /// Frame byte counts are bounded by the wire limit (well under 2^53), so widening to f64
+    /// loses nothing; the buckets' own bounds are f64 anyway.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn frame_in(&self, bytes: usize) {
         self.frames_in.inc();
+        self.frame_bytes.observe(bytes as f64);
     }
 
     pub(crate) fn frames_out(&self, n: u64) {
@@ -357,6 +526,20 @@ impl Meters {
 
     pub(crate) fn resume(&self, outcome: ResumeOutcome) {
         if let Some(counter) = self.resume.get(outcome.index()) {
+            counter.inc();
+        }
+    }
+
+    /// Counts one served reconnect, labelled by why the client had to come back.
+    pub(crate) fn reconnected(&self, reason: Reconnect) {
+        if let Some(counter) = self.reconnect.get(reason.index()) {
+            counter.inc();
+        }
+    }
+
+    /// Counts one frame or message body the wire layer could not decode, by error symbol.
+    pub(crate) fn decode_failed(&self, failure: DecodeFailure) {
+        if let Some(counter) = self.decode_errors.get(failure.index()) {
             counter.inc();
         }
     }
