@@ -564,17 +564,27 @@ impl App {
             Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway))),
             Arc::clone(&bell_relay),
         ));
-        let notify = migo_notify::open(
-            store.clone(),
-            cache.clone(),
-            limiter.clone(),
-            sender,
-            bell,
-            Box::new(OsRandom),
-            &node_secret,
-            migo_notify::NotifyConfig::default(),
-            &registry,
-        );
+        // The row-replication tier's handle, late-bound for the same reason the
+        // gateway handle below is: federation opens a layer after the services,
+        // and every pull-on-demand half must not exist before the mesh it pulls
+        // over does. The composition root fills it once the relay is built —
+        // both the messaging gate's and the notifier wrapper's, because both
+        // write rows for accounts whose home may be another node.
+        let replication_handle = Arc::new(crate::replication::ReplicationHandle::new());
+        let notify: migo_notify::SharedNotifier = Arc::new(crate::ports::FederatedNotifier::new(
+            migo_notify::open(
+                store.clone(),
+                cache.clone(),
+                limiter.clone(),
+                sender,
+                bell,
+                Box::new(OsRandom),
+                &node_secret,
+                migo_notify::NotifyConfig::default(),
+                &registry,
+            ),
+            Arc::clone(&replication_handle),
+        ));
 
         // The economy's announcements become notifications: a gift that arrives while
         // its recipient is offline is waiting in their inbox, not lost, and a recipient
@@ -601,13 +611,6 @@ impl App {
         // price before a founder's removal lands — the same layering rule,
         // joined here because neither messaging nor economy may depend on the
         // other. The economy is built above messaging for exactly this seam.
-        //
-        // The gate also holds the row-replication tier's handle, late-bound
-        // for the same reason the gateway handle below is: federation opens a
-        // layer after messaging, and the gate's pull-on-demand half must not
-        // exist before the mesh it pulls over does. The composition root fills
-        // it once the relay is built.
-        let replication_handle = Arc::new(crate::replication::ReplicationHandle::new());
         let messaging = migo_messaging::open(
             store.clone(),
             cache.clone(),
