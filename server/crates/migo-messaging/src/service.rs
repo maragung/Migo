@@ -1275,6 +1275,16 @@ where
         members.push(caller.account_id);
         members.extend_from_slice(&others);
         members.sort_unstable();
+        // Section 163's trigger bookkeeping: the create is a membership change
+        // like any other, and the distribution that follows it is owed to every
+        // seat the create produced. The generation recorded here is the number
+        // every event this change emits carries on the wire, so a client that
+        // missed a later redistribution can compare it against the generation
+        // its keys carry and know to ask.
+        let generation = self
+            .redistribution
+            .record(conversation.conversation_id, members.clone())
+            .generation;
         let summary = ConversationSummary {
             conversation_id: conversation.conversation_id,
             kind: conversation.kind,
@@ -1302,16 +1312,6 @@ where
         // appears without a refresh. Without this, a direct chat's first message
         // is sealed for a peer who does not know the conversation exists.
         let count = others.len() as u32 + 1;
-        // Section 163's trigger bookkeeping: the create is a membership change
-        // like any other, and the distribution that follows it is owed to every
-        // seat the create produced. The generation recorded here is the number
-        // every event this change emits carries on the wire, so a client that
-        // missed a later redistribution can compare it against the generation
-        // its keys carry and know to ask.
-        let generation = self
-            .redistribution
-            .record(summary.conversation_id, members.clone())
-            .generation;
         let fanouts = others
             .iter()
             .map(|member| {
