@@ -26,6 +26,18 @@
  * device and retried the moment that sender's distribution lands, so ordinary reordering never
  * surfaces as a decryption failure. The buffer is bounded, so a genuinely undecryptable message
  * cannot grow it without limit.
+ *
+ * # Why a gap heals itself
+ *
+ * A conversation's sequence numbers are gapless by construction (§152), so a message that lands
+ * above `watermark + 1` means pages this device never received — not reordering *within* the stream
+ * but a hole in it. The watermark holds (§158: the reconnect comparison must name what is truly
+ * held) and the domain asks the {@link GapFiller} — the client, wired around the sync domain — to
+ * fetch exactly that hole and replay it through {@link ingest}. The ask is guarded so a persistent
+ * hole cannot become a loop: one fill per conversation at a time, and a fill that could not move
+ * the watermark is not re-asked on every later event. What the fill replays is deduplicated against
+ * what the live stream already delivered above the hole, so a message that arrived live while its
+ * page was being fetched surfaces once, not twice.
  */
 
 import type { Id } from '@migo/wire';
@@ -72,6 +84,16 @@ const SENDER_KEY_EVENT = 'sender-key';
 /** How many undecryptable messages we hold per sender device before dropping the oldest. */
 const MAX_PENDING_PER_SENDER = 64;
 
+/**
+ * How many above-the-watermark deliveries we remember per conversation before dropping the oldest.
+ *
+ * The guard exists only for the window a gap fill is in flight, so the bound is generous rather
+ * than exact: beyond it, an ancient above-gap delivery may surface twice (the same trade the
+ * pending buffer makes) rather than the set growing without limit under a hole the server never
+ * fills.
+ */
+const MAX_AHEAD_REMEMBERED = 4096;
+
 /** One device to seal a pairwise distribution for: which user owns it, and which device it is. */
 export interface DeviceAddress {
   userId: Id;
@@ -89,6 +111,29 @@ export interface DeviceAddress {
 export interface DeviceDirectory {
   /** The devices a sender key must reach for this conversation, excluding our own sending device. */
   recipientDevices(conversationId: Id): Promise<DeviceAddress[]>;
+}
+
+/**
+ * How the messaging layer asks for the pages a detected gap is missing.
+ *
+ * The domain owns the watermark accounting but cannot fetch history — sync is another domain's
+ * slice — so the composition root (the client) supplies this seam, exactly the way it supplies
+ * {@link DeviceDirectory}. The contract is deliberately narrow: the filler pages the range in and
+ * replays it through {@link MessagingDomain.ingest}; whether the watermark then moved is the
+ * domain's own accounting, and a fill that could not move it is ended by resolving, never by
+ * throwing twice.
+ */
+export interface GapFiller {
+  /**
+   * Fetches and replays the events missing above the conversation's watermark, up to `toSeq`.
+   *
+   * `toSeq` is the highest sequence the domain has seen for the conversation — the top of the
+   * hole — so the filler asks for exactly the gap (§158's `to_seq` ranges a SYNC into one hole)
+   * and never a tail of whatever has arrived since. Resolves when it has paged as far as it
+   * will; a rejection is reported once to the event-error sink and the domain will not ask
+   * again until the watermark moves.
+   */
+  fillGap(conversationId: Id, toSeq: number): Promise<void>;
 }
 
 /** A decrypted inbound message handed to the application. */
@@ -145,6 +190,7 @@ export class MessagingDomain {
   readonly #groupCrypto: GroupCrypto;
   readonly #directory: DeviceDirectory;
   readonly #onEventError: EventErrorHandler | undefined;
+  readonly #gapFiller: GapFiller | undefined;
 
   readonly #messageListeners = new Set<Listener<IncomingMessage>>();
   readonly #deletionListeners = new Set<Listener<MessageDeletion>>();
@@ -165,6 +211,40 @@ export class MessagingDomain {
    */
   readonly #watermarks = new Map<Id, number>();
 
+  /**
+   * The highest sequence number ever seen per conversation, gap or no gap.
+   *
+   * The watermark names the top of what is *held*; this names the top of what has *arrived*. The
+   * difference is the hole a gap fill must target: a fill asked for less would leave the tail of
+   * the hole unfetched, and one asked for more would tail live traffic instead of filling.
+   */
+  readonly #highestSeen = new Map<Id, number>();
+
+  /** Conversations with a gap fill in flight, so one hole spawns one fill, not one per event. */
+  readonly #filling = new Set<Id>();
+
+  /**
+   * The watermark a fill that could not close the gap stopped at, per conversation.
+   *
+   * While the current watermark equals this value the server has already been asked and has
+   * already answered without moving it, so a later above-gap event re-asks nothing — the hot loop
+   * a persistent hole must never become. The stall lifts the moment the watermark moves (live
+   * delivery filled part of the hole, or a reconnect's resync ran), and a fill that made progress
+   * never records one at all.
+   */
+  readonly #stalledAt = new Map<Id, number>();
+
+  /**
+   * Sequence numbers already dispatched above the watermark, so the page that later fills the gap
+   * beneath them does not deliver them twice.
+   *
+   * A live event that lands above the watermark is delivered at once (the hole below is no reason
+   * to hold it) and its seq is remembered here; the fill's page then reaches the same seq and must
+   * not repeat it. Entries at or below the watermark can never be fetched again and are pruned as
+   * the watermark passes them.
+   */
+  readonly #ahead = new Map<Id, number[]>();
+
   #unsubscribes: Array<() => void> = [];
 
   constructor(
@@ -173,12 +253,14 @@ export class MessagingDomain {
     groupCrypto: GroupCrypto,
     directory: DeviceDirectory,
     onEventError?: EventErrorHandler,
+    gapFiller?: GapFiller,
   ) {
     this.#rpc = rpc;
     this.#sessionCrypto = sessionCrypto;
     this.#groupCrypto = groupCrypto;
     this.#directory = directory;
     this.#onEventError = onEventError;
+    this.#gapFiller = gapFiller;
   }
 
   /** Begins delivering inbound messages and receipts. Idempotent. */
@@ -228,7 +310,9 @@ export class MessagingDomain {
    * nothing has been ingested for the conversation yet, so the caller picks its own floor (a
    * fresh thread replays from the beginning; one whose history is gone replays from whatever the
    * server can still serve). A reconnect where this survives says exactly where to resume: one
-   * past this number.
+   * past this number. A live event that lands above this number plus one is a hole, and the
+   * domain now schedules its own fill for it (through the {@link GapFiller} the client supplies),
+   * so a mid-session gap heals without waiting for a reconnect to notice it.
    */
   watermark(conversationId: Id): number | undefined {
     return this.#watermarks.get(conversationId);
@@ -387,6 +471,12 @@ export class MessagingDomain {
   /** Routes one inbound message event by kind. */
   #onMessageEvent(event: MessageEvent): void {
     this.#trackWatermark(event);
+    if (this.#alreadyDispatched(event)) {
+      // The gap fill's page caught up with a delivery the live stream had already made above the
+      // hole; the accounting above already counted it, so the dispatch below must not repeat it.
+      return;
+    }
+    this.#rememberDispatch(event);
     if (event.deleted === true) {
       this.#deliver(this.#deletionListeners, {
         messageId: event.messageId,
@@ -410,7 +500,9 @@ export class MessagingDomain {
    *
    * Tombstones count: a deletion occupies a sequence number like any message, so the prefix this
    * map describes is of *events*, not of content. Called before dispatch so both listeners and
-   * the crypto layers below see the same accounting a later `watermark` read reports.
+   * the crypto layers below see the same accounting a later `watermark` read reports. A sequence
+   * above `held + 1` is a hole in a space §152 says is gapless, so it also schedules the fill that
+   * asks the {@link GapFiller} for the missing pages.
    */
   #trackWatermark(event: MessageEvent): void {
     const held = this.#watermarks.get(event.conversationId);
@@ -418,8 +510,124 @@ export class MessagingDomain {
       // The floor, or the next brick on top of it.
       this.#watermarks.set(event.conversationId, event.seq);
     }
-    // At or below: a redelivery the caller's own dedup handles. Above held + 1: a gap — the
-    // watermark waits for the missing pages, so a reconnect resyncs from what is truly held.
+    const high = this.#highestSeen.get(event.conversationId);
+    if (high === undefined || event.seq > high) {
+      this.#highestSeen.set(event.conversationId, event.seq);
+    }
+    if (held !== undefined && event.seq > held + 1) {
+      // Above held + 1: a gap. The watermark waits for the missing pages, and something goes to
+      // fetch them — a resync from what is truly held is exactly what section 158 asks for.
+      this.#scheduleGapFill(event.conversationId);
+    }
+    // At or below: a redelivery the caller's own dedup handles. Below the floor: the caller's
+    // floor to choose, not ours to fill.
+  }
+
+  /**
+   * Asks the gap filler for the pages a detected hole is missing, once per hole.
+   *
+   * The ask is guarded twice so a hole cannot become a loop. While a fill is in flight the guard
+   * is the {@link #filling} set — every later above-gap event for that conversation is already
+   * the running fill's business. After a fill that could not move the watermark the guard is
+   * {@link #stalledAt}: the server has answered, and re-asking on every later event would be
+   * exactly the hot loop a persistent hole must never become. A fill that made progress records
+   * no stall, so a fill cut short by its page budget continues on the next above-gap event; and
+   * when events arrived *above* the target while a fill ran, the continuation is scheduled as
+   * the fill ends, without waiting for another event to notice the new hole.
+   */
+  #scheduleGapFill(conversationId: Id): void {
+    const filler = this.#gapFiller;
+    if (filler === undefined || this.#filling.has(conversationId)) {
+      return;
+    }
+    const haveSeq = this.#watermarks.get(conversationId);
+    const toSeq = this.#highestSeen.get(conversationId);
+    if (haveSeq === undefined || toSeq === undefined || toSeq <= haveSeq) {
+      return;
+    }
+    if (this.#stalledAt.get(conversationId) === haveSeq) {
+      return;
+    }
+    this.#filling.add(conversationId);
+    void filler
+      .fillGap(conversationId, toSeq)
+      .catch((cause: unknown) => {
+        // The fill is background repair; its failure is surfaced, not thrown into the live path.
+        this.#onEventError?.(OP.SYNC, cause);
+      })
+      .finally(() => {
+        this.#filling.delete(conversationId);
+        const after = this.#watermarks.get(conversationId) ?? haveSeq;
+        if (after > haveSeq) {
+          this.#stalledAt.delete(conversationId);
+        } else {
+          this.#stalledAt.set(conversationId, after);
+        }
+        const ceiling = this.#highestSeen.get(conversationId) ?? toSeq;
+        if (ceiling > toSeq && after < ceiling) {
+          // Events arrived above the target while the fill ran; their hole is a new ask. The
+          // stall recorded above (when the fill made no progress) still applies, so this cannot
+          // chain on its own — only genuinely new arrivals reopen the question.
+          this.#scheduleGapFill(conversationId);
+        }
+      });
+  }
+
+  /**
+   * Whether this event was already dispatched as an above-the-watermark live delivery.
+   *
+   * Consuming the memory: the seq is forgotten here, because the dispatch it guarded against has
+   * either happened (this page copy is that dispatch's duplicate) or the page it would have ridden
+   * never came and the live copy stands alone.
+   */
+  #alreadyDispatched(event: MessageEvent): boolean {
+    const ahead = this.#ahead.get(event.conversationId);
+    if (ahead === undefined) {
+      return false;
+    }
+    const index = ahead.indexOf(event.seq);
+    if (index !== -1) {
+      ahead.splice(index, 1);
+      return true;
+    }
+    // Entries at or below the watermark can never be fetched again; prune them so the list holds
+    // only the live window above the hole.
+    const watermark = this.#watermarks.get(event.conversationId);
+    if (watermark !== undefined) {
+      const live = ahead.filter((seq) => seq > watermark);
+      if (live.length !== ahead.length) {
+        if (live.length === 0) {
+          this.#ahead.delete(event.conversationId);
+        } else {
+          this.#ahead.set(event.conversationId, live);
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Remembers an above-the-watermark delivery, so the gap fill's page cannot repeat it.
+   *
+   * Only a seq above the current watermark can be re-fetched later — everything at or below it is
+   * behind the cursor every fetch starts from — so those are the only deliveries worth guarding.
+   */
+  #rememberDispatch(event: MessageEvent): void {
+    const watermark = this.#watermarks.get(event.conversationId);
+    if (watermark === undefined || event.seq <= watermark) {
+      return;
+    }
+    let ahead = this.#ahead.get(event.conversationId);
+    if (ahead === undefined) {
+      ahead = [];
+      this.#ahead.set(event.conversationId, ahead);
+    }
+    if (!ahead.includes(event.seq)) {
+      ahead.push(event.seq);
+      if (ahead.length > MAX_AHEAD_REMEMBERED) {
+        ahead.shift();
+      }
+    }
   }
 
   /**

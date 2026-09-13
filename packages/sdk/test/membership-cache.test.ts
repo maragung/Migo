@@ -16,6 +16,15 @@
  * They drive the real `MigoClient` — real transport handshake against a controlled socket —
  * so the client's own listener wiring, not a hand-called private method, is what updates the
  * cache.
+ *
+ * The room half of the same cache has a lifecycle beyond the join, pinned here too:
+ *
+ * * A restored session rebuilds the room-to-conversation bridge with `rehydrateRoom` — the
+ *   one call a reload has that reaches the bridge — and a bridged room answers a later pass
+ *   with no wire work at all.
+ * * `teardownRoom` unwatches both topics in one frame, forgets the conversation's crypto
+ *   state, and drops the bridge and the membership cache: the four calls a leaver would
+ *   otherwise have to orchestrate by hand.
  */
 
 import assert from 'node:assert/strict';
@@ -29,18 +38,22 @@ import {
   BandwidthMode,
   OP,
   Platform,
+  TopicKind,
   ConversationKind,
   EncryptionMode,
   MemberChange,
+  RoomKind,
   decodeKeyBundleRequest,
   decodeRosterReq,
   decodeSubscribeRequest,
+  encodeAcknowledged,
   encodeConversationListResponse,
   encodeConversationMemberEvent,
   encodeConversationRosterResponse,
   encodeKeyBundleResponse,
   encodeKeyPublishResult,
   encodePong,
+  encodeRoomJoinResponse,
   encodeRoomMemberEvent,
   encodeRosterResponse,
   encodeSubscribeResponse,
@@ -51,6 +64,7 @@ import type {
   ConversationSummary,
   KeyBundle,
   RosterEntry,
+  Topic,
   Welcome,
 } from '@migo/protocol';
 import { decodeFrame, encodeFrame, frameHeader, idFromBytes } from '@migo/wire';
@@ -228,6 +242,29 @@ class ScriptedServer {
     if (opcode === OP.SUBSCRIBE) {
       const request = decodeBody(decodeSubscribeRequest, frame.payload);
       reply(encodeBody(encodeSubscribeResponse, { accepted: request.topics }));
+      return;
+    }
+    if (opcode === OP.UNSUBSCRIBE) {
+      reply(encodeBody(encodeAcknowledged, { ok: true }));
+      return;
+    }
+    if (opcode === OP.ROOM_JOIN) {
+      // The idempotent re-join §156 promises a seated member: the handle again, no fanout.
+      reply(
+        encodeBody(encodeRoomJoinResponse, {
+          room: {
+            roomId: idOf(0x100d),
+            publicId: 'room-1',
+            kind: RoomKind.Public,
+            name: 'The Room',
+            memberCount: this.roomRoster.length,
+            onlineCount: 1,
+          },
+          conversationId: idOf(0x5eed),
+          encryption: EncryptionMode.EndToEnd,
+          lastSeq: 0,
+        }),
+      );
       return;
     }
     if (opcode === OP.CONVERSATION_LIST) {
@@ -489,6 +526,159 @@ test('a room member event folds the joiner into the audience, so old members sea
     assert.ok(
       !after.some((device) => device.userId === idOf(42)),
       'the room leaver is out of the next audience',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+/** Every topic the client has asked the server about with `opcode`, read off the recorded wire. */
+function topicRequests(server: ScriptedServer, opcode: number): Topic[] {
+  const topics: Topic[] = [];
+  for (const raw of server.socket.sent) {
+    const frame = decodeFrame(raw as Uint8Array);
+    if (frame.header.opcode !== opcode) {
+      continue;
+    }
+    topics.push(...decodeBody(decodeSubscribeRequest, frame.payload).topics);
+  }
+  return topics;
+}
+
+test('a restored session rebuilds the room bridge, so room member events patch the cache again', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    // The restart shape: a fresh client over a room it joined in a previous session. The bridge
+    // is empty and, without a restore path, nothing in the session could ever fill it — every
+    // room member event would no-op and the membership cache would go silently stale.
+    server.roomRoster = [40, 41];
+    const conversationId = await client.rehydrateRoom(idOf(0x100d), 50);
+    assert.equal(conversationId, idOf(0x5eed), 'the join handle names the conversation to restore');
+
+    // One join to learn the mapping (§156: a seated member's join produces no fanout), one
+    // roster page to prime the membership, and both topics watched.
+    assert.equal(server.asked.filter((opcode) => opcode === OP.ROOM_JOIN).length, 1);
+    assert.equal(server.asked.filter((opcode) => opcode === OP.ROOM_ROSTER).length, 1);
+    const watched = topicRequests(server, OP.SUBSCRIBE);
+    assert.ok(
+      watched.some((topic) => topic.kind === TopicKind.Conversation && topic.id === idOf(0x5eed)),
+      'the conversation topic is watched',
+    );
+    assert.ok(
+      watched.some((topic) => topic.kind === TopicKind.Room && topic.id === idOf(0x100d)),
+      'the room topic is watched',
+    );
+
+    // The bridge stands: a joiner folds into the audience with no roster re-read — the exact
+    // movement an empty bridge silently dropped.
+    server.roomMemberEvent(42, true);
+    await tick();
+    const audience = await client.recipientDevices(idOf(0x5eed));
+    assert.ok(
+      audience.some((device) => device.userId === idOf(42)),
+      'the room joiner is in the next audience',
+    );
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.ROOM_ROSTER).length,
+      1,
+      'the bridge, not a roster re-read, carried the join',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('rehydrateRoom is idempotent: a bridged room answers a later pass with no wire work', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    server.roomRoster = [40, 41];
+    const first = await client.rehydrateRoom(idOf(0x100d), 50);
+    const joins = server.asked.filter((opcode) => opcode === OP.ROOM_JOIN).length;
+    const rosters = server.asked.filter((opcode) => opcode === OP.ROOM_ROSTER).length;
+    const subscribes = server.asked.filter((opcode) => opcode === OP.SUBSCRIBE).length;
+
+    // A restore loop's second pass — and every pass after it — pays nothing for a room it
+    // already bridged, which is what makes calling it per persisted room affordable.
+    const second = await client.rehydrateRoom(idOf(0x100d), 50);
+    assert.equal(second, first, 'the same conversation id answers both passes');
+    assert.equal(server.asked.filter((opcode) => opcode === OP.ROOM_JOIN).length, joins);
+    assert.equal(server.asked.filter((opcode) => opcode === OP.ROOM_ROSTER).length, rosters);
+    assert.equal(server.asked.filter((opcode) => opcode === OP.SUBSCRIBE).length, subscribes);
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('teardownRoom unsubscribes both topics in one frame and drops the bridge and the cache', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    server.roomRoster = [40, 41];
+    await client.startRoomConversation(idOf(0x5eed), idOf(0x100d), 50);
+    const unsubscribes = server.asked.filter((opcode) => opcode === OP.UNSUBSCRIBE).length;
+
+    await client.teardownRoom(idOf(0x100d));
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.UNSUBSCRIBE).length - unsubscribes,
+      1,
+      'both topics left in a single UNSUBSCRIBE frame',
+    );
+    const dropped = topicRequests(server, OP.UNSUBSCRIBE);
+    assert.ok(
+      dropped.some((topic) => topic.kind === TopicKind.Room && topic.id === idOf(0x100d)),
+      'the room topic was dropped',
+    );
+    assert.ok(
+      dropped.some((topic) => topic.kind === TopicKind.Conversation && topic.id === idOf(0x5eed)),
+      'the conversation topic was dropped in the same frame',
+    );
+
+    // The membership cache is gone: the next audience question is the honest unknown-membership
+    // throw, not a stale roster a departed member could still be sealed for.
+    await assert.rejects(client.recipientDevices(idOf(0x5eed)), /membership is unknown/);
+
+    // The bridge is gone too: a rehydrate after the teardown joins again rather than answering
+    // from a mapping that outlived the room.
+    await client.rehydrateRoom(idOf(0x100d), 50);
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.ROOM_JOIN).length,
+      1,
+      'the dropped bridge forced a fresh join',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('teardownRoom without a bridge drops the room topic alone, and is safe to repeat', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    // The reload-then-leave shape: the bridge was never built this session, and the caller
+    // knows the conversation id only from its own persistence.
+    await client.teardownRoom(idOf(0x100d), idOf(0x5eed));
+    let dropped = topicRequests(server, OP.UNSUBSCRIBE);
+    assert.ok(
+      dropped.some((topic) => topic.kind === TopicKind.Room && topic.id === idOf(0x100d)),
+      'the room topic was dropped',
+    );
+    assert.ok(
+      dropped.some((topic) => topic.kind === TopicKind.Conversation && topic.id === idOf(0x5eed)),
+      'the passed conversation id named the conversation topic',
+    );
+
+    // With neither a bridge nor a passed id, only the room topic is ours to drop — and
+    // repeating the call costs one idempotent frame and throws nothing.
+    await client.teardownRoom(idOf(0x7ee7));
+    await client.teardownRoom(idOf(0x7ee7));
+    dropped = topicRequests(server, OP.UNSUBSCRIBE);
+    assert.equal(
+      dropped.filter((topic) => topic.kind === TopicKind.Room && topic.id === idOf(0x7ee7)).length,
+      2,
+      'each repeat dropped the room topic it was asked to',
+    );
+    assert.equal(
+      dropped.filter((topic) => topic.kind === TopicKind.Conversation).length,
+      1,
+      'no conversation topic was guessed at',
     );
   } finally {
     await client.disconnect();

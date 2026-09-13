@@ -20,6 +20,12 @@
  *   until filled), and a reconnect's catch-up starts from that watermark, so the fetch after
  *   a reset asks for exactly what the outage cost — never the full resync section 158 forbids.
  *   The sync gate behind the outbox parking is the same one any paging sync work awaits.
+ * * **Mid-session gap fill** — a live sequence landing above watermark + 1 is a hole in a
+ *   space section 152 says is gapless, and the client now schedules its own catch-up for it:
+ *   one bounded, page-limited fill that asks for exactly the hole, swallows the copies of
+ *   events the live stream already delivered above it, asks once (not once per later event)
+ *   about a hole the server cannot fill, and continues a larger hole on the next above-gap
+ *   event.
  *
  * They drive the real `MigoClient` over a scripted socket — the same harness shape the
  * membership-cache tests use — because the point under test is the client's own wiring, not
@@ -737,6 +743,199 @@ test('a hidden page parks the sync gate; a visible one admits work again', async
     client.setPageVisible(true);
     await parked;
     assert.ok(admitted, 'visibility admits the parked work again');
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a mid-session gap schedules its own catch-up: the fill asks exactly the hole', async () => {
+  const { client, server, socket } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    const seen: number[] = [];
+    // Tombstones deliver to a listener without crypto, so the delivery path under test is the
+    // real one while the assertions stay about sequence accounting.
+    client.messaging.onDeletion((deletion) => seen.push(deletion.seq));
+    for (let seq = 1; seq <= 3; seq += 1) {
+      deliverEvent(socket, eventOf(conversation, seq, true));
+    }
+    await tick();
+    assert.equal(client.messaging.watermark(conversation), 3);
+
+    // The hole: 4..6 never arrive live; 7 lands above it. The server can serve the missing
+    // pages, as the real one always can for a gap inside its retention.
+    server.syncScript = (request) => ({
+      conversationId: request.conversationId,
+      status: SyncStatus.Ok,
+      fromSeq: request.haveSeq + 1,
+      toSeq: 7,
+      more: false,
+      messages: [4, 5, 6, 7].map((seq) => eventOf(conversation, seq, true)),
+    });
+    deliverEvent(socket, eventOf(conversation, 7, true));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+
+    // Exactly one SYNC, and it asked for the hole — haveSeq from the watermark, toSeq the top
+    // of what had arrived — never a tail of anything newer.
+    assert.equal(server.syncs.length, 1, 'the gap scheduled exactly one fill');
+    assert.equal(server.syncs[0]?.conversationId, conversation);
+    assert.equal(server.syncs[0]?.haveSeq, 3, 'the fill starts from what is truly held');
+    assert.equal(server.syncs[0]?.toSeq, 7, 'the fill is bounded to the top of the hole');
+    assert.equal(client.messaging.watermark(conversation), 7, 'the fill closed the hole');
+
+    // Everything delivered exactly once: 7 arrived live above the hole AND rode the page, and
+    // the page's copy was swallowed rather than delivered a second time.
+    const counts = new Map<number, number>();
+    for (const seq of seen) {
+      counts.set(seq, (counts.get(seq) ?? 0) + 1);
+    }
+    for (let seq = 1; seq <= 7; seq += 1) {
+      assert.equal(counts.get(seq), 1, `seq ${seq} was delivered exactly once`);
+    }
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a hole the server cannot fill is asked once, not once per later event', async () => {
+  const { client, server, socket } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    for (let seq = 1; seq <= 3; seq += 1) {
+      deliverEvent(socket, eventOf(conversation, seq, true));
+    }
+    await tick();
+    // The null script answers every SYNC with "nothing missing": the persistent hole.
+
+    deliverEvent(socket, eventOf(conversation, 7, true));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+    assert.equal(server.syncs.length, 1, 'the hole was asked exactly once');
+    assert.equal(server.syncs[0]?.haveSeq, 3);
+    assert.equal(server.syncs[0]?.toSeq, 7);
+    assert.equal(
+      client.messaging.watermark(conversation),
+      3,
+      'an unfilled hole holds the watermark',
+    );
+
+    // More traffic above the hole: none of it re-asks — the server has already answered, and
+    // re-asking per event would be the hot loop a persistent hole must never become.
+    deliverEvent(socket, eventOf(conversation, 8, true));
+    deliverEvent(socket, eventOf(conversation, 9, true));
+    deliverEvent(socket, eventOf(conversation, 10, true));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+    assert.equal(server.syncs.length, 1, 'a stalled fill is not re-asked per event');
+
+    // The stall lifts when the watermark moves — 4 arrives live, closing part of the hole —
+    // so the next above-gap event may ask again.
+    deliverEvent(socket, eventOf(conversation, 4, true));
+    await tick();
+    deliverEvent(socket, eventOf(conversation, 11, true));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+    assert.equal(server.syncs.length, 2, 'a moved watermark re-arms the fill');
+    assert.equal(server.syncs[1]?.haveSeq, 4);
+    assert.equal(server.syncs[1]?.toSeq, 11);
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a fill is page-bounded, and the next above-gap event continues a larger hole', async () => {
+  const { client, server, socket } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    const top = 1203; // 1200 missing events under one trigger
+    server.syncScript = (request) => {
+      const from = request.haveSeq + 1;
+      const to = Math.min(request.toSeq ?? top, from + request.limit - 1);
+      const messages: MessageEvent[] = [];
+      for (let seq = from; seq <= to; seq += 1) {
+        messages.push(eventOf(conversation, seq, true));
+      }
+      return {
+        conversationId: request.conversationId,
+        status: SyncStatus.Ok,
+        fromSeq: from,
+        toSeq: to,
+        more: to < (request.toSeq ?? top),
+        messages,
+      };
+    };
+    for (let seq = 1; seq <= 3; seq += 1) {
+      deliverEvent(socket, eventOf(conversation, seq, true));
+    }
+    await tick();
+
+    deliverEvent(socket, eventOf(conversation, top, true));
+    for (let i = 0; i < 12; i += 1) {
+      await tick();
+    }
+    // Five pages of 200: the budget stops the walk mid-hole rather than crawling it whole...
+    assert.equal(server.syncs.length, 5, 'the fill stopped at its page budget');
+    assert.equal(
+      client.messaging.watermark(conversation),
+      1003,
+      'the pages it did ask advanced the watermark',
+    );
+    assert.equal(server.syncs[0]?.toSeq, top, 'the ask was bounded to the hole, not a tail');
+
+    // ...and because a fill that made progress is not stalled, the next event above the
+    // still-open hole continues the walk until the hole is closed.
+    deliverEvent(socket, eventOf(conversation, top + 1, true));
+    for (let i = 0; i < 12; i += 1) {
+      await tick();
+    }
+    assert.equal(
+      client.messaging.watermark(conversation),
+      top + 1,
+      'the continuation closed the hole',
+    );
+    assert.equal(server.syncs.length, 7, 'the continuation paged twice more (200 events, then 1)');
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test("teardownRoom forgets the room conversation's crypto, so the next send re-distributes", async () => {
+  const { client, server } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    const room = idOf(0x100d);
+    await client.sendQueued(conversation, textOf('before the teardown'));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+    const distributedBefore = server.sends.filter(
+      (send) => send.kind === MessageKind.KeyExchange,
+    ).length;
+    assert.ok(distributedBefore > 0, 'the first send distributed the sender key');
+
+    // The reload shape: the bridge was never built this session, so the caller names the
+    // conversation from its own persistence. The teardown drops the membership cache with
+    // everything else, so the caller re-primes it the way an app that kept the thread open
+    // would — what is under test is the crypto, not the cache.
+    await client.teardownRoom(room, conversation);
+    client.rememberMembers(conversation, [idOf(10), idOf(20), idOf(30)]);
+
+    await client.sendQueued(conversation, textOf('after the teardown'));
+    for (let i = 0; i < 8; i += 1) {
+      await tick();
+    }
+    const distributedAfter = server.sends.filter(
+      (send) => send.kind === MessageKind.KeyExchange,
+    ).length;
+    assert.ok(
+      distributedAfter > distributedBefore,
+      'a sender key forgotten by the teardown is distributed again on the next send',
+    );
   } finally {
     await client.disconnect();
   }
