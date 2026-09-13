@@ -1601,6 +1601,14 @@ struct Worker {
     /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
     /// request's own id is the only thing that can say which room the ack answers.
     pending_leave: Option<Id>,
+    /// The room a join-bell membership probe is in flight for. A `Joined` naming this account
+    /// for a room this session has never heard of arrived on the account's own user topic —
+    /// the join happened on another device — and the reaction is an idempotent re-join. But a
+    /// bell can be stale (the account may have left since the other device joined), and a
+    /// reaction that re-joined them would be this device deciding membership, so the roster is
+    /// asked for first: it refuses anyone who is not in the room, and only a room that still
+    /// answers is re-joined.
+    pending_room_probe: Option<Id>,
     /// The conversation a roster read is in flight for. The wire's roster answer names no
     /// conversation, so the request's own subject is the only thing that can say which
     /// membership the reply promotes. One at a time by design: the send path asks only when
@@ -1729,6 +1737,7 @@ impl Worker {
             gateway: None,
             retry: None,
             pending_leave: None,
+            pending_room_probe: None,
             pending_roster: None,
             pending_registration: None,
             txs: None,
@@ -6185,6 +6194,11 @@ impl Worker {
             signed.rooms_watched.remove(&room_id);
             signed.room_conversations.remove(&room_id);
             if let Some(conversation) = conversation {
+                // The tracked conversation topic goes with the room's own: the server revoked
+                // both the moment the leave landed, and a set that kept the id would re-ask
+                // (and be refused) on the next reconnect. The wire UNSUBSCRIBE is not sent —
+                // the revocation already happened server-side, and this is the local book.
+                signed.conversations_watched.remove(&conversation);
                 signed.groups.forget(conversation);
                 signed.sessions.forget(conversation, None);
                 signed.pending.retain(|(id, _), _| *id != conversation);
@@ -6193,7 +6207,24 @@ impl Worker {
         conversation
     }
 
-    /// A member event off a watched room's topic: someone came, went, dropped, or was removed.
+    /// The join-bell's membership probe answered: the roster read only succeeds for a member,
+    /// so a room that answers is a room this account is still in — re-join it, idempotently,
+    /// and let `on_room_joined` run the join's other half (the room topic watch, the room to
+    /// conversation bridge, the list re-read). A refusal arrives as an error frame and fails
+    /// the decode below, which drops the probe just as quietly: a bell for a room the account
+    /// has since left is not this device's to act on.
+    async fn on_room_probe(&mut self, frame: &migo_protocol::Frame) {
+        let Some(room_id) = self.pending_room_probe.take() else {
+            return;
+        };
+        if gateway::decode::<migo_protocol::RosterResponse>(frame).is_err() {
+            return;
+        }
+        self.join_room(room_id).await;
+    }
+
+    /// A member event off a watched room's topic — or off the account's own user topic, the
+    /// join-bell: someone came, went, dropped, or was removed.
     ///
     /// Forwarded whole rather than reduced to a sentence here: the display name is a profile
     /// fetch away and belongs with the chat pane's other name lookups, and the change enum and
@@ -6205,6 +6236,15 @@ impl Worker {
     /// goes, and the list re-reads so the row stops being offered. Without this the room would
     /// sit in the list with a composer whose every send can only fail server-side (audit area
     /// 4: the kicked member must lose the surface, not just the delivery).
+    ///
+    /// The bell is the join's other half, and rooms owe conversations the same one. A `Joined`
+    /// naming *this* account, for a room this session has never heard of, is the one frame the
+    /// server sends a member who cannot be a subscriber of the room yet — the join happened on
+    /// another device, and this session learns the room exists from it. The reaction is the
+    /// join flow re-run behind a membership probe (see `pending_room_probe`): the re-join is
+    /// idempotent — an already-member is answered with the full handle and the room hears
+    /// nothing — and `on_room_joined` does the rest, so this device hears everything the room
+    /// says next.
     async fn on_room_member(&mut self, frame: &migo_protocol::Frame) {
         let Ok(event) = gateway::decode::<migo_protocol::RoomMemberEvent>(frame) else {
             return;
@@ -6217,6 +6257,27 @@ impl Worker {
             } else {
                 migo_protocol::MemberChange::Left
             });
+        // The join-bell, run before the folds below: they key off rooms this session knows,
+        // and the bell is precisely the room it does not.
+        if change == migo_protocol::MemberChange::Joined {
+            let known = self.signed.as_ref().is_some_and(|signed| {
+                signed.rooms_watched.contains(&event.room_id)
+                    || signed.room_conversations.contains_key(&event.room_id)
+            });
+            let self_join = self
+                .signed
+                .as_ref()
+                .is_some_and(|signed| signed.account.account_id == event.user_id);
+            if self_join && !known && self.pending_room_probe.is_none() {
+                self.pending_room_probe = Some(event.room_id);
+                let probe = migo_protocol::RosterReq {
+                    room_id: event.room_id,
+                    limit: Some(1),
+                    after: None,
+                };
+                self.request(Opcode::RoomRoster, &probe).await;
+            }
+        }
         // A departure from a room this session is in kills the room's outbound chain: the member
         // who left may still hold its key, and the one thing a chain must not do after a member
         // leaves is keep sealing. The next send builds a fresh chain and distributes it to
@@ -6885,6 +6946,7 @@ impl Worker {
             Opcode::RoomList => self.on_rooms(&frame),
             Opcode::RoomJoin | Opcode::RoomCreate => self.on_room_joined(&frame).await,
             Opcode::RoomLeave => self.on_room_left(&frame).await,
+            Opcode::RoomRoster => self.on_room_probe(&frame).await,
             Opcode::RoomMemberEvent => self.on_room_member(&frame).await,
             Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),

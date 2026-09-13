@@ -2565,6 +2565,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.rooms.leave(roomId)
+                // The server revoked both topics the moment the leave landed; these drops are
+                // for the client's own tracked set, so a later session reset does not re-ask
+                // for a room the account is no longer in. Each is idempotent and failures are
+                // swallowed: tidying a set the server already cleaned is not a failure the
+                // leaver needs to read.
+                runCatching { live.client.unwatchRoom(roomId) }
+                runCatching { live.client.unwatchConversation(conversationId) }
                 roomInfo.remove(roomId)
                 signedIn { current ->
                     current.copy(
@@ -5163,6 +5170,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             return
+        }
+
+        // The join's other half, and rooms owe conversations the same doorbell. A `Joined` naming
+        // *this* account, for a room this device has never heard of, arrived on our own user
+        // topic -- the one frame the server sends a member who cannot be a subscriber of the room
+        // yet, because the join happened on another device. The reaction is the join flow re-run:
+        // a roster page first (it refuses anyone who is not in the room, and a doorbell can be
+        // stale -- the account may have left since the other device joined, and a reaction that
+        // re-joined them would be this device deciding membership), then the idempotent re-join
+        // (an already-member's join is answered with the full handle and tells the room nothing),
+        // then the conversation start, so this device hears everything the room says next.
+        if (self != null && event.userId == self && change == MemberChange.Joined && !roomInfo.containsKey(event.roomId)) {
+            viewModelScope.launch {
+                try {
+                    live.client.rooms.getRoster(event.roomId, 1)
+                    val joined: RoomJoinResponse = live.client.rooms.join(event.roomId)
+                    live.client.startRoomConversation(joined.conversationId, joined.room.roomId)
+                    noteRoom(joined)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    // A refused doorbell reaction costs this device the room until the next
+                    // list refresh; the membership itself is server-side truth and needs no
+                    // repair here.
+                }
+            }
         }
         roomInfo[event.roomId]?.let { summary ->
             roomInfo[event.roomId] = summary.copy(

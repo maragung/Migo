@@ -99,6 +99,12 @@ impl Hub {
 
     /// Removes a session and all of its subscriptions.
     pub(crate) fn deregister(&self, session_id: Id) {
+        // The fan-out gate shuts first and completely: a broadcast that snapshotted this
+        // session just before teardown must refuse every topic, not enqueue into a queue
+        // whose writer is already leaving.
+        if let Some(handle) = self.sessions.get(&session_id) {
+            handle.outbound().clear_topics();
+        }
         self.sessions.remove(&session_id);
         if let Some((_, account_id)) = self.session_accounts.remove(&session_id) {
             if let Some(mut sessions) = self.account_sessions.get_mut(&account_id) {
@@ -123,6 +129,18 @@ impl Hub {
         }
     }
 
+    /// The topics a session holds, as the wire names them, for the resume retention: a
+    /// session that drops involuntarily leaves its topics behind alongside its ring, so the
+    /// reconnect that resumes it can restore delivery without the client resubscribing
+    /// (section 158: a resumed reconnect does no sync and no resubscribe). Read before
+    /// `deregister`, which empties the set it reads.
+    pub(crate) fn topics_of(&self, session_id: Id) -> Vec<Topic> {
+        self.session_topics
+            .get(&session_id)
+            .map(|held| held.iter().map(|key| key.to_topic()).collect())
+            .unwrap_or_default()
+    }
+
     /// Adds subscriptions, enforcing the per-session cap, and reports which were accepted and
     /// which were refused. Already-held topics are accepted idempotently and do not count
     /// against the cap a second time.
@@ -131,6 +149,14 @@ impl Hub {
         let mut accepted = Vec::with_capacity(topics.len());
         let mut rejected = Vec::new();
         let mut added = 0_u64;
+        // The keys taken this call, handed to the mailbox's fan-out gate after the shard
+        // guard is released — the gate is the second half of the subscription, and a
+        // fan-out that lands between the two still finds the topic absent and waits for
+        // the next one rather than delivering to a session the hub has not finished
+        // subscribing. The hub's own set is inserted first so the snapshot a fan-out
+        // takes can only ever include a session whose gate is about to open, never one
+        // whose gate opened before the hub knew.
+        let mut gated = Vec::new();
         for topic in topics {
             let key = TopicKey::of(topic);
             if held.contains(&key) {
@@ -139,12 +165,20 @@ impl Hub {
                 held.insert(key);
                 self.subscribers.entry(key).or_default().insert(session_id);
                 accepted.push(topic.clone());
+                gated.push(key);
                 added += 1;
             } else {
                 rejected.push(topic.clone());
             }
         }
         drop(held);
+        if !gated.is_empty() {
+            if let Some(handle) = self.sessions.get(&session_id) {
+                for key in gated {
+                    handle.outbound().add_topic(key);
+                }
+            }
+        }
         self.meters.subscriptions_added(added);
         self.meters
             .subscriptions_refused(Refused::Cap, rejected.len() as u64);
@@ -152,6 +186,15 @@ impl Hub {
     }
 
     /// Removes subscriptions the session holds; unknown topics are ignored.
+    ///
+    /// The mailbox's fan-out gate is closed *before* the hub's own sets are
+    /// touched: a fan-out that snapshotted the subscriber list a moment ago
+    /// can still be walking its targets, and the gate — not the snapshot — is
+    /// what stops it. A frame that enqueued before the gate closed precedes
+    /// this call's return, and the caller that answers the client afterwards
+    /// makes the acknowledgement follow it; a frame that arrives after finds
+    /// the gate shut. Either way nothing for the topic is delivered past the
+    /// point the unsubscribe returns.
     pub(crate) fn unsubscribe(&self, session_id: Id, topics: &[Topic]) {
         let Some(mut held) = self.session_topics.get_mut(&session_id) else {
             return;
@@ -161,6 +204,9 @@ impl Hub {
             let key = TopicKey::of(topic);
             if held.remove(&key) {
                 removed += 1;
+                if let Some(handle) = self.sessions.get(&session_id) {
+                    handle.outbound().remove_topic(key);
+                }
                 if let Some(mut set) = self.subscribers.get_mut(&key) {
                     set.remove(&session_id);
                     if set.is_empty() {
@@ -203,6 +249,13 @@ impl Hub {
                     let key = TopicKey::of(topic);
                     if held.remove(&key) {
                         removed += 1;
+                        // The gate closes before the set shrinks, as in `unsubscribe`:
+                        // a fan-out already walking its snapshot finds the gate shut
+                        // here too, so a revoked topic delivers nothing past the
+                        // revocation — not to this session, not on this node.
+                        if let Some(handle) = self.sessions.get(&session_id) {
+                            handle.outbound().remove_topic(key);
+                        }
                         if let Some(mut set) = self.subscribers.get_mut(&key) {
                             set.remove(&session_id);
                             if set.is_empty() {
@@ -266,10 +319,19 @@ impl Hub {
                         continue;
                     }
                 }
-                let outcome =
-                    handle
-                        .outbound()
-                        .push(encoded.clone(), class, opcode, coalesce_key, now);
+                // The gated push: the snapshot above says who was listening when the
+                // fan-out started, the mailbox's topic set says who is listening when the
+                // frame is enqueued, and the second is the truth that wins — a revocation
+                // or unsubscribe that raced this walk delivers nothing past the moment it
+                // returned. `NotSubscribed` is policy, not a drop, and is not counted.
+                let outcome = handle.outbound().push_for_topic(
+                    key,
+                    encoded.clone(),
+                    class,
+                    opcode,
+                    coalesce_key,
+                    now,
+                );
                 if let PushOutcome::Dropped(class) = outcome {
                     self.meters.frame_dropped(class);
                 }

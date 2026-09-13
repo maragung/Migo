@@ -1037,6 +1037,19 @@ class MigoClient private constructor(
         subscribe(listOf(Topic(TopicKind.Room, roomId)))
     }
 
+    /**
+     * Stops receiving a room's events, and stops tracking the topic.
+     *
+     * The server revokes a leaver's room topics on its own -- this is not what keeps the frames
+     * away -- but the tracked set is what a session reset re-subscribes from, and a topic for a
+     * room the account left would otherwise be re-asked (and refused) on every reconnect. Call it
+     * after `rooms.leave` resolves; it is idempotent, so a topic the server already took costs
+     * nothing to name again.
+     */
+    suspend fun unwatchRoom(roomId: Id) {
+        unsubscribe(listOf(Topic(TopicKind.Room, roomId)))
+    }
+
     /** Subscribes to an account's topic, for that account's presence changes. */
     suspend fun watchUser(userId: Id) {
         subscribe(listOf(Topic(TopicKind.User, userId)))
@@ -1641,11 +1654,13 @@ class MigoClient private constructor(
     /**
      * Opens a replacement session, resuming the old one where the server allows it.
      *
-     * A resume that succeeded means the server replayed from the acknowledged watermark and the
-     * subscriptions are still in place, so there is nothing to redo. A fresh session means they are
-     * gone, and every tracked topic is re-sent before the application's own resync runs -- in that
-     * order, because a resync that fetched history before the subscriptions were back would leave a gap
-     * between the last fetched message and the first delivered one.
+     * Every tracked topic is re-sent on both paths, and the application's own resync runs only on a
+     * fresh session -- in that order, because a resync that fetched history before the subscriptions
+     * were back would leave a gap between the last fetched message and the first delivered one. The
+     * re-subscribe after a successful resume is belt-and-braces rather than waste: SUBSCRIBE is
+     * idempotent, and a topic the server could not re-authorize while the session was down comes back
+     * refused exactly as a fresh ask would be, so a resumed session is never left silent by a server
+     * that does not restore subscriptions itself.
      */
     private suspend fun reopen(previous: Session) {
         val resume = if (previous.gateway.sessionId == NIL_ID) {
@@ -1663,8 +1678,6 @@ class MigoClient private constructor(
             opened
         }
 
-        if (session.resumed) return
-
         val topics = cacheLock.withLock { subscribedTopics.values.toList() }
         if (topics.isNotEmpty()) {
             try {
@@ -1677,7 +1690,9 @@ class MigoClient private constructor(
                 options.onEventError?.invoke(Op.SUBSCRIBE, cause)
             }
         }
-        options.onReset?.invoke()
+        if (!session.resumed) {
+            options.onReset?.invoke()
+        }
     }
 
     /** The SUBSCRIBE round trip, without the tracking, for the paths that track separately. */

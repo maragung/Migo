@@ -2202,7 +2202,7 @@ export interface RoomMemberEvent {
   joined: boolean;
   role?: RoomRole;
   memberCount?: number;
-  /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
+  /** Why the membership changed. Absent on a join, where `joined` says it; a leave, kick, ban, or grace timeout sets it so a removal can be told from a roster refresh. */
   change?: MemberChange;
   /** The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe. */
   revision?: number;

@@ -161,6 +161,16 @@ export interface TransportOptions {
   onStateChange?: (state: ConnectionState) => void;
   /** Called when a reconnect could not resume: the session is fresh and app state must resync. */
   onReset?: () => void;
+  /**
+   * Called when a reconnect *did* resume: the session is the old one, the ring is replaying, and
+   * the server has re-derived the subscriptions it could re-authorize. Re-subscribing here is
+   * belt-and-braces — SUBSCRIBE is idempotent, and a topic the server could not restore (the
+   * account lost it while the session was down) is refused exactly as a fresh ask would be — so
+   * a resumed session is never left silent by a server that predates server-side restore. No
+   * resync rides this callback: section 158 promises a resumed session it need not sync, and the
+   * ring plus this re-subscribe are the whole of what it owes.
+   */
+  onResumed?: () => void;
   /** Called with a decoded RECONNECT_HINT before the transport acts on it. */
   onReconnectHint?: (hint: ReconnectHint) => void;
 }
@@ -271,6 +281,9 @@ export class GatewayTransport {
   #isReconnect = false;
   /** A reset noticed in the WELCOME that has not reached its handler yet (see #onReady). */
   #resetPending = false;
+
+  /** A successful resume noticed in the WELCOME, delivered once the session reaches Ready. */
+  #resumedPending = false;
 
   /** The in-flight handshake's settlers, or null when not handshaking. */
   #handshake: { resolve: () => void; reject: (error: Error) => void } | null = null;
@@ -638,6 +651,9 @@ export class GatewayTransport {
       this.#lastAckedSeq = 0;
       this.#resetPending = true;
     }
+    if (this.#isReconnect && resumed) {
+      this.#resumedPending = true;
+    }
 
     if (resumed || welcome.authenticatedUser !== undefined) {
       this.#onReady();
@@ -697,6 +713,10 @@ export class GatewayTransport {
     if (this.#resetPending) {
       this.#resetPending = false;
       this.#options.onReset?.();
+    }
+    if (this.#resumedPending) {
+      this.#resumedPending = false;
+      this.#options.onResumed?.();
     }
   }
 

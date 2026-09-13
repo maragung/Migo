@@ -649,6 +649,19 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     await this.subscribe([{ kind: TopicKind.Room, id: roomId }]);
   }
 
+  /**
+   * Stops receiving a room's events, and stops tracking the topic.
+   *
+   * The server revokes a leaver's room topics on its own — this is not what keeps the frames
+   * away — but the tracked set is what a session reset re-subscribes from, and a topic for a
+   * room the account left would otherwise be re-asked (and refused) on every reconnect. Call
+   * it after `rooms.leave` resolves; it is idempotent, so a topic the server already took
+   * costs nothing to name again.
+   */
+  async unwatchRoom(roomId: Id): Promise<void> {
+    await this.unsubscribe([{ kind: TopicKind.Room, id: roomId }]);
+  }
+
   /** Subscribes to a user's topic, for that account's presence changes. */
   async watchUser(userId: Id): Promise<void> {
     await this.subscribe([{ kind: TopicKind.User, id: userId }]);
@@ -1476,6 +1489,25 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     if (this.#ctx === null) {
       return;
     }
+    this.#resubscribeTopics(true);
+    this.#options.onReset?.();
+  }
+
+  /**
+   * Re-subscribes every topic this client tracks, in section 158's kind order, and (after a
+   * reset, never after a resume) lets the outbox leave once the subscriptions are live again.
+   *
+   * The same walk serves two callers. A reset means the session is fresh and nothing is
+   * subscribed, so the outbox waits for the re-subscribe and the app resync that follows. A
+   * resume means the server has already re-derived what it could re-authorize, and the
+   * re-subscribe is belt-and-braces: SUBSCRIBE is idempotent, a topic the server could not
+   * restore comes back refused exactly as a fresh ask would be, and the outbox's in-flight
+   * entries are still pending rather than rejected — so it is not touched here.
+   */
+  #resubscribeTopics(drainOutbox: boolean): void {
+    if (this.#ctx === null) {
+      return;
+    }
     const buckets = new Map<number, Topic[]>();
     for (const topic of this.#subscribedTopics.values()) {
       let bucket = buckets.get(topic.kind);
@@ -1501,16 +1533,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
         .call(OP.SUBSCRIBE, encodeSubscribeRequest, decodeSubscribeResponse, { topics: ordered })
         .then(() => {
           // Subscriptions are live again, so the outbox may leave — after sync, per section 158.
-          // The app's resync runs concurrently (it was notified in parallel below); its sync
+          // The app's resync runs concurrently (it was notified in parallel); its sync
           // reads race the drain by design, because an idempotent send that overtakes a sync
           // read is answered by the later sync, not duplicated.
-          this.#outbox?.drain();
+          if (drainOutbox) {
+            this.#outbox?.drain();
+          }
         })
         .catch((cause: unknown) => this.#options.onEventError?.(OP.SUBSCRIBE, cause));
-    } else {
+    } else if (drainOutbox) {
       this.#outbox?.drain();
     }
-    this.#options.onReset?.();
   }
 
   /** The transport options assembled from the client options plus the grant's credentials. */
@@ -1526,6 +1559,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       hello,
       onStateChange: (state) => this.#options.onStateChange?.(state),
       onReset: () => this.#handleReset(),
+      onResumed: () => this.#resubscribeTopics(false),
     };
     if (this.#options.webSocketFactory !== undefined) {
       options.webSocketFactory = this.#options.webSocketFactory;

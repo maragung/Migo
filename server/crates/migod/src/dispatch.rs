@@ -31,7 +31,10 @@
 //! service returns `Ok(None)` and there is no fan-out to ride on; a handler that replies only
 //! inside `if let Some(fanout)` leaves the no-op path hanging until the client's timer fires.
 //! `MessageReceipt` and `Typing` are notifications and correctly never reply. `PresenceSet` and
-//! `RoomLeave` are RPCs the SDK awaits, so they acknowledge first and then publish; the
+//! `RoomLeave` are RPCs the SDK awaits, so they always reply exactly once; `RoomLeave` replies
+//! *after* its fan-out and revocation so no room frame can be delivered past the acknowledgement
+//! (the removal must stop the frames at the ack, not after it), while `PresenceSet` replies first
+//! and then publishes. The
 //! regression tests in `tests/dispatch_replies.rs` drive both over a real socket, because this
 //! silence is invisible from inside the process.
 //!
@@ -776,11 +779,15 @@ impl Dispatcher for AppDispatcher {
                 let request: ConversationLeaveRequest =
                     from_frame(frame).map_err(fault::from_wire)?;
                 let fanouts = self.messaging.leave(&caller, request).await?;
-                context.reply(&Acknowledged { ok: true })?;
+                // Publish (and revoke the leaver's sockets) before the reply, for the same
+                // reason `RoomLeave` does: the acknowledgement must be the last frame the
+                // leaver can attribute to the conversation, and a reply sent first opens a
+                // window where a raced message is still delivered after "you are out".
                 for fanout in fanouts {
                     self.publish_messaging(context, caller.account_id, fanout)
                         .await?;
                 }
+                context.reply(&Acknowledged { ok: true })?;
                 Ok(())
             }
             Opcode::ConversationRoster => {
@@ -989,18 +996,26 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomLeaveRequest = from_frame(frame).map_err(fault::from_wire)?;
+                let room_id = request.room_id;
                 // Leaving is room state too: the member list the home node sequences is
                 // the one every node must agree on, partition or not.
-                self.room_relay.ensure_writable(request.room_id).await?;
+                self.room_relay.ensure_writable(room_id).await?;
                 let fanout = self.rooms.leave(&caller, request).await?;
-                // Reply before the fanout, and unconditionally: the service returns Ok(None)
-                // for an idempotent no-op leave (not a member, or already gone), which is a
-                // success the caller still awaits an acknowledgement for — gating the reply on
-                // the fanout left those paths hanging until the client's request timer fired.
-                context.reply(&Acknowledged { ok: true })?;
+                // Publish and revoke before the reply, and reply unconditionally. The service
+                // returns Ok(None) for an idempotent no-op leave (not a member, or already gone),
+                // which is a success the caller still awaits an acknowledgement for — gating the
+                // reply on the fanout left those paths hanging until the client's request timer
+                // fired. But when a real leave did happen, the acknowledgement must not overtake
+                // the teardown: a reply sent first lets a message that raced the leave be enqueued
+                // and delivered after the client saw "you are out" — the frames stop at, not after,
+                // the acknowledgement. A no-op leave still revokes defensively: a session that
+                // somehow holds the topics against an already-emptied seat loses them here.
                 if let Some(fanout) = fanout {
                     self.publish_rooms(context, fanout).await?;
+                } else {
+                    self.revoke_room_audience(room_id, caller.account_id).await;
                 }
+                context.reply(&Acknowledged { ok: true })?;
                 Ok(())
             }
             Opcode::RoomList => {
@@ -1739,7 +1754,30 @@ pub(crate) fn publish_room_fanout(
     };
     let opcode = fanout.opcode();
     match &fanout.event {
-        RoomBroadcast::Member(event) => context.publish_excluding_self(&topic, opcode, event, None),
+        RoomBroadcast::Member(event) => {
+            context.publish_excluding_self(&topic, opcode, event, None)?;
+            // The join's other half, and rooms owe conversations the same doorbell. A member
+            // event's audience is the room's subscribers, and a member who has just joined is
+            // not one yet on any device but the one that asked — their other sessions cannot
+            // be subscribed to a room they have never heard of. The same event, published to
+            // the joiner's user topic, is the one frame that reaches them: every session
+            // listening to its own topic hears it, and a client that does not know the room
+            // reacts by re-deriving its subscriptions (a join is idempotent, section 156), so
+            // a member becomes a member everywhere they hold a session. Not coalesced, for
+            // the same reason the room copy is not: *who* joined is the fact.
+            if matches!(event.change, Some(MemberChange::Joined)) {
+                context.publish(
+                    &Topic {
+                        kind: TopicKind::User,
+                        id: event.user_id,
+                    },
+                    opcode,
+                    event,
+                    None,
+                )?;
+            }
+            Ok(())
+        }
         RoomBroadcast::State(event) => {
             context.publish_excluding_self(&topic, opcode, event, Some(stream_key(&fanout.room_id)))
         }

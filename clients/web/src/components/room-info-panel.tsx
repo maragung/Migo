@@ -504,6 +504,12 @@ export function RoomInfoPanel({
         // and the directory row would keep showing a room of one that nobody is in.
         forgetRoom(roomId);
         forgetConversation(conversationId);
+        // The server revoked both topics the moment the leave landed; these drops are for the
+        // client's own tracked set, so a later session reset does not re-ask for a room the
+        // account is no longer in. Fire-and-forget: a refusal here is tidying a set the server
+        // has already cleaned, not a failure the leaver needs to read.
+        void client.unwatchRoom(roomId).catch(() => {});
+        void client.unwatchConversation(conversationId).catch(() => {});
         closeConversation();
       })
       .catch((cause: unknown) => {
