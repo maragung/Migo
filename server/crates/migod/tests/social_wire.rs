@@ -1,8 +1,7 @@
 //! The SOCIAL opcodes answered on the wire, where the handler layer lives.
 //!
-//! Five behaviours only the dispatcher can get wrong, because the service under it is
+//! Six behaviours only the dispatcher can get wrong, because the service under it is
 //! correct in isolation:
-//!
 //! * **A full friends page must not hide the request behind it.** The combined
 //!   relationship listing once truncated the concatenated answer to the caller's
 //!   limit, so a user whose friends filled the page read "no pending requests"
@@ -37,13 +36,16 @@
 //!   behind `FRIEND_EVENT` has two halves, and for a long time only one of them
 //!   existed: the other party heard the move, while the actor's *other* devices —
 //!   and, for declines and blocks, the other party entirely — sat on a stale friends
-//!   list until somebody refreshed by hand. The five tests after the crossing one
+//!   list until somebody refreshed by hand. The tests after the crossing one
 //!   drive each mutation with both parties live on two devices each, over real TCP
 //!   sockets, and assert who hears what: an acceptance reaches the acceptor's other
 //!   device (and not the session that answered), a request reaches the asker's other
 //!   device, a decline moves the graph for both parties without a bell, a block
 //!   tears a friendship down live on both sides, and blocking a stranger publishes
-//!   nothing to the stranger at all — the privacy half of the same fan-out.
+//!   nothing to the stranger at all — the privacy half of the same fan-out. A mute
+//!   is the quietest member of the family: the muter's other device hears the
+//!   switch flip both ways, and the muted account hears nothing, because a volume
+//!   control is not a verdict.
 //!
 //! Every test uses the reply rule as its clock: every frame it waits for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -59,10 +61,10 @@ use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
     codes, from_frame, to_frame, Acknowledged, Encode, Frame, FriendEvent, FriendRespond,
-    FriendTarget, NotificationEvent, NotificationKind, Opcode, PresenceEvent, PresenceState,
-    PresenceUpdate, ProfileRequest, ProfileResponse, ProfileUpdate, RelationshipList,
-    RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic, TopicKind, UserProfile,
-    PROTOCOL_VERSION,
+    FriendTarget, MuteSet, NotificationEvent, NotificationKind, Opcode, PresenceEvent,
+    PresenceState, PresenceUpdate, ProfileRequest, ProfileResponse, ProfileUpdate,
+    RelationshipList, RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
+    UserProfile, PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -629,6 +631,97 @@ async fn a_request_reaches_the_askers_other_device() {
     assert_eq!(
         echo.state, "request",
         "the asker's other device learns the request it watched leave"
+    );
+}
+
+/// A mute is a page of the caller's own graph, and the echo is what keeps it honest on
+/// the caller's other devices: a mute tapped on the phone leaves the tablet rendering
+/// a stranger's messages until somebody refreshes by hand. The switch flips both ways —
+/// `muted` on, `unmuted` off — and the muted account hears neither, because a volume
+/// control is not a verdict.
+#[tokio::test]
+async fn a_mute_reaches_the_muters_other_device() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "jena").await;
+    let alice_laptop_grant = second_device_grant(&app, "jena").await;
+    let bob_grant = registered_grant(&app, "kyle").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+
+    // The mute itself. The two accounts need no relationship at all — a mute is the
+    // caller's own business — so the switch is flipped on a stranger.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::MuteSet,
+            10,
+            &MuteSet {
+                user_id: bob_grant.account_id,
+                on: true,
+            },
+        )
+        .await;
+
+    // The muter's other device hears the echo: the mute list it renders gained a
+    // row, and this is the only frame that tells it so.
+    let muted: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the muter's other device gets an event");
+    assert_eq!(muted.user_id, bob_grant.account_id);
+    assert_eq!(
+        muted.state, "muted",
+        "the muter's other device learns the mute list grew"
+    );
+
+    // And back off again: the unmute is the same page moving the other way.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::MuteSet,
+            11,
+            &MuteSet {
+                user_id: bob_grant.account_id,
+                on: false,
+            },
+        )
+        .await;
+    let unmuted: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the muter's other device gets the second event");
+    assert_eq!(unmuted.user_id, bob_grant.account_id);
+    assert_eq!(
+        unmuted.state, "unmuted",
+        "the muter's other device learns the mute was lifted"
+    );
+
+    // The muted account hears nothing at all. A PING, and a read to its PONG: the
+    // echo — had the fan-out leaked it across accounts — is queued ahead of the
+    // reply this PING earns, so finding the PONG without a FRIEND_EVENT in front of
+    // it is the assertion.
+    send(
+        &mut bob.stream,
+        Opcode::Ping,
+        12,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut bob.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::FriendEvent),
+            "the muted account is not told it was muted — a volume control is not a verdict"
+        );
+        if frame.header.correlation == 12 {
+            break frame;
+        }
+    };
+    assert!(
+        !pong.header.is_error(),
+        "the muted account keeps serving the frames it did ask for"
     );
 }
 
