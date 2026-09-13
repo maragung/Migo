@@ -163,11 +163,12 @@ pub fn group_join_event(
 /// Builds the departure event the roster hears: `Ended` naming the leaver and
 /// the size after the change — `Ended` because the wire's vocabulary has no
 /// "left" state, and the reason slot carries the departure's own truth:
-/// [`EndReason::ByCaller`] for a leave the participant sent, so a client
-/// rendering the optional reason still renders something honest (the
-/// participant withdrew themselves), and [`EndReason::Network`] for the
-/// sweep's retirement of a seat whose session died, so the same slot does not
-/// claim a withdrawal nobody made.
+/// [`EndReason::ByCaller`](crate::model::EndReason::ByCaller) for a leave the
+/// participant sent, so a client rendering the optional reason still renders
+/// something honest (the participant withdrew themselves), and
+/// [`EndReason::Network`](crate::model::EndReason::Network) for the sweep's
+/// retirement of a seat whose session died, so the same slot does not claim a
+/// withdrawal nobody made.
 #[must_use]
 pub fn group_leave_event(
     call: &GroupCall,
