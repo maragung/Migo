@@ -2502,13 +2502,19 @@ impl Worker {
             // an error. BATCHING is honoured since inbound envelopes are unpacked in `on_record`;
             // RICH_PRESENCE is honoured since the profile pane's status field saves through
             // PROFILE_UPDATE.custom_status — and only draws as an editable field on sessions whose
-            // WELCOME put the bit in the intersection.
+            // WELCOME put the bit in the intersection. CALLS, ROOMS, and ECONOMY are honoured
+            // because the client speaks those families' opcodes (the call signal path, the rooms
+            // screens, the wallet and gifting) and the server now refuses a family's frames on a
+            // session that did not announce its bit — the mask is the switch's own key.
             features: features::E2E_V1
                 | features::PRESENCE
                 | features::TYPING
                 | features::COMPRESSION
                 | features::BATCHING
-                | features::RICH_PRESENCE,
+                | features::RICH_PRESENCE
+                | features::CALLS
+                | features::ROOMS
+                | features::ECONOMY,
             locale: "en".to_owned(),
             bandwidth_mode: migo_protocol::BandwidthMode::Auto,
             access_token: Some(signed.access_token.clone()),

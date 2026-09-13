@@ -213,12 +213,15 @@ val DEFAULT_REPLENISH_POLICY = PrekeyReplenishPolicy(low = 16, batch = 64)
  * The features this build actually implements, as the HELLO bitmask.
  *
  * Announced honestly: a bit here is a promise that the code behind it exists, and the server may enable
- * behaviour on the strength of it. [Feature.MEDIA_UPLOAD] is now announced because the upload path
- * exists in this build ([MediaDomain], plus the avatar flow in [changeAvatar]); [Feature.VOICE_MESSAGE]
- * remains absent because that path is still specification (migo.md section 168) -- this client can
- * decode a media or voice-note reference in a message, which is a different thing from being able to
- * produce one.
- * [Feature.BOTS], [Feature.TRANSLATION] and [Feature.ECONOMY] are absent for the same reason;
+ * behaviour on the strength of it. [Feature.MEDIA_UPLOAD] is announced because the upload path exists in
+ * this build ([MediaDomain], plus the avatar flow in [changeAvatar]); [Feature.CALLS] because the calls
+ * domain places and answers rings ([CallsDomain], wired into the app's call manager); and
+ * [Feature.ECONOMY] because the wallet and gifting are shipped screens, not specification -- the server
+ * now refuses a family's frames on a session that did not announce its bit, so the mask is what keeps
+ * those paths working. [Feature.VOICE_MESSAGE] remains absent because that path is still specification
+ * (migo.md section 168) -- this client can decode a media or voice-note reference in a message, which is
+ * a different thing from being able to produce one.
+ * [Feature.BOTS] and [Feature.TRANSLATION] are absent for the same reason;
  * [Feature.QUIC] because this build has no Kotlin QUIC runtime and connects over WebSocket even when a
  * QUIC endpoint is chosen, so announcing the bit would be a promise the wire cannot keep; and
  * [Feature.TRACING] because a mobile client has no trace sink to send to.
@@ -235,7 +238,9 @@ val DEFAULT_CLIENT_FEATURES: ULong = Feature.COMPRESSION or
     Feature.ROOMS or
     Feature.GAMES or
     Feature.MEDIA_UPLOAD or
-    Feature.RESUME
+    Feature.RESUME or
+    Feature.CALLS or
+    Feature.ECONOMY
 
 /**
  * The media domain's own kind numbering for an avatar. Kept here rather than as a `const` on the

@@ -145,8 +145,11 @@ impl LiveSession {
             .expect("connecting does not stall")
             .expect("the connection is accepted");
 
+        // The PRESENCE and ROOMS bits: the replies this suite drives belong to those two
+        // families, both of which brief section 72 gates on the negotiated set.
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features: migo_protocol::features::PRESENCE | migo_protocol::features::ROOMS,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
