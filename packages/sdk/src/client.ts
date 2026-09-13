@@ -1097,7 +1097,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     if (members === undefined) {
       throw new SdkError(
         `migo: membership for conversation ${conversationId} is unknown; ` +
-          'call startConversation, loadConversations, or rememberMembers first',
+          'call startConversation, rehydrateRoom, loadConversations, or rememberMembers first',
       );
     }
     const audience = new Set<Id>(members.ids);

@@ -633,8 +633,13 @@ test('teardownRoom unsubscribes both topics in one frame and drops the bridge an
     );
 
     // The membership cache is gone: the next audience question is the honest unknown-membership
-    // throw, not a stale roster a departed member could still be sealed for.
-    await assert.rejects(client.recipientDevices(idOf(0x5eed)), /membership is unknown/);
+    // throw, not a stale roster a departed member could still be sealed for. The hint names every
+    // path that (re)seeds the cache — rehydrateRoom included, since a restored room is the case
+    // this whole test file exists for.
+    await assert.rejects(
+      client.recipientDevices(idOf(0x5eed)),
+      /membership for conversation .* is unknown; call startConversation, rehydrateRoom, loadConversations, or rememberMembers first/,
+    );
 
     // The bridge is gone too: a rehydrate after the teardown joins again rather than answering
     // from a mapping that outlived the room.
