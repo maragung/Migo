@@ -84,7 +84,9 @@ class ResetResyncTest {
         val seen = Recorder()
         resync(seen).run(
             openConversationId = conversation,
-            heldSeq = { held -> if (held == other) 12L else 41L },
+            // The open chat holds 41, `other` holds 12, and `third` holds nothing — the point
+            // being that a listed conversation with no held cursor stays out of the run.
+            heldSeq = { held -> if (held == other) 12L else if (held == conversation) 41L else null },
             conversations = { listOf(other, third, conversation) },
         )
         // Section 158's "sync visible conversations first": the chat on screen syncs before the
