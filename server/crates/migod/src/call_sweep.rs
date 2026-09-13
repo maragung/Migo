@@ -14,6 +14,20 @@
 //! topics — the caller's screen gives up, and the callee's ring stops without
 //! anyone having to decline a call that was never going to connect.
 //!
+//! # The group seats ride the same tick
+//!
+//! A group seat whose session died is the ring's problem wearing a roster: the
+//! participant cannot leave — nothing is running to send the leave — and the
+//! roster left behind cannot unseat them, because a leave is the leaver's own
+//! fact. The dispatcher stamps the seat gone on the session edge, and every
+//! tick [`group_sweep`](migo_calls::Callkeeper::group_sweep) retires the seats
+//! whose grace window passed without the re-join, returning each departure as
+//! the same `CallSfuEvent` an explicit leave publishes — this task then sends
+//! it to the conversation's topic, where the remaining roster hears it and
+//! stops rendering a participant whose session is dead (section 166, audit
+//! area 6). No coalescing key, for the same reason the explicit-leave handler
+//! passes none: no two membership facts may collapse into one.
+//!
 //! `migo-calls` itself owns no timer (see that crate's docs): the sweep also
 //! runs opportunistically inside `invite`, which keeps a quiet node's rows
 //! honest between ticks. This task is the half the opportunistic pass cannot
@@ -106,5 +120,28 @@ async fn sweep_once(calls: &SharedCallkeeper, gateway: &Gateway, clock: &dyn Clo
             }
         }
         Err(error) => tracing::warn!(%error, "the call sweep failed"),
+    }
+    // The group seats, same tick: each stamped-gone seat whose grace window
+    // passed is retired and its departure announced to the conversation —
+    // published here rather than in the handler above because the retirement
+    // has no author to exclude, and there is no request in hand to ride on.
+    match calls.group_sweep(now).await {
+        Ok(departures) => {
+            for event in departures {
+                let topic = Topic {
+                    kind: TopicKind::Conversation,
+                    id: event.conversation_id.unwrap_or_default(),
+                };
+                // Plain broadcast, no coalescing key — the same rule the
+                // explicit-leave handler keeps: membership facts never
+                // collapse, whatever the opcode's class allows.
+                gateway.broadcast_to_topic(&topic, Opcode::CallSfuEvent, &event, now);
+                tracing::info!(
+                    call_id = %event.call_id.unwrap_or_default(),
+                    "a dead group seat retired; the roster told"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(%error, "the group seat sweep failed"),
     }
 }

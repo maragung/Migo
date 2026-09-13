@@ -32,6 +32,12 @@
 //!   only the relay — the `Connected` state event every client listens for
 //!   never went out. The fourth test relays the answer and asserts both
 //!   parties hear `Connected`.
+//! * **A dead session ends the connected call for the survivor.** A party
+//!   whose socket dies cannot send the end — nothing is running to send it —
+//!   so the node ends the departed account's calls on the session edge and
+//!   publishes `Ended(Network)` to the survivor's user topic, prompt instead
+//!   of a client-side media timeout. The fifth test kills the callee's socket
+//!   mid-call and asserts the caller hears it.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -690,6 +696,94 @@ async fn the_answer_relay_tells_both_parties_the_call_connected() {
     // out before it. Nothing further is owed to the callee's own session, and
     // that is the design — the answering device's truth is its reply and its
     // own screen state, not an event it must wait for.
+}
+
+/// A connected party's socket dies — no `CALL_END`, just a closed connection —
+/// and the survivor hears the call ended from the *server*, promptly, instead
+/// of waiting out a client-side media timeout (audit area 6, section 180).
+/// Before the session edge ended the departed account's calls, the survivor's
+/// only clock was its own reconnect window: tens of seconds of one-way media
+/// to a peer that no longer exists. The frame waited for below is the fix —
+/// `Ended(Network)`, published by the node on the edge that always knows.
+#[tokio::test]
+async fn a_dead_session_s_connected_call_ends_for_the_survivor() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "survivorcaller").await;
+    let callee = registered_grant(&app, "survivorcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "survivor-room").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut callee_session = LiveSession::connect(addr, &callee).await;
+
+    // The call to Connected, exactly as the answer-relay test builds it: ring,
+    // answer, and the callee's first sealed SDP relay.
+    let call_id = Id::from_bytes([0xD4; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            121,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x88; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+    let _ = next_event_of(&mut callee_session.stream, Opcode::CallInviteEvent, STEP).await;
+
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallAnswer,
+            122,
+            &CallAnswer {
+                call_id,
+                callee_device: callee.device_id,
+                sealed_answer: vec![0x99; 48],
+            },
+        )
+        .await;
+    let _ = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallSdp,
+            123,
+            &CallSdp {
+                call_id,
+                from_device: callee.device_id,
+                to_device: caller.device_id,
+                sealed_sdp: vec![0xAA; 48],
+            },
+        )
+        .await;
+    let connected = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&connected).expect("the caller's event decodes");
+    assert_eq!(state.state, CallState::Connected.to_wire());
+    let _ = next_event_of(&mut caller_session.stream, Opcode::CallSdp, STEP).await;
+
+    // The callee's socket dies — the whole account, its only session, gone
+    // with no leave and no end. The caller stays connected.
+    drop(callee_session);
+
+    // The survivor is told, and told *why*: `Network`, the reason that claims
+    // connectivity was lost rather than a hang-up nobody sent. The timeout is
+    // the assertion — on the code this test was written against, nothing came,
+    // and the caller's screen waited out its media timeout alone.
+    let ended = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&ended).expect("the survivor's event decodes");
+    assert_eq!(state.call_id, call_id);
+    assert_eq!(state.state, CallState::Ended.to_wire());
+    assert_eq!(
+        state.reason,
+        Some(EndReason::Network.to_wire()),
+        "the server says the network died, not that anybody hung up"
+    );
 }
 
 #[tokio::test]

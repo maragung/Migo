@@ -259,6 +259,21 @@ pub trait Callkeeper: Send + Sync {
     /// paths that already paid.
     async fn call(&self, caller: &Caller, call_id: Id) -> Result<Call>;
 
+    /// Ends the answered calls an account was a party to, as `Network`.
+    ///
+    /// The socket-death twin of the ring sweep: a connected party whose last
+    /// session went down cannot end the call — nothing is running to send the
+    /// end — and the survivor should not wait out a client-side media
+    /// timeout for a fact the server already holds. Returns the terminated
+    /// rows so the caller of this method can publish each one's
+    /// [`Call::ended_event`] to the *other* party, exactly as the ring sweep
+    /// publishes to both.
+    ///
+    /// Not charged: no frame arrived, and the sweep's own `NoAnswer` ends are
+    /// free for the same reason — a server-originated end is not a client's
+    /// spend.
+    async fn end_disconnected(&self, account_id: Id, now: Timestamp) -> Result<Vec<Call>>;
+
     // --- the group call ---------------------------------------------------
     //
     // The SFU's half: seating a roster, telling it about itself, and moving
@@ -369,6 +384,35 @@ pub trait Callkeeper: Send + Sync {
     /// such call" and "not your call", so the dispatcher's group-then-1:1
     /// handoff needs no new error to tell the two stores apart.
     async fn group_key_audience(&self, caller: &Caller, call_id: Id) -> Result<Vec<Id>>;
+
+    /// Records that the session holding a seat has ended.
+    ///
+    /// The dispatcher's `session_ended` edge calls this so the group store
+    /// learns what the 1:1 store learns from its own deadlines: the seat's
+    /// owner is gone. Every roster a device of this account is seated in gets
+    /// the seat's `gone_since` stamp; a later re-join replaces the seat and
+    /// clears the stamp, and [`Callkeeper::group_sweep`] does the retiring.
+    /// Idempotent, and a no-op for a device that holds no seat — the common
+    /// case, since a session that never joined a group call is a session with
+    /// nothing to mark.
+    async fn group_session_ended(
+        &self,
+        account_id: Id,
+        device_id: Id,
+        now: Timestamp,
+    ) -> Result<()>;
+
+    /// Retires the seats whose session ended past the grace window, returning
+    /// their departure events.
+    ///
+    /// The group twin of [`Callkeeper::sweep`]: a seat whose `gone_since` is
+    /// older than the configured grace is removed, the call retires when its
+    /// last seat empties, and each retired seat produces the departure event
+    /// the *remaining* roster should hear — carrying the conversation id, so
+    /// the publisher knows which topic that is. The caller of this method owns
+    /// the publishing, exactly as the ring sweep's caller does, because only
+    /// the composition root knows which topics reach anyone.
+    async fn group_sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>>;
 }
 
 /// The call service, shared.

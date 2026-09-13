@@ -268,6 +268,20 @@ impl RoomPresence {
     pub(crate) async fn online_count(&self, room_id: Id) -> u32 {
         self.shared.online_count(room_id).await
     }
+
+    /// How many live sessions an account holds right now, as this node's tally knows it.
+    ///
+    /// The one question the dispatcher's session edges ask beyond rooms: whether a socket
+    /// that just went down was the account's last. Zero means the account is unreachable
+    /// through this node — the fact a connected call's survivor needs told, and the one a
+    /// departing socket cannot deliver itself.
+    pub(crate) fn session_count(&self, account_id: Id) -> u32 {
+        self.shared
+            .state
+            .lock()
+            .get(&account_id)
+            .map_or(0, |entry| entry.sessions)
+    }
 }
 
 impl Shared {

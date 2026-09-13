@@ -189,6 +189,22 @@ impl Harness {
     }
 
     fn gated(gate: TestGate) -> Self {
+        Self::gated_with_config(gate, CallsConfig::default())
+    }
+
+    /// The same harness over a turned knob: the seat grace, which the sweep's
+    /// tests wait out and the production default sizes in tens of seconds.
+    fn with_seat_grace(grace_ms: i64) -> Self {
+        Self::gated_with_config(
+            TestGate::open(),
+            CallsConfig {
+                seat_grace_ms: grace_ms,
+                ..CallsConfig::default()
+            },
+        )
+    }
+
+    fn gated_with_config(gate: TestGate, config: CallsConfig) -> Self {
         let settings = Config::default();
         let store = Arc::new(MemoryCallStore::new());
         let registry = Registry::new();
@@ -204,7 +220,7 @@ impl Harness {
             limiter,
             Arc::new(gate),
             &registry,
-            CallsConfig::default(),
+            config,
         );
         Self {
             calls,
@@ -1650,4 +1666,230 @@ async fn every_group_series_is_registered_at_zero() {
             "{series} must exist before anything happens"
         );
     }
+}
+
+// --- the deaths a session edge reports -----------------------------------------
+//
+// A socket that closes without a leave is the one death no frame reports: the
+// tests here pin what the dispatcher's session_ended edge and the sweep it arms
+// do with that fact — a group seat stamped, swept after the grace, and a
+// connected 1:1 call ended for the survivor.
+
+#[tokio::test]
+async fn a_seat_whose_session_died_is_swept_after_the_grace() {
+    let harness = Harness::with_seat_grace(SECOND);
+    for who in [alice(NOW), bob(NOW)] {
+        harness
+            .calls
+            .group_join(
+                &who,
+                id(GROUP_CALL),
+                id(CONVERSATION),
+                0,
+                b"sealed".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // The session edge: Bob's socket died, and only the mark is written — the
+    // grace window belongs to the re-join that may still come.
+    harness
+        .calls
+        .group_session_ended(id(BOB), id(BOB_PHONE), ts(NOW + SECOND))
+        .await
+        .unwrap();
+
+    // Before the grace ends, the sweep is a no-op: the roster still holds two
+    // seats, and nothing is announced. The read is a duplicate re-join — the
+    // one call that hands the roster back.
+    let early = harness
+        .calls
+        .group_sweep(ts(NOW + SECOND + SECOND / 2))
+        .await
+        .unwrap();
+    assert!(early.is_empty(), "the grace window is still open");
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + SECOND + SECOND / 2),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(call.participants.len(), 2);
+
+    // Once the grace has passed, the sweep retires the seat and hands back the
+    // departure announcement the roster is owed — the same shape an explicit
+    // leave produces, with the reason telling the truth about a departure
+    // nobody chose to send.
+    let departures = harness
+        .calls
+        .group_sweep(ts(NOW + 3 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(departures.len(), 1, "the dead seat is retired");
+    let event = &departures[0];
+    assert_eq!(event.call_id, id(GROUP_CALL));
+    assert_eq!(event.conversation_id, Some(id(CONVERSATION)));
+    assert_eq!(event.user_id, Some(id(BOB)));
+    assert_eq!(event.device_id, Some(id(BOB_PHONE)));
+    assert_eq!(event.participant_count, Some(1));
+    assert_eq!(event.state, CallState::Ended.to_wire());
+    assert_eq!(event.reason, Some(EndReason::Network.to_wire()));
+
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + 3 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        call.participants.len(),
+        1,
+        "the roster no longer renders Bob"
+    );
+    assert_eq!(call.participants[0].account_id, id(ALICE));
+
+    // A swept roster is not swept twice.
+    let again = harness
+        .calls
+        .group_sweep(ts(NOW + 10 * SECOND))
+        .await
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "the live seat is not retirement's business"
+    );
+}
+
+#[tokio::test]
+async fn a_rejoin_inside_the_grace_keeps_the_seat() {
+    let harness = Harness::with_seat_grace(SECOND);
+    for who in [alice(NOW), bob(NOW)] {
+        harness
+            .calls
+            .group_join(
+                &who,
+                id(GROUP_CALL),
+                id(CONVERSATION),
+                0,
+                b"sealed".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+    harness
+        .calls
+        .group_session_ended(id(BOB), id(BOB_PHONE), ts(NOW + SECOND))
+        .await
+        .unwrap();
+
+    // Bob's client came back before the grace expired — same device, same
+    // sealed offer — so the join is the duplicate it always was, and the mark
+    // the dead socket left is cleared.
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &bob(NOW + SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Duplicate);
+    assert_eq!(call.participants.len(), 2);
+    assert!(events.is_empty(), "a re-join announces nothing");
+
+    // The grace has long passed, and the seat is still there: the sweep has
+    // nothing to retire.
+    let departures = harness
+        .calls
+        .group_sweep(ts(NOW + 10 * SECOND))
+        .await
+        .unwrap();
+    assert!(
+        departures.is_empty(),
+        "the re-joined seat survived the sweep"
+    );
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + 10 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(call.participants.len(), 2);
+}
+
+#[tokio::test]
+async fn a_disconnected_last_session_ends_its_established_calls_network() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .answer(&bob(NOW + SECOND), id(CALL), id(BOB_PHONE))
+        .await
+        .unwrap()
+        .expect("the answer connects the call");
+
+    // The session edge for Bob's last session: the call he can no longer end
+    // himself is ended for him, and the survivor is owed the row's event.
+    let retired = harness
+        .calls
+        .end_disconnected(id(BOB), ts(NOW + 2 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(retired.len(), 1, "the one connected call is retired");
+    let call = &retired[0];
+    assert_eq!(call.call_id, id(CALL));
+    assert_eq!(call.state, CallState::Ended);
+    assert_eq!(call.end_reason, Some(EndReason::Network));
+
+    // The event the dispatcher publishes to Alice's topic says the same thing.
+    let event = call.ended_event();
+    assert_eq!(event.call_id, id(CALL));
+    assert_eq!(event.state, CallState::Ended.to_wire());
+    assert_eq!(event.reason, Some(EndReason::Network.to_wire()));
+
+    // Idempotent, as every end is: a second edge finds nothing live.
+    let again = harness
+        .calls
+        .end_disconnected(id(BOB), ts(NOW + 3 * SECOND))
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "an ended call cannot end twice");
+
+    // And a ring is not the disconnect path's business: its own deadline
+    // retires it, so an account whose ring died with its session leaves the
+    // row to the ring sweeper.
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL + 1, CAROL))
+        .await
+        .unwrap();
+    let rings = harness
+        .calls
+        .end_disconnected(id(CAROL), ts(NOW + 4 * SECOND))
+        .await
+        .unwrap();
+    assert!(rings.is_empty(), "a ring is the ring sweeper's business");
 }
