@@ -243,13 +243,10 @@ impl<T: Transport> Connection<'_, T> {
         // frame's feature gate reads it rather than re-deriving it.
         let negotiated = hello.features & admitted;
 
-        // Section 72/148: COMPRESSION is a frame-level switch with the same shape as BATCHING
-        // above — a deflate payload leaves this node only for a client that asked for the bit
-        // and a node that offered it. The node-wide setting is the offer; the intersection is
-        // the decision, made here once so the writer never re-derives it and a session's
-        // frames keep one shape for its whole life. Before this the setting alone decided,
-        // so a client that never announced the bit could still be handed a compressed frame
-        // it had no reason to be able to read.
+        // Section 72/148: COMPRESSION has the same shape as BATCHING above — the node-wide
+        // setting is the offer, the intersection is the decision, made once here so a
+        // client that never announced the bit is never handed a deflate payload it had
+        // no reason to be able to read.
         self.compression =
             self.compression && negotiated & migo_protocol::features::COMPRESSION != 0;
 
