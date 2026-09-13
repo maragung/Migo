@@ -616,17 +616,20 @@ impl Dispatcher for AppDispatcher {
                 // REACTION_SET after a timeout re-sends byte-identical fields, and a
                 // fresh random id would store the reaction twice — the send path's
                 // idempotency is client-chosen ids, so the translation has to choose
-                // one deterministically. Hashing the caller and the whole request
+                // one deterministically. Hashing the account and the whole request
                 // gives that: a retry maps to the same id and converges on the
                 // stored row, while a genuinely different reaction (another emoji,
                 // or the same one on a different message) differs in the hashed
                 // bytes and gets its own id. Every id bit is derived — a timestamp
                 // prefix would defeat the point, since a retry is sampled at a new
                 // `now`. Nothing reads a message id's embedded time; ids are
-                // identity here, not clock.
+                // identity here, not clock. The device is deliberately absent
+                // from the hash: a reaction belongs to the account, not the
+                // device it was tapped on, so the same reaction re-sent from a
+                // second device of one account is the same reaction — one row,
+                // one fan-out — exactly as a retry from the first device is.
                 let mut hasher = DefaultHasher::new();
                 identity.account_id().hash(&mut hasher);
-                identity.device_id().hash(&mut hasher);
                 request.conversation_id.hash(&mut hasher);
                 request.target_message_id.hash(&mut hasher);
                 request.envelope.hash(&mut hasher);
