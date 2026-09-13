@@ -194,6 +194,18 @@ data class AppSettings(
     val serverUrl: String = serverEndpoint.restBaseUrl(),
 
     /**
+     * How the server above was chosen: probed automatically, or committed by hand.
+     *
+     * [ServerSelectionMode.Auto] means the endpoint field holds the *last resolution* of the
+     * auto picker, not a promise -- the picker re-resolves against the known server list on
+     * every app start, because the node that was fastest last week is not guaranteed to be the
+     * fastest now. [ServerSelectionMode.Manual] means the endpoint is the user's own record,
+     * kept exactly as the form committed it and never rewritten by a probe. The default is auto
+     * so a fresh install on a multi-node deployment never asks its owner to guess a node address.
+     */
+    val serverSelectionMode: ServerSelectionMode = ServerSelectionMode.Auto,
+
+    /**
      * The language tag sent in HELLO, for server-composed strings.
      *
      * Empty means "use the system locale", which is what a caller resolves before building the frame.
@@ -281,6 +293,7 @@ private val KEY_SERVER_REST_SCHEME = stringPreferencesKey("server_rest_scheme")
 // The legacy single-string key, kept so a pre-migration install's value carries forward into the
 // new structured fields. New writes do not touch it.
 private val KEY_SERVER_URL = stringPreferencesKey("server_url")
+private val KEY_SERVER_SELECTION_MODE = stringPreferencesKey("server_selection_mode")
 private val KEY_LOCALE = stringPreferencesKey("locale")
 private val KEY_BANDWIDTH_MODE = stringPreferencesKey("bandwidth_mode")
 private val KEY_THEME = stringPreferencesKey("theme")
@@ -307,6 +320,11 @@ private fun Preferences.toAppSettings(): AppSettings {
     return AppSettings(
         serverEndpoint = endpoint,
         serverUrl = endpoint.restBaseUrl(),
+        serverSelectionMode = readEnum(
+            this[KEY_SERVER_SELECTION_MODE],
+            ServerSelectionMode.entries,
+            defaults.serverSelectionMode,
+        ),
         locale = this[KEY_LOCALE] ?: defaults.locale,
         bandwidthMode = readBandwidthMode(this[KEY_BANDWIDTH_MODE], defaults.bandwidthMode),
         theme = readEnum(this[KEY_THEME], ThemeChoice.entries, defaults.theme),
@@ -335,6 +353,7 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_SERVER_TRANSPORT] = serverEndpoint.transport.name
     preferences[KEY_SERVER_GATEWAY_SCHEME] = serverEndpoint.gatewayScheme.name
     preferences[KEY_SERVER_REST_SCHEME] = serverEndpoint.restScheme.name
+    preferences[KEY_SERVER_SELECTION_MODE] = serverSelectionMode.name
     preferences[KEY_LOCALE] = locale
     preferences[KEY_BANDWIDTH_MODE] = bandwidthMode.name
     preferences[KEY_THEME] = theme.name

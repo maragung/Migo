@@ -24,6 +24,7 @@ import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
 import com.migo.core.protocol.UserProfile
 import com.migo.core.store.ServerEndpoint
+import com.migo.core.store.ServerSelectionMode
 import com.migo.core.wire.Id
 import java.math.BigInteger
 
@@ -62,6 +63,17 @@ sealed interface AppState {
          * [ServerEndpoint.init]) never reaches here.
          */
         val serverEndpoint: ServerEndpoint,
+        /**
+         * How that endpoint was chosen: probed automatically, or committed by hand.
+         *
+         * Auto is the default and re-resolves against the known server list on every start and
+         * on every return to the mode, so the endpoint field is the *current resolution* the form
+         * shows under the "Otomatis" label. Manual means the endpoint is exactly what the form
+         * (or an explicit pick from the list) committed.
+         */
+        val serverMode: ServerSelectionMode = ServerSelectionMode.Auto,
+        /** True while the auto mode's parallel health probe is in flight. */
+        val autoResolving: Boolean = false,
         /** Username or email, kept across a failed attempt so it does not have to be retyped. */
         val identifier: String = "",
         /** True while a register or sign-in call is in flight; the form is disabled. */
