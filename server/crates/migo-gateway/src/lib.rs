@@ -913,12 +913,12 @@ mod tests {
             id: Id::from(0x00C3),
         };
         for session_id in [subscriber, silent] {
-            let subscribed = gateway
+            let joined = gateway
                 .inner
                 .hub
                 .subscribe(session_id, std::slice::from_ref(&topic));
             assert!(
-                subscribed.rejected.is_empty(),
+                joined.rejected.is_empty(),
                 "both sessions hold the topic; the feature bit gates the frame, not the subscription"
             );
         }
