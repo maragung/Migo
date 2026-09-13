@@ -614,11 +614,38 @@ impl App {
                     self.toasts.push(Toast::success(format!("Joined {title}")));
                     self.open_conversation(conversation_id);
                 }
-                Event::RoomLeft { room_id } => {
+                Event::RoomLeft {
+                    room_id,
+                    conversation_id,
+                    self_left,
+                } => {
                     self.rooms.joined.remove(&room_id);
-                    self.toasts.push(Toast::info("Left the room"));
+                    self.toasts.push(Toast::info(if self_left {
+                        "Left the room"
+                    } else {
+                        "You were removed from the room"
+                    }));
                     // The conversation is closed server-side; its notice tail goes with it.
                     self.chat.room_notices.remove(&room_id);
+                    // The thread's own closure, the same teardown a group's departure performs:
+                    // this account can no longer read the room, and a thread (or a list row, or
+                    // a member sheet) it cannot read must not stay on screen offering sends the
+                    // server can only refuse. The list re-read the worker already fired is what
+                    // settles the row; this clears everything held above it.
+                    if let Some(conversation_id) = conversation_id {
+                        self.chat.group_notices.remove(&conversation_id);
+                        self.chat.rosters.remove(&conversation_id);
+                        self.chat.votes.remove(&conversation_id);
+                        self.chat.roster_open.remove(&conversation_id);
+                        self.chat.messages.remove(&conversation_id);
+                        self.chat
+                            .conversations
+                            .retain(|c| c.conversation_id != conversation_id);
+                        if self.chat.selected == Some(conversation_id) {
+                            self.chat.selected = None;
+                        }
+                        self.desktop.close_chat(conversation_id);
+                    }
                 }
                 // A membership change in a watched room: the notice line lands in the room's
                 // thread, and the member total — when the event carries it — folds into the
