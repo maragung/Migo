@@ -181,8 +181,14 @@ impl LiveSession {
             .expect("connecting does not stall")
             .expect("the connection is accepted");
 
+        // The CALLS bit: the sealed key request rides CALL_RENEGOTIATE and the
+        // sealed reply rides CALL_SDP, and the non-SFU call family is gated on
+        // the negotiated bit (brief section 72) — a session that never asked
+        // for it is answered FEATURE_NOT_NEGOTIATED. The SFU opcodes the call
+        // itself uses stay ungated, the decision section 165 records.
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features: migo_protocol::features::CALLS,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
