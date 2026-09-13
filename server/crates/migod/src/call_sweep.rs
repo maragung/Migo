@@ -136,10 +136,7 @@ async fn sweep_once(calls: &SharedCallkeeper, gateway: &Gateway, clock: &dyn Clo
                 // explicit-leave handler keeps: membership facts never
                 // collapse, whatever the opcode's class allows.
                 gateway.broadcast_to_topic(&topic, Opcode::CallSfuEvent, &event, now);
-                tracing::info!(
-                    call_id = %event.call_id.unwrap_or_default(),
-                    "a dead group seat retired; the roster told"
-                );
+                tracing::info!(call_id = %event.call_id, "a dead group seat retired; the roster told");
             }
         }
         Err(error) => tracing::warn!(%error, "the group seat sweep failed"),
