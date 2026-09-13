@@ -140,6 +140,11 @@ impl LiveSession {
 
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            // Every frame this suite drives belongs to the games family, and brief section 72
+            // ties that family to the GAMES bit — a session that did not ask for it is refused
+            // FEATURE_NOT_NEGOTIATED before the first GAME_START, exactly as a CALLS-less
+            // session is refused before it may place a ring.
+            features: migo_protocol::features::GAMES,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()
