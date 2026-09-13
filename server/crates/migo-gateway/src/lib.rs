@@ -877,4 +877,72 @@ mod tests {
             "the payload arrives exactly as it was encoded"
         );
     }
+
+    #[test]
+    fn a_feature_bearing_broadcast_is_withheld_from_a_session_without_the_bit() {
+        // Brief section 72: the server must not send a frame for a feature the client did
+        // not advertise. Two sessions hold the same topic; only one negotiated PRESENCE. A
+        // PRESENCE_EVENT broadcast reaches the subscriber that asked for the bit and never
+        // enters the mailbox of the one that did not — withheld, not sent-and-ignored —
+        // while an untagged frame on the same topic still reaches both, because the
+        // subscription itself is not the thing the bit gates.
+        let gateway = gateway();
+        let subscriber = Id::from(0x00D4);
+        let silent = Id::from(0x00D5);
+        let mut outbound = Vec::new();
+        for (session_id, negotiated) in
+            [(subscriber, migo_protocol::features::PRESENCE), (silent, 0)]
+        {
+            let mailbox = Arc::new(Outbound::new(
+                gateway.inner.settings.queue_capacity,
+                gateway.inner.settings.resume_buffer_frames,
+                gateway.inner.settings.resume_window_ms,
+                migo_protocol::BandwidthMode::Normal,
+                30_000,
+            ));
+            gateway.inner.hub.register(SessionHandle::new(
+                session_id,
+                Arc::clone(&mailbox),
+                migo_protocol::BandwidthMode::Normal,
+                negotiated,
+            ));
+            outbound.push(mailbox);
+        }
+        let topic = Topic {
+            kind: TopicKind::User,
+            id: Id::from(0x00C3),
+        };
+        for session_id in [subscriber, silent] {
+            let subscribed = gateway
+                .inner
+                .hub
+                .subscribe(session_id, std::slice::from_ref(&topic));
+            assert!(
+                subscribed.rejected.is_empty(),
+                "both sessions hold the topic; the feature bit gates the frame, not the subscription"
+            );
+        }
+
+        let presence = migo_protocol::PresenceEvent::default();
+        gateway.broadcast_to_topic(&topic, Opcode::PresenceEvent, &presence, ts(NOW));
+
+        assert_eq!(
+            outbound[0].take_ready(ts(NOW)).len(),
+            1,
+            "the subscriber that negotiated PRESENCE hears the event"
+        );
+        assert!(
+            outbound[1].take_ready(ts(NOW)).is_empty(),
+            "the session without the bit is not sent the frame at all"
+        );
+
+        // The same topic still carries an untagged frame to both sessions.
+        let notice = NotificationEvent::default();
+        gateway.broadcast_to_topic(&topic, Opcode::NotificationEvent, &notice, ts(NOW));
+        assert_eq!(
+            outbound[1].take_ready(ts(NOW)).len(),
+            1,
+            "an untagged frame on the same topic reaches the session without the bit"
+        );
+    }
 }

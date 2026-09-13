@@ -5,10 +5,13 @@
  * access token and device id are filled in by the client from the grant, so they are intentionally
  * absent from {@link ClientHello}.
  *
- * The feature set is the stock client's plus `GROUP_CALL`: the bit is opt-in by the SDK's own rule
- * — a client that offers it should be one that has a group-call UI, and this client now does (the
- * roster screen). The server does not gate the SFU opcodes on the bit, so offering it is a
- * statement about this client, not a request the server must grant.
+ * The feature set is the stock client's plus the families this client renders: `GROUP_CALL`, and
+ * the `CALLS`, `ECONOMY`, and `GAMES` bits the wire now gates the families' opcodes on (the
+ * server refuses a frame for a feature the session did not advertise, and withholds the family's
+ * events too). Offering a bit is a statement about this client: the call overlay answers rings,
+ * the gift picker and the wallet spend the balance, and the game launcher plays — each half is
+ * the reason its bit is here rather than in the SDK's stock set, which stays neutral because a
+ * client that cannot render a family should not promise it.
  *
  * `RICH_PRESENCE` arrives with the stock set rather than being added here, and this client is the
  * reason it is in that set: it writes the status the bit gates (the profile panel's save and the me
@@ -22,8 +25,13 @@ import type { ClientHello } from '@migo/sdk';
 
 import { config } from '@/lib/config.js';
 
-/** The bits a browser session offers: the stock set, plus the group-call UI this client carries. */
-const WEB_FEATURES: bigint = DEFAULT_CLIENT_FEATURES | protocol.FEATURE.GROUP_CALL;
+/** The bits a browser session offers: the stock set plus the families this client renders. */
+const WEB_FEATURES: bigint =
+  DEFAULT_CLIENT_FEATURES |
+  protocol.FEATURE.GROUP_CALL |
+  protocol.FEATURE.CALLS |
+  protocol.FEATURE.ECONOMY |
+  protocol.FEATURE.GAMES;
 
 /** The hello for a browser session, using the browser's locale and letting the server pace bandwidth. */
 export function webHello(): ClientHello {

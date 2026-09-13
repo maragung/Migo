@@ -242,8 +242,12 @@ impl Client {
             .expect("connecting does not stall")
             .expect("the connection is accepted");
 
+        // The PRESENCE bit: every frame this suite drives is the presence family, which
+        // brief section 72 gates on the negotiated set — the session asks for the bit
+        // the way a client that wants presence events does.
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
+            features: migo_protocol::features::PRESENCE,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
             ..Default::default()

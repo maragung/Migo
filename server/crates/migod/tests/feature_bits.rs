@@ -84,3 +84,50 @@ async fn a_node_with_a_mesh_listener_bound_advertises_the_federation_bit() {
          listener-conditional rule QUIC and TCP_TRANSPORT follow"
     );
 }
+
+#[tokio::test]
+async fn the_node_advertises_every_opcode_gated_family() {
+    // Brief section 72: PRESENCE, TYPING, ROOMS, GAMES, BOTS, and ECONOMY are opcode gates —
+    // the registry ties their opcodes to the bit and the gateway refuses or withholds the
+    // frame on a session without it. A bit like that must be in the advertised set or no
+    // client could ever negotiate it, so this pins the advertisement the gates depend on:
+    // remove one line in `advertised_features` and the family's switch welds shut.
+    let app = build_app(&[]).await;
+    for (bit, name) in [
+        (features::PRESENCE, "PRESENCE"),
+        (features::TYPING, "TYPING"),
+        (features::ROOMS, "ROOMS"),
+        (features::GAMES, "GAMES"),
+        (features::BOTS, "BOTS"),
+        (features::ECONOMY, "ECONOMY"),
+        (features::CALLS, "CALLS"),
+        (features::COMPRESSION, "COMPRESSION"),
+    ] {
+        assert_ne!(
+            app.features & bit,
+            0,
+            "the {name} bit is advertised: its opcodes are gated on the negotiated set, so a \
+             node that serves the family but never offers the bit would refuse every client"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_compression_bit_follows_the_gateway_setting() {
+    // The frame-level twin of the listener-conditional rule: compression is offered exactly
+    // while the gateway setting has it on, and a connection compresses only for a session
+    // that negotiated the bit. The kill switch (`features.disabled = ["compression"]`) trims
+    // it the same way, through the same `advertised_features` cut.
+    let app = build_app(&[]).await;
+    assert_ne!(
+        app.features & features::COMPRESSION,
+        0,
+        "the default gateway configuration offers compression"
+    );
+    let app = build_app(&[("MIGO_GATEWAY__COMPRESSION_ENABLED", "false")]).await;
+    assert_eq!(
+        app.features & features::COMPRESSION,
+        0,
+        "a node with compression switched off must not advertise the bit"
+    );
+}

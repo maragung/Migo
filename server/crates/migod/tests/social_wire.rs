@@ -25,6 +25,14 @@
 //!   the tests below drives the pair the way a client uses it: the bit set a stock
 //!   client offers, a status written through the profile patch, and the value read
 //!   back off the card by a different session — the half the other two cannot see.
+//! * **A feature bit is a switch on the wire, not an advertisement.** The PRESENCE
+//!   bit gates the family's frames in both directions (section 72): the inbound half
+//!   is the FEATURE_NOT_NEGOTIATED refusal, and the outbound half is the withholding
+//!   — a session that did not ask for the bit is not sent the family's events at
+//!   all. The last test drives the outbound half with two sessions of one account
+//!   watching a friend's topic, one with the bit and one without, and reads the
+//!   bitless session through a PING to make the missing frame a deterministic fact
+//!   rather than a timeout that proves nothing.
 //!
 //! Every test uses the reply rule as its clock: every frame it waits for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -36,13 +44,13 @@ use base64::Engine as _;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
+use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
     codes, from_frame, to_frame, Acknowledged, Encode, Frame, FriendEvent, FriendRespond,
-    FriendTarget, Opcode, ProfileRequest, ProfileResponse, ProfileUpdate, RelationshipList,
-    RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic, TopicKind, UserProfile,
-    PROTOCOL_VERSION,
+    FriendTarget, Opcode, PresenceEvent, PresenceState, PresenceUpdate, ProfileRequest,
+    ProfileResponse, ProfileUpdate, RelationshipList, RelationshipListReq, SubscribeRequest,
+    SubscribeResponse, Topic, TopicKind, UserProfile, PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -102,6 +110,25 @@ async fn registered_grant(app: &App, username: &str) -> Grant {
         )
         .await
         .expect("a development app registers an account")
+}
+
+/// Signs an existing account in on a second device, the way the answered-elsewhere
+/// fan-outs already do it: the bit test below needs one account watching from two
+/// sessions at once, one that asked for a feature bit and one that did not.
+async fn second_device_grant(app: &App, username: &str) -> Grant {
+    app.auth
+        .sign_in(
+            SignIn {
+                identifier: username.to_string(),
+                passphrase: Secret::new("correct-horse-battery-staple"),
+                device: DeviceClaim::new(migo_protocol::Platform::Web, "the other device"),
+                captcha: None,
+                server: None,
+            },
+            &RequestContext::at(app.clock.now()),
+        )
+        .await
+        .expect("a fresh second sign-in needs no captcha and succeeds")
 }
 
 /// Sends one request frame as a length-prefixed record.
@@ -252,6 +279,30 @@ impl LiveSession {
                 &FriendTarget { user_id: target },
             )
             .await;
+    }
+
+    /// Subscribes to a peer's user topic, the one every presence event for that
+    /// account is published to. The self-subscription the constructor performs is
+    /// the same call with the session's own id; this is the second one a friend's
+    /// client makes, and its acceptance is what authorizes the events below.
+    async fn subscribe_to_user(&mut self, correlation: u32, user: migo_core::Id) {
+        let confirmation: SubscribeResponse = self
+            .ask(
+                Opcode::Subscribe,
+                correlation,
+                &SubscribeRequest {
+                    topics: vec![Topic {
+                        kind: TopicKind::User,
+                        id: user,
+                    }],
+                },
+            )
+            .await;
+        assert_eq!(
+            confirmation.accepted.len(),
+            1,
+            "the peer's user topic is accepted for a friend"
+        );
     }
 }
 
@@ -611,5 +662,115 @@ async fn a_custom_status_without_the_rich_presence_bit_is_refused_but_the_sessio
     assert_eq!(
         still_working.custom_status, None,
         "the refused field was never written"
+    );
+}
+
+/// The PRESENCE bit's own surface, end to end: a session that did not ask for the
+/// bit does not receive the family's frames (brief section 72 — the server must not
+/// send a frame for a feature the client did not advertise).
+///
+/// One account watches a friend from two devices at once: a session whose HELLO
+/// asked for PRESENCE, and a session whose HELLO asked for nothing. Both subscribe
+/// to the friend's user topic, the friend changes state, and the two halves of the
+/// intersection see the one fan-out differently — the bitted session is handed the
+/// PRESENCE_EVENT, the bitless session is handed nothing. The bitless half is read
+/// through a PING: the fan-out has already been delivered to its twin when the PING
+/// is sent, and replies share the session's one outbound queue with broadcasts, so
+/// any presence frame the gate failed to withhold would be sitting in front of the
+/// PONG. Reading to the PONG and finding no PRESENCE_EVENT is therefore a
+/// deterministic negative, not a race won by timing.
+#[tokio::test]
+async fn a_presence_frame_is_withheld_from_a_session_that_did_not_ask_for_the_bit() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let author_grant = registered_grant(&app, "gina").await;
+    let watcher_grant = registered_grant(&app, "hank").await;
+    let other_device_grant = second_device_grant(&app, "hank").await;
+
+    // The author changes state later; the watcher listens from two sessions of one
+    // account, one per side of the bit. Every session takes the 1500ms spacing the
+    // constructor gives the shared pre-auth bucket.
+    let mut author =
+        LiveSession::connect_with_features(addr, &author_grant, migo_protocol::features::PRESENCE)
+            .await;
+    let mut watching =
+        LiveSession::connect_with_features(addr, &watcher_grant, migo_protocol::features::PRESENCE)
+            .await;
+    let mut bitless = LiveSession::connect_with_features(addr, &other_device_grant, 0).await;
+
+    // Friendship, by crossing requests: the peer's user topic is only served to a
+    // friend, so the subscriptions below need the relationship settled first.
+    author.friend_request(10, watcher_grant.account_id).await;
+    watching.friend_request(11, author_grant.account_id).await;
+
+    // Both of the watcher's sessions subscribe to the author's topic — the
+    // subscription itself is not the feature; the frames it carries are.
+    watching
+        .subscribe_to_user(20, author_grant.account_id)
+        .await;
+    bitless.subscribe_to_user(21, author_grant.account_id).await;
+
+    // The author goes Away. Online would collide with the state session-start
+    // already stamped, and an unchanged state publishes nothing — Away is a change
+    // the fan-out cannot skip.
+    let acknowledged: Acknowledged = author
+        .ask(
+            Opcode::PresenceSet,
+            30,
+            &PresenceUpdate {
+                state: PresenceState::Away,
+                custom_status: None,
+            },
+        )
+        .await;
+    assert!(acknowledged.ok, "the author's own session holds the bit");
+
+    // The bitted session is handed the event. Presence frames about the watcher's
+    // own account may have arrived earlier — the other device's session-start — so
+    // the wait is for the author's event in particular, and the state it carries is
+    // part of the assertion.
+    let event = loop {
+        let frame = recv_within(&mut watching.stream, STEP).await;
+        if Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent) {
+            let event: PresenceEvent = from_frame(&frame).expect("the event decodes");
+            if event.user_id == author_grant.account_id {
+                break event;
+            }
+        }
+    };
+    assert_eq!(
+        event.state,
+        PresenceState::Away,
+        "the bitted session sees the state change it was promised"
+    );
+
+    // The bitless session: a PING, and a read to its PONG. The fan-out above has
+    // already been delivered to the bitted twin, so the withheld frame — if the
+    // gate had leaked it — is queued ahead of the reply this PING earns. Finding
+    // the PONG without a PRESENCE_EVENT in front of it is the assertion; the
+    // session being alive to answer at all is the second one.
+    send(
+        &mut bitless.stream,
+        Opcode::Ping,
+        31,
+        &migo_protocol::Ping {
+            client_time: migo_core::Timestamp::from_millis(0),
+        },
+    )
+    .await;
+    let pong = loop {
+        let frame = recv_within(&mut bitless.stream, STEP).await;
+        assert_ne!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::PresenceEvent),
+            "a session without the PRESENCE bit is never handed a presence frame"
+        );
+        if frame.header.correlation == 31 {
+            break frame;
+        }
+    };
+    assert!(
+        !pong.header.is_error(),
+        "the bitless session keeps serving the frames it did negotiate"
     );
 }
