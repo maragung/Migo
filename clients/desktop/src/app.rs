@@ -34,6 +34,7 @@ use crate::ui::chat::{
 };
 use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
+use crate::ui::games::{GameRow, GamesState};
 use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
 use crate::ui::server_form::AutoStatus;
@@ -67,6 +68,7 @@ pub struct App {
     rooms: RoomsState,
     space: SpaceState,
     alerts: AlertsState,
+    games: GamesState,
     search: SearchState,
     wallet: WalletState,
     /// The call overlay's subject: the one call this device is in, as the worker last projected
@@ -168,6 +170,7 @@ impl App {
             rooms: RoomsState::default(),
             space: SpaceState::default(),
             alerts: AlertsState::default(),
+            games: GamesState::default(),
             search: SearchState::default(),
             wallet: WalletState::default(),
             call: None,
@@ -794,6 +797,36 @@ impl App {
                 Event::AlertPushed => {
                     // The push is the cue to re-read whatever inbox-shaped surface is showing.
                     self.commands.push(Command::Notifications);
+                }
+                Event::EconomyPushed => {
+                    // The same cue for the wallet: the event carries no balance, so the honest
+                    // reaction is the read, not arithmetic on a number the server did not vouch
+                    // for. The wallet place refreshes on entry too, so this lands on the taskbar
+                    // and whatever wallet surface is open alike.
+                    self.commands.push(Command::Wallet);
+                }
+                Event::GamePushed {
+                    conversation_id,
+                    game_id,
+                    event,
+                    actor_id,
+                    state_version,
+                } => {
+                    // Arrival time is the row's clock: the wire carries none a client may quote,
+                    // and the feed orders by arrival while the game itself orders by the version
+                    // the row also carries.
+                    self.games.push(GameRow {
+                        key: format!(
+                            "{game_id}:{state_version}:{event}:{}",
+                            actor_id.map(|actor| actor.to_text()).unwrap_or_default()
+                        ),
+                        conversation_id,
+                        game_id,
+                        event,
+                        actor_id,
+                        state_version,
+                        at: migo_core::Timestamp::now(),
+                    });
                 }
                 Event::Balance {
                     coins,
@@ -1528,7 +1561,7 @@ impl App {
             Place::Wallet => crate::ui::wallet::show(ui, &mut context, &mut self.wallet),
             Place::Profile => crate::ui::profile::show(ui, &mut context, &mut self.profile_panel),
             Place::Admins => crate::ui::admins::show(ui, &mut context, &mut self.admins_panel),
-            Place::Games => crate::ui::games::show(ui, &context),
+            Place::Games => crate::ui::games::show(ui, &mut context, &mut self.games),
             Place::Settings => {
                 crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
             }
