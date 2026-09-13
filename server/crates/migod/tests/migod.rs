@@ -902,6 +902,14 @@ async fn dispatcher() -> DispatcherHarness {
         std::sync::Arc::new(migod::presence_relay::PresenceRelay::new(
             app.federation.clone(),
         )),
+        // The row-replication tier over the same mesh, for the same reason once
+        // more: the asks a fail-closed read would make are what a real node
+        // would make, and no peer ever answers here, so every pull keeps the
+        // refusal it started with.
+        std::sync::Arc::new(migod::replication::ReplicationRelay::new(
+            app.federation.clone(),
+            app_store.clone(),
+        )),
     );
     DispatcherHarness { app, dispatcher }
 }

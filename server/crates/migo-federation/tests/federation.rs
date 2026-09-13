@@ -52,7 +52,7 @@ use migo_federation::model::{
 use migo_federation::{
     FederatedEvent, Mesh, MeshConfig, MeshService, NewPeerSpec, PeerIdentity, PeerStatus, PeerView,
     PendingEvent, SequenceVerdict, CONVERSATION_OPCODE_MAX, CONVERSATION_OPCODE_MIN,
-    FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
+    FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN, ROW_OPCODE_MAX, ROW_OPCODE_MIN,
 };
 use migo_protocol::codes;
 use migo_store::traits::FederationStore;
@@ -1565,9 +1565,25 @@ async fn the_conversation_band_pair_is_accepted() {
 }
 
 #[tokio::test]
-async fn the_gaps_around_the_conversation_band_are_refused() {
-    // 240 is a live client opcode (ENTITLEMENTS) and 243 is the reserved span, so neither
-    // may ride the mesh; the second band is exactly the 241-242 pair and nothing wider.
+async fn the_row_band_pair_is_accepted() {
+    // The row-replication tier's carve-out (section 145's third written decision):
+    // 243-246 are mesh frames too — the account pair and the conversation pair.
+    let h = Harness::new();
+    h.mesh
+        .enqueue(event(id(1), ROW_OPCODE_MIN, b"x"), ts(NOW))
+        .await
+        .expect("the row band's lowest opcode is valid");
+    h.mesh
+        .enqueue(event(id(1), ROW_OPCODE_MAX, b"x"), ts(NOW))
+        .await
+        .expect("the row band's highest opcode is valid");
+}
+
+#[tokio::test]
+async fn the_gaps_around_the_upper_federation_bands_are_refused() {
+    // 240 is a live client opcode (ENTITLEMENTS) and 247 is the reserved span,
+    // so neither may ride the mesh; the upper bands are exactly the 241-242
+    // conversation pair plus the 243-246 row tier and nothing wider.
     let h = Harness::new();
     expect_code(
         h.mesh
@@ -1577,7 +1593,7 @@ async fn the_gaps_around_the_conversation_band_are_refused() {
     );
     expect_code(
         h.mesh
-            .enqueue(event(id(1), CONVERSATION_OPCODE_MAX + 1, b"x"), ts(NOW))
+            .enqueue(event(id(1), ROW_OPCODE_MAX + 1, b"x"), ts(NOW))
             .await,
         codes::VALIDATION_FAILED,
     );

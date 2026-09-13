@@ -957,10 +957,11 @@ impl<T: Transport> Connection<'_, T> {
     ///
     /// Section 146: the head of the reserved range is enforced as never-allocated. The
     /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
-    /// `ENTITLEMENTS` (240) out of its head, and the conversation-federation tier later
-    /// carved `FED_CONVERSATION_SUBSCRIBE` (241) and `FED_CONVERSATION_EVENT` (242) —
-    /// each carve-out per the written decisions section 145 records — so the
-    /// never-allocated span this gate polices is 243-255. A client speaking one is
+    /// `ENTITLEMENTS` (240) out of its head, the conversation-federation tier later
+    /// carved `FED_CONVERSATION_SUBSCRIBE` (241) and `FED_CONVERSATION_EVENT` (242),
+    /// and the row-replication tier carved 243-246 — each carve-out per the written
+    /// decisions section 145 records — so the
+    /// never-allocated span this gate polices is 247-255. A client speaking one is
     /// speaking a dialect this node promised
     /// not to know — and unlike a merely unknown opcode (a newer client, answered and
     /// kept going), a reserved number is one this build has sworn an opinion about, so
@@ -976,7 +977,7 @@ impl<T: Transport> Connection<'_, T> {
     ) -> FrameOutcome {
         let error = fault::error(
             codes::UNKNOWN_OPCODE,
-            "reserved opcode range 243-255 is refused until a written decision allocates it",
+            "reserved opcode range 247-255 is refused until a written decision allocates it",
         )
         .public("reserved opcode");
         push_error(
@@ -1056,7 +1057,7 @@ impl<T: Transport> Connection<'_, T> {
 
         // Section 146: a number inside the never-allocated span of the reserved range
         // is refused before the opcode is even resolved — terminal, not answered.
-        if (243..=255).contains(&opcode_raw) {
+        if (247..=255).contains(&opcode_raw) {
             return self.refuse_reserved_range(outbound, opcode_raw, correlation, now);
         }
 

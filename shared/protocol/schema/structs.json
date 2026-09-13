@@ -2379,6 +2379,228 @@
       ]
     },
     {
+      "name": "FedAccountQuery",
+      "doc": "A node asks its peers which of them owns an account's rows: the account-to-node routing question of section 170, asked as a broadcast because an account row carries no home label to read. `regarding` names the local account the asker already holds, so a peer that owns the account can also send the edges between the two — the subject-side block and friendship rows the asker's privacy gate and block check read. The ask rides the mesh only from a fail-closed gate that found no local profile, and a peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same fail-closed refusal.",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "account_id",
+          "type": "id"
+        },
+        {
+          "name": "regarding",
+          "type": "id"
+        }
+      ]
+    },
+    {
+      "name": "FedAccountEdge",
+      "doc": "One social-graph edge the queried account owns, crossing as part of its rows: verbatim — the kind, both timestamps, nothing derived. Only the edges between the queried account and the asker's `regarding` account cross, never the account's whole graph, because a replication answer may carry what the asker's gate reads and no more.",
+      "fields": [
+        {
+          "name": "other_id",
+          "type": "id"
+        },
+        {
+          "name": "kind",
+          "type": "RelationshipKind"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "accepted_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 1,
+          "doc": "Set when a friend request was accepted; absent while it is pending."
+        }
+      ]
+    },
+    {
+      "name": "FedAccountRows",
+      "doc": "The answer to a FedAccountQuery, from a peer that holds the account: the account row, the profile row, and the edges between the account and the asker's `regarding` account, all verbatim. The passphrase hash crosses with the account row the way the replication stand-in copied it: the mesh is an authenticated link between allow-listed fleet peers, the same trust boundary that already carries sealed envelopes, and a replica account without its hash would not be the row it claims to be. Applied only by a node that asked, and only when the row is not already held — a peer cannot overwrite local truth, only feed a gate that had nothing to read.",
+      "fields": [
+        {
+          "name": "account_id",
+          "type": "id"
+        },
+        {
+          "name": "username",
+          "type": "string"
+        },
+        {
+          "name": "passphrase_hash",
+          "type": "string"
+        },
+        {
+          "name": "locale",
+          "type": "string"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "display_name",
+          "type": "string"
+        },
+        {
+          "name": "show_last_seen",
+          "type": "u32"
+        },
+        {
+          "name": "who_can_message",
+          "type": "u32"
+        },
+        {
+          "name": "who_can_add",
+          "type": "u32"
+        },
+        {
+          "name": "searchable",
+          "type": "bool"
+        },
+        {
+          "name": "profile_updated_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "edges",
+          "type": "list<FedAccountEdge>"
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "optional": true,
+          "id": 1
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "optional": true,
+          "id": 2
+        },
+        {
+          "name": "country",
+          "type": "string",
+          "optional": true,
+          "id": 3
+        },
+        {
+          "name": "bio",
+          "type": "string",
+          "optional": true,
+          "id": 4
+        },
+        {
+          "name": "avatar_media_id",
+          "type": "id",
+          "optional": true,
+          "id": 5
+        },
+        {
+          "name": "birth_year",
+          "type": "u32",
+          "optional": true,
+          "id": 6
+        },
+        {
+          "name": "gender",
+          "type": "u32",
+          "optional": true,
+          "id": 7,
+          "doc": "The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for."
+        },
+        {
+          "name": "custom_status",
+          "type": "string",
+          "optional": true,
+          "id": 8
+        }
+      ]
+    },
+    {
+      "name": "FedConversationQuery",
+      "doc": "A node asks its peers which of them owns a conversation's rows: the asker holds a session that wants the conversation's topic, and the membership read came back empty — which on a mesh means the row may live on another node rather than the topic being unreal. The peer that homes the conversation answers; a peer that holds nothing stays silent.",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "conversation_id",
+          "type": "id"
+        }
+      ]
+    },
+    {
+      "name": "FedConversationRows",
+      "doc": "The answer to a FedConversationQuery: the conversation row verbatim — home_region included, the one fact every node holding a copy must read the same answer from — and the member ids. Membership crosses as the id set: the replica answers existence and authorization, not per-member preferences, which stay facts of the node whose session set them. Applied only by a node that asked, and only when the row is not already held.",
+      "fields": [
+        {
+          "name": "conversation_id",
+          "type": "id"
+        },
+        {
+          "name": "kind",
+          "type": "ConversationKind"
+        },
+        {
+          "name": "encryption",
+          "type": "EncryptionMode"
+        },
+        {
+          "name": "home_region",
+          "type": "string"
+        },
+        {
+          "name": "created_by",
+          "type": "id"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "last_seq",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": "list<id>"
+        },
+        {
+          "name": "room_id",
+          "type": "id",
+          "optional": true,
+          "id": 1
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": true,
+          "id": 2
+        },
+        {
+          "name": "last_message_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 3
+        },
+        {
+          "name": "archived_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 4
+        }
+      ]
+    },
+    {
       "name": "FedKeyRotate",
       "fields": [
         {

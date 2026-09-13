@@ -580,6 +580,13 @@ impl App {
         // price before a founder's removal lands — the same layering rule,
         // joined here because neither messaging nor economy may depend on the
         // other. The economy is built above messaging for exactly this seam.
+        //
+        // The gate also holds the row-replication tier's handle, late-bound
+        // for the same reason the gateway handle below is: federation opens a
+        // layer after messaging, and the gate's pull-on-demand half must not
+        // exist before the mesh it pulls over does. The composition root fills
+        // it once the relay is built.
+        let replication_handle = Arc::new(crate::replication::ReplicationHandle::new());
         let messaging = migo_messaging::open(
             store.clone(),
             cache.clone(),
@@ -588,6 +595,7 @@ impl App {
                 store.clone(),
                 social.clone(),
                 rooms.clone(),
+                Arc::clone(&replication_handle),
             )),
             Arc::new(EconomyKickTariff::new(economy.clone())),
             migo_messaging::MessagingConfig::from_node(&config.node),
@@ -773,6 +781,19 @@ impl App {
             federation.clone(),
         ));
 
+        // The row-replication tier (section 170's account-to-node routing map):
+        // the ask half the fail-closed reads above trigger, and the answer half
+        // the mesh transport's ingest path drives. Built beside the other
+        // relays for the same reason they are — the transport and the gate
+        // share it — and bound into the messaging gate's late-bound handle the
+        // moment it exists, so the pull is live before the first client
+        // session can ask a question it answers.
+        let replication_relay = Arc::new(crate::replication::ReplicationRelay::new(
+            federation.clone(),
+            store.clone(),
+        ));
+        replication_handle.set(Arc::clone(&replication_relay));
+
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
@@ -802,6 +823,7 @@ impl App {
             Arc::clone(&room_relay),
             Arc::clone(&conversation_relay),
             Arc::clone(&presence_relay),
+            Arc::clone(&replication_relay),
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
@@ -900,6 +922,7 @@ impl App {
             Some(Arc::clone(&room_relay)),
             Some(Arc::clone(&conversation_relay)),
             Some(Arc::clone(&presence_relay)),
+            Some(Arc::clone(&replication_relay)),
             &registry,
             clock.clone(),
             config.federation.handshake_timeout_ms,

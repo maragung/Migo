@@ -83,18 +83,20 @@ non-zero and prints everything observed, including both nodes' logs and
 5. **A 1:1 direct message crosses the link, both directions, and decrypts —
    when the running binary carries the conversation tier.** alice opens a
    direct conversation with bob on node 1 — node 1 is its home, stamped into
-   the row's `home_region` at creation — and the row plus the whole
-   membership are fixtured into node 2 the way the room's were. bob learns
-   the conversation from his conversation list on node 2 (which proves the
-   far node serves a conversation homed elsewhere) and watches it there (the
-   conversation tier's subscribe half: node 2 asks the home node to watch
-   it), and each side's sealed message reaches and decrypts on the other:
-   alice's via the home node's tiered fan-out, bob's reply handed by node 2
-   to the home node and served from its own hub. The stamp is also the
-   harness's version tell: a binary that stamps `home_region` must also
-   carry the messages (a failure there fails the run), while a binary that
-   predates the tier writes no stamp and the check reports the gap instead —
-   the same stance the presence tier's check takes.
+   the row's `home_region` at creation. How the row and its membership reach
+   node 2 depends on the binary (see 7 below): with the row-replication tier
+   the nodes pull them across the mesh themselves; without it they are
+   fixtured the way the room's were. bob learns the conversation from his
+   conversation list on node 2 (which proves the far node serves a
+   conversation homed elsewhere) and watches it there (the conversation
+   tier's subscribe half: node 2 asks the home node to watch it), and each
+   side's sealed message reaches and decrypts on the other: alice's via the
+   home node's tiered fan-out, bob's reply handed by node 2 to the home node
+   and served from its own hub. The stamp is also the harness's version tell:
+   a binary that stamps `home_region` must also carry the messages (a failure
+   there fails the run), while a binary that predates the tier writes no
+   stamp and the check reports the gap instead — the same stance the presence
+   tier's check takes.
 
 6. **A presence change crosses the link — when the running binary carries the
    user-topic tier.** bob subscribes to alice's user topic on node 2; the
@@ -107,6 +109,21 @@ non-zero and prints everything observed, including both nodes' logs and
    retried. Both tiers shipped in the same release, so the DM check's
    `home_region` stamp is this check's version tell too — stamped, and the
    crossing is demanded; absent, and the gap is reported.
+
+7. **Account and conversation rows cross the link on their own — when the
+   running binary carries the row-replication tier.** The tier's tell is the
+   `/metrics` counter `migo_mesh_rows_replicated_total`, which only exists
+   once the binary registers it (a zero value is not the same fact as
+   absence, so the tell reads whether the counter is named at all). When it
+   is present, the direct-message check writes **no** account, profile,
+   friendship-cross-edge, conversation, or membership fixture for the direct
+   path: alice's conversation create must pull bob's account, profile, and
+   their edges across the mesh through node 1's privacy gate (asserted
+   straight from node 1's store), bob's subscribe must pull the conversation
+   row and both member rows through node 2's membership check (asserted the
+   same way), and bob's reply must pull alice's account the same way. The
+   applied-answer counters on both nodes are demanded non-zero at the end.
+   When the counter is absent, the fixtures return exactly as before.
 
 ## What it does not prove — reported, not hidden
 
@@ -127,17 +144,22 @@ today, not harness limitations:
   and both checks report the gaps honestly instead of failing.
 
 The harness also stands in, deliberately, for replication that does not exist
-yet: accounts, devices, key bundles, room and conversation rows, membership
-rows, and friendship edges do not replicate across nodes, so the sync check
-copies the counterpart rows directly in PostgreSQL (verbatim copies of what
-the registering node already holds, plus the membership rows a join or a
-conversation create on that node would have written, and the friendship
-edges on both nodes because the far node's fail-closed privacy gate answers
-a direct send from its own rows). Without those fixtures the cross-node
-paths would fail on missing rows before they ever reached the mesh. A future
-replication layer replaces the fixtures; until then the check proves exactly
-the part that exists: the configuration-formed link and the tiered room,
-conversation, and presence fan-out over it.
+yet. What still does not replicate in any binary, and is fixtured in both
+regimes: **device and key-bundle rows** (each node must serve the other
+account's devices for the clients to seal against — no device-federation tier
+exists) and **every room row** (the room tier fans events out but does not
+replicate the room, its membership, or its conversation; bob joins the room ON
+node 2, which only works if the rows are already there). What the
+row-replication tier now carries — account, profile, and friendship rows, and
+conversation rows with their membership — is fixtured only for binaries that
+predate the tier; on a tier-bearing binary the checks demand the nodes pull
+those rows themselves, and the one hand-seeded row left on such binaries is
+each node's own-side friendship edge, because the friend handshake itself does
+not federate (the cross edges must and do arrive inside the replication
+answers). Without the fixtures the cross-node paths would fail on missing rows
+before they ever reached the mesh; with them, the check proves exactly the
+part that exists: the configuration-formed link and the tiered room,
+conversation, presence, and row-replication paths over it.
 
 ## Files
 

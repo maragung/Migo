@@ -30,11 +30,13 @@ use migo_crypto::kdf;
 use migo_protocol::{
     to_frame, Ack, Acknowledged, Authenticate, Authenticated, CallAnswer, CallIce, CallInvite,
     CallInviteResult, CallStateEvent, CallStats, ClientInfo, ConversationKind,
-    ConversationListRequest, ConversationListResponse, ConversationSummary, EncryptionMode, FedAck,
-    FedConversationEvent, FedConversationRouting, FedForward, FedUserEvent, FedUserWatch, Frame,
-    Hello, Limits, MessageEvent, MessageKind, MessageReceipt, MessageSend, NodeInfo, Opcode, Ping,
-    Pong, PresenceEvent, PresenceState, PresenceUpdate, ReceiptKind, ResumeRequest, RoomStateEvent,
-    SyncResponse, SyncStatus, TypingEvent, TypingState, Welcome,
+    ConversationListRequest, ConversationListResponse, ConversationSummary, EncryptionMode,
+    FedAccountEdge, FedAccountQuery, FedAccountRows, FedAck, FedConversationEvent,
+    FedConversationQuery, FedConversationRouting, FedConversationRows, FedForward, FedUserEvent,
+    FedUserWatch, Frame, Hello, Limits, MessageEvent, MessageKind, MessageReceipt, MessageSend,
+    NodeInfo, Opcode, Ping, Pong, PresenceEvent, PresenceState, PresenceUpdate, ReceiptKind,
+    RelationshipKind, ResumeRequest, RoomStateEvent, SyncResponse, SyncStatus, TypingEvent,
+    TypingState, Welcome,
 };
 
 /// Migo-epoch milliseconds for a September 2026 instant: 6 varint bytes on the
@@ -841,11 +843,138 @@ fn federation_frames_fit_their_budgets() {
         "FED_CONVERSATION_EVENT overhead is {event_overhead} bytes, budget 64 (section 171)"
     );
 
+    // FED_ACCOUNT_QUERY is the row-replication tier's ask (section 170): the
+    // epoch and two raw 16-byte ids — the account whose owner is unknown and
+    // the local account whose shared edges the owner should send. It is asked
+    // at most once per fail-closed gate miss, so it holds the control budget
+    // FED_USER_SUBSCRIBE's ask does plus one more id.
+    let account_query = frame_size(
+        Opcode::FedAccountQuery,
+        1,
+        &FedAccountQuery {
+            epoch: 5000,
+            account_id: f.peer,
+            regarding: f.user,
+        },
+    );
+    assert!(
+        account_query <= 48,
+        "FED_ACCOUNT_QUERY is {account_query} bytes, budget 48 (section 171)"
+    );
+
+    // FED_CONVERSATION_QUERY is the same ask for a conversation: the epoch and
+    // the conversation id, one per authorize-topic miss. Same control budget
+    // as FED_USER_SUBSCRIBE.
+    let conversation_query = frame_size(
+        Opcode::FedConversationQuery,
+        1,
+        &FedConversationQuery {
+            epoch: 5000,
+            conversation_id: f.conversation,
+        },
+    );
+    assert!(
+        conversation_query <= 32,
+        "FED_CONVERSATION_QUERY is {conversation_query} bytes, budget 32 (section 171)"
+    );
+
+    // FED_ACCOUNT_ROWS is the whole of a replicated account crossing at once:
+    // the account row (username, locale, the PHC passphrase hash), the profile
+    // row (display name, three visibility numbers, the flag, the profile
+    // timestamp), and the edges the asker's gate reads — here one accepted
+    // friend edge and one pending edge. The hash dominates: a PHC-encoded
+    // Argon2id string (m=19456 KiB, t=2, p=1, 32-byte output) is 97
+    // characters, and a replica account without it would not be the row it
+    // claims to be. 320 bytes is the budget because this is a whole-account
+    // frame, not a control frame — roughly the hash plus two profile-shaped
+    // halves and two edges.
+    let phc_hash = format!(
+        "$argon2id$v=19$m=19456,t=2,p=1${}${}",
+        "A".repeat(22),
+        "B".repeat(43)
+    );
+    assert_eq!(
+        phc_hash.len(),
+        97,
+        "the sample hash must be a real PHC length"
+    );
+    let account_rows = frame_size(
+        Opcode::FedAccountRows,
+        1,
+        &FedAccountRows {
+            account_id: f.peer,
+            username: "dmfedbob".to_string(),
+            passphrase_hash: phc_hash,
+            locale: "en-US".to_string(),
+            created_at: NOW,
+            display_name: "Bob on beta".to_string(),
+            show_last_seen: 1,
+            who_can_message: 1,
+            who_can_add: 1,
+            searchable: true,
+            profile_updated_at: NOW,
+            edges: vec![
+                FedAccountEdge {
+                    other_id: f.user,
+                    kind: RelationshipKind::Friend,
+                    created_at: NOW,
+                    accepted_at: Some(NOW),
+                },
+                FedAccountEdge {
+                    other_id: f.user,
+                    kind: RelationshipKind::PendingOutgoing,
+                    created_at: NOW,
+                    accepted_at: None,
+                },
+            ],
+            email: None,
+            phone: None,
+            country: Some("ID".to_string()),
+            bio: None,
+            avatar_media_id: None,
+            birth_year: Some(1990),
+            gender: Some(1),
+            custom_status: None,
+        },
+    );
+    assert!(
+        account_rows <= 320,
+        "FED_ACCOUNT_ROWS is {account_rows} bytes, budget 320 (section 171)"
+    );
+
+    // FED_CONVERSATION_ROWS is a replicated conversation crossing at once: the
+    // row itself (id, kind, encryption, home label, creator, timestamps, the
+    // seq watermark) plus the member ids that are still seated. A direct
+    // conversation is two ids; the budget leaves room for a small group.
+    let conversation_rows = frame_size(
+        Opcode::FedConversationRows,
+        1,
+        &FedConversationRows {
+            conversation_id: f.conversation,
+            kind: ConversationKind::Direct,
+            encryption: EncryptionMode::EndToEnd,
+            home_region: "alpha".to_string(),
+            created_by: f.user,
+            created_at: NOW,
+            last_seq: 500,
+            members: vec![f.user, f.peer],
+            room_id: None,
+            title: None,
+            last_message_at: Some(NOW),
+            archived_at: None,
+        },
+    );
+    assert!(
+        conversation_rows <= 128,
+        "FED_CONVERSATION_ROWS is {conversation_rows} bytes, budget 128 (section 171)"
+    );
+
     println!(
         "federation: forward overhead {forward_overhead} bytes around a {}-byte payload, ack \
          {ack}, user watch {watch}, user event overhead {user_event_overhead} bytes around a \
          {}-byte presence frame, conversation subscribe {subscribe}, conversation event overhead \
-         {event_overhead}",
+         {event_overhead}, account ask {account_query}, conversation ask {conversation_query}, \
+         account rows {account_rows}, conversation rows {conversation_rows}",
         inner_bytes.len(),
         presence_inner_bytes.len()
     );

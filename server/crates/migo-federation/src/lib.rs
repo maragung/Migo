@@ -88,6 +88,7 @@ pub use crate::model::{
     is_federation_opcode, FederatedEvent, MeshConfig, NewPeerSpec, PeerIdentity, PeerStatus,
     PeerView, PendingEvent, SequenceVerdict, CONVERSATION_OPCODE_MAX, CONVERSATION_OPCODE_MIN,
     DEFAULT_DEGRADED_OUTBOX_WATERMARK, FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
+    ROW_OPCODE_MAX, ROW_OPCODE_MIN,
 };
 pub use crate::service::{open, MeshService};
 pub use crate::traits::{Mesh, SharedMesh};
