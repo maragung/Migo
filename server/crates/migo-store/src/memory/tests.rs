@@ -85,6 +85,9 @@ async fn seed_group(store: &MemoryStore, conversation_id: Id, members: Vec<Id>) 
                 kind: ConversationKind::Group,
                 encryption: EncryptionMode::EndToEnd,
                 room_id: None,
+                // No home node: the unit suite proves store behaviour, not
+                // fan-out, so the label stays empty.
+                home_region: String::new(),
                 last_seq: 0,
                 created_by,
                 created_at: ts(3_000),

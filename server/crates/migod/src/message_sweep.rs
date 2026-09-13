@@ -139,6 +139,10 @@ mod tests {
             limiter.into(),
             gate,
             std::sync::Arc::new(migo_messaging::FreeKicks),
+            // The default label — "local" — is the honest one for a sweeper
+            // built over a memory store: no mesh, no peers, no conversations
+            // crossing anything.
+            migo_messaging::MessagingConfig::default(),
             &registry,
             Box::new(migo_core::SeededRandom::new(0x5eed_9001)) as Box<dyn migo_core::Random>,
         ));

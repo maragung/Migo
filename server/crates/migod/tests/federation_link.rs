@@ -82,6 +82,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
         None,
         None,
         None,
+        None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn migo_core::Clock>,
         migo_core::config::DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -116,6 +117,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
     admit(&mesh_b, a_id, &key_a, format!("wss://{bound}"), "region-a").await;
     let transport_b = Arc::new(migod::mesh::MeshTransport::new(
         mesh_b.clone(),
+        None,
         None,
         None,
         None,

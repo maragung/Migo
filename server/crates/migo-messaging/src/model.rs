@@ -75,6 +75,47 @@ impl Caller {
 /// half of the trade: a longer TTL is smoother and lies for longer.
 pub const TYPING_TTL_MS: u32 = 10_000;
 
+/// What the messaging service needs that only deployment knows.
+///
+/// The one fact is the region label of the node the service runs on, stamped
+/// onto every conversation this node creates as the conversation's home node
+/// (section 170). Not a sequencer claim — a private message never needed one —
+/// but the fan-out authority: the tiered fan-out that carries a conversation's
+/// events across nodes keeps its watch table on the home node alone, and the
+/// label is read from the row by every node that holds a copy of it, so it is
+/// written once, here, at birth. The room half of the same rule lives in
+/// `migo-rooms` as `RoomsConfig`, and both take the label from the node
+/// identity rather than a section of their own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessagingConfig {
+    /// The region that homes conversations created on this node.
+    pub home_region: String,
+}
+
+impl Default for MessagingConfig {
+    fn default() -> Self {
+        Self {
+            home_region: "local".to_string(),
+        }
+    }
+}
+
+impl MessagingConfig {
+    /// Takes the home region from the node that will hold the watch table.
+    ///
+    /// Here rather than in `Config` so there is one source for the region: the
+    /// node identity — the same rule the room half follows, and for the same
+    /// reason. A `[messaging] home_region` key would be a second one, and the
+    /// first time the two disagreed a conversation would be created claiming a
+    /// region no process in it holds the watch table for.
+    #[must_use]
+    pub fn from_node(node: &migo_core::config::NodeConfig) -> Self {
+        Self {
+            home_region: node.region.clone(),
+        }
+    }
+}
+
 /// Members a group may have, including its creator.
 ///
 /// A group is fanned out to synchronously and every member's cursor is written

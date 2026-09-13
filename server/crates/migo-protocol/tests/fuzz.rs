@@ -36,13 +36,13 @@ use migo_protocol::{
 
 #[test]
 fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
-    // Every allocated opcode lives below 241 today (the highest is
-    // ENTITLEMENTS at 240), so the whole span 0..=300 is swept exhaustively
-    // rather than sampled: it covers every allocated number, the never-allocated
-    // gaps between ranges, and the reserved head.
+    // Every allocated opcode lives below 243 today (the highest are the
+    // conversation-federation pair at 241-242), so the whole span 0..=300 is
+    // swept exhaustively rather than sampled: it covers every allocated number,
+    // the never-allocated gaps between ranges, and the reserved head.
     for raw in 0u32..=300 {
         let resolved = Opcode::from_wire(raw); // must not panic, for any input
-        let in_reserved_span = (241..=255).contains(&raw);
+        let in_reserved_span = (243..=255).contains(&raw);
         assert_eq!(
             resolved.is_some(),
             !in_reserved_span && Opcode::ALL.iter().any(|opcode| opcode.to_wire() == raw),
@@ -53,17 +53,24 @@ fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
     // The reserved span the gateway refuses before resolution (section 146):
     // the table must not know a single one of them, or the range gate and the
     // table would disagree about what this build speaks.
-    for raw in 241u32..=255 {
+    for raw in 243u32..=255 {
         assert_eq!(
             Opcode::from_wire(raw),
             None,
-            "opcode {raw} is inside the never-allocated span 241-255 and must not resolve"
+            "opcode {raw} is inside the never-allocated span 243-255 and must not resolve"
         );
     }
 
-    // 240 is allocated (ENTITLEMENTS, section 145's carve-out) and must resolve
-    // — the phase gate, not the range gate, is what refuses it from a client.
+    // 240 is allocated (ENTITLEMENTS, section 145's store carve-out) and 241-242
+    // are allocated (the conversation-federation tier, the same section's later
+    // carve-out); all three must resolve — the server-auth gate, not the range
+    // gate, is what refuses the federation pair from a client.
     assert_eq!(Opcode::from_wire(240), Some(Opcode::Entitlements));
+    assert_eq!(
+        Opcode::from_wire(241),
+        Some(Opcode::FedConversationSubscribe)
+    );
+    assert_eq!(Opcode::from_wire(242), Some(Opcode::FedConversationEvent));
 
     // Past the reserved span the numbers are simply unknown, not reserved:
     // a newer client speaking one is answered, not cut off.

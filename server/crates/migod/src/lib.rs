@@ -16,6 +16,7 @@
 
 pub mod call_sweep;
 pub mod cli;
+pub mod conversation_relay;
 pub mod dispatch;
 pub mod message_sweep;
 pub mod ports;

@@ -85,8 +85,8 @@ use crate::cursor;
 use crate::fanout::{Broadcast, Fanout};
 use crate::metrics::{Meters, SendOutcome, SyncOutcome};
 use crate::model::{
-    Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
-    MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
+    Caller, MessagingConfig, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS,
+    MAX_TITLE_LEN, MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
 };
 use crate::traits::{Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
 
@@ -112,6 +112,10 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     /// implementation matters in any process, and the tests want to swap it
     /// wholesale.
     tariff: SharedKickTariff,
+    /// The deployment facts: the region label stamped onto every conversation
+    /// this node creates, which names the node that holds that conversation's
+    /// federated watch table (section 170).
+    config: MessagingConfig,
     /// The randomness source, behind a lock because [`Random`] is `Send` and not
     /// `Sync`.
     ///
@@ -151,13 +155,14 @@ impl OpenVote {
 
 /// Builds the messaging service over the shared backends.
 ///
-/// Infallible, and it stays that way on purpose. There is no `MessagingConfig`:
-/// the one limit an operator might want to move is the page cap, and that already
-/// lives in [`migo_store::MAX_PAGE`] because the store is what has to hold to it.
-/// A second copy in a second config section would be one number with two sources
-/// of truth, and the failure mode is a service that accepts a page the store then
-/// clamps — a bug that shows up as "the client says 200, the response has 200,
-/// paging still skips rows".
+/// Infallible, and it stays that way on purpose: nothing in
+/// [`MessagingConfig`] can fail to parse, because its one field is a label the
+/// node identity already holds. The one limit an operator might want to move is
+/// the page cap, and that already lives in [`migo_store::MAX_PAGE`] because the
+/// store is what has to hold to it. A second copy in a second config section
+/// would be one number with two sources of truth, and the failure mode is a
+/// service that accepts a page the store then clamps — a bug that shows up as
+/// "the client says 200, the response has 200, paging still skips rows".
 #[must_use]
 pub fn open(
     store: SharedStore,
@@ -165,6 +170,7 @@ pub fn open(
     limiter: SharedRateLimiter,
     gate: SharedMessageGate,
     tariff: SharedKickTariff,
+    config: MessagingConfig,
     registry: &Registry,
 ) -> SharedMessaging {
     Arc::new(Messages::new(
@@ -173,6 +179,7 @@ pub fn open(
         limiter,
         gate,
         tariff,
+        config,
         registry,
         Box::new(OsRandom) as Box<dyn Random>,
     ))
@@ -194,6 +201,7 @@ where
         limiter: Arc<L>,
         gate: SharedMessageGate,
         tariff: SharedKickTariff,
+        config: MessagingConfig,
         registry: &Registry,
         random: Box<dyn Random>,
     ) -> Self {
@@ -203,6 +211,7 @@ where
             limiter,
             gate,
             tariff,
+            config,
             random: Mutex::new(random),
             meters: Meters::new(registry),
             votes: Mutex::new(HashMap::new()),
@@ -1176,6 +1185,11 @@ where
                     others[0],
                     conversation_id,
                     EncryptionMode::EndToEnd,
+                    // The node that creates the conversation homes it: this is
+                    // the label every node holding a copy of the row will read
+                    // to decide who tiers the conversation's federated events,
+                    // and it is written once, here, never derived again.
+                    self.config.home_region.clone(),
                     caller.now,
                 )
                 .await?
@@ -1194,6 +1208,10 @@ where
                         // no request field that could ask for one.
                         encryption: EncryptionMode::EndToEnd,
                         room_id: None,
+                        // The node that creates the conversation homes it — the
+                        // same stamp, and for the same reason, as the direct
+                        // path above.
+                        home_region: self.config.home_region.clone(),
                         last_seq: 0,
                         created_by: caller.account_id,
                         created_at: caller.now,

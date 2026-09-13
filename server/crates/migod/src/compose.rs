@@ -338,10 +338,13 @@ pub struct App {
     /// TCP is the native clients' (Android, desktop) default transport (section 138), advertised
     /// through the `TCP_TRANSPORT` feature bit only while it is serving.
     pub tcp_bind: Option<SocketAddr>,
-    /// The address the optional mesh listener bound, or `None` when the server-to-server
-    /// mesh is not configured. Held for the same reason `quic_bind` and `tcp_bind` are: a
-    /// test or an operator's tool that links nodes must name the address a peer's
-    /// `federation.peers` entry points at, and port zero binds an ephemeral one.
+    /// The address the optional mesh listener bound, or `None` when the node runs no
+    /// federation listener. The server-to-server segment's own bind (section 169),
+    /// advertised through the `FEDERATION` feature bit only while it is serving. Held
+    /// for the same reason the QUIC and TCP binds are: a test that builds several
+    /// nodes in one process, or an operator's tool that links nodes, must name the
+    /// address a peer's `federation.peers` entry points at — and port zero binds an
+    /// ephemeral one that keeps such tests off each other's sockets.
     pub mesh_bind: Option<SocketAddr>,
     /// Authentication: register, sign in, refresh, sign out, and access-token verification.
     pub auth: SharedAuth,
@@ -502,7 +505,10 @@ impl App {
         // and the layering rule says they meet here, in the composition root,
         // rather than by `migo-messaging` depending on either. The room config
         // takes its home region from the node identity — one source, the same
-        // one every other region-scoped decision reads.
+        // one every other region-scoped decision reads. The messaging config
+        // takes its home region from the same place, for the conversations this
+        // node creates: the label names the node that holds their federated
+        // watch table (section 170), so a second source would be a second home.
         let rooms = migo_rooms::open(
             store.clone(),
             limiter.clone(),
@@ -562,6 +568,7 @@ impl App {
                 rooms.clone(),
             )),
             Arc::new(EconomyKickTariff::new(economy.clone())),
+            migo_messaging::MessagingConfig::from_node(&config.node),
             &registry,
         );
         let presence = migo_presence::open(
@@ -722,6 +729,16 @@ impl App {
                 Arc::clone(&gateway_handle),
             ))),
         ));
+        // The conversation half of the same tier, for the conversations a room does not
+        // own: a direct chat or a group whose members connected to whichever node they
+        // connected to. It holds no late-bound handle — a conversation has no move path —
+        // so the mesh and the store it reads are the whole of what it needs, and it is
+        // built beside the room relay so the composition root keeps both halves of both
+        // tiers in one place.
+        let conversation_relay = Arc::new(crate::conversation_relay::ConversationRelay::new(
+            federation.clone(),
+            store.clone(),
+        ));
 
         // The user-topic tier of the same fan-out (section 170): the relay the
         // presence publish paths forward through and the mesh transport's
@@ -761,6 +778,7 @@ impl App {
             calls.clone(),
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),
+            Arc::clone(&conversation_relay),
             Arc::clone(&presence_relay),
         ));
 
@@ -857,6 +875,7 @@ impl App {
             Arc::clone(&federation),
             Some(Arc::clone(&gateway)),
             Some(Arc::clone(&room_relay)),
+            Some(Arc::clone(&conversation_relay)),
             Some(Arc::clone(&presence_relay)),
             &registry,
             clock.clone(),

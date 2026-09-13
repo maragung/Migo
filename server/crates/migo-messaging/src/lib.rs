@@ -54,9 +54,10 @@
 //! #     limiter: migo_ratelimit::SharedRateLimiter,
 //! #     gate: migo_messaging::SharedMessageGate,
 //! #     tariff: migo_messaging::SharedKickTariff,
-//! #     registry: &Registry,
+//! #     config: migo_messaging::MessagingConfig,
+//! #     registry: &migo_core::metrics::Registry,
 //! # ) -> migo_core::Result<()> {
-//! let messaging = migo_messaging::open(store, cache, limiter, gate, tariff, registry);
+//! let messaging = migo_messaging::open(store, cache, limiter, gate, tariff, config, registry);
 //! # let _ = messaging;
 //! # Ok(())
 //! # }
@@ -74,8 +75,8 @@ pub mod traits;
 
 pub use crate::fanout::{Broadcast, Fanout};
 pub use crate::model::{
-    Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MEMBER_PREVIEW,
-    TYPING_TTL_MS,
+    Caller, MessagingConfig, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS,
+    MEMBER_PREVIEW, TYPING_TTL_MS,
 };
 pub use crate::service::{open, Messages, SharedMessaging};
 pub use crate::traits::{

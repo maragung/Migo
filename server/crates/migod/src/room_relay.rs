@@ -355,10 +355,12 @@ impl RoomRelay {
     ///
     /// The store tells the two kinds of conversation apart: a room's resolves
     /// to its row and is gated by where that room is homed; a direct or group
-    /// conversation resolves to nothing, has no home node and no sequencer to
-    /// duplicate, and passes — which is section 173's own split, that a private
-    /// message survives the partition because it never needed the far node's
-    /// order in the first place.
+    /// conversation resolves to nothing and passes. It passes even though the
+    /// conversation now has a home node for fan-out (section 170's
+    /// conversation tier), because that home node is a fan-out authority and
+    /// not a sequencer — a private message never needed the far node's order
+    /// (section 173), so a partition makes its delivery wait, never its
+    /// write.
     pub async fn ensure_conversation_writable(&self, conversation_id: Id) -> Result<()> {
         match self.store.room_by_conversation(conversation_id).await? {
             Some(room) => self.room_writable(&room).await,
@@ -617,8 +619,10 @@ impl RoomRelay {
 ///
 /// The outbox's payload is a whole encoded MWP frame (the transport wraps it
 /// in a `FED_FORWARD` without opening it), so both halves build theirs the
-/// same way and the shape lives in one place.
-fn encode_envelope<T: Encode>(opcode: Opcode, value: &T) -> Result<Vec<u8>> {
+/// same way and the shape lives in one place. Shared with the conversation
+/// relay, whose envelopes are built the same way around a different inner
+/// event.
+pub(crate) fn encode_envelope<T: Encode>(opcode: Opcode, value: &T) -> Result<Vec<u8>> {
     let frame: Frame = to_frame(opcode.to_wire(), 0, value).map_err(fault::from_wire)?;
     frame
         .encode()

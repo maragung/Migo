@@ -32,6 +32,9 @@ pub struct Model {
     /// The `title` column.
     #[sea_orm(column_type = "Text")]
     pub title: Option<String>,
+    /// The `home_region` column.
+    #[sea_orm(column_type = "Text")]
+    pub home_region: String,
 }
 
 /// Foreign keys leaving `conversation`.

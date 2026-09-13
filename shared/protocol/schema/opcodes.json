@@ -1141,6 +1141,30 @@
    "doc": "Carries one presence event of a watched user topic, sealed as a local subscriber would have received it."
   },
   {
+   "name": "FED_CONVERSATION_SUBSCRIBE",
+   "code": 241,
+   "direction": "both",
+   "payload": "FedConversationRouting",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 2,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "A node asks the conversation's home node to mirror its sealed event stream. The payload names the conversation and the watcher; the home node keeps one entry per node and sends each event once per watcher."
+  },
+  {
+   "name": "FED_CONVERSATION_EVENT",
+   "code": 242,
+   "direction": "both",
+   "payload": "FedConversationEvent",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 0,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content."
+  },
+  {
    "name": "CALL_INVITE",
    "code": 224,
    "direction": "client_to_server",

@@ -6009,6 +6009,43 @@ impl Decode for FedRouting {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedConversationRouting {
+    pub epoch: u64,
+    pub home_region: String,
+    pub conversation_id: Id,
+}
+
+impl Encode for FedConversationRouting {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_str(&self.home_region)?;
+        w.write_id(&self.conversation_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedConversationRouting {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        out.home_region = r.read_string()?;
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FedEpoch {
     pub epoch: u64,
 }
@@ -6785,6 +6822,40 @@ impl Decode for FedUserEvent {
         r.enter()?;
         let mut out = Self::default();
         out.user_id = r.read_id()?;
+        out.payload = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedConversationEvent {
+    pub conversation_id: Id,
+    pub payload: Vec<u8>,
+}
+
+impl Encode for FedConversationEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_bytes(&self.payload)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedConversationEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
         out.payload = r.read_bytes()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
@@ -10747,6 +10818,10 @@ pub enum Opcode {
     FedUserSubscribe = 222,
     /// Carries one presence event of a watched user topic, sealed as a local subscriber would have received it.
     FedUserEvent = 223,
+    /// A node asks the conversation's home node to mirror its sealed event stream. The payload names the conversation and the watcher; the home node keeps one entry per node and sends each event once per watcher.
+    FedConversationSubscribe = 241,
+    /// One sealed conversation event, forwarded node to node. The bytes are the client's sealed envelope, passed through unopened: the forwarding node cannot read the content.
+    FedConversationEvent = 242,
     /// Invites a callee to a call.
     CallInvite = 224,
     /// Tells the callee a call is ringing.
@@ -10898,6 +10973,8 @@ impl Opcode {
             221 => Self::FedDirectory,
             222 => Self::FedUserSubscribe,
             223 => Self::FedUserEvent,
+            241 => Self::FedConversationSubscribe,
+            242 => Self::FedConversationEvent,
             224 => Self::CallInvite,
             225 => Self::CallInviteEvent,
             226 => Self::CallAnswer,
@@ -11026,6 +11103,8 @@ impl Opcode {
             Self::FedDirectory => "FED_DIRECTORY",
             Self::FedUserSubscribe => "FED_USER_SUBSCRIBE",
             Self::FedUserEvent => "FED_USER_EVENT",
+            Self::FedConversationSubscribe => "FED_CONVERSATION_SUBSCRIBE",
+            Self::FedConversationEvent => "FED_CONVERSATION_EVENT",
             Self::CallInvite => "CALL_INVITE",
             Self::CallInviteEvent => "CALL_INVITE_EVENT",
             Self::CallAnswer => "CALL_ANSWER",
@@ -11154,6 +11233,8 @@ impl Opcode {
             Self::FedDirectory => 2,
             Self::FedUserSubscribe => 2,
             Self::FedUserEvent => 0,
+            Self::FedConversationSubscribe => 2,
+            Self::FedConversationEvent => 0,
             Self::CallInvite => 20,
             Self::CallInviteEvent => 0,
             Self::CallAnswer => 5,
@@ -11281,6 +11362,8 @@ impl Opcode {
             Self::FedDirectory => DeliveryClass::Critical,
             Self::FedUserSubscribe => DeliveryClass::Critical,
             Self::FedUserEvent => DeliveryClass::Critical,
+            Self::FedConversationSubscribe => DeliveryClass::Critical,
+            Self::FedConversationEvent => DeliveryClass::Critical,
             Self::CallInvite => DeliveryClass::Critical,
             Self::CallInviteEvent => DeliveryClass::Critical,
             Self::CallAnswer => DeliveryClass::Critical,
@@ -11412,6 +11495,8 @@ impl Opcode {
             Self::FedDirectory => false,
             Self::FedUserSubscribe => false,
             Self::FedUserEvent => false,
+            Self::FedConversationSubscribe => false,
+            Self::FedConversationEvent => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -11547,6 +11632,8 @@ impl Opcode {
             Self::FedDirectory => AuthLevel::Server,
             Self::FedUserSubscribe => AuthLevel::Server,
             Self::FedUserEvent => AuthLevel::Server,
+            Self::FedConversationSubscribe => AuthLevel::Server,
+            Self::FedConversationEvent => AuthLevel::Server,
             Self::CallInvite => AuthLevel::User,
             Self::CallInviteEvent => AuthLevel::User,
             Self::CallAnswer => AuthLevel::User,
@@ -11594,6 +11681,8 @@ impl Opcode {
             Self::FedDirectory => Some(features::FEDERATION),
             Self::FedUserSubscribe => Some(features::FEDERATION),
             Self::FedUserEvent => Some(features::FEDERATION),
+            Self::FedConversationSubscribe => Some(features::FEDERATION),
+            Self::FedConversationEvent => Some(features::FEDERATION),
             _ => None,
         }
     }
@@ -11703,6 +11792,8 @@ impl Opcode {
             Self::FedDirectory => Direction::Both,
             Self::FedUserSubscribe => Direction::Both,
             Self::FedUserEvent => Direction::Both,
+            Self::FedConversationSubscribe => Direction::Both,
+            Self::FedConversationEvent => Direction::Both,
             Self::CallInvite => Direction::ClientToServer,
             Self::CallInviteEvent => Direction::ServerToClient,
             Self::CallAnswer => Direction::ClientToServer,
@@ -11831,6 +11922,8 @@ impl Opcode {
             Self::FedDirectory => false,
             Self::FedUserSubscribe => false,
             Self::FedUserEvent => false,
+            Self::FedConversationSubscribe => false,
+            Self::FedConversationEvent => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -11966,6 +12059,8 @@ impl Opcode {
         Self::FedDirectory,
         Self::FedUserSubscribe,
         Self::FedUserEvent,
+        Self::FedConversationSubscribe,
+        Self::FedConversationEvent,
         Self::CallInvite,
         Self::CallInviteEvent,
         Self::CallAnswer,

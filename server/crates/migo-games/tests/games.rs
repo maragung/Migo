@@ -234,6 +234,9 @@ impl Harness {
                     kind: ConversationKind::Group,
                     encryption: EncryptionMode::Transport,
                     room_id: None,
+                    // No home node: a conversation seeded for a game never
+                    // leaves the process it was born in.
+                    home_region: String::new(),
                     last_seq: 0,
                     created_by,
                     created_at: ts(NOW),
@@ -1793,6 +1796,9 @@ async fn a_deployment_with_no_economy_plays_exactly_the_same_games() {
                 kind: ConversationKind::Group,
                 encryption: EncryptionMode::Transport,
                 room_id: None,
+                // No home node: a conversation seeded for a game never leaves
+                // the process it was born in.
+                home_region: String::new(),
                 last_seq: 0,
                 created_by: id(1),
                 created_at: ts(NOW),

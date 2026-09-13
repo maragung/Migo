@@ -463,6 +463,7 @@ impl From<entity::conversation::Model> for Conversation {
             kind: ConversationKind::from_wire(wire_u32(row.kind)),
             encryption: EncryptionMode::from_wire(wire_u32(row.encryption)),
             room_id: row.room_id.map(id_of),
+            home_region: row.home_region,
             title: row.title,
             last_seq: row.last_seq,
             created_by: id_of(row.created_by),
@@ -2006,6 +2007,7 @@ impl MessagingStore for PostgresStore {
                 kind: Set(wire_i16(conversation.kind.to_wire())),
                 encryption: Set(wire_i16(conversation.encryption.to_wire())),
                 room_id: Set(conversation.room_id.map(uuid_of)),
+                home_region: Set(conversation.home_region.clone()),
                 title: Set(conversation.title),
                 last_seq: Set(conversation.last_seq),
                 created_by: Set(uuid_of(conversation.created_by)),
@@ -2045,6 +2047,7 @@ impl MessagingStore for PostgresStore {
         b: Id,
         conversation_id: Id,
         encryption: EncryptionMode,
+        home_region: String,
         at: Timestamp,
     ) -> Result<Conversation> {
         if a == b {
@@ -2065,6 +2068,10 @@ impl MessagingStore for PostgresStore {
                 conversation_id: Set(uuid_of(conversation_id)),
                 kind: Set(wire_i16(ConversationKind::Direct.to_wire())),
                 encryption: Set(wire_i16(encryption.to_wire())),
+                // Stamped at birth: the node that creates the conversation is the
+                // one that holds its watch table, and the label is never derived
+                // again — see the model's own docs.
+                home_region: Set(home_region),
                 created_by: Set(uuid_of(a)),
                 created_at: Set(stamp_of(at)),
                 ..Default::default()
@@ -3001,6 +3008,10 @@ impl RoomStore for PostgresStore {
             kind: Set(wire_i16(ConversationKind::Room.to_wire())),
             encryption: Set(encryption),
             room_id: Set(Some(room_id)),
+            // A room's conversation is homed with its room: the room's home node
+            // holds the watch table that tiers the room's events, and its chat is
+            // one of those events — two homes for one room would be two truths.
+            home_region: Set(new.home_region.clone()),
             created_by: Set(owner_id),
             created_at: Set(created_at),
             ..Default::default()

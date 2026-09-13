@@ -1044,6 +1044,7 @@ impl MessagingStore for MemoryStore {
         b: Id,
         conversation_id: Id,
         encryption: EncryptionMode,
+        home_region: String,
         at: Timestamp,
     ) -> Result<Conversation> {
         if a == b {
@@ -1069,6 +1070,10 @@ impl MessagingStore for MemoryStore {
             kind: ConversationKind::Direct,
             encryption,
             room_id: None,
+            // Stamped at birth: the node that creates the conversation is the
+            // one that holds its watch table, and the label is never derived
+            // again — see the model's own docs.
+            home_region,
             last_seq: 0,
             created_by: a,
             created_at: at,
@@ -1611,6 +1616,10 @@ impl RoomStore for MemoryStore {
             kind: ConversationKind::Room,
             encryption: room.encryption,
             room_id: Some(room.room_id),
+            // A room's conversation is homed with its room: the room's home node
+            // holds the watch table that tiers the room's events, and its chat is
+            // one of those events — two homes for one room would be two truths.
+            home_region: room.home_region.clone(),
             last_seq: 0,
             created_by: room.owner_id,
             created_at: room.created_at,

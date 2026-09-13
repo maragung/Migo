@@ -751,6 +751,19 @@ pub struct Conversation {
     pub encryption: EncryptionMode,
     /// The room this conversation belongs to, when it is a room.
     pub room_id: Option<Id>,
+    /// The home node of this conversation, as a region label.
+    ///
+    /// Not a sequencer claim — a private message never needed one (section
+    /// 170's own split) — but a fan-out authority: the tiered fan-out that
+    /// carries a conversation's events across nodes keeps its watch table on
+    /// the home node alone, and this label is the one fact every node holding
+    /// a copy of the row reads the same answer from. Stamped at creation by
+    /// the creating node and never derived again, the same rule the room's
+    /// `home_region` follows. A room's conversation carries the room's own
+    /// home region, so a room and its chat are homed together. The empty
+    /// string is the pre-label state: no home node, and the conversation's
+    /// events stay on the node that published them.
+    pub home_region: String,
     /// The name a group's founders chose for it. Direct conversations and
     /// rooms never carry one — their names are the other person and the room's
     /// own name respectively.

@@ -31,10 +31,10 @@ use migo_protocol::{
     to_frame, Ack, Acknowledged, Authenticate, Authenticated, CallAnswer, CallIce, CallInvite,
     CallInviteResult, CallStateEvent, CallStats, ClientInfo, ConversationKind,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EncryptionMode, FedAck,
-    FedForward, FedUserEvent, FedUserWatch, Frame, Hello, Limits, MessageEvent, MessageKind,
-    MessageReceipt, MessageSend, NodeInfo, Opcode, Ping, Pong, PresenceEvent, PresenceState,
-    PresenceUpdate, ReceiptKind, ResumeRequest, RoomStateEvent, SyncResponse, SyncStatus,
-    TypingEvent, TypingState, Welcome,
+    FedConversationEvent, FedConversationRouting, FedForward, FedUserEvent, FedUserWatch, Frame,
+    Hello, Limits, MessageEvent, MessageKind, MessageReceipt, MessageSend, NodeInfo, Opcode, Ping,
+    Pong, PresenceEvent, PresenceState, PresenceUpdate, ReceiptKind, ResumeRequest, RoomStateEvent,
+    SyncResponse, SyncStatus, TypingEvent, TypingState, Welcome,
 };
 
 /// Migo-epoch milliseconds for a September 2026 instant: 6 varint bytes on the
@@ -805,10 +805,47 @@ fn federation_frames_fit_their_budgets() {
         "FED_USER_EVENT overhead is {user_event_overhead} bytes, budget 64 (section 171)"
     );
 
+    // FED_CONVERSATION_SUBSCRIBE is the conversation tier's ask (section
+    // 170): one per conversation per process, so its cost is a control
+    // frame's — the routing epoch, the home region label, and the
+    // conversation id — and it holds the same 48-byte control budget FED_ACK
+    // does. A typical ask names a short region label and an epoch still small
+    // enough for a handful of varint bytes.
+    let subscribe = frame_size(
+        Opcode::FedConversationSubscribe,
+        0,
+        &FedConversationRouting {
+            epoch: 5000,
+            home_region: "region-2".to_string(),
+            conversation_id: f.conversation,
+        },
+    );
+    assert!(
+        subscribe <= 48,
+        "FED_CONVERSATION_SUBSCRIBE is {subscribe} bytes, budget 48 (section 171)"
+    );
+
+    // FED_CONVERSATION_EVENT's cost is everything around the payload it
+    // carries: the envelope's conversation id, the payload length varint, and
+    // the frame header, wrapped around the same sealed message event
+    // FED_FORWARD's budget measures above. The budget is FED_FORWARD's own
+    // overhead ceiling: one envelope naming one conversation.
+    let event = FedConversationEvent {
+        conversation_id: f.conversation,
+        payload: inner_bytes.clone(),
+    };
+    let event_frame = frame_size(Opcode::FedConversationEvent, 1, &event);
+    let event_overhead = event_frame - inner_bytes.len();
+    assert!(
+        event_overhead <= 64,
+        "FED_CONVERSATION_EVENT overhead is {event_overhead} bytes, budget 64 (section 171)"
+    );
+
     println!(
         "federation: forward overhead {forward_overhead} bytes around a {}-byte payload, ack \
          {ack}, user watch {watch}, user event overhead {user_event_overhead} bytes around a \
-         {}-byte presence frame",
+         {}-byte presence frame, conversation subscribe {subscribe}, conversation event overhead \
+         {event_overhead}",
         inner_bytes.len(),
         presence_inner_bytes.len()
     );

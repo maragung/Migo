@@ -605,12 +605,18 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
 /// watch table is here, which is what makes a room's traffic reach the nodes that were not
 /// the origin. A room *subscribe* is the home-node half of tiered fanout (section 170): the
 /// authenticated peer is recorded as holding subscribers of the room, so this node's
-/// publishes forward it one federated copy. The others are real, validated frames whose
-/// final-mile crates do not yet expose an ingest port — presence aggregation and call
-/// signaling — and the honest treatment is count-and-log, not a pretend success deeper in.
+/// publishes forward it one federated copy. A conversation event and a conversation
+/// subscribe are the same two halves for the conversations a room does not own — a direct
+/// chat or a group — whose members sit on whichever node they connected to. A user event
+/// and a user subscribe are the user-topic tier of the same fanout, with no onward half: a
+/// presence change is only ever published by the node whose session caused it. The others
+/// are real, validated frames whose final-mile crates do not yet expose an ingest port —
+/// call signaling — and the honest treatment is count-and-log, not a pretend success
+/// deeper in.
 pub(crate) struct IngestRouter {
     gateway: Option<Arc<Gateway>>,
     relay: Option<Arc<crate::room_relay::RoomRelay>>,
+    conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
     presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
@@ -623,6 +629,7 @@ impl IngestRouter {
     fn new(
         gateway: Option<Arc<Gateway>>,
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
+        conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
@@ -630,6 +637,7 @@ impl IngestRouter {
         Self {
             gateway,
             relay,
+            conversations,
             presence,
             meters: MeshMeters::new(registry),
             clock,
@@ -709,6 +717,26 @@ impl IngestRouter {
                 self.meters.ingested();
                 Ok(())
             }
+            Opcode::FedConversationSubscribe => {
+                let routing: migo_protocol::FedConversationRouting =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                // The conversation half of the same tier: the peer holds subscribers of
+                // this direct or group conversation, so this node's publishes owe it one
+                // federated copy each. Idempotent, and refuses a stale routing epoch for
+                // the same re-handshake reason the room half does.
+                if let Some(relay) = &self.conversations {
+                    relay.register_watcher(peer, &routing)?;
+                }
+                tracing::info!(
+                    conversation = %routing.conversation_id.to_text(),
+                    home = %routing.home_region,
+                    epoch = routing.epoch,
+                    "peer subscribed to a conversation this node watches"
+                );
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                Ok(())
+            }
             Opcode::FedUserSubscribe => {
                 let watch: migo_protocol::FedUserWatch =
                     from_frame(&inner).map_err(fault::from_wire)?;
@@ -729,6 +757,11 @@ impl IngestRouter {
                 self.note(inner.header.opcode, inner.payload.len());
                 self.meters.ingested();
                 Ok(())
+            }
+            Opcode::FedConversationEvent => {
+                let event: migo_protocol::FedConversationEvent =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                self.route_conversation_event(peer, event).await
             }
             Opcode::FedUserEvent => {
                 let event: migo_protocol::FedUserEvent =
@@ -856,6 +889,88 @@ impl IngestRouter {
         Ok(())
     }
 
+    /// Publishes a forwarded conversation event into the local hub.
+    ///
+    /// The conversation half of the room path above, for the conversations a
+    /// room does not own. The inner payload is an encoded messaging frame —
+    /// the event as the origin node's session would have pushed it — and
+    /// every messaging event carries its own `conversation_id`, so the topic
+    /// is read off the event and no store lookup is needed to place it. The
+    /// bytes are handed to the hub exactly as they arrived (section 145),
+    /// which is also the whole of the security story: a direct chat's
+    /// envelope is sealed client-side and crosses every node on the way,
+    /// including the home node, unopened.
+    ///
+    /// The coalescing mirrors the origin node's request path exactly (section
+    /// 154), the same keys `messaging_placement_of` computes for a room's
+    /// chat: a message, a receipt and a join are delivered whole, while
+    /// typing is keyed by author and a tally or a state change by
+    /// conversation, so a backed-up consumer keeps only the latest of each.
+    ///
+    /// # The onward half
+    ///
+    /// The same two reasons a room event arrives apply, and the row is what
+    /// tells them apart
+    /// ([`ConversationRelay::homes`](crate::conversation_relay::ConversationRelay::homes)):
+    /// the *home* node holds the conversation's watch table and owes the
+    /// event onward to the other watchers, while a *watching* node is the end
+    /// of the line and owes nothing.
+    async fn route_conversation_event(
+        &self,
+        peer: Id,
+        event: migo_protocol::FedConversationEvent,
+    ) -> Result<()> {
+        let migo_protocol::FedConversationEvent {
+            conversation_id,
+            payload,
+        } = event;
+        // One refcounted buffer for the whole ingest, exactly as the room path
+        // does: the hub hands the same bytes to every subscriber, and the
+        // onward copy re-seals them.
+        let payload = Bytes::from(payload);
+        let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
+        let inner_opcode = Opcode::from_wire(inner.header.opcode)
+            .ok_or_else(|| fault::validation("opcode", "not a known conversation event"))?;
+        let now = self.clock.now();
+        let placement = messaging_placement_of(inner_opcode, &inner)?;
+        if let Some(gateway) = &self.gateway {
+            gateway.broadcast_frame_to_topic(
+                &placement.topic,
+                inner_opcode,
+                &payload,
+                placement.coalesce,
+                now,
+            );
+            if let Some(topic) = &placement.also {
+                gateway.broadcast_frame_to_topic(topic, inner_opcode, &payload, None, now);
+            }
+        }
+        // The home node's second obligation: the event came from a peer that
+        // already delivered it locally, so the other watching nodes are the
+        // ones still owed a copy.
+        if let Some(relay) = &self.conversations {
+            if relay.homes(conversation_id).await {
+                if let Err(error) = relay
+                    .fan_out_inbound(conversation_id, peer, &payload, now)
+                    .await
+                {
+                    // The local publish already happened and every subscriber
+                    // here has the event; a failure to pass it on costs the
+                    // other nodes their copy, which the sender's redelivery
+                    // may still make good, so it is logged, not raised.
+                    tracing::warn!(
+                        %error,
+                        conversation = %conversation_id.to_text(),
+                        "cannot pass an ingested conversation event on to the other nodes"
+                    );
+                }
+            }
+        }
+        self.note(inner.header.opcode, inner.payload.len());
+        self.meters.ingested();
+        Ok(())
+    }
+
     /// Publishes a forwarded user-topic presence event into the local hub.
     ///
     /// The inner payload is itself an encoded frame — the presence event as the origin
@@ -904,6 +1019,7 @@ impl IngestRouter {
             subject = %user_id.to_text(),
             "user-topic presence event ingested from the mesh"
         );
+
         self.note(inner.header.opcode, inner.payload.len());
         self.meters.ingested();
         Ok(())
@@ -947,11 +1063,16 @@ struct Placement {
 
 /// Reads a forwarded event's opcode into the topic (or topics) it belongs on.
 ///
-/// The whole of the routing decision, in one place, so the two kinds of event a room
-/// produces are visibly the same shape. The frame is decoded only to read the id that names
-/// its topic — every messaging event carries its own `conversation_id`, the same fact that
-/// lets the request path publish without a store lookup — and the *bytes* are what get
-/// published, so a well-formed event reaches subscribers exactly as the origin sent it.
+/// The room half of the routing decision: a room envelope carries room
+/// lifecycle events and rebalance hints, which belong on the room topic, and
+/// a room's *chat*, which is a messaging event and belongs on the
+/// conversation the room's row names — that half is shared with the
+/// conversation envelope, so it lives in
+/// [`messaging_placement_of`] and is reached from here. The frame is decoded
+/// only to read the id that names its topic — every messaging event carries
+/// its own `conversation_id`, the same fact that lets the request path
+/// publish without a store lookup — and the *bytes* are what get published,
+/// so a well-formed event reaches subscribers exactly as the origin sent it.
 fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement> {
     let room = room_topic(room_id);
     match opcode {
@@ -976,7 +1097,23 @@ fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement>
             also: None,
         }),
         // A room's chat is a conversation, so its text, receipts and conversation-level
-        // events arrive as messaging events and belong on the conversation topic.
+        // events arrive as messaging events and belong on the conversation topic — the
+        // same placement the conversation envelope uses, read in one place.
+        _ => messaging_placement_of(opcode, inner),
+    }
+}
+
+/// Where a forwarded *messaging* event belongs, on whichever envelope carried
+/// it.
+///
+/// Both envelopes carry a room's chat and a direct chat the same way — an
+/// inner messaging frame — because in both cases the audience is a
+/// conversation's subscribers and every messaging event names its own
+/// conversation. This is the one placement both routes share, which is what
+/// keeps a subscriber who follows a conversation across nodes seeing the
+/// frame the origin's subscribers saw, whichever envelope it rode.
+fn messaging_placement_of(opcode: Opcode, inner: &Frame) -> Result<Placement> {
+    match opcode {
         Opcode::MessageEvent => Ok(Placement {
             topic: conversation_topic(
                 from_frame::<migo_protocol::MessageEvent>(inner)
@@ -1048,7 +1185,7 @@ fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement>
         }
         _ => Err(fault::validation(
             "opcode",
-            "not an event that belongs on a room topic",
+            "not an event that belongs on a conversation topic",
         )),
     }
 }
@@ -1374,6 +1511,7 @@ impl MeshTransport {
         mesh: SharedMesh,
         gateway: Option<Arc<Gateway>>,
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
+        conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
         presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
@@ -1384,6 +1522,7 @@ impl MeshTransport {
             router: Arc::new(IngestRouter::new(
                 gateway,
                 relay,
+                conversations,
                 presence,
                 registry,
                 Arc::clone(&clock),
@@ -1710,6 +1849,29 @@ mod tests {
         store
     }
 
+    /// A store holding one direct conversation whose `home_region` is
+    /// `home_region`.
+    ///
+    /// The conversation twin of [`store_with_room`]: the relay's publish paths
+    /// ask the store which node owns a conversation's fanout, so a relay
+    /// without the row is a relay that forwards nothing. The pair of members
+    /// is arbitrary — the tier reads the row, not the roster.
+    async fn store_with_conversation(conversation_id: Id, home_region: &str) -> SharedStore {
+        let store: SharedStore = Arc::new(MemoryStore::new());
+        store
+            .direct_conversation(
+                Id::from(0xAAAA),
+                Id::from(0xBBBB),
+                conversation_id,
+                EncryptionMode::EndToEnd,
+                home_region.to_string(),
+                Timestamp::from_millis(NOW),
+            )
+            .await
+            .expect("a fresh pair builds a conversation");
+        store
+    }
+
     /// A node with its own store, key, and registry, and `peer` admitted to its allow-list.
     async fn node(name: u8, peer: Id, peer_key: &[u8]) -> SharedMesh {
         let registry = Registry::new();
@@ -1805,6 +1967,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1882,6 +2045,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -1933,6 +2097,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,
@@ -2067,6 +2232,7 @@ mod tests {
             None,
             Some(Arc::clone(&relay_b)),
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2143,6 +2309,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             Some(Arc::clone(&relay_b)),
@@ -2224,6 +2391,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2312,6 +2480,7 @@ mod tests {
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            None,
             None,
             None,
             None,
@@ -2479,6 +2648,7 @@ mod tests {
             None,
             Some(relay_b.clone()),
             None,
+            None,
             &registry,
             Arc::new(ManualClock::new(later)),
             DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
@@ -2579,6 +2749,145 @@ mod tests {
         );
     }
 
+    /// The same crossing for the conversation a room does not own: a direct chat.
+    ///
+    /// A's user sends a sealed message in a direct conversation homed on B. A does not
+    /// hold the conversation's watch table — only the home node does — so A's publish is
+    /// one copy addressed to B; B, holding the table, hands it to the nodes that watch
+    /// the conversation and not back to A. The envelope stays sealed the whole way: B
+    /// ingests and tiers bytes it cannot read, which is the standing rule of section 170.
+    #[tokio::test]
+    async fn a_direct_message_crosses_the_nodes_and_the_home_node_tiers_it() {
+        let (mesh_a, mesh_b, a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let later = Timestamp::from_millis(NOW + 60_000);
+        let registry = registry();
+
+        let conversation_id = Id::from(0x2222);
+        // Homed on B as both sides read it: A's row is what tells A it is not the home
+        // node, and B's row is what makes B the node that tiers.
+        let store_a = store_with_conversation(conversation_id, "region-2").await;
+        let store_b = store_with_conversation(conversation_id, "region-2").await;
+        let relay_a = Arc::new(crate::conversation_relay::ConversationRelay::new(
+            mesh_a.clone(),
+            store_a,
+        ));
+        let relay_b = Arc::new(crate::conversation_relay::ConversationRelay::new(
+            mesh_b.clone(),
+            store_b,
+        ));
+        // B ingests on `later`, so the onward copy it enqueues is due at `later` — the
+        // ingest clock has to be the test's, or the copy lands in the real present.
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            None,
+            Some(relay_b.clone()),
+            None,
+            &registry,
+            Arc::new(ManualClock::new(later)),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        // B holds the watch table: A and a third node have subscribers of the
+        // conversation — the other participant's session on A, and one more elsewhere.
+        let third = Id::from(0x0303);
+        let routing = migo_protocol::FedConversationRouting {
+            epoch: mesh_b.epoch(),
+            home_region: "region-2".to_string(),
+            conversation_id,
+        };
+        relay_b
+            .register_watcher(a_id, &routing)
+            .expect("a current epoch admits the watch");
+        relay_b
+            .register_watcher(third, &routing)
+            .expect("a second node may watch too");
+
+        let message = migo_protocol::MessageEvent {
+            message_id: Id::from(0x9999),
+            conversation_id,
+            seq: 1,
+            sender_id: Id::from(0xAAAA),
+            sender_device: Id::from(0xAAAA_0001),
+            kind: migo_protocol::MessageKind::Text,
+            envelope: b"sealed-by-the-sender-s-device".to_vec(),
+            created_at: Timestamp::from_millis(NOW),
+            reply_to: None,
+            edited_at: None,
+            deleted: None,
+            sender_key_id: None,
+        };
+        relay_a
+            .forward(
+                &MessageFanout {
+                    conversation_id,
+                    exclude_device: None,
+                    event: MessageBroadcast::Message(message.clone()),
+                },
+                now,
+            )
+            .await
+            .expect("the message forwards to the home node");
+
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            1,
+            "one copy to the home node, not one per watcher A cannot see"
+        );
+        assert_eq!(
+            due[0].target_node, b_id,
+            "and it is addressed to the node that homes the conversation"
+        );
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b.clone();
+        let server_router = transport_b.router_ref().clone();
+        let server_budget = transport_b.budget.clone();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, later, server_budget).await
+        });
+        let client_budget = default_budget();
+        deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            later,
+            &client_budget,
+        )
+        .await
+        .expect("the batch is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+
+        let payload = framed(Opcode::MessageEvent, 0, &message)
+            .expect("the message event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_b.ingested(),
+            vec![(Opcode::MessageEvent.to_wire(), payload)],
+            "B ingested the direct message onto its own hub"
+        );
+
+        let onward = mesh_b.due(later).await.expect("the queue reads");
+        assert_eq!(
+            onward.len(),
+            1,
+            "one copy onward, and none back to the origin"
+        );
+        assert_eq!(
+            onward[0].target_node, third,
+            "the other watching node, and only it"
+        );
+    }
+
     /// The budget's arithmetic is the gateway's heartbeat convention exactly: the deadline
     /// lands a whole budget past the start, and only a clock strictly past it counts as
     /// expired — a handshake that lands exactly on the deadline finished inside it, so a
@@ -2635,6 +2944,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,
@@ -2704,6 +3014,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             None,
             None,

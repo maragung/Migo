@@ -298,6 +298,9 @@ impl Harness {
                     kind: ConversationKind::Group,
                     encryption,
                     room_id: None,
+                    // No home node: a conversation seeded for a media test never
+                    // leaves the process it was born in.
+                    home_region: String::new(),
                     last_seq: 0,
                     created_by: id(members[0]),
                     created_at: ts(SECOND),

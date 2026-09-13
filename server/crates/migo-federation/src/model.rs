@@ -18,8 +18,30 @@ use migo_core::{Id, Timestamp};
 /// mistaken for a client one.
 pub const FEDERATION_OPCODE_MIN: i32 = 208;
 
-/// The highest federation opcode, inclusive. See [`FEDERATION_OPCODE_MIN`].
+/// The highest federation opcode of the contiguous band, inclusive. See
+/// [`FEDERATION_OPCODE_MIN`].
 pub const FEDERATION_OPCODE_MAX: i32 = 223;
+
+/// The lowest opcode of the second federation band, the conversation tier's carve-out
+/// from the head of the reserved range (section 145's written-decision precedent,
+/// following 239-240). The contiguous band 208-223 was already full when the tier was
+/// allocated, so its pair sits here instead; see [`CONVERSATION_OPCODE_MAX`].
+pub const CONVERSATION_OPCODE_MIN: i32 = 241;
+
+/// The highest opcode of the second federation band, inclusive. See
+/// [`CONVERSATION_OPCODE_MIN`].
+pub const CONVERSATION_OPCODE_MAX: i32 = 242;
+
+/// Whether an opcode belongs to either federation band, i.e. may ride the mesh.
+///
+/// A frame on the mesh must never be mistaken for a client frame, and equally a client
+/// opcode must never be enqueued toward a peer, so [`enqueue`](crate::Mesh::enqueue)
+/// refuses anything outside both bands.
+#[must_use]
+pub const fn is_federation_opcode(opcode: i32) -> bool {
+    (opcode >= FEDERATION_OPCODE_MIN && opcode <= FEDERATION_OPCODE_MAX)
+        || (opcode >= CONVERSATION_OPCODE_MIN && opcode <= CONVERSATION_OPCODE_MAX)
+}
 
 /// How long a handshake nonce is remembered, in milliseconds.
 ///
@@ -219,7 +241,8 @@ pub struct PeerIdentity {
 ///
 /// The payload is an already-encoded MWP frame body: opaque bytes here, and a private
 /// message inside one is a sealed envelope this layer never opens (section 169). The opcode
-/// must fall in the federation band, [`FEDERATION_OPCODE_MIN`]`..=`[`FEDERATION_OPCODE_MAX`].
+/// must fall in one of the two federation bands, 208-223 or the conversation tier's
+/// 241-242 (see [`is_federation_opcode`]).
 #[derive(Clone, Debug)]
 pub struct FederatedEvent {
     /// The node id to deliver to.

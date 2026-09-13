@@ -2050,6 +2050,23 @@
       ]
     },
     {
+      "name": "FedConversationRouting",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "home_region",
+          "type": "string"
+        },
+        {
+          "name": "conversation_id",
+          "type": "id"
+        }
+      ]
+    },
+    {
       "name": "FedEpoch",
       "fields": [
         {
@@ -2340,6 +2357,19 @@
       "fields": [
         {
           "name": "user_id",
+          "type": "id"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "FedConversationEvent",
+      "fields": [
+        {
+          "name": "conversation_id",
           "type": "id"
         },
         {

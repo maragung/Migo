@@ -36,8 +36,8 @@ use migo_store::{SharedStore, Store};
 use crate::link::{LinkHealth, LinkSequences};
 use crate::metrics::{HandshakeReject, Meters, ReplayReason};
 use crate::model::{
-    FederatedEvent, MeshConfig, NewPeerSpec, PeerIdentity, PeerStatus, PeerView, PendingEvent,
-    SequenceVerdict, FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
+    is_federation_opcode, FederatedEvent, MeshConfig, NewPeerSpec, PeerIdentity, PeerStatus,
+    PeerView, PendingEvent, SequenceVerdict,
 };
 use crate::replay::NonceWindow;
 use crate::traits::{Mesh, SharedMesh};
@@ -508,10 +508,10 @@ where
     }
 
     async fn enqueue(&self, event: FederatedEvent, now: Timestamp) -> Result<PendingEvent> {
-        if !(FEDERATION_OPCODE_MIN..=FEDERATION_OPCODE_MAX).contains(&event.opcode) {
+        if !is_federation_opcode(event.opcode) {
             return Err(fault::validation(
                 "opcode",
-                "must be in the federation band 208..=223",
+                "must be in a federation band: 208..=223 or 241..=242",
             ));
         }
         if event.payload.is_empty() {

@@ -154,6 +154,9 @@ async fn seed_group(store: &SharedStore, conversation_id: Id, members: Vec<Id>) 
                 kind: ConversationKind::Group,
                 encryption: EncryptionMode::EndToEnd,
                 room_id: None,
+                // No home node: the contract suite proves store behaviour, not
+                // fan-out, so the label stays empty.
+                home_region: String::new(),
                 last_seq: 0,
                 created_by,
                 created_at: ts(3_000),
@@ -1248,23 +1251,47 @@ pub async fn the_direct_conversation_survives_a_race(store: &SharedStore) {
     let bob = seed_account(store, 2, "bob").await;
 
     let first = store
-        .direct_conversation(alice, bob, id(50), EncryptionMode::EndToEnd, ts(3_000))
+        .direct_conversation(
+            alice,
+            bob,
+            id(50),
+            EncryptionMode::EndToEnd,
+            "node-a".to_string(),
+            ts(3_000),
+        )
         .await
         .unwrap();
     // The loser of the race brings its own id and must still get the winner's
-    // row, from either side of the pair.
+    // row, from either side of the pair — including the winner's home node
+    // label, which is stamped once at birth and never derived again.
     let second = store
-        .direct_conversation(bob, alice, id(51), EncryptionMode::EndToEnd, ts(3_001))
+        .direct_conversation(
+            bob,
+            alice,
+            id(51),
+            EncryptionMode::EndToEnd,
+            "node-b".to_string(),
+            ts(3_001),
+        )
         .await
         .unwrap();
     assert_eq!(second.conversation_id, first.conversation_id);
+    assert_eq!(second.home_region, first.home_region);
+    assert_eq!(first.home_region, "node-a");
     assert!(store.conversation(id(51)).await.unwrap().is_none());
 
     let members = store.members(first.conversation_id).await.unwrap();
     assert_eq!(members.len(), 2);
     expect_code(
         store
-            .direct_conversation(alice, alice, id(52), EncryptionMode::EndToEnd, ts(3_002))
+            .direct_conversation(
+                alice,
+                alice,
+                id(52),
+                EncryptionMode::EndToEnd,
+                "node-a".to_string(),
+                ts(3_002),
+            )
             .await,
         codes::VALIDATION_FAILED,
     );
@@ -3575,6 +3602,9 @@ pub async fn a_game_token_moves_even_within_one_millisecond(store: &SharedStore)
                 kind: ConversationKind::Group,
                 encryption: EncryptionMode::Transport,
                 room_id: None,
+                // No home node: this conversation proves a game token rule, not
+                // fan-out, so the label stays empty.
+                home_region: String::new(),
                 last_seq: 0,
                 created_by: alice,
                 created_at: ts(1_000),

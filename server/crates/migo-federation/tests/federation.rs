@@ -51,7 +51,8 @@ use migo_federation::model::{
 };
 use migo_federation::{
     FederatedEvent, Mesh, MeshConfig, MeshService, NewPeerSpec, PeerIdentity, PeerStatus, PeerView,
-    PendingEvent, SequenceVerdict, FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
+    PendingEvent, SequenceVerdict, CONVERSATION_OPCODE_MAX, CONVERSATION_OPCODE_MIN,
+    FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
 };
 use migo_protocol::codes;
 use migo_store::traits::FederationStore;
@@ -1543,6 +1544,40 @@ async fn an_opcode_above_the_band_is_refused() {
     expect_code(
         h.mesh
             .enqueue(event(id(1), FEDERATION_OPCODE_MAX + 1, b"x"), ts(NOW))
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+}
+
+#[tokio::test]
+async fn the_conversation_band_pair_is_accepted() {
+    // The conversation tier's carve-out from the head of the reserved range (section 145):
+    // 241 FED_CONVERSATION_SUBSCRIBE and 242 FED_CONVERSATION_EVENT are mesh frames too.
+    let h = Harness::new();
+    h.mesh
+        .enqueue(event(id(1), CONVERSATION_OPCODE_MIN, b"x"), ts(NOW))
+        .await
+        .expect("the conversation band's lowest opcode is valid");
+    h.mesh
+        .enqueue(event(id(1), CONVERSATION_OPCODE_MAX, b"x"), ts(NOW))
+        .await
+        .expect("the conversation band's highest opcode is valid");
+}
+
+#[tokio::test]
+async fn the_gaps_around_the_conversation_band_are_refused() {
+    // 240 is a live client opcode (ENTITLEMENTS) and 243 is the reserved span, so neither
+    // may ride the mesh; the second band is exactly the 241-242 pair and nothing wider.
+    let h = Harness::new();
+    expect_code(
+        h.mesh
+            .enqueue(event(id(1), CONVERSATION_OPCODE_MIN - 1, b"x"), ts(NOW))
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+    expect_code(
+        h.mesh
+            .enqueue(event(id(1), CONVERSATION_OPCODE_MAX + 1, b"x"), ts(NOW))
             .await,
         codes::VALIDATION_FAILED,
     );
