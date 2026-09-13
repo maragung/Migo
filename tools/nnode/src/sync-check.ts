@@ -41,12 +41,15 @@
  * room tier fans events out but does not replicate the room, its membership,
  * or its conversation — bob joins the room ON node 2, which only works if the
  * rows are already there, and his own membership row on node 2 is exactly the
- * row a join on that node would have written). The account, profile, and
- * friendship rows are fixtured ONLY when the running binary predates the
- * row-replication tier; a binary that has the tier must pull them itself, and
- * the direct-message check fails if it does not. Every fixture is logged;
- * nothing is papered over — if a PROVED path fails, the run exits non-zero
- * with everything observed.
+ * row a join on that node would have written). The account and profile rows
+ * are fixtured ONLY when the running binary predates the row-replication
+ * tier; a binary that has the tier must pull them itself — forced at fixture
+ * time by the direct-conversation creates whose privacy gate routes the
+ * account query to the home node, since no traffic has flowed yet to pull
+ * one and the device fixtures cannot be written until the account rows land
+ * — and the direct-message check fails if it does not. Every fixture is
+ * logged; nothing is papered over — if a PROVED path fails, the run exits
+ * non-zero with everything observed.
  *
  * Environment variables (defaults match tools/nnode/run.sh):
  *   NODE1_HTTP  node 1 REST origin   (default http://127.0.0.1:18201)
@@ -65,6 +68,7 @@ import {
   ConversationKind,
   PresenceState,
   RelationshipKind,
+  RemoteError,
   RoomKind,
   RoomRole,
   TopicKind,
@@ -227,6 +231,29 @@ async function waitFor(condition: () => boolean, timeout: number): Promise<boole
   return true;
 }
 
+/**
+ * Waits until one database row exists, polling at a human pace.
+ *
+ * A row pulled across the mesh lands asynchronously — the ask rides the outbox
+ * to the owning node, the answer rides it back — so a fixture that references
+ * the far account (a device row's foreign key above all) cannot be written
+ * until the pull has actually seated it. Fails the run naming what never
+ * arrived, because a fixture written against a missing row is not a fixture,
+ * it is a foreign-key error.
+ */
+async function waitForRow(db: string, sql: string, what: string): Promise<void> {
+  const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
+  for (;;) {
+    if (rowJson<Record<string, unknown>>(db, sql) !== null) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      fail('fixture', `${what} never appeared on ${db}`);
+    }
+    await sleep(500);
+  }
+}
+
 // --- clients ------------------------------------------------------------------
 
 /**
@@ -304,38 +331,26 @@ async function main(): Promise<void> {
   // 3. Fixtures. Two regimes, decided by the row-replication tell above:
   //
   //   - Binary without the tier: the account, profile, and device/key rows of
-  //     each account are copied verbatim to the other node, the same stand-in
-  //     as always.
-  //   - Binary with the tier: only the device and key-bundle rows are copied,
-  //     because devices and keys have no federation tier yet and the clients
-  //     seal for each other's devices. The account and profile rows must be
-  //     pulled across the mesh by the nodes themselves — the checks demand it.
-  const fixtureAccount = (from: string, to: string, uuid: string, note: string): void => {
-    if (!rowsReplicate) {
-      const account = mustRow<Record<string, unknown>>(
-        from,
-        `select row_to_json(t) from account t where account_id = '${uuid}'`,
-        `${note}'s account row`,
-      );
-      insertJson(to, 'account', account);
-      const profile = mustRow<Record<string, unknown>>(
-        from,
-        `select row_to_json(t) from profile t where account_id = '${uuid}'`,
-        `${note}'s profile row`,
-      );
-      // `show_last_seen = 2` (everyone) so the other node's watch of this
-      // account's presence topic is authorized without a friendship graph.
-      profile.show_last_seen = 2;
-      insertJson(to, 'profile', profile);
-    } else {
-      log(
-        'fixture',
-        `${note}'s account and profile rows NOT copied ${from} → ${to}: this binary carries the row-replication tier and must pull them itself`,
-      );
-    }
-    // Devices and key bundles cross in both regimes: no tier carries them,
-    // and each node must serve the other account's devices for the clients
-    // to seal against.
+  //     each account are copied verbatim to the other node, and all four
+  //     friendship rows are seeded — the same stand-in as always.
+  //   - Binary with the tier: nothing is copied. The account and profile rows
+  //     must be pulled across the mesh by the nodes themselves — the checks
+  //     demand it — and the pull's only client-visible trigger is a
+  //     direct-conversation create: its privacy gate fail-closes on a
+  //     recipient profile the node does not hold, and the tier turns that
+  //     into a mesh ask (FED_ACCOUNT_QUERY) before it answers. The creates
+  //     run here, at fixture time, because everything that references the far
+  //     account comes after them — the device rows' foreign key above all,
+  //     since a device row cannot be written for an account the destination
+  //     node does not hold yet and no cross-node traffic has flowed to pull
+  //     one.
+
+  // Devices and key bundles cross in both regimes: no tier carries them, and
+  // each node must serve the other account's devices for the clients to seal
+  // against. The account row must already be seated on `to` — the foreign key
+  // on `device.account_id` is the whole reason this is its own step in the
+  // tier regime below.
+  const fixtureDevices = (from: string, to: string, uuid: string, note: string): void => {
     for (const table of ['device', 'identity_key', 'signed_prekey', 'one_time_prekey']) {
       const rows = rowsJson<Record<string, unknown>>(
         from,
@@ -351,8 +366,149 @@ async function main(): Promise<void> {
     );
   };
 
-  fixtureAccount(PG.db2, PG.db1, bobUuid, 'bob');
-  fixtureAccount(PG.db1, PG.db2, aliceUuid, 'alice');
+  // A friendship so the direct-message check is refused by neither privacy
+  // policy — it then measures federation, not permissions. The far node's
+  // gate is fail-closed: it answers from its own rows, and without the edges
+  // there it can only refuse PRIVACY_RESTRICTED. The relationship table's
+  // foreign key runs both ways (`account_id` and `other_id` each reference
+  // `account`), so an edge toward an account the node does not hold cannot be
+  // seeded at all — which is what forces the tier regime below to interleave
+  // pulls with own-side edges rather than seeding everything up front. The
+  // cross edges are never seeded in that regime: they are the tier's to
+  // carry, they arrive inside the account-rows answers the gates pull, and
+  // the checks below assert each far edge is there before relying on it.
+  const friendshipAt = new Date().toISOString();
+  const friendship = (db: string, from: string, to: string): void => {
+    insertJson(db, 'relationship', {
+      account_id: from,
+      other_id: to,
+      kind: RelationshipKind.Friend,
+      created_at: friendshipAt,
+      accepted_at: friendshipAt,
+    });
+  };
+
+  // One pull trigger: the direct-conversation create whose gate asks the mesh.
+  // The first two runs are expected to end in a refusal — no friendship exists
+  // anywhere yet, because seeding one takes the far account's row, which is
+  // exactly what the pull brings — and the pull has already happened by the
+  // time the gate refuses, so the refusal is caught and logged rather than
+  // allowed to fail the run. Anything else the server might say rethrows.
+  const triggerPull = async (note: string, create: () => Promise<unknown>): Promise<void> => {
+    try {
+      await create();
+      log('fixture', `${note} was accepted; the pull it forced stands either way`);
+    } catch (error) {
+      if (error instanceof RemoteError && error.symbol === 'PRIVACY_RESTRICTED') {
+        log('fixture', `${note} was refused by privacy (expected: no friendship is seeded yet)`);
+        return;
+      }
+      throw error;
+    }
+  };
+
+  if (!rowsReplicate) {
+    const fixtureAccount = (from: string, to: string, uuid: string, note: string): void => {
+      const account = mustRow<Record<string, unknown>>(
+        from,
+        `select row_to_json(t) from account t where account_id = '${uuid}'`,
+        `${note}'s account row`,
+      );
+      insertJson(to, 'account', account);
+      const profile = mustRow<Record<string, unknown>>(
+        from,
+        `select row_to_json(t) from profile t where account_id = '${uuid}'`,
+        `${note}'s profile row`,
+      );
+      // `show_last_seen = 2` (everyone) so the other node's watch of this
+      // account's presence topic is authorized without a friendship graph.
+      profile.show_last_seen = 2;
+      insertJson(to, 'profile', profile);
+      fixtureDevices(from, to, uuid, note);
+    };
+    fixtureAccount(PG.db2, PG.db1, bobUuid, 'bob');
+    fixtureAccount(PG.db1, PG.db2, aliceUuid, 'alice');
+    const pairs: [string, string][] = [
+      [aliceUuid, bobUuid],
+      [bobUuid, aliceUuid],
+    ];
+    for (const [a, b] of pairs) {
+      friendship(PG.db1, a, b);
+      friendship(PG.db2, a, b);
+    }
+    log('fixture', 'friendship rows written on both nodes');
+  } else {
+    log(
+      'fixture',
+      'account and profile rows NOT copied either way: this binary carries the row-replication tier and must pull them itself',
+    );
+    // Trigger 1 — alice's create makes node 1 ask about bob. The answer seats
+    // bob's account and profile on node 1 (no edges: node 2 holds none toward
+    // alice yet, for the same foreign-key reason), and the create is then
+    // refused, because alice's own edge toward bob cannot be seeded before
+    // bob's row lands. Only once the row is there may the device rows follow —
+    // their foreign key is the bug this regime used to have — and alice's
+    // own-side edge, whose `other_id` the pull just seated.
+    await triggerPull("alice's direct-conversation create", () =>
+      alice.startConversation(ConversationKind.Direct, [bobId]),
+    );
+    await waitForRow(
+      PG.db1,
+      `select row_to_json(t) from account t where account_id = '${bobUuid}'`,
+      "bob's account row, pulled to node 1 by the create's privacy gate",
+    );
+    log(
+      'fixture',
+      "bob's account row seated on node 1; alice's own-side edge and bob's devices may follow",
+    );
+    friendship(PG.db1, aliceUuid, bobUuid);
+    fixtureDevices(PG.db2, PG.db1, bobUuid, 'bob');
+
+    // Trigger 2 — bob's create makes node 2 ask about alice, and this answer
+    // carries the edge alice → bob seeded above, because that is the edge
+    // between the queried account and the asker. Node 2 seats alice's
+    // account, profile, and that cross edge — the cross edge check 4 demands
+    // on node 2 — and refuses the create itself, because bob's own edge
+    // toward alice was unseedable until alice's row landed, which the same
+    // pull just did.
+    await triggerPull("bob's direct-conversation create", () =>
+      bob.startConversation(ConversationKind.Direct, [aliceId]),
+    );
+    await waitForRow(
+      PG.db2,
+      `select row_to_json(t) from account t where account_id = '${aliceUuid}'`,
+      "alice's account row, pulled to node 2 by the create's privacy gate",
+    );
+    log(
+      'fixture',
+      "alice's account row seated on node 2; bob's own-side edge and alice's devices may follow",
+    );
+    friendship(PG.db2, bobUuid, aliceUuid);
+    fixtureDevices(PG.db1, PG.db2, aliceUuid, 'alice');
+
+    // Trigger 3 — node 1 already holds bob's profile, so its gate would never
+    // ask about him again (the ask fires only when the profile read comes
+    // back empty), yet the cross edge bob → alice has not crossed. The
+    // replica profile the first pull seated is dropped — a row the tier
+    // wrote, not a fixture, and dropping it is the node-lost-its-replica
+    // shape the pull-on-demand design recovers from — so the next create
+    // re-asks, and the answer now carries bob's edge toward alice. This
+    // create is accepted: the ask re-seats the profile, and alice's own-side
+    // edge is seeded. It also founds the direct conversation check 4
+    // exercises; the create there resolves idempotently to this one.
+    psql(PG.db1, `delete from profile where account_id = '${bobUuid}'`);
+    log(
+      'fixture',
+      "bob's replica profile dropped on node 1 so its gate re-asks (the cross edge has not crossed yet)",
+    );
+    await alice.startConversation(ConversationKind.Direct, [bobId]);
+    await waitForRow(
+      PG.db1,
+      `select row_to_json(t) from relationship t where account_id = '${bobUuid}' and other_id = '${aliceUuid}'`,
+      "bob's friendship edge toward alice, carried to node 1 by the re-ask's answer",
+    );
+    log('fixture', "bob's cross friendship edge seated on node 1 by the re-ask's answer");
+  }
 
   // The room and its conversation, verbatim: node 2 must know the room exists
   // (its client joins there) and that the conversation is a room conversation
@@ -404,43 +560,6 @@ async function main(): Promise<void> {
   });
   insertJson(PG.db1, 'room_member', membershipRow(bobUuid, RoomRole.Member));
   insertJson(PG.db2, 'room_member', membershipRow(aliceUuid, RoomRole.Owner));
-
-  // A friendship so the direct-message check is refused by neither privacy
-  // policy — it then measures federation, not permissions. The far node's
-  // gate is fail-closed: it answers from its own rows, and without the edges
-  // there it can only refuse PRIVACY_RESTRICTED. With the row-replication
-  // tier present, only each node's OWN-side edge is seeded (alice's
-  // `alice → bob` on node 1, bob's `bob → alice` on node 2) — exactly the
-  // state the store's own acceptance path would leave behind, because the
-  // friend handshake itself does not federate — and the cross edges are the
-  // tier's to carry: they arrive inside the account-rows answers the gates
-  // pull, and the checks below assert the far edge is there before relying
-  // on it. Without the tier, all four rows are seeded as before.
-  const friendshipAt = new Date().toISOString();
-  const friendship = (db: string, from: string, to: string): void => {
-    insertJson(db, 'relationship', {
-      account_id: from,
-      other_id: to,
-      kind: RelationshipKind.Friend,
-      created_at: friendshipAt,
-      accepted_at: friendshipAt,
-    });
-  };
-  if (rowsReplicate) {
-    friendship(PG.db1, aliceUuid, bobUuid);
-    friendship(PG.db2, bobUuid, aliceUuid);
-    log('fixture', 'own-side friendship edges seeded per node; cross edges must replicate');
-  } else {
-    const pairs: [string, string][] = [
-      [aliceUuid, bobUuid],
-      [bobUuid, aliceUuid],
-    ];
-    for (const [a, b] of pairs) {
-      friendship(PG.db1, a, b);
-      friendship(PG.db2, a, b);
-    }
-    log('fixture', 'friendship rows written on both nodes');
-  }
 
   // 4. Subscriptions, before anything is sent. Alice's roster (node 1) now
   //    names bob, so her membership cache — the audience the first send seals
@@ -619,11 +738,13 @@ async function main(): Promise<void> {
       );
     }
     if (rowsReplicate) {
-      // CHECK 4, replication regime: no conversation fixtures at all. Alice's
-      // create already forced node 1's privacy gate to pull bob's account
-      // across the mesh (nothing else seats the profile the gate reads), so
-      // demand the proof straight from node 1's store: bob's account row, and
-      // the cross friendship edge the answer carried, both seated by the pull.
+      // CHECK 4, replication regime: no conversation fixtures at all. The
+      // fixture-time trigger create already forced node 1's privacy gate to
+      // pull bob's account across the mesh (nothing else seats the profile
+      // the gate reads), and the create here resolves idempotently to the
+      // conversation that create founded — so demand the proof straight from
+      // node 1's store: bob's account row, and the cross friendship edge the
+      // re-ask's answer carried, both seated by pulls, not fixtures.
       const bobOnNode1 = rowJson<Record<string, unknown>>(
         PG.db1,
         `select row_to_json(t) from account t where account_id = '${bobUuid}'`,
@@ -782,11 +903,12 @@ async function main(): Promise<void> {
     log('check-4b', `PROVED: alice received and decrypted "${dmReply}"`);
 
     if (rowsReplicate) {
-      // The reply's send forced node 2's gate to pull alice's account the same
-      // way the create pulled bob's, so demand both proofs: the cross
-      // friendship edge the answer carried, and the applied-answer counters on
-      // both nodes. These close the loop the checks opened — the direct path
-      // crossed on replicated rows and nothing else.
+      // Node 2's pull of alice's account happened at fixture time — bob's
+      // trigger create forced it, and its answer carried alice's cross
+      // friendship edge — so demand both proofs: that edge, and the
+      // applied-answer counters on both nodes. These close the loop the
+      // checks opened — the direct path crossed on replicated rows and
+      // nothing else.
       const aliceEdgeOnNode2 = rowJson<Record<string, unknown>>(
         PG.db2,
         `select row_to_json(t) from relationship t where account_id = '${aliceUuid}' and other_id = '${bobUuid}'`,
@@ -817,9 +939,9 @@ async function main(): Promise<void> {
   // CHECK 5: a presence change crosses to a watcher on the peer node. Bob's
   // watch of alice's user topic on node 2 is authorized by her profile row on
   // that node — fixtured when the binary predates the row-replication tier,
-  // pulled across the mesh by bob's direct reply when it has the tier (his
-  // send gate read her profile, so it is seated before this subscribe asks
-  // about it) — and by the friendship the rows carry either way; the granted
+  // pulled across the mesh by bob's fixture-time trigger create when it has
+  // the tier (so it is seated long before this subscribe asks about it) —
+  // and by the friendship the rows carry either way; the granted
   // watch is the user-topic tier's subscribe half — node 2 asks its peers to
   // watch alice — and alice then changes presence on node 1, whose forward
   // half carries one federated copy per watching node.
