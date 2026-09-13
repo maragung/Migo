@@ -64,7 +64,7 @@ where
     F: Fn(&ServerEndpoint) -> Fut,
     Fut: Future<Output = Option<Duration>>,
 {
-    let probes: Vec<Fut> = candidates.iter().map(|endpoint| probe(endpoint)).collect();
+    let probes: Vec<Fut> = candidates.iter().map(probe).collect();
     let latencies: Vec<Option<Duration>> = join_all(probes).await;
     let fastest = pick_fastest(&latencies)?;
     Some(candidates[fastest].clone())
