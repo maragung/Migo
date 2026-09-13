@@ -3604,3 +3604,294 @@ async fn stress_many_concurrent_sessions_handshake_and_release_their_slots() {
         "the live gauge is back to zero once every session hung up"
     );
 }
+
+// ===========================================================================
+// Section 174 observability: the three series that were spec-only until now
+// — inbound frame sizes, reconnects served by the reason the previous session
+// closed, and decode failures by error symbol. Each is asserted twice:
+// registered at zero before any traffic (an alarm waiting on a series must
+// find it on the first scrape, not after its first event), and counted
+// through the real path that increments it.
+// ===========================================================================
+
+/// Reads one `name{labels} value` line out of a rendered exposition, for the
+/// metric tests below.
+#[track_caller]
+fn series_value(rendered: &str, prefix: &str) -> u64 {
+    let line = rendered
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("series {prefix} is missing from the exposition:\n{rendered}"));
+    line.rsplit(' ')
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("series {prefix} has no numeric value: {line}"))
+}
+
+#[tokio::test]
+async fn the_section_174_series_are_registered_at_zero_before_any_traffic() {
+    // A fresh harness is a fresh registry with the gateway's meters just
+    // registered; scraping it before a single frame is served is the property
+    // section 174 demands of every series.
+    let h = Harness::new();
+    let rendered = h.registry.render();
+    for reason in [
+        "server_shutdown",
+        "node_draining",
+        "session_lagging",
+        "heartbeat_timeout",
+        "transport_error",
+        "rebalance",
+    ] {
+        assert_eq!(
+            h.counter("migo_reconnect_total", &[("reason", reason)]),
+            0,
+            "the reconnect series for {reason} must exist at zero from the first scrape"
+        );
+    }
+    for error in [
+        "decode_failed",
+        "frame_too_large",
+        "unsupported_version",
+        "unsupported_flag",
+    ] {
+        assert_eq!(
+            h.counter("migo_decode_errors_total", &[("error", error)]),
+            0,
+            "the decode-error series for {error} must exist at zero from the first scrape"
+        );
+    }
+    assert_eq!(
+        series_value(&rendered, "migo_frame_bytes_bucket{le=\"1024\"}"),
+        0,
+        "the frame-bytes histogram must expose its first bucket at zero"
+    );
+    assert_eq!(
+        series_value(&rendered, "migo_frame_bytes_bucket{le=\"+Inf\"}"),
+        0,
+        "the frame-bytes histogram must expose its +Inf bucket at zero"
+    );
+    assert_eq!(
+        series_value(&rendered, "migo_frame_bytes_count"),
+        0,
+        "the frame-bytes histogram must expose its count at zero"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn inbound_frame_sizes_land_in_the_frame_bytes_histogram() {
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    // A handshake and one PING: two text-sized frames, so both must land in the
+    // first bucket — the bound that exists to swallow everything a chat-sized
+    // frame can be without ever separating a one-word reply from a paragraph.
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.client(Opcode::Ping, 2, &Ping::default());
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        h.counter("migo_gateway_frames_in_total", &[]),
+        2,
+        "the scripted session exchanged two frames"
+    );
+    let rendered = h.registry.render();
+    assert_eq!(
+        series_value(&rendered, "migo_frame_bytes_count"),
+        2,
+        "every inbound frame is observed by the histogram"
+    );
+    assert_eq!(
+        series_value(&rendered, "migo_frame_bytes_bucket{le=\"1024\"}"),
+        2,
+        "both frames are text-sized and must share the first, coarse bucket"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_served_resume_counts_the_reconnect_by_the_reason_the_session_died() {
+    let h = Harness::new();
+
+    // The first session: authenticated, because a resume buffer is only
+    // retained for a session that holds an identity.
+    let first = Pipe::new();
+    first.keep_open();
+    first.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+
+    let drive = async {
+        for _ in 0..500 {
+            if h.sessions_opened() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            h.sessions_opened(),
+            1,
+            "the first session must be established before it is killed"
+        );
+        let session_id = welcome_in(&first.sent()).session_id;
+
+        // The connection dies: an involuntary close, which is what retains the
+        // backlog for a resume. The parked recv future only re-polls when a
+        // select branch fires, and the slowest of those is the heartbeat
+        // ticker, so the poll must be willing to wait out (paused) seconds.
+        first.sever();
+        for _ in 0..500 {
+            if h.sessions_closed("transport_error") > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert_eq!(
+            h.sessions_closed("transport_error"),
+            1,
+            "the first session must close as a transport error before the reconnect"
+        );
+
+        // The reconnect: a second connection, same session id, resuming from
+        // zero. The reconnect counter must name the cause — the transport
+        // error that ended the previous session — not just the fact.
+        let second = Pipe::new();
+        second.keep_open();
+        second.client(
+            Opcode::Hello,
+            1,
+            &Hello {
+                protocol_version: PROTOCOL_VERSION,
+                access_token: Some(VALID_TOKEN.to_string()),
+                device_id: Some(device_of(ACCOUNT)),
+                resume: Some(ResumeRequest {
+                    session_id,
+                    last_frame_seq: 0,
+                }),
+                ..Default::default()
+            },
+        );
+        let resumed = h.serve(&second);
+        tokio::pin!(resumed);
+        for _ in 0..500 {
+            if h.counter("migo_reconnect_total", &[("reason", "transport_error")]) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::timeout(Duration::ZERO, &mut resumed)
+                .await
+                .ok();
+        }
+        assert_eq!(
+            h.counter("migo_reconnect_total", &[("reason", "transport_error")]),
+            1,
+            "the served resume is one reconnect, labelled by why the client had to come back"
+        );
+        for reason in [
+            "server_shutdown",
+            "node_draining",
+            "session_lagging",
+            "heartbeat_timeout",
+            "rebalance",
+        ] {
+            assert_eq!(
+                h.counter("migo_reconnect_total", &[("reason", reason)]),
+                0,
+                "no other reconnect reason may move for a transport-error reconnect"
+            );
+        }
+        second.hangup();
+        resumed.await;
+    };
+    tokio::join!(h.serve(&first), drive);
+}
+
+#[tokio::test]
+async fn an_opening_frame_that_will_not_decode_is_counted_by_error_symbol() {
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    // One byte cannot be a frame header, so this never parses as a frame at all.
+    pipe.push_bytes(Bytes::from_static(&[0x01]));
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        h.counter("migo_decode_errors_total", &[("error", "decode_failed")]),
+        1,
+        "an unparseable opener is one decode failure"
+    );
+    assert_eq!(h.handshake_rejected("protocol_violation"), 1);
+    assert_eq!(h.sessions_opened(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_oversized_frame_on_a_live_session_counts_a_decode_error() {
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    // One byte past the frame budget the WELCOME advertised: the size check
+    // runs before the parse, so this is FRAME_TOO_LARGE, not DECODE_FAILED.
+    pipe.push_bytes(Bytes::from(vec![
+        0u8;
+        migo_wire::limits::MAX_FRAME_BYTES + 1
+    ]));
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        h.counter("migo_decode_errors_total", &[("error", "frame_too_large")]),
+        1,
+        "an oversized frame is one decode failure, by its own symbol"
+    );
+    assert_eq!(
+        h.counter("migo_decode_errors_total", &[("error", "decode_failed")]),
+        0,
+        "an oversized frame must not also count as a plain decode failure"
+    );
+    assert_eq!(h.sessions_closed("protocol_violation"), 1);
+    // The oversized frame was still observed by the size histogram, and only
+    // the +Inf bucket can hold it.
+    let rendered = h.registry.render();
+    assert!(
+        series_value(&rendered, "migo_frame_bytes_bucket{le=\"+Inf\"}")
+            > series_value(&rendered, "migo_frame_bytes_bucket{le=\"1024\"}"),
+        "the oversized frame must land beyond every finite bucket"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_message_body_that_will_not_decode_is_counted_by_error_symbol() {
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    // A well-formed frame header carrying the PONG opcode, but a body that
+    // decodes as neither a Pong nor a Ping: the frame parsed, the message did
+    // not — the decode path that closes a ready session.
+    let bogus = to_frame(Opcode::Pong.to_wire(), 7, &hello())
+        .expect("the scripted frame must encode")
+        .encode()
+        .expect("the scripted frame must encode");
+    pipe.push_bytes(bogus);
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        h.counter("migo_decode_errors_total", &[("error", "decode_failed")]),
+        1,
+        "a body that will not decode is one decode failure"
+    );
+    assert_eq!(h.sessions_closed("protocol_violation"), 1);
+}

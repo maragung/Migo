@@ -50,7 +50,9 @@ use migo_wire::limits::MAX_BATCH_ITEMS;
 use crate::codec::{encode_error, encode_message};
 use crate::config::MAX_SUBSCRIPTIONS;
 use crate::dispatch::{ClientContext, TopicRequest};
-use crate::metrics::{Closed, HandshakeReject, Meters, Refused, ResumeOutcome};
+use crate::metrics::{
+    Closed, DecodeFailure, HandshakeReject, Meters, Reconnect, Refused, ResumeOutcome,
+};
 use crate::outbound::{Outbound, PushOutcome, ResumeBuffer};
 use crate::session::{Phase, SessionHandle};
 use crate::transport::{Transport, TransportError};
@@ -105,6 +107,11 @@ enum Plan {
     /// A resume of a dropped session, reusing its id and the retained backlog to redeliver.
     Resume {
         session_id: Id,
+        /// Why the client had to come back: the reason its previous session closed, read off
+        /// the retained buffer. `None` is unreachable — a buffer is only stored for a close in
+        /// `retains_resume`'s set, exactly the reasons [`Reconnect::of`] names — but the type
+        /// stays honest rather than inventing a label for the impossible.
+        reconnect: Option<Reconnect>,
         buffer: ResumeBuffer,
         last_seq: u64,
     },
@@ -194,14 +201,17 @@ impl<T: Transport> Connection<'_, T> {
             hello.bandwidth_mode,
             heartbeat_base_ms,
         ));
-        let (resumed, resume_from_seq) = match &plan {
+        let (resumed, resume_from_seq, reconnect) = match &plan {
             Plan::Resume {
-                buffer, last_seq, ..
+                buffer,
+                last_seq,
+                reconnect,
+                ..
             } => {
                 outbound.seed_resume(buffer, *last_seq);
-                (Some(true), Some(*last_seq))
+                (Some(true), Some(*last_seq), *reconnect)
             }
-            Plan::Fresh { .. } => (None, None),
+            Plan::Fresh { .. } => (None, None, None),
         };
 
         let (phase, identity) = self
@@ -242,6 +252,7 @@ impl<T: Transport> Connection<'_, T> {
                 now,
                 resumed,
                 resume_from_seq,
+                reconnect,
                 identity.as_ref(),
                 outbound.cadence(),
             )
@@ -300,17 +311,19 @@ impl<T: Transport> Connection<'_, T> {
             self.transport.close().await;
             return None;
         };
-        gateway.meters.frame_in();
+        gateway.meters.frame_in(first.len());
         let now = gateway.now();
 
         let frame = match Frame::decode(first) {
             Ok(frame) => frame,
             Err(error) => {
+                let error = fault::from_wire(error);
+                self.gateway.meters.decode_failed(DecodeFailure::of(&error));
                 self.reject(
                     HandshakeReject::ProtocolViolation,
                     Opcode::Error.to_wire(),
                     0,
-                    &fault::from_wire(error),
+                    &error,
                 )
                 .await;
                 return None;
@@ -335,11 +348,13 @@ impl<T: Transport> Connection<'_, T> {
         let hello = match from_frame::<Hello>(&frame) {
             Ok(hello) => hello,
             Err(error) => {
+                let error = fault::from_wire(error);
+                self.gateway.meters.decode_failed(DecodeFailure::of(&error));
                 self.reject(
                     HandshakeReject::ProtocolViolation,
                     Opcode::Hello.to_wire(),
                     correlation,
-                    &fault::from_wire(error),
+                    &error,
                 )
                 .await;
                 return None;
@@ -404,6 +419,7 @@ impl<T: Transport> Connection<'_, T> {
         match gateway.take_resume(request.session_id) {
             Some(buffer) if buffer.covers(request.last_frame_seq, now) => Some(Plan::Resume {
                 session_id: request.session_id,
+                reconnect: Reconnect::of(buffer.closed),
                 buffer,
                 last_seq: request.last_frame_seq,
             }),
@@ -486,6 +502,7 @@ impl<T: Transport> Connection<'_, T> {
         now: Timestamp,
         resumed: Option<bool>,
         resume_from_seq: Option<u64>,
+        reconnect: Option<Reconnect>,
         identity: Option<&Identity>,
         cadence: migo_protocol::Cadence,
     ) -> bool {
@@ -535,6 +552,11 @@ impl<T: Transport> Connection<'_, T> {
         gateway.meters.frames_out(1);
         if resumed.is_some() {
             gateway.meters.resume(ResumeOutcome::Resumed);
+            if let Some(reason) = reconnect {
+                // The reconnect is only counted once it is truly served — a WELCOME the client
+                // never received is a resume attempt, not a reconnect (section 174).
+                gateway.meters.reconnected(reason);
+            }
         }
         true
     }
@@ -606,18 +628,22 @@ impl<T: Transport> Connection<'_, T> {
                 incoming = self.transport.recv() => {
                     match incoming {
                         Ok(Some(bytes)) => {
-                            self.gateway.meters.frame_in();
+                            self.gateway.meters.frame_in(bytes.len());
                             last_seen = self.gateway.now();
                             probed = false;
                             let frame = match Frame::decode(bytes) {
                                 Ok(frame) => frame,
                                 Err(error) => {
+                                    let error = fault::from_wire(error);
+                                    self.gateway
+                                        .meters
+                                        .decode_failed(DecodeFailure::of(&error));
                                     push_error(
                                         &outbound,
                                         &self.gateway.meters,
                                         Opcode::Error.to_wire(),
                                         0,
-                                        &fault::from_wire(error),
+                                        &error,
                                         last_seen,
                                         self.compression,
                                     );
@@ -1496,12 +1522,14 @@ impl<T: Transport> Connection<'_, T> {
         error: WireError,
         now: Timestamp,
     ) -> FrameOutcome {
+        let error = fault::from_wire(error);
+        self.gateway.meters.decode_failed(DecodeFailure::of(&error));
         push_error(
             outbound,
             &self.gateway.meters,
             opcode,
             correlation,
-            &fault::from_wire(error),
+            &error,
             now,
             self.compression,
         );
@@ -1582,7 +1610,7 @@ impl<T: Transport> Connection<'_, T> {
         // Retain resume state only for an involuntary close of an authenticated session, so a
         // reconnect can bridge the gap (section 150). A clean client-driven close keeps nothing.
         if established.identity.is_some() && retains_resume(reason) {
-            let buffer = established.outbound.resume_buffer(gateway.now());
+            let buffer = established.outbound.resume_buffer(gateway.now(), reason);
             gateway.store_resume(established.session_id, buffer);
         }
         // Balance the start: a connection that announced itself owes exactly one end, however it

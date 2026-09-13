@@ -5402,7 +5402,7 @@ Aturan untuk seri metric:
 Setiap seri didaftarkan pada nol saat startup, karena counter yang baru muncul pada kejadian pertamanya membuat alarm yang menunggunya gagal dievaluasi, bukan bernilai salah
 Label hanya enum tertutup yang kardinalitasnya tetap pada waktu kompilasi
 TIDAK BOLEH ada seri berlabel account, device, conversation, atau session id, karena label seperti itu adalah daftar hadir per orang yang diekspor ke siapa pun yang men-scrape endpoint metrik; jumlah prekey per account tidak diekspor atas alasan yang sama
-Histogram ukuran envelope sengaja tidak ada, karena panjang ciphertext adalah side channel yang membedakan "ya" dari sebuah paragraf
+Histogram yang bisa membedakan "ya" dari sebuah paragraf sengaja tidak ada, karena panjang ciphertext adalah side channel; migo_frame_bytes tetap diizinkan karena bucket-nya sengaja kasar — batas pertamanya menelan semua frame seukuran teks, jadi serinya membaca skala transport, bukan panjang isi
 
 Metrics wajib, nama persis seperti didaftarkan kode:
 
@@ -5415,6 +5415,9 @@ migo_gateway_resume_total, berlabel outcome yaitu resumed, rejected, atau unknow
 migo_gateway_handshake_rejected_total, berlabel reason, karena client yang ditolak menerima error yang sama-sama opaque dan hanya seri ini yang membedakan satu insiden dari insiden lain
 migo_gateway_subscriptions_refused_total, berlabel reason yaitu cap atau unauthorized
 migo_gateway_rate_limited_total, migo_ratelimit_rejections_total berlabel scope, migo_ratelimit_degraded_total, dan migo_ratelimit_fallback_saturated_total
+migo_frame_bytes, histogram ukuran frame yang diterima dari client; bucket-nya sengaja kasar sehingga jawaban satu kata dan sebuah paragraf jatuh pada bucket yang sama, dan tidak ada label opcode
+migo_reconnect_total, berlabel reason yaitu server_shutdown, node_draining, session_lagging, heartbeat_timeout, transport_error, atau rebalance; dihitung saat resume benar-benar dilayani, dengan alasan penutupan sesi sebelumnya yang dibawa buffer resume
+migo_decode_errors_total, berlabel error yaitu decode_failed, frame_too_large, unsupported_version, atau unsupported_flag; dihitung pada setiap kegagalan decode frame atau body pesan, sehingga tidak lagi hanya terlihat sebagai penutupan sesi dengan reason protocol_violation
 migo_keys_published_total, migo_keys_publish_rejected_total berlabel reason, migo_keys_one_time_prekeys_accepted_total, migo_keys_one_time_prekeys_skipped_total, migo_keys_bundles_served_total, migo_keys_bundles_without_one_time_prekey_total, dan migo_keys_fetches_refused_exhausted_total
 migo_calls_invite_total dan migo_calls_answer_total berlabel outcome, migo_calls_connected_total, migo_calls_ended_total berlabel reason, migo_calls_expired_total, migo_calls_relayed_total berlabel kind, migo_calls_group_join_total berlabel outcome, migo_calls_group_left_total, migo_calls_group_relayed_total, dan migo_calls_group_rekeyed_total
 migo_sfu_joins_total berlabel outcome, migo_sfu_leaves_total, migo_sfu_publishes_total berlabel outcome, migo_sfu_unpublishes_total, migo_sfu_subscriptions_total berlabel outcome, migo_sfu_unsubscriptions_total, migo_sfu_frames_forwarded_total dan migo_sfu_frames_dropped_total berlabel reason, migo_sfu_adaptations_total berlabel direction, serta gauge migo_sfu_participants dan migo_sfu_active_video_streams, semuanya tanpa label identitas karena siapa berada di panggilan mana adalah fakta paling sensitif yang dipegang plane media
@@ -5423,9 +5426,6 @@ migo_federation_handshakes_total, migo_federation_handshake_rejected_total dan m
 
 Belum ada di kode dan tetap menjadi requirement, STATUS: SPEC:
 
-migo_frame_bytes_bucket, histogram byte per opcode — ditahan oleh aturan side channel di atas
-migo_reconnect_total, berlabel reason
-migo_decode_errors_total, berlabel error symbol; kegagalan decode hari ini terlihat sebagai penutupan sesi dengan reason protocol_violation
 migo_errors_total, berlabel error symbol dan class
 migo_e2e_prekeys_remaining sebagai histogram per account — bentuk per account mustahil di bawah larangan label identitas di atas, dan kebutuhan operasionalnya dipenuhi migo_keys_bundles_without_one_time_prekey_total serta migo_keys_fetches_refused_exhausted_total
 migo_call_setup_seconds
