@@ -545,22 +545,34 @@ impl App {
         );
         // No push sender is wired in this build: registrations are stored, deliveries are dropped.
         let sender: SharedPushSender = Arc::new(NoPush);
+        // The notifier's realtime half: the bell every accepted event rings on the
+        // recipient's user topic. It is held by the same one-slot cell the room relay
+        // holds, because the gateway cannot exist before the dispatcher it is handed,
+        // and the dispatcher cannot exist before the services it routes to — so the
+        // cell is bound here, empty, and filled the moment the gateway opens. A ring
+        // during that startup window is quietly dropped: the row is still written and
+        // the push still queued, and no socket exists yet to have missed anything.
+        let bell_gateway = Arc::new(GatewayHandle::new());
+        let bell: migo_notify::SharedBell =
+            Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway)));
         let notify = migo_notify::open(
             store.clone(),
             cache.clone(),
             limiter.clone(),
             sender,
+            bell,
             Box::new(OsRandom),
             &node_secret,
             migo_notify::NotifyConfig::default(),
             &registry,
         );
 
-        // The economy's announcements become notification rows: a gift that arrives
-        // while its recipient is offline is waiting in their inbox, not lost. The push
-        // half is `NoPush` (above) and the realtime half is the dispatcher's to publish
-        // — this adapter only stores, because the Announcer port fires inside the
-        // service where no connection context exists to broadcast with.
+        // The economy's announcements become notifications: a gift that arrives while
+        // its recipient is offline is waiting in their inbox, not lost, and a recipient
+        // who is online hears the bell. The push half is `NoPush` (above) and the
+        // realtime half is the notifier's own seam — this adapter only forwards,
+        // because the Announcer port fires inside the service where no connection
+        // context exists to broadcast with.
         let announcer: SharedAnnouncer =
             Arc::new(crate::ports::NotifyingAnnouncer::new(notify.clone()));
         let economy = migo_economy::open(
@@ -873,6 +885,9 @@ impl App {
         // room relay's reconnect hints for a moved room — reach the hub. Before this point
         // they were no-ops, which is correct — no session can have connected yet.
         gateway_handle.set(Arc::clone(&gateway));
+        // The notifier's bell was bound to an empty cell before the gateway existed;
+        // from here on, every notification the process raises rings a live topic.
+        bell_gateway.set(Arc::clone(&gateway));
 
         // The native clients' default transport: raw TCP, bound only when the operator gave it
         // an address (section 138). One connection, one session, length-prefixed binary frames —

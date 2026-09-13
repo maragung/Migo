@@ -4621,11 +4621,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onTyping { typing(it) })
         // A pushed notification is a cue to reconcile every inbox-shaped surface, and a friend
         // event a cue to re-read the graph -- the same reconcile-don't-trust rule each section
-        // applies on its own refresh button.
+        // applies on its own refresh button. The re-read runs whatever section is open: the
+        // friends cache is app-global and section entry only loads it when empty, so an event
+        // that arrived while another tab was showing would otherwise sit unapplied until some
+        // unrelated action reloaded the list -- the exact "accepted but not showing" state the
+        // event exists to prevent.
         subscriptions.add(opened.client.onNotification { pushed(it) })
-        subscriptions.add(opened.client.onFriendEvent {
-            if ((_state.value as? AppState.SignedIn)?.section == AppState.Section.FRIENDS) loadFriends()
-        })
+        subscriptions.add(opened.client.onFriendEvent { loadFriends() })
         // The three room streams. They land in the cache and, when they name the open room, in its
         // header, timeline and member sheet; a stream for any other room updates the cache and stops
         // there. Added here with the rest so a reconnect re-bridges all of them together.

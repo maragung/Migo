@@ -136,6 +136,13 @@ pub struct Event {
     pub actor_id: Option<Id>,
     /// The room this happened in, where it happened in one.
     pub room_id: Option<Id>,
+    /// The conversation this happened in, where it happened in one — a gift names the
+    /// chat it was given in, so the bell's tap target opens the right screen.
+    ///
+    /// Carried to the realtime frame only: the inbox row has no such column, because
+    /// the row the client fetches on tap already knows where it is going. `None` for
+    /// every kind that is not about a conversation.
+    pub conversation_id: Option<Id>,
     /// What it points at, for the client to fetch once awake.
     pub subject_id: Option<Id>,
     /// Server time.
@@ -143,7 +150,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// An event with no actor, no room, and no subject.
+    /// An event with no actor, no room, no conversation, and no subject.
     #[must_use]
     pub const fn new(account_id: Id, kind: NotificationKind, at: Timestamp) -> Self {
         Self {
@@ -151,6 +158,7 @@ impl Event {
             kind,
             actor_id: None,
             room_id: None,
+            conversation_id: None,
             subject_id: None,
             at,
         }
@@ -167,6 +175,13 @@ impl Event {
     #[must_use]
     pub const fn in_room(mut self, room_id: Id) -> Self {
         self.room_id = Some(room_id);
+        self
+    }
+
+    /// Sets the conversation.
+    #[must_use]
+    pub const fn in_conversation(mut self, conversation_id: Id) -> Self {
+        self.conversation_id = Some(conversation_id);
         self
     }
 

@@ -34,7 +34,7 @@ use std::sync::Arc;
 use migo_cache::{Cache, CacheKey, SharedCache, Ttl};
 use migo_core::metrics::Registry;
 use migo_core::{Id, Random, Result, Timestamp};
-use migo_protocol::{fault, NotificationKind, Platform};
+use migo_protocol::{fault, NotificationEvent, NotificationKind, Platform};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter, TrustTier};
 use migo_store::model::{notification_kind, Notification, NotificationPosition, PushTarget};
 use migo_store::{SharedStore, Store};
@@ -46,7 +46,9 @@ use crate::model::{
     MAX_INBOX_PAGE,
 };
 use crate::token::TokenKeeper;
-use crate::traits::{Notifier, PushSender, Sent, SharedNotifier, SharedPushSender, Target};
+use crate::traits::{
+    Notifier, PushSender, Sent, SharedBell, SharedNotifier, SharedPushSender, Target,
+};
 
 /// Cache scope for the coalescing marks.
 ///
@@ -89,6 +91,14 @@ pub struct Notifications<
     cache: Arc<C>,
     limiter: Arc<L>,
     sender: Arc<P>,
+    /// The realtime half of every delivery: what a connected device hears.
+    ///
+    /// A port and not a call into the transport, because [`Notifier::notify`] fires
+    /// inside other crates' fan-outs where no connection context exists. The
+    /// composition root binds the gateway's broadcast; a test binds a recorder; a
+    /// deployment with nothing bound gets [`crate::traits::NoBell`] and only the row
+    /// and the push.
+    bell: SharedBell,
     /// Seals and hashes push tokens. See [`crate::token`].
     keeper: TokenKeeper,
     config: NotifyConfig,
@@ -139,6 +149,7 @@ where
         cache: Arc<C>,
         limiter: Arc<L>,
         sender: Arc<P>,
+        bell: SharedBell,
         random: Box<dyn Random>,
         root_secret: &[u8],
         config: NotifyConfig,
@@ -149,6 +160,7 @@ where
             cache,
             limiter,
             sender,
+            bell,
             keeper: TokenKeeper::derive(root_secret),
             config,
             random: Mutex::new(random),
@@ -460,6 +472,13 @@ where
 
     /// Stores and delivers one event, having already decided it is worth delivering.
     async fn deliver(&self, event: Event) -> Result<Delivery> {
+        // The realtime half goes first, and its failure is not anybody's failure. The
+        // bell is for the recipient who is looking right now, and it must not wait
+        // behind a store write whose own failure the caller may swallow anyway; a
+        // broadcast that cannot be made is a buzz the recipient catches up on at their
+        // next inbox read, not an error the gift's payer has to answer for.
+        self.bell
+            .ring(event.account_id, &wire_event_of(&event), event.at);
         let stored = self.store_event(&event).await?;
         let badge = self.badge_for(event.account_id).await;
         let mut delivery = self.wake_devices(&event, badge).await;
@@ -471,6 +490,26 @@ where
 /// The wire number for a kind.
 fn wire_kind(kind: NotificationKind) -> i16 {
     i16::try_from(kind.to_wire()).unwrap_or(0)
+}
+
+/// The wire shape of one delivery: what the bell rings.
+///
+/// `title` and `body` are empty because the client writes the sentence, in the
+/// reader's language, from the kind and the actor — a server that filled them would be
+/// choosing a language from a column that describes somebody else's locale. Everything
+/// else is carried straight off the event, and `subject_id` is not on this frame at
+/// all: it is the inbox row's pointer for the client to fetch once awake, not part of
+/// the buzz.
+fn wire_event_of(event: &Event) -> NotificationEvent {
+    NotificationEvent {
+        kind: event.kind,
+        at: event.at,
+        title: None,
+        body: None,
+        conversation_id: event.conversation_id,
+        room_id: event.room_id,
+        actor_id: event.actor_id,
+    }
 }
 
 /// A stored row as a client reads it.
@@ -630,6 +669,7 @@ pub fn open(
     cache: SharedCache,
     limiter: SharedRateLimiter,
     sender: SharedPushSender,
+    bell: SharedBell,
     random: Box<dyn Random>,
     root_secret: &[u8],
     config: NotifyConfig,
@@ -640,6 +680,7 @@ pub fn open(
         cache,
         limiter,
         sender,
+        bell,
         random,
         root_secret,
         config,

@@ -30,9 +30,8 @@ use migo_economy::{Caller as EconomyCaller, Gift, SendGift, SharedTreasurer, Sku
 use migo_gateway::ClientContext;
 use migo_protocol::{
     fault, from_frame, EconomyEvent, Entitlement, EntitlementsReq, EntitlementsResponse, Frame,
-    GiftSend, GiftSendResult, KickPointsBuy, KickPointsBuyResult, NotificationEvent,
-    NotificationKind, Opcode, StorePurchase, StorePurchaseResult, Topic, TopicKind, WalletReq,
-    WalletView,
+    GiftSend, GiftSendResult, KickPointsBuy, KickPointsBuyResult, Opcode, StorePurchase,
+    StorePurchaseResult, Topic, TopicKind, WalletReq, WalletView,
 };
 use migo_store::model::{Currency, EntitlementPosition};
 use migo_store::MAX_PAGE;
@@ -86,12 +85,17 @@ pub(crate) async fn handle_gift_send(
         duplicate: Some(outcome.duplicate),
     })?;
 
-    // Two events, two audiences, and only on a first send — a retry that the service
-    // deduplicated must not buzz the recipient a second time for a gift they already
-    // have (the announcer inside the service holds the same rule for the row).
+    // One event, one audience, and only on a first send — a retry that the service
+    // deduplicated must not tick the sender's wallet a second time for a gift they
+    // already paid for (the announcer inside the service holds the same rule for the
+    // recipient's notification, and its seam rings the bell).
     if !outcome.duplicate {
         // The sender's own wallet changed, and their client may be watching for it:
-        // an ECONOMY_EVENT on the sender's own topic is the live balance tick.
+        // an ECONOMY_EVENT on the sender's own topic is the live balance tick. The
+        // recipient's half is not ours to publish: their bell and their inbox row are
+        // the notifier's, delivered by the seam every other notification rides, with
+        // the conversation the gift was given in carried on the announcement so the
+        // bell's tap target opens the right screen.
         let sender_topic = Topic {
             kind: TopicKind::User,
             id: caller.account_id,
@@ -105,27 +109,6 @@ pub(crate) async fn handle_gift_send(
                 currency: outcome.price.currency.as_str().to_string(),
             },
             None,
-        )?;
-        // The recipient's bell. The row is already stored by the announcer the
-        // composition root bound; this is the realtime mirror of it, coalesced per
-        // recipient the same way the out-of-band path coalesces.
-        let recipient_topic = Topic {
-            kind: TopicKind::User,
-            id: outcome.recipient_id,
-        };
-        ctx.publish(
-            &recipient_topic,
-            Opcode::NotificationEvent,
-            &NotificationEvent {
-                kind: NotificationKind::Gift,
-                at: ctx.now(),
-                title: None,
-                body: None,
-                conversation_id: request.conversation_id,
-                room_id: None,
-                actor_id: Some(caller.account_id),
-            },
-            Some(crate::dispatch::coalesce_key_of(&outcome.recipient_id)),
         )?;
     }
     Ok(())

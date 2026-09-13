@@ -109,24 +109,31 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
 
   const isGroup = kind === ConversationKind.Group;
 
-  // The friends quick-pick loads once; it is the graph the panel already knows.
+  // The friends quick-pick loads once; it is the graph the panel already knows. A friend
+  // event re-reads it, because the dialog can be open while the graph moves elsewhere —
+  // a request accepted from the phone is a new row the quick-pick owes this screen.
   useEffect(() => {
     if (!client) {
       return;
     }
     let cancelled = false;
-    client.social
-      .listRelationships()
-      .then((entries) => {
-        if (!cancelled) {
-          setFriends(entries.filter((entry) => entry.kind === KIND_FRIEND));
-        }
-      })
-      .catch(() => {
-        // A failed quick-pick leaves the search as the working path.
-      });
+    const reload = (): void => {
+      client.social
+        .listRelationships()
+        .then((entries) => {
+          if (!cancelled) {
+            setFriends(entries.filter((entry) => entry.kind === KIND_FRIEND));
+          }
+        })
+        .catch(() => {
+          // A failed quick-pick leaves the search as the working path.
+        });
+    };
+    reload();
+    const off = client.social.onFriendEvent(reload);
     return () => {
       cancelled = true;
+      off();
     };
   }, [client]);
 

@@ -563,6 +563,7 @@ where
                 kind: NotificationKind::Gift,
                 actor_id: Some(caller.account_id),
                 subject_id: Some(settled_gift_id),
+                conversation_id: gift.conversation_id,
                 at: caller.now,
             })
             .await;
@@ -812,6 +813,7 @@ where
                 kind: NotificationKind::LevelUp,
                 actor_id: None,
                 subject_id: None,
+                conversation_id: None,
                 at: award.at,
             })
             .await;
@@ -846,6 +848,7 @@ where
                 kind: NotificationKind::Achievement,
                 actor_id: None,
                 subject_id: grant.ref_id,
+                conversation_id: None,
                 at: grant.at,
             })
             .await;

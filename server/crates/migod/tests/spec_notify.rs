@@ -51,6 +51,9 @@ async fn in_memory() -> SharedNotifier {
         cache,
         limiter,
         sender,
+        // No bell: these tests exercise the inbox and the wire opcodes around it, not
+        // the realtime frame, which has no socket here to arrive on anyway.
+        Arc::new(migo_notify::NoBell),
         Box::new(SeededRandom::new(7)) as Box<dyn Random>,
         ROOT_SECRET,
         NotifyConfig::default(),

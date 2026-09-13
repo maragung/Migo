@@ -17,11 +17,15 @@
  * Nothing here can enumerate accounts wholesale: a short or empty query is rejected or clamped
  * server-side, which is the enumeration defence a public directory would otherwise need.
  *
- * # Blocks are one-sided and silent
+ * # Blocks are one-sided and verdict-free toward the blocked party
  *
- * {@link blockUser} sets a Block edge. Blocking is not a friendship teardown dialogue: the wire
- * carries no notification to the blocked party, and the block list is only ever visible to the
- * blocker through their own relationship list.
+ * {@link blockUser} sets a Block edge. Blocking is not a friendship teardown dialogue: no bell
+ * rings and no inbox row is written for the blocked party, and the block list is only ever
+ * visible to the blocker through their own relationship list. When the block tears down a
+ * friendship or a pending request, the blocked party's devices receive the same `"removed"`
+ * {@link onFriendEvent} an un-friend would carry — enough to re-read the list, not enough to
+ * tell the two apart — and a block that removed nothing observable publishes nothing to them
+ * at all.
  *
  * # Mutes are quieter still
  *
@@ -108,9 +112,17 @@ export class SocialDomain {
   /**
    * Registers a handler for friendship changes. Returns an unsubscribe function.
    *
-   * An event names the other account and a `state` string (`"request"`, `"accepted"`); it is a hint
-   * that the graph moved, not a source of truth — re-read {@link listRelationships} to draw the
-   * right buttons, since the event carries no direction (incoming vs outgoing) and no removal state.
+   * An event names the other account and a `state` string — `"request"` (an edge now waits),
+   * `"accepted"` (a friendship now exists), `"removed"` (an edge is gone: a declined request,
+   * an un-friend, or the teardown a block performs), or `"blocked"` (this account blocked
+   * somebody; only ever delivered to the blocker's own devices). It is a hint that the graph
+   * moved, not a source of truth — re-read {@link listRelationships} to draw the right buttons,
+   * since the event carries no direction (incoming vs outgoing) and no verdict.
+   *
+   * Every graph move reaches every affected device: the other party's devices, and this
+   * account's other devices when this account acted (the device that performed the mutation
+   * is excluded — it was answered by the call's own reply). A handler should therefore treat
+   * the event as "re-read now" whatever screen it is on.
    */
   onFriendEvent(handler: Listener<FriendEvent>): () => void {
     return this.#friendListeners.add(handler);
@@ -133,6 +145,11 @@ export class SocialDomain {
    *
    * `accept: false` declines (or withdraws an already-declined request); the edge simply disappears
    * from the graph either way. Only the *recipient* of a request may respond to it.
+   *
+   * Both outcomes fan out as a {@link onFriendEvent} hint: an acceptance reaches the asker (with
+   * the bell) and this account's other devices; a decline reaches the asker and this account's
+   * other devices as a bare `"removed"` hint — no notification, no inbox row, and no verdict the
+   * asker's UI could render as one.
    */
   async friendRespond(userId: Id, accept: boolean): Promise<void> {
     const request: FriendRespond = { userId, accept };
@@ -142,9 +159,14 @@ export class SocialDomain {
   /**
    * Blocks an account.
    *
-   * One-sided and unnotified: the blocked account is not told, and the block shows only in the
-   * blocker's own {@link listRelationships}. Blocking also tears down any friendship between the two
-   * server-side, so a caller that holds the relationship list should refresh it after this resolves.
+   * One-sided toward the other party: the blocked account is not *told* they were blocked, and
+   * the block shows only in the blocker's own {@link listRelationships}. Blocking also tears down
+   * any friendship between the two server-side. The realtime half honours the same line: when a
+   * friendship (or a pending request, or their follow) is torn down, the blocked account's devices
+   * receive a `"removed"` {@link onFriendEvent} — the same hint an un-friend carries, so the two
+   * stay indistinguishable — while a block that removed nothing publishes nothing to them at all.
+   * This account's other devices receive a `"blocked"` hint either way, so their friends and block
+   * lists re-read.
    */
   async blockUser(userId: Id): Promise<void> {
     const request: FriendTarget = { userId };

@@ -1923,6 +1923,58 @@ async fn blocking_twice_leaves_one_row() {
     assert_eq!(harness.count(ALICE, RelationshipKind::Block).await, 1);
 }
 
+/// A block reports whose graph moved, so the dispatcher knows who to hint.
+///
+/// `BlockOutcome::severed` is the blocked account's flag — set only when an edge they
+/// could observe was torn down, because a "the graph moved" hint delivered to a stranger
+/// would name their blocker, which is a fact the wire is otherwise careful never to hand
+/// over. `BlockOutcome::moved` is the blocker's own other devices' flag. The second
+/// block of the same account changes nothing at all, and section 156's closing rule —
+/// state that did not change produces no frame — is why that is computed rather than
+/// assumed.
+#[tokio::test]
+async fn a_block_reports_whose_graph_moved() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.person(STRANGER, "stranger").await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    // A stranger: nothing they could see is torn down, but the block itself is new, so
+    // the blocker's other devices still hear that their graph moved.
+    let stranger = harness
+        .social
+        .block(&alice, id(STRANGER))
+        .await
+        .expect("blocking a stranger needs no consent");
+    assert!(
+        !stranger.severed,
+        "a stranger whose graph did not move is not hinted at"
+    );
+    assert!(stranger.moved, "the blocker's own graph grew a block row");
+
+    // A friendship, then the block: the teardown is observable from both sides.
+    harness.friendship(ALICE, BOB, NOW).await;
+    let friend = harness
+        .social
+        .block(&alice, id(BOB))
+        .await
+        .expect("blocking a friend tears the friendship down");
+    assert!(
+        friend.severed,
+        "the blocked friend's graph lost a friendship and must hear it"
+    );
+    assert!(friend.moved);
+
+    // The pure no-op: already blocked, already muted, nothing left to remove. No frame
+    // is owed to anybody, and the outcome says so.
+    let again = harness.social.block(&alice, id(BOB)).await.expect("second");
+    assert!(!again.severed);
+    assert!(
+        !again.moved,
+        "a block that changed nothing reports that it changed nothing"
+    );
+}
+
 /// A block carries a mute, because a room transcript is one log.
 ///
 /// The block gates direct chat, but the room the two still share is read by its
