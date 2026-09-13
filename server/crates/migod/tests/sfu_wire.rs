@@ -327,6 +327,44 @@ impl LiveSession {
             }
         }
     }
+
+    /// `ask` for a request that can land inside the limiter's window: a test's
+    /// setup burst is several frames in one second, and a request sent soon
+    /// after them is answered "retry in N ms" — the server talking, not the
+    /// server broken — so the session waits exactly as long as it is told and
+    /// asks again, the same politeness the handshake backoff practices above.
+    async fn ask_against_the_window<M: Encode, R: migo_protocol::Decode>(
+        &mut self,
+        opcode: Opcode,
+        correlation: u32,
+        message: &M,
+    ) -> R {
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            send(&mut self.stream, opcode, correlation, message).await;
+            loop {
+                let frame = recv_within(&mut self.stream, STEP).await;
+                if frame.header.correlation != correlation {
+                    continue;
+                }
+                if !frame.header.is_error() {
+                    return from_frame(&frame).expect("the reply decodes");
+                }
+                let refusal: migo_protocol::Error =
+                    from_frame(&frame).expect("the refusal decodes");
+                assert!(
+                    refusal.code == migo_protocol::codes::RATE_LIMITED,
+                    "the request is refused outright: {refusal:?}"
+                );
+                backoff = u64::from(refusal.retry_after_ms.unwrap_or(1000));
+                break;
+            }
+        }
+        panic!("the request never succeeds even after backing off as instructed");
+    }
 }
 
 /// Reads from a session until a frame of the wanted opcode arrives, skipping
@@ -1029,9 +1067,12 @@ async fn a_dead_session_s_seat_is_retired_and_the_roster_told() {
     // The roster no longer contains the stale participant. A duplicate re-join
     // from the founder's own seat re-publishes the roster snapshot to the
     // founder's user topic, and the proof is read off that snapshot — not off
-    // the announcement above, which could have said anything.
+    // the announcement above, which could have said anything. The re-join is
+    // the founder's fifth frame inside the limiter's window — the burst that
+    // seated both participants ran in the same second — so it goes out with
+    // the backoff manners a rate-limited client owes, not as a demand.
     let _: migo_protocol::CallTurnResponse = founder_session
-        .ask(Opcode::CallSfuJoin, 19, &sfu_join(call_id, conversation_id))
+        .ask_against_the_window(Opcode::CallSfuJoin, 19, &sfu_join(call_id, conversation_id))
         .await;
     // The re-join is a duplicate, so the conversation topic hears nothing from
     // it; the one frame the founder's user topic carries is the snapshot
