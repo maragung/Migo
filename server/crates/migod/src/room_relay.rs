@@ -52,8 +52,8 @@
 //! home node restart needs more than luck: the cache says every ask was
 //! answered, the home node's replacement holds an empty table, and no client
 //! `SUBSCRIBE` is coming to re-ask — so the composition root re-anchors the
-//! cache on a timer ([`reanchor`](RoomRelay::reanchor)), which re-sends the
-//! watches a fresh process would have sent and lets a restarted home node
+//! cache on a timer, re-sending the
+//! watches a fresh process would have sent and letting a restarted home node
 //! rebuild its table from them.
 
 use std::collections::{HashMap, HashSet};
