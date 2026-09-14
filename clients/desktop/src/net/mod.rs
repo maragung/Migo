@@ -7450,7 +7450,7 @@ impl Worker {
             self.on_key_exchange(event);
             return;
         }
-        let Some(message) = self.decrypt(&event) else {
+        let Some(message) = self.decrypt(event) else {
             return;
         };
         self.sink.send(Event::Message(message));
@@ -7466,9 +7466,7 @@ impl Worker {
     /// Routes one conversation seq through its account, returning the top of the hole the seq
     /// opened, if it opened one. See [`SeqAccount::track`] for the accounting itself.
     fn track_seq(&mut self, conversation_id: Id, seq: u64) -> Option<u64> {
-        let Some(signed) = self.signed.as_mut() else {
-            return None;
-        };
+        let signed = self.signed.as_mut()?;
         signed
             .sequences
             .entry(conversation_id)

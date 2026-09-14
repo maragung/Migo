@@ -141,8 +141,9 @@ mod tests {
         let good = (id_of(2), id_of(3));
         let _ = fs::create_dir_all(&store.dir);
         let text = format!(
-            "not-an-id-at-all\n\n{}\nonly-one\n",
-            format!("{} {}", good.0.to_text(), good.1.to_text())
+            "not-an-id-at-all\n\n{} {}\nonly-one\n",
+            good.0.to_text(),
+            good.1.to_text()
         );
         let _ = fs::write(store.path(account), text);
 
