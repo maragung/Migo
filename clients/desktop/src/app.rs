@@ -607,11 +607,75 @@ impl App {
                     // The member menu's "View profile" answered: the card files against the
                     // conversation whose window asked, because the profile view draws inside
                     // that window — a card filed without its window would outlive the group it
-                    // was opened from, and a group's member list is the only door to it.
+                    // was opened from, and a group's member list is the only door to it. The
+                    // standing facts start absent, each arriving as its own answer files —
+                    // a card that waited on its level lines before showing would be a card
+                    // that never showed at all.
                     self.chat.member_profile = Some(crate::ui::chat::MemberProfileView {
                         conversation_id,
                         card,
+                        progression: None,
+                        badges: Vec::new(),
+                        rank: None,
+                        relationship: None,
                     });
+                }
+                Event::MemberProgression {
+                    conversation_id,
+                    progression,
+                } => {
+                    // The view's standing ask, answering: the progression lines file only into
+                    // the view that asked for them, and a view already closed drops its own
+                    // late answer rather than handing it to whoever opened next.
+                    if let Some(view) = self.chat.member_profile.as_mut() {
+                        if view.conversation_id == conversation_id {
+                            view.progression = Some(progression);
+                        }
+                    }
+                }
+                Event::MemberBadges {
+                    conversation_id,
+                    badges,
+                } => {
+                    // The same ask's badge half, under the same rule: the view's own, or not
+                    // at all.
+                    if let Some(view) = self.chat.member_profile.as_mut() {
+                        if view.conversation_id == conversation_id {
+                            view.badges = badges;
+                        }
+                    }
+                }
+                Event::MemberRank {
+                    conversation_id,
+                    position,
+                } => {
+                    // The XP-board page answered: a position files as the rank line, and the
+                    // page's `None` files as one more absence the view already knows how to
+                    // draw.
+                    if let Some(view) = self.chat.member_profile.as_mut() {
+                        if view.conversation_id == conversation_id {
+                            view.rank = position;
+                        }
+                    }
+                }
+                Event::MemberEdge {
+                    conversation_id,
+                    kind,
+                } => {
+                    // The social line's own read: the edge as the graph states it now, filed
+                    // into the view that asked — and re-asked by every friend act the view
+                    // issues, so the line always says what the wire says.
+                    if let Some(view) = self.chat.member_profile.as_mut() {
+                        if view.conversation_id == conversation_id {
+                            view.relationship = kind;
+                        }
+                    }
+                }
+                Event::Entitlements(skus) => {
+                    // The composer's picker shelves: the codes the account owns, as a set the
+                    // picker's tabs cut against the packs this client can render. Read once
+                    // per picker opening, so a pack bought elsewhere lands on the next open.
+                    self.chat.owned_packs = Some(skus.into_iter().collect());
                 }
                 Event::AvatarChangeFailed { reason } => {
                     // The avatar button's own refusal: filed beside the form the person is

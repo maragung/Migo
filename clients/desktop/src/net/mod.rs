@@ -48,9 +48,9 @@ use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
-    codes, features, BadgesReq, ClientInfo, ConversationKind, DeliveryClass, EncryptionMode, Frame,
-    FriendRespond, FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, KickPointsBuy,
-    LeaderboardReq, LedgerReq, MessageKind, NotificationAck, Opcode, ProgressionReq,
+    codes, features, BadgesReq, ClientInfo, ConversationKind, DeliveryClass, EncryptionMode,
+    EntitlementsReq, Frame, FriendRespond, FriendTarget, GiftCatalogueReq, GiftSend, InboxReq,
+    KickPointsBuy, LeaderboardReq, LedgerReq, MessageKind, NotificationAck, Opcode, ProgressionReq,
     RelationshipListReq, RoomCreate, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SearchReq,
     SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
 };
@@ -373,6 +373,32 @@ pub enum Command {
     /// the ask and routes the answering card to [`Event::MemberProfile`] rather than to the
     /// names map alone.
     MemberProfile { conversation_id: Id, user_id: Id },
+    /// Read another member's economy standing — progression and badges — for the member view's
+    /// level, XP, and badge lines.
+    ///
+    /// The same two reads the wallet fires for the caller, aimed at another account: the wire
+    /// keeps the facts on the economy service, and the worker remembers the ask so the replies
+    /// file against the window that opened the view. Every fact degrades to absence — a view
+    /// whose standing never answers is a card without its level lines, not a broken card.
+    MemberStanding { conversation_id: Id, user_id: Id },
+    /// Read the XP board's first page for another member's rank.
+    ///
+    /// The board is the community's own list, read whole rather than per account: the view
+    /// shows a rank only when the person stands on the first page, and a person off it has no
+    /// line at all — the same honest absence the web card draws.
+    MemberRank { conversation_id: Id, user_id: Id },
+    /// Read the caller's edge to one account, for the member view's social line.
+    ///
+    /// The graph walk is the friends pane's own read, issued again rather than borrowed,
+    /// because the view needs the edge as it stands now — after a friend act, the line must
+    /// say what the wire says, not what the pane last cached.
+    MemberEdge { conversation_id: Id, user_id: Id },
+    /// Read the account's entitlements — every catalogue code the account owns — for the
+    /// composer's emoticon and sticker picker.
+    ///
+    /// One read per picker opening is the honest cadence: a pack bought elsewhere lands on
+    /// the next open, the same trade the web picker's cached set makes.
+    Entitlements,
     /// Read the gift catalogue alone, for the member menu's gift picker.
     ///
     /// The wallet's own read fires six requests at once, and a picker that only wants the
@@ -936,6 +962,32 @@ pub enum Event {
         conversation_id: Id,
         card: crate::model::MemberCard,
     },
+    /// Another member's XP progression, answering the member view's standing ask. Same routing
+    /// rule as the card: the window that asked is the one that draws it.
+    MemberProgression {
+        conversation_id: Id,
+        progression: Progression,
+    },
+    /// Another member's badges with the days they were earned, answering the same ask.
+    MemberBadges {
+        conversation_id: Id,
+        badges: Vec<crate::model::BadgeRow>,
+    },
+    /// Another member's position on the XP board's first page — `None` when they stand off it,
+    /// which the view draws as no rank line rather than a guess.
+    MemberRank {
+        conversation_id: Id,
+        position: Option<u32>,
+    },
+    /// The caller's edge to one account, answering the member view's social-line ask. `None`
+    /// is "no edge the graph names" — drawn as no line, exactly like the web card's unknown.
+    MemberEdge {
+        conversation_id: Id,
+        kind: Option<RelationshipKind>,
+    },
+    /// The account's owned catalogue codes, for the composer's picker: the emoticon packs and
+    /// sticker packs the picker's tabs draw.
+    Entitlements(Vec<String>),
     /// An avatar upload was refused — the file would not read, the server declined the bytes,
     /// or the profile patch behind them was rejected.
     ///
@@ -1855,6 +1907,24 @@ struct Worker {
     /// card answers — the same one-at-a-time patience the roster ask keeps, for the same
     /// reason: the reply that clears the ask is the reply that fills the view.
     pending_member_profile: Option<(Id, Id)>,
+    /// The member view's standing ask, split per reply because the wire answers progression
+    /// and badges as two frames that name no asker: each half is remembered until its own
+    /// reply lands, and each reply routes by its half. The progression reply does name its
+    /// account, so that half is checked against the account as well as the ask; the badge
+    /// reply names nobody, so its half is spent on the next badge frame — the one race this
+    /// pattern allows, the same trade a wallet refresh firing mid-ask already makes everywhere
+    /// a reply cannot name its request.
+    pending_member_progression: Option<(Id, Id)>,
+    /// The badge half of the member view's standing ask. See
+    /// [`Self::pending_member_progression`] for why the halves are separate.
+    pending_member_badges: Option<(Id, Id)>,
+    /// The XP-board page a member rank ask is waiting on. The board reply names the accounts
+    /// it ranks but not the asker, so the ask is remembered to find the row — and a row the
+    /// page does not hold is the answer "no rank", not a lost ask.
+    pending_member_rank: Option<(Id, Id)>,
+    /// The graph walk a member view's social-line ask is waiting on. The relationships reply
+    /// is the whole graph, so the ask is only the memory of which edge to pull out of it.
+    pending_member_edge: Option<(Id, Id)>,
     /// The founding keys a registration attempt minted but has not yet made stick (§12). A
     /// registration that fails after the server heard it must be retried with the *same* keys:
     /// a fresh root would be a different identity key, which the server can only answer with
@@ -1996,6 +2066,10 @@ impl Worker {
             pending_room_probe: None,
             pending_roster: None,
             pending_member_profile: None,
+            pending_member_progression: None,
+            pending_member_badges: None,
+            pending_member_rank: None,
+            pending_member_edge: None,
             pending_registration: None,
             txs: None,
             peers: None,
@@ -2311,6 +2385,25 @@ impl Worker {
             } => {
                 self.fetch_member_profile(conversation_id, user_id).await;
             }
+            Command::MemberStanding {
+                conversation_id,
+                user_id,
+            } => {
+                self.fetch_member_standing(conversation_id, user_id).await;
+            }
+            Command::MemberRank {
+                conversation_id,
+                user_id,
+            } => {
+                self.fetch_member_rank(conversation_id, user_id).await;
+            }
+            Command::MemberEdge {
+                conversation_id,
+                user_id,
+            } => {
+                self.fetch_member_edge(conversation_id, user_id).await;
+            }
+            Command::Entitlements => self.request_entitlements().await,
             Command::GiftCatalogue => self.request_gift_catalogue().await,
             Command::SaveProfile(patch) => self.save_profile(patch).await,
             Command::ChangeAvatar { path } => self.change_avatar(path).await,
@@ -3543,6 +3636,57 @@ impl Worker {
         self.fetch_profiles(vec![user_id]).await;
     }
 
+    /// Reads another member's economy standing: the progression and the badges, the same two
+    /// reads the wallet fires for the caller, aimed at the account the view names. Each half
+    /// of the ask is remembered separately because each reply is its own frame.
+    async fn fetch_member_standing(&mut self, conversation_id: Id, user_id: Id) {
+        self.pending_member_progression = Some((conversation_id, user_id));
+        self.pending_member_badges = Some((conversation_id, user_id));
+        self.request(
+            Opcode::Progression,
+            &ProgressionReq {
+                of_account: user_id,
+            },
+        )
+        .await;
+        self.request(
+            Opcode::Badges,
+            &BadgesReq {
+                of_account: user_id,
+            },
+        )
+        .await;
+    }
+
+    /// Reads the XP board's first page for another member's rank — the same board the wallet
+    /// reads, one page deeper, because a rank is only a fact the community's own first page
+    /// can state.
+    async fn fetch_member_rank(&mut self, conversation_id: Id, user_id: Id) {
+        self.pending_member_rank = Some((conversation_id, user_id));
+        let board = LeaderboardReq {
+            board: "xp".to_owned(),
+            limit: Some(100),
+        };
+        self.request(Opcode::Leaderboard, &board).await;
+    }
+
+    /// Reads the caller's edge to one account: the same graph walk the friends pane makes,
+    /// remembered so the reply's edge can be pulled out for the view's social line.
+    async fn fetch_member_edge(&mut self, conversation_id: Id, user_id: Id) {
+        self.pending_member_edge = Some((conversation_id, user_id));
+        self.request_relationships().await;
+    }
+
+    /// Reads the account's entitlements — the catalogue codes the account owns — for the
+    /// composer's picker. One read, one reply, no routing to remember: only the picker asks,
+    /// and only one picker stands at a time. The page's own ceiling is the store's `MAX_PAGE`
+    /// of two hundred, and a shelf of packs never reaches it, so the read takes the whole
+    /// shelf in one page and the cursor the wire would offer is never taken.
+    async fn request_entitlements(&mut self) {
+        self.request(Opcode::Entitlements, &EntitlementsReq::default())
+            .await;
+    }
+
     /// Reads the gift catalogue alone — the wallet's whole-economy read without the other
     /// five requests, for surfaces that want the shop's shelves and nothing else.
     async fn request_gift_catalogue(&mut self) {
@@ -3552,9 +3696,10 @@ impl Worker {
 
     /// Reduces one wire card to the member view's row.
     ///
-    /// The same reduction the own card takes, minus the owner's own disclosures: a birth year
-    /// and a custom status are things an account says about itself on its own pane, and
-    /// another account's card carries neither.
+    /// The same reduction the own card takes, minus the owner's own disclosure: a birth year
+    /// is the one thing an account says about itself on its own pane that another account's
+    /// card never carries. The custom status, country, and language are the account's public
+    /// face and ride along.
     fn member_card_from_wire(profile: &migo_protocol::UserProfile) -> crate::model::MemberCard {
         crate::model::MemberCard {
             account_id: profile.user_id,
@@ -3566,6 +3711,10 @@ impl Worker {
                 .presence
                 .map(|state| model::Presence::from_wire(state.to_wire()))
                 .unwrap_or(model::Presence::Unknown),
+            verified: profile.verified,
+            custom_status: profile.custom_status.clone(),
+            country: profile.country.clone(),
+            language: profile.language.clone(),
         }
     }
 
@@ -7148,23 +7297,61 @@ impl Worker {
         self.sink.send(Event::Ledger(rows));
     }
 
-    /// The progression came back.
+    /// The progression came back. The wire names the account it ranks, so the reply sorts
+    /// itself: the caller's own standing files for the wallet, another account's answers the
+    /// member view's ask — and the ask is spent with the reply, matched or not, so a stale
+    /// ask cannot claim a later page.
     fn on_progression(&mut self, frame: &migo_protocol::Frame) {
         let Ok(wire) = gateway::decode::<migo_protocol::ProgressionWire>(frame) else {
             return;
         };
-        self.sink.send(Event::ProgressionArrived(Progression {
+        let progression = Progression {
             level: wire.level,
+            xp: wire.xp,
             xp_into_level: wire.xp_into_level,
             xp_for_next_level: wire.xp_for_next_level,
-        }));
+        };
+        if let Some((conversation_id, asked)) = self.pending_member_progression {
+            if asked == wire.account_id {
+                self.pending_member_progression = None;
+                self.sink.send(Event::MemberProgression {
+                    conversation_id,
+                    progression,
+                });
+                return;
+            }
+        }
+        // The wallet's card files only the caller's own standing: a reply the member view
+        // asked for must not overwrite the caller's level with somebody else's.
+        let me = self.signed.as_ref().map(|signed| signed.account.account_id);
+        if me == Some(wire.account_id) {
+            self.sink.send(Event::ProgressionArrived(progression));
+        }
     }
 
-    /// The badges came back, by code.
+    /// The badges came back, by code and day. The reply names no account, so the member view's
+    /// ask — when one stands — is spent on the next badge frame: the one race the pattern
+    /// allows (a wallet refresh firing in the same round trip), and the same trade every
+    /// reply-without-a-name in this worker already makes.
     fn on_badges(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::BadgesResponse>(frame) else {
             return;
         };
+        if let Some((conversation_id, _asked)) = self.pending_member_badges.take() {
+            let badges = response
+                .badges
+                .into_iter()
+                .map(|badge| crate::model::BadgeRow {
+                    code: badge.badge_code,
+                    awarded_at: badge.awarded_at,
+                })
+                .collect();
+            self.sink.send(Event::MemberBadges {
+                conversation_id,
+                badges,
+            });
+            return;
+        }
         let codes = response
             .badges
             .into_iter()
@@ -7173,11 +7360,25 @@ impl Worker {
         self.sink.send(Event::Badges(codes));
     }
 
-    /// The leaderboard came back.
+    /// The leaderboard came back. A member rank ask spends itself on the page — the position
+    /// the asked account holds, or the honest `None` of standing off the first page — and
+    /// every other page files for the wallet's board.
     fn on_leaderboard(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::LeaderboardResponse>(frame) else {
             return;
         };
+        if let Some((conversation_id, asked)) = self.pending_member_rank.take() {
+            let position = response
+                .ranks
+                .iter()
+                .find(|rank| rank.account_id == asked)
+                .map(|rank| rank.position);
+            self.sink.send(Event::MemberRank {
+                conversation_id,
+                position,
+            });
+            return;
+        }
         let rows = response
             .ranks
             .into_iter()
@@ -7189,6 +7390,17 @@ impl Worker {
             })
             .collect();
         self.sink.send(Event::Leaderboard(rows));
+    }
+
+    /// The entitlements came back: the catalogue codes the account owns, for the composer's
+    /// picker. Codes this client's pack table cannot render are kept anyway — ownership is a
+    /// server fact, and renderability is the picker's own cut to make.
+    fn on_entitlements(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::EntitlementsResponse>(frame) else {
+            return;
+        };
+        let skus = response.items.into_iter().map(|item| item.sku).collect();
+        self.sink.send(Event::Entitlements(skus));
     }
 
     /// The gift catalogue came back.
@@ -7475,6 +7687,7 @@ impl Worker {
             Opcode::Progression => self.on_progression(&frame),
             Opcode::Badges => self.on_badges(&frame),
             Opcode::Leaderboard => self.on_leaderboard(&frame),
+            Opcode::Entitlements => self.on_entitlements(&frame),
             Opcode::GiftCatalogue => self.on_gifts(&frame),
             Opcode::GiftSend => self.on_gift_sent(&frame).await,
             Opcode::KickPointsBuy => self.on_kick_points_bought(&frame).await,
@@ -8131,6 +8344,20 @@ impl Worker {
             .filter(|entry| entry.kind == RelationshipKind::Friend)
             .map(|entry| entry.user_id)
             .collect();
+        // The member view's edge ask, answered from the same walk: one graph read serves the
+        // pane and the profile card's social line, because the edge is the same fact to both.
+        // The ask is spent with the reply whether the graph names the account or not — no edge
+        // is an answer ("add friend"), not a lost ask.
+        if let Some((conversation_id, asked)) = self.pending_member_edge.take() {
+            let kind = entries
+                .iter()
+                .find(|entry| entry.user_id == asked)
+                .map(|entry| entry.kind);
+            self.sink.send(Event::MemberEdge {
+                conversation_id,
+                kind,
+            });
+        }
         self.sink.send(Event::Relationships(entries));
         self.fetch_profiles(named).await;
         self.watch_users(friends).await;

@@ -709,14 +709,14 @@ pub struct OwnProfile {
 ///
 /// The same wire shape the pane's own card reduces from, kept as its own type because the two
 /// surfaces ask different questions: the pane edits its card, the member view only reads one —
-/// a group is where you find out who somebody is, not where you change who you are. The
-/// birth year and custom status are the owner's own disclosures and never ride another
-/// account's card, so they are absent here by design.
+/// a group is where you find out who somebody is, not where you change who you are. The birth
+/// year is the owner's own disclosure and never rides another account's card, so it is absent
+/// here by design; the custom status, country, and language are the account's public face and
+/// ride along, the same facts the web client's profile card draws.
 #[derive(Debug, Clone)]
 pub struct MemberCard {
     /// The person the card names, as the commands that act on them need it: the view reads the
     /// copyable id below for display, but a friend request or a gift answers to this one.
-    #[allow(dead_code)] // Read once the profile view grows its social line.
     pub account_id: Id,
     pub username: String,
     pub display_name: String,
@@ -725,6 +725,14 @@ pub struct MemberCard {
     pub bio: Option<String>,
     /// The state the account stood in when the card was read.
     pub presence: Presence,
+    /// The server's own ✔, when the account has been verified.
+    pub verified: Option<bool>,
+    /// The status line the account set for itself, in its own words.
+    pub custom_status: Option<String>,
+    /// The country the account names, as it named it.
+    pub country: Option<String>,
+    /// The language the account speaks, as it declared it.
+    pub language: Option<String>,
 }
 
 /// One account found by search or offered as a suggestion.
@@ -736,10 +744,13 @@ pub struct PersonRow {
     pub mutual_friends: u32,
 }
 
-/// The account's XP progression, for the wallet's level card.
+/// The account's XP progression, for the wallet's level card and the member view's standing
+/// lines alike — one shape, because the two surfaces ask the same question of two accounts.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Progression {
     pub level: u32,
+    /// The account's XP total, beside the bar the way the web card draws it.
+    pub xp: u64,
     pub xp_into_level: u64,
     pub xp_for_next_level: u64,
 }
@@ -756,6 +767,14 @@ impl Progression {
         }
         (self.xp_into_level as f32 / self.xp_for_next_level as f32).clamp(0.0, 1.0)
     }
+}
+
+/// One badge an account holds, with the day it was earned — the wallet's own badge row keeps
+/// only the code, but the member view's chip says when, the way the web card's tooltip does.
+#[derive(Debug, Clone)]
+pub struct BadgeRow {
+    pub code: String,
+    pub awarded_at: Timestamp,
 }
 
 /// One row of the Space activity stream.

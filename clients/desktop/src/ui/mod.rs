@@ -22,6 +22,7 @@ pub mod chat;
 pub mod desktop;
 pub mod friends;
 pub mod games;
+pub mod packs;
 pub mod profile;
 pub mod rooms;
 pub mod search;
