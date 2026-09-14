@@ -383,7 +383,7 @@ async fn a_reconnect_on_the_other_node_cancels_the_grace_and_counts_the_member()
         kind: TopicKind::Room,
         id: room_id,
     };
-    alice.subscribe(vec![room_topic]).await;
+    alice.subscribe(vec![room_topic.clone()]).await;
 
     // Bob joins from alpha and watches the topic; his is the session that will drop.
     let mut bob = Client::connect_fresh(a_addr, &bob_grant).await;
@@ -396,7 +396,7 @@ async fn a_reconnect_on_the_other_node_cancels_the_grace_and_counts_the_member()
             },
         )
         .await;
-    bob.subscribe(vec![room_topic]).await;
+    bob.subscribe(vec![room_topic.clone()]).await;
 
     // Carol joins from beta and watches the topic there. Her join's member event
     // crosses to the home node, so alice's socket sees her arrive — the beta-to-alpha

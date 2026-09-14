@@ -34,8 +34,8 @@ use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, Acknowledged, ConversationCreateRequest, ConversationKind,
     ConversationSummary, Decode, Encode, Frame, FriendEvent, FriendTarget, GroupKeyDistribution,
-    Hello, NotificationEvent, NotificationKind, Opcode, SubscribeRequest, SubscribeResponse, Topic,
-    TopicKind, Welcome, PROTOCOL_VERSION,
+    Hello, NotificationEvent, NotificationKind, Opcode, SubscribeRequest, Topic, TopicKind,
+    Welcome, PROTOCOL_VERSION,
 };
 use migod::App;
 

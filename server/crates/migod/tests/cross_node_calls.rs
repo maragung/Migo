@@ -45,7 +45,7 @@ use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, CallCancel, CallInvite, CallInviteEvent, CallInviteResult,
     CallStateEvent, Decode, Encode, Frame, Hello, Opcode, RoomJoinRequest, RoomKind,
-    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    SubscribeRequest, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
