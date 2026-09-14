@@ -12,9 +12,10 @@
 //!
 //! The tier works at the ingest boundary, which is the one place every copy
 //! of a conversation event already passes through on every node:
-//! [`IngestRouter::route_conversation_event`](crate::mesh::IngestRouter::route_conversation_event)
-//! for the conversations a room does not own, and `route_room_event` for the
-//! chat a room *does* own — the same inner frame in both envelopes, a
+//! `route_conversation_event` for the conversations a room does not own, and
+//! `route_room_event` for the chat a room *does* own — both private methods
+//! on the ingest router, so they are named as plain code here — the same
+//! inner frame in both envelopes, a
 //! [`MessageEvent`], which is why both routes
 //! call the one [`seat`] here rather than each growing its own half of a
 //! mechanism. When the inner frame is a message, the row is written to this
