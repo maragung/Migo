@@ -5840,7 +5840,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: Exception) {
                 // Absent, not fatal: no badge row.
             }
-            editMember(userId) { it.copy(relationship = readEdge(live, userId)) }
+            // The edge is read before the edit, because readEdge suspends and editMember's
+            // lambda does not — the same shape every other standing fact above takes.
+            val edge = readEdge(live, userId)
+            editMember(userId) { it.copy(relationship = edge) }
             try {
                 // Only the first page is read — a person off it simply has no rank line.
                 val board = live.client.economy.getLeaderboard("xp", 100)
