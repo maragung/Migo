@@ -83,6 +83,13 @@ impl App {
         // typer could end is an indicator that outlives a typer who died mid-word.
         let typing_sweeper = self.spawn_typing_sweeper();
 
+        // The relay re-anchor takes the fourth: a home node that restarts comes
+        // back holding an empty watch table while this node's subscribe cache
+        // still says every ask was answered, and no client SUBSCRIBE is coming
+        // to re-ask — so the node itself re-sends the asks, on the interval the
+        // operator tuned.
+        let relay_reanchor = self.spawn_relay_reanchor();
+
         let state = GatewayState {
             gateway: self.gateway,
             clock: self.clock,
@@ -103,11 +110,12 @@ impl App {
         .await
         .context("server stopped abnormally")?;
 
-        // All three sweepers heard the same shutdown signal; this await is so a
-        // fully stopped node leaves no task behind it.
+        // All four background tasks heard the same shutdown signal; this await is
+        // so a fully stopped node leaves no task behind it.
         let _ = sweeper.await;
         let _ = message_sweeper.await;
         let _ = typing_sweeper.await;
+        let _ = relay_reanchor.await;
 
         tracing::info!("server stopped");
         Ok(())

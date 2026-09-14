@@ -637,9 +637,20 @@ pub struct MeshPeer {
 /// drain forever (brief section 173).
 pub const DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 
+/// How often the relay re-anchor re-sends this node's subscription asks, in
+/// milliseconds. The watch tables those asks fill live in the home node's
+/// memory, so a home node that restarts comes back holding an empty table
+/// while this node still remembers every ask as answered — one ask per
+/// remembered subscription per interval is what closes that gap, and a minute
+/// is the whole repair latency an operator tolerates before the tier is
+/// better off with a lower setting.
+pub const DEFAULT_FEDERATION_REANCHOR_INTERVAL_MS: u64 = 60_000;
+
 /// Server-to-server mesh. `Default` is a manual impl rather than a derive because
 /// the handshake budget's default is the [`DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS`]
-/// convention and not zero, which validation would refuse.
+/// convention and not zero, which validation would refuse — and the re-anchor
+/// interval's default is the [`DEFAULT_FEDERATION_REANCHOR_INTERVAL_MS`] convention
+/// for the same reason.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FederationConfig {
@@ -660,6 +671,18 @@ pub struct FederationConfig {
     /// at the deadline and enters the same backoff a refused connection does, so one
     /// silent node cannot hang a drain (brief section 173).
     pub handshake_timeout_ms: u64,
+    /// How often, in milliseconds, the relay tiers re-send the subscription
+    /// asks this node owes the rooms' and conversations' home nodes. A watch
+    /// table is memory on the home node's side, so a home node that restarts
+    /// comes back holding an empty table while this node's once-per-process
+    /// cache still says every ask was answered — and no client `SUBSCRIBE`
+    /// is coming to re-ask, because the sessions are already granted. The
+    /// re-anchor closes that gap on a timer: one idempotent ask per
+    /// remembered subscription per interval, which a home node that never
+    /// restarted simply re-inserts and a restarted one rebuilds its table
+    /// from. Shrunk in tests, where the repair has to land inside the test's
+    /// clock rather than the production minute.
+    pub reanchor_interval_ms: u64,
     /// Peer nodes the config document offers to clients, so a client can
     /// measure latency per node and fail over between them (section 170).
     /// Empty — the single-node posture — means the document lists this node
@@ -673,6 +696,7 @@ impl Default for FederationConfig {
             enabled: false,
             peers: Vec::new(),
             handshake_timeout_ms: DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+            reanchor_interval_ms: DEFAULT_FEDERATION_REANCHOR_INTERVAL_MS,
             client_peers: Vec::new(),
         }
     }
@@ -1180,6 +1204,13 @@ impl Config {
             problems.push(
                 "federation.handshake_timeout_ms must be greater than zero: a zero budget \
                  fails every handshake"
+                    .to_string(),
+            );
+        }
+        if self.federation.reanchor_interval_ms == 0 {
+            problems.push(
+                "federation.reanchor_interval_ms must be greater than zero: a zero interval \
+                 would re-send every ask back to back with no breath between them"
                     .to_string(),
             );
         }
