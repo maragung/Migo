@@ -146,7 +146,7 @@ fn replica_of(event: &MessageEvent, now: Timestamp) -> Option<ReplicaMessage> {
 mod tests {
     use super::*;
     use migo_core::Id;
-    use migo_protocol::{Encode, MessageKind};
+    use migo_protocol::MessageKind;
 
     fn event(seq: u64, deleted: Option<bool>) -> MessageEvent {
         MessageEvent {
@@ -221,7 +221,9 @@ mod tests {
         // this pins that the wire's own encoding is the shape the read-back
         // expects, so a schema drift on either side fails here first.
         let wire = event(7, Some(true));
-        let frame = migo_protocol::to_frame(&wire).unwrap();
+        let frame =
+            migo_protocol::to_frame(migo_protocol::Opcode::MessageEvent.to_wire(), 1, &wire)
+                .unwrap();
         let decoded: MessageEvent =
             migo_protocol::from_frame(&frame).expect("the wire shape round-trips");
         let replica = replica_of(&decoded, Timestamp::from_millis(3_300)).unwrap();
