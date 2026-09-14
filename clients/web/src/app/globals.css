@@ -1957,6 +1957,52 @@ main {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* The attach control's own wrap: the menu hangs off it, opening upward — the composer row is the
+   bottom of the thread, so down is the one direction it cannot go. */
+.attach-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.attach-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: calc(var(--z-dropdown) + 1);
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.attach-menu[hidden] {
+  display: none;
+}
+.attach-menu-item {
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.attach-menu-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.attach-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.attach-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
 .composer-meta {
   display: flex;
   align-items: center;

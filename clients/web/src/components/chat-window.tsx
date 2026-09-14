@@ -554,6 +554,25 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             conversation has the SFU roster instead, which anyone in it may join. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
         <GroupCallButton conversationId={isGroup ? conversationId : null} onJoin={joinGroupCall} />
+        {/* Gifting is a thread-level act — it picks a person and spends balance — so its control
+            lives with the thread's other actions in the header, left of games, not in the row
+            the composer keeps exclusively for chat. */}
+        <button
+          type="button"
+          className={`icon-btn ${giftOpen ? 'active' : ''}`}
+          onClick={() => {
+            setEmoticonOpen(false);
+            if (!giftOpen) {
+              setGiftKey(newIntentKey());
+            }
+            setGiftOpen(!giftOpen);
+          }}
+          aria-label={giftOpen ? 'Close gift picker' : 'Send a gift'}
+          aria-pressed={giftOpen}
+          title="Send a gift"
+        >
+          <Icon name="gift" size={20} />
+        </button>
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
 
@@ -717,14 +736,6 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         disabled={!!error}
         replyPreview={replyPreview}
         onCancelReply={() => setReplyTo(null)}
-        onGift={() => {
-          setEmoticonOpen(false);
-          if (!giftOpen) {
-            setGiftKey(newIntentKey());
-          }
-          setGiftOpen(!giftOpen);
-        }}
-        giftOpen={giftOpen}
         emoticonOpen={emoticonOpen}
         // Disappearing messages are a private-and-group feature: a room's history is its record
         // (the room's transcripts are the point of a room), so the clock control stays out of a

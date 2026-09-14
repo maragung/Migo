@@ -125,3 +125,42 @@ test('the clock control renders only where disappearing is offered, and states i
     'no clock control where the context offers none',
   );
 });
+
+// --- the row the product owner drew: chat, and only chat ---
+
+test('the row carries the two pickers left of the input and the mic right of it, and no gift', () => {
+  // The bottom row is exclusively for chat: the emoticon control and the attach control sit left
+  // of the input, the mic beside send on the right — and gifting, a thread-level act, has no
+  // place here at all (its control moved to the header).
+  const markup = render({ onToggleEmoticon: () => {} });
+  const smile = markup.indexOf('aria-label="Open emoticon picker"');
+  const attach = markup.indexOf('aria-label="Attach a file"');
+  const input = markup.indexOf('aria-label="Message"');
+  const mic = markup.indexOf('aria-label="Record a voice note"');
+  const send = markup.indexOf('aria-label="Send"');
+  assert.ok(smile >= 0 && smile < input, 'the emoticon control must sit left of the input');
+  assert.ok(attach >= 0 && attach < input, 'the attach control must sit left of the input');
+  assert.ok(mic > input && mic < send, 'the mic must sit between the input and send');
+  assert.ok(!markup.includes('gift'), 'the composer row must not offer a gift control');
+});
+
+test('the attach menu offers the four sources, each through its own honest picker', () => {
+  // The one attach control stands for four ways to pick what the next message carries, and each
+  // opens the platform picker already filtered to its promise: a photo is taken (camera), an
+  // image or a video is chosen, a file is anything. The menu rides in the markup behind the
+  // hidden attribute, so its offers are part of the composer's own render.
+  const markup = render();
+  for (const label of ['Pick a file', 'Take a photo', 'Pick a video', 'Pick an image']) {
+    assert.ok(markup.includes(`>${label}<`), `the attach menu lost its "${label}" option`);
+  }
+  assert.ok(
+    markup.includes('accept="image/*"'),
+    'the image sources must filter the platform picker',
+  );
+  assert.ok(
+    markup.includes('accept="video/*"'),
+    'the video source must filter the platform picker',
+  );
+  assert.ok(markup.includes('capture="environment"'), 'a photo must come from the camera');
+  assert.ok(markup.split('type="file"').length === 5, 'the four sources each own an input');
+});
