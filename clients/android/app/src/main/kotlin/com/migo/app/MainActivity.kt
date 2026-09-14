@@ -1,17 +1,10 @@
 package com.migo.app
 
-import android.Manifest
-import android.content.Context
-import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,33 +15,19 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
-import com.migo.app.model.AttachSource
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
-import com.migo.app.ui.CallOverlay
-import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
-import com.migo.app.ui.GroupCallOverlay
-import com.migo.app.ui.GroupInviteCandidate
-import com.migo.app.ui.LocalCallEglContext
 import com.migo.app.ui.MigoTheme
 import com.migo.app.ui.MobileHome
 import com.migo.app.ui.MobileTabStrip
@@ -60,26 +39,26 @@ import com.migo.app.ui.SettingsScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
-import com.migo.core.protocol.ConversationKind
-import com.migo.core.protocol.RelationshipKind
-import com.migo.core.store.MediaAutoDownload
+import com.migo.core.store.NavigationMode
 import com.migo.core.store.ThemeChoice
-import com.migo.core.wire.Id
-import java.io.File
 
 /**
- * The only activity.
+ * The main activity: the app's front door, and the shell of whichever navigation mode is chosen.
  *
  * One activity and a handful of composables rather than a navigation graph. Which screen is showing
  * is already decided by [AppState] -- signed out, or signed in -- and a nav graph would be a second
- * answer to that question, able to disagree with the first.
+ * answer to that question, able to disagree with the first. The one other activity is
+ * [ChatActivity], which chat-list mode stacks for a conversation tapped in the list; it reads the
+ * same process-held view model this activity reads, so the two are two windows onto one session,
+ * never two sessions.
  *
- * The signed-in screen is the mobile reference's windowing shell: a 46dp tab strip at the very top
- * carrying the home tabs (Friends, Rooms, Feed) and one tab per open conversation, with the
- * selected view showing full-bleed beneath it — a home view (the orange me card and its list), a
- * conversation, or a panel the me card's sheet opened. The back gesture is handled where it means
- * something: back closes the visible window's tab, backs a panel out of the way, and never exits
- * the app while a window or a panel is showing.
+ * The signed-in screen is the mobile reference's windowing shell (the default, unchanged): a 46dp
+ * tab strip at the very top carrying the home tabs (Friends, Rooms, Feed) and one tab per open
+ * conversation, with the selected view showing full-bleed beneath it — a home view (the orange me
+ * card and its list), a conversation, or a panel the me card's sheet opened. The back gesture is
+ * handled where it means something: back closes the visible window's tab, backs a panel out of the
+ * way, and never exits the app while a window or a panel is showing. The chat-list mode swaps the
+ * strip for a bottom bar and Main's conversation list, in [ChatListShell].
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,22 +71,35 @@ class MainActivity : ComponentActivity() {
         // answers to is a device fact the view model already holds, and wrapping the tree here
         // would leave the activity choosing a theme the settings panel then cannot change.
         setContent {
-            MigoApp()
+            // The session view model is the process's one instance, held by the application so
+            // the chat activity reads the same session this shell reads.
+            MigoApp(model = (application as MigoApplication).appViewModel)
         }
+    }
+
+    override fun onDestroy() {
+        // The main activity finishing is the app leaving, and that is the moment the session's
+        // store lets the view model go — the same teardown an activity-scoped store always ran,
+        // at the same moment. A rebuild (a rotation, a resize) finishes nothing and keeps the
+        // session; a stacked chat activity never takes the session with it, because the main
+        // activity below it is not finishing while it is in front.
+        if (isFinishing) {
+            (application as MigoApplication).releaseSession()
+        }
+        super.onDestroy()
     }
 }
 
 /**
- * Routes the current state to a screen.
+ * Routes the current state to a screen, and the navigation mode to a shell.
  *
- * The view model is obtained here rather than by the activity, so the whole tree below reads one
- * instance and survives a configuration change with it.
+ * The view model is handed in by the activity — the process-held instance — so the whole tree
+ * below reads the one instance the chat activity also reads, and survives a configuration change
+ * with it.
  */
 @Composable
-private fun MigoApp(model: AppViewModel = viewModel()) {
+private fun MigoApp(model: AppViewModel) {
     val state by model.state.collectAsState()
-    val callState by model.callState.collectAsState()
-    val groupCallState by model.groupCallState.collectAsState()
     // The theme preference is collected here — the composition root, the one place that both
     // holds the view model and wraps everything the theme colours. "System" is the system's own
     // dark fact; the other two choices are the person's word over it.
@@ -116,79 +108,6 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
         ThemeChoice.System -> isSystemInDarkTheme()
         ThemeChoice.Light -> false
         ThemeChoice.Dark -> true
-    }
-
-    // The microphone permission is asked for at the moment of use, at the call button: a prompt
-    // at first launch teaches nothing (the user has not called anybody yet), and the call that
-    // needs the microphone is the one that explains why. The launcher lives here — the shell's
-    // only composition root — so the button deep in a chat header can reach it without threading
-    // an activity through the screens, and the model's staged call is what carries the intent
-    // across the permission dialog's asynchronous answer. A video call asks for the camera too,
-    // in the same one dialog: the two permissions serve one gesture, and two questions for one
-    // tap is the dialog the user has already learned to distrust.
-    val context = LocalContext.current
-    val microphone = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> model.microphonePermission(granted) }
-    val callPermissions = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions(),
-    ) { grants ->
-        // The microphone is the call itself; the camera is the video half. A grant of the mic
-        // alone on a video call still places the video call — the manager's answer path is where
-        // a missing camera falls back, and a refused mic is the one refusal that is stated.
-        val microphoneGranted =
-            grants[Manifest.permission.RECORD_AUDIO] == true
-        val cameraGranted = grants[Manifest.permission.CAMERA] == true
-        model.callPermissions(microphoneGranted, cameraGranted)
-    }
-    val requestCall: (Id, Id, Boolean) -> Unit = { conversationId, peerId, video ->
-        val microphoneNeeded = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO,
-        ) != PackageManager.PERMISSION_GRANTED
-        val cameraNeeded = video && ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.CAMERA,
-        ) != PackageManager.PERMISSION_GRANTED
-        when {
-            !microphoneNeeded && !cameraNeeded ->
-                if (video) {
-                    model.startVideoCall(conversationId, peerId)
-                } else {
-                    model.startVoiceCall(conversationId, peerId)
-                }
-
-            video -> {
-                // One dialog, both permissions: a camera without a microphone is a silent
-                // camera, and a microphone without a camera is the voice call nobody asked
-                // for. Both are always requested together even when one is already granted --
-                // the system asks only for what is missing, and the answer map then holds both
-                // keys, which is what the model's answer path reads.
-                model.stageVideoCall(conversationId, peerId)
-                callPermissions.launch(
-                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
-                )
-            }
-
-            else -> {
-                model.stageVoiceCall(conversationId, peerId)
-                microphone.launch(Manifest.permission.RECORD_AUDIO)
-            }
-        }
-    }
-    // The same moment-of-use asking for the composer's microphone: the mic button is the one
-    // control that explains why the permission exists, and the model's staged note is what carries
-    // the intent across the dialog's answer. The permission itself is shared with the call -- one
-    // microphone, one question.
-    val requestVoiceNote: () -> Unit = {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            model.startVoiceNote()
-        } else {
-            model.stageVoiceNote()
-            microphone.launch(Manifest.permission.RECORD_AUDIO)
-        }
     }
 
     // The interruption rule a recording keeps: the app going to the background — a lock, a
@@ -234,53 +153,25 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                         onDismissFailure = model::dismissFailure,
                     )
 
-                    is AppState.SignedIn -> ShellScreen(
-                        state = current,
-                        model = model,
-                        onRequestCall = requestCall,
-                        onRequestVoiceNote = requestVoiceNote,
-                    )
+                    // The two navigation modes are two shells over one session: the windowing
+                    // shell the app has always drawn, and the chat list. The preference is read
+                    // here so a change in the settings panel is a recomposition away, and both
+                    // shells read the same state — switching between them keeps every window,
+                    // every unread, and the open chat exactly where it was.
+                    is AppState.SignedIn -> if (preferences.navigationMode == NavigationMode.ChatList) {
+                        ChatListShell(state = current, model = model)
+                    } else {
+                        ShellScreen(state = current, model = model)
+                    }
                 }
             }
 
-            // The call overlay renders above whatever the shell is showing — a call takes the screen
-            // from anything, the same rule the web client's overlay keeps — and renders nothing at all
-            // when no call is ringing, live, just ended, or failed to start. The peer's name is
-            // resolved here at the composition root, the one place that holds both the call state and
-            // the model that knows the names. The video tracks are collected here too — the peer's
-            // as state, because it lands mid-call, ours read once per composition — and the session's
-            // shared video GL context is provided here so every renderer below the overlay shares
-            // the one the call manager minted with its factories.
-            val callPeerId = callState.incoming?.callerId
-                ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
-            val remoteVideo by model.remoteVideo.collectAsState()
-            CompositionLocalProvider(LocalCallEglContext provides model.callEglContext) {
-                CallOverlay(
-                    state = callState,
-                    peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
-                    onAccept = model::acceptCall,
-                    onDecline = model::declineCall,
-                    onCancel = model::cancelCall,
-                    onHangUp = model::hangUpCall,
-                    onToggleMute = model::toggleCallMute,
-                    onDismiss = model::dismissCallScreen,
-                    localVideo = model.localVideo,
-                    remoteVideo = remoteVideo,
-                )
-            }
-
-            // The group-call overlay renders above the call overlay — the web layout's own order —
-            // and renders nothing at all when this device holds no group-call seat, lost one
-            // without a note, or failed to join. The roster's names are resolved here at the
-            // composition root, the same place the call overlay resolves its peer's, and the
-            // "you" mark is the signed-in account's own id.
-            GroupCallOverlay(
-                state = groupCallState,
-                names = model::displayName,
-                meId = (state as? AppState.SignedIn)?.accountId,
-                onLeave = model::leaveGroupCall,
-                onDismiss = model::dismissGroupCall,
-            )
+            // The call overlays render above whatever the shell is showing — a call takes the
+            // screen from anything, the same rule the web client's overlay keeps — and render
+            // nothing at all when no call is ringing, live, just ended, or failed to start. The
+            // chat activity holds this same layer over this same state, so a call is answered
+            // from whichever surface is in front.
+            SessionOverlays(model = model, state = state)
         }
     }
 }
@@ -294,77 +185,13 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
  * visible window; the window's tab stays. A panel (Alerts, Search, Wallet, Profile, Games, Admins)
  * is the one thing that covers the strip, carrying its own "‹ Menu Panel" bar back to the tab the
  * strip still shows, held in [AppState.SignedIn.stripSection].
+ *
+ * The conversation itself is [ChatPane]'s to draw — the same surface the chat activity composes —
+ * so the chat is wired once and shown by both shells.
  */
 @Composable
-private fun ShellScreen(
-    state: AppState.SignedIn,
-    model: AppViewModel,
-    onRequestCall: (Id, Id, Boolean) -> Unit,
-    onRequestVoiceNote: () -> Unit,
-) {
+private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
     val open = state.open
-    // The composer's four attachment doors and the document destination picker, all the system's
-    // own sheets: three GetContent reads (anything, a video, an image) and one TakePicture write
-    // for the camera, plus the CreateDocument for the save a document row asks for -- no storage
-    // permission either way, because the person's own pick is the person's own grant, and the
-    // camera's output is the app's own cache through a FileProvider the manifest names. The image
-    // or document split is still the model's, by the picked file's own MIME type; the staged
-    // document is what carries the Save press across the picker's answer.
-    val pickFile = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri != null) model.sendAttachment(uri)
-    }
-    val pickVideo = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri != null) model.sendAttachment(uri)
-    }
-    val pickImage = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri != null) model.sendAttachment(uri)
-    }
-    // The camera's destination, remembered across the shot itself: TakePicture answers only
-    // whether the camera wrote the file, so the uri the launch was handed has to be the one the
-    // answer reads. Saved rather than remembered, because a rotation mid-shot must not orphan a
-    // photo the camera did take.
-    var cameraOutput by rememberSaveable { mutableStateOf<String?>(null) }
-    val takePhoto = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { saved ->
-        val path = cameraOutput
-        cameraOutput = null
-        if (saved && path != null) model.sendAttachment(Uri.parse(path))
-    }
-    val saveDocument = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { uri ->
-        if (uri != null) model.saveDocumentTo(uri)
-    }
-    val mediaObjects by model.mediaObjects.collectAsState()
-    val avatarBytes by model.avatarBytes.collectAsState()
-    // The member profile sheet's state, collected here for the same reason the avatars are: the
-    // read is the model's, while the surface belongs to whichever member sheet named the person.
-    val memberProfile by model.memberProfile.collectAsState()
-    // The account's owned pack SKUs, for the composer's emoticon/sticker picker: null while the
-    // one-per-session read is in flight, which the picker renders as its own wait.
-    val ownedPacks by model.ownedPacks.collectAsState()
-    // The media choice, answered as one fact for every bubble on screen: "Wi-Fi only" reads the
-    // connection's own metered state, which is the network's word rather than the app's guess.
-    // Read per composition rather than remembered — a settings change must reach the next
-    // recomposition without a key to invalidate on, and the read is a system-service lookup this
-    // screen makes at most a few times a second.
-    val context = LocalContext.current
-    val preferences by model.preferences.collectAsState()
-    val autoFetchMedia = when (preferences.mediaAutoDownload) {
-        MediaAutoDownload.Always -> true
-        MediaAutoDownload.Never -> false
-        // A missing manager or no active network answers "metered": the safe reading of a
-        // Wi-Fi-only choice is the one that spends nothing.
-        MediaAutoDownload.Unmetered ->
-            context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == false
-    }
     // Back means "close this, not the app", in the order a person reads the screen: the members
     // sheet (handled inside the chat, composed deeper so it wins while it is up), then the visible
     // window's tab, then a panel. The strip and the home screen are the resting state back stands
@@ -412,136 +239,10 @@ private fun ShellScreen(
             // they are, not after they back out.
             ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
             if (open != null) {
-                ChatScreen(
-                    chat = open,
-                    onDraft = model::setDraft,
-                    onSend = model::send,
-                    onLeave = open.roomId?.let { roomId ->
-                        { model.leaveRoom(open.conversationId, roomId) }
-                    },
-                    onOpenMembers = open.roomId?.let { roomId ->
-                        { model.openMembers(open.conversationId, roomId) }
-                    },
-                    onCloseMembers = { model.closeMembers(open.conversationId) },
-                    onVoteKick = { target ->
-                        open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
-                    },
-                    onSanction = { target, action ->
-                        open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
-                    },
-                    onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
-                    // The group lifecycle rides the same chat surface: the member sheet, the
-                    // rename, the invite quick-pick, and the founder-vs-vote controls all read
-                    // from the conversation id alone, where the room controls above need a room.
-                    onOpenGroupMembers = if (open.roomId == null) {
-                        { model.openGroupMembers(open.conversationId) }
-                    } else {
-                        null
-                    },
-                    onCloseGroupMembers = { model.closeMembers(open.conversationId) },
-                    onInvite = { userId -> model.inviteToGroup(open.conversationId, userId) },
-                    onGroupVoteKick = { target -> model.groupVoteKick(open.conversationId, target) },
-                    onGroupMute = { target, term -> model.groupMute(open.conversationId, target, term) },
-                    onGroupKick = { target -> model.groupKick(open.conversationId, target) },
-                    onRenameGroup = { title -> model.renameGroup(open.conversationId, title) },
-                    onToggleRename = model::toggleGroupRename,
-                    onRenameValue = model::setGroupRename,
-                    onLeaveGroup = if (open.roomId == null) {
-                        { model.leaveGroup(open.conversationId) }
-                    } else {
-                        null
-                    },
-                    // The invite quick-pick lists the friends this shell can name: a row that offers
-                    // to invite someone has to say who it is offering.
-                    groupInvitees = state.friends.entries
-                        .filter { it.kind == RelationshipKind.Friend.wire.toLong() }
-                        .mapNotNull { entry ->
-                            val name = model.nameOf(entry.userId) ?: return@mapNotNull null
-                            GroupInviteCandidate(entry.userId, name)
-                        }
-                        .sortedBy { it.name },
-                    gameCatalogue = state.games.catalogue,
-                    gamesLoading = state.games.loading,
-                    gamesFailure = state.games.failure,
-                    onLoadGames = model::loadGameCatalogue,
-                    onStartGame = { slug -> model.startGame(open.conversationId, slug) },
-                    onGuess = { value -> model.submitGuess(open.conversationId, value) },
-                    selfId = state.accountId,
-                    onAcknowledgeSafety = model::acknowledgeSafetyChange,
-                    onStartCall = { peerId, video -> onRequestCall(open.conversationId, peerId, video) },
-                    // The group-call join rides the same header: offered only for a group, the
-                    // web client's own gate — a direct chat has the 1:1 buttons and a room has
-                    // no group call to join.
-                    onJoinGroupCall = if (open.kind == ConversationKind.Group) {
-                        { model.joinGroupCall(open.conversationId) }
-                    } else {
-                        null
-                    },
-                    onExportLog = { model.shareChatLog(open.conversationId) },
-                    onToggleSearch = model::toggleChatSearch,
-                    onSearchQuery = model::setChatSearchQuery,
-                    // Attachments are an end-to-end feature: the control is offered only where the
-                    // conversation has a key channel to hand the recipients the object's key --
-                    // every direct chat and group, never a server-readable room. The four menu
-                    // picks all funnel into the model's one attachment send path; the choice only
-                    // decides which of the system's pickers opens.
-                    onPickAttachment = if (open.kind != ConversationKind.Room) {
-                        { source ->
-                            when (source) {
-                                AttachSource.File -> pickFile.launch("*/*")
-                                AttachSource.Photo -> {
-                                    val output = newCameraOutput(context)
-                                    cameraOutput = output.toString()
-                                    takePhoto.launch(output)
-                                }
-                                AttachSource.Video -> pickVideo.launch("video/*")
-                                AttachSource.Image -> pickImage.launch("image/*")
-                            }
-                        }
-                    } else {
-                        null
-                    },
-                    onVoiceNote = onRequestVoiceNote,
-                    onPauseVoiceNote = model::pauseVoiceNote,
-                    onResumeVoiceNote = model::resumeVoiceNote,
-                    onStopVoiceNote = model::stopVoiceNote,
-                    onSendVoiceNote = model::sendVoiceNote,
-                    onDeleteVoiceNote = model::deleteVoiceNoteDraft,
-                    onUndoVoiceNoteDiscard = model::undoVoiceNoteDiscard,
-                    onCancelVoiceNote = model::cancelVoiceNote,
-                    onReact = model::react,
-                    // The sender's own two acts on their line, from the long-press bar: the edit
-                    // seals a replacement through the same chain the send used, and the delete is
-                    // the tombstone every member's copy drops when the server broadcasts it.
-                    onEdit = model::editMessage,
-                    onDelete = model::deleteMessage,
-                    onResolveMedia = model::resolveMedia,
-                    autoFetchMedia = autoFetchMedia,
-                    onSaveDocument = { attachment ->
-                        model.stageDocumentSave(attachment)
-                        saveDocument.launch(attachment.caption ?: "document")
-                    },
-                    mediaObjects = mediaObjects,
-                    avatarBytes = avatarBytes,
-                    // The member menu's two doors: the profile sheet's read and the gift picker's
-                    // send, both the model's because both are round trips the sheet cannot make
-                    // for itself. The gift catalogue is the wallet's own — the session loads it at
-                    // sign-in for the banner's balance — so the picker never has to wait on a read.
-                    onViewMember = { userId, name -> model.openMemberProfile(userId, name) },
-                    memberProfile = memberProfile,
-                    onCloseMemberProfile = model::closeMemberProfile,
-                    giftCatalogue = state.wallet.catalogue,
-                    onSendGift = { sku, recipient, clientKey -> model.sendGift(sku, recipient, clientKey) },
-                    // The header gift's recipient list, the composer's emoticon picker's owned
-                    // read, and the profile card's two friend acts: all the model's round trips,
-                    // handed in because a sheet cannot make them for itself. The owned pack set is
-                    // collected here like the avatars are -- one read per session, kept by the
-                    // model, read by whichever surface needs it.
-                    onLoadGiftRecipients = model::loadGiftRecipients,
-                    ownedPacks = ownedPacks,
-                    onLoadOwnedPacks = model::loadOwnedPacks,
-                    onMemberFriendRequest = model::memberFriendRequest,
-                    onMemberFriendRespond = { accept -> model.memberFriendRespond(accept) },
+                ChatPane(
+                    state = state,
+                    open = open,
+                    model = model,
                     modifier = Modifier.weight(1f),
                 )
             } else {
@@ -559,8 +260,8 @@ private fun ShellScreen(
 
     // A registration ends with the account file offer: the `.migo` container the session layer
     // sealed from the root that just registered, offered once, over whatever the shell is
-    // showing — the person presses Save where they are, not in a settings panel they have yet
-    // to find. A dialog rather than a sheet because it interrupts: there is no conversation to
+    // showing — the person presses Save where they are, not in a settings panel they have yet to
+    // find. A dialog rather than a sheet because it interrupts: there is no conversation to
     // read underneath an account that has not been backed up yet.
     if (state.accountFileOffer) {
         SaveAccountFileDialog(
@@ -572,29 +273,15 @@ private fun ShellScreen(
 }
 
 /**
- * Mints the camera shot's destination: a fresh file in the app's own cache, handed to the camera
- * through the FileProvider the manifest names.
- *
- * The app's cache rather than shared storage, because the shot is this app's own intermediate —
- * the attachment send reads the bytes and the file's MIME straight from the provider's uri, and
- * nothing outside the app ever needs the path. A fresh file per shot, because the camera's answer
- * is only "written" or "not": reusing a name would leave a refused shot showing the photo before
- * it, which is a lie a fresh temp file cannot tell.
- */
-private fun newCameraOutput(context: Context): Uri {
-    val dir = File(context.cacheDir, "camera")
-    dir.mkdirs()
-    val file = File.createTempFile("shot", ".jpg", dir)
-    return FileProvider.getUriForFile(context, context.packageName + ".filepicker", file)
-}
-
-/**
  * The panels the me sheet opens, each covering the screen with its own way back. The home views
  * (Friends, Rooms, Feed) live in [MobileHome], and the conversation list is the window strip's own
  * ground — so the router here is the panels, and the home sections stand down.
+ *
+ * Not private: the chat-list shell routes its panels through the same router, so a panel is wired
+ * once and reached the same way from either shell.
  */
 @Composable
-private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifier: Modifier = Modifier) {
+internal fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifier: Modifier = Modifier) {
     when (state.section) {
         // The home views are [MobileHome]'s to draw; the router stands down here so there is one
         // place each screen is wired.
@@ -671,6 +358,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
                 state = state,
                 preferences = preferences,
                 onTheme = model::setTheme,
+                onNavigationMode = model::setNavigationMode,
                 onSendReadReceipts = model::setSendReadReceipts,
                 onSendTypingIndicators = model::setSendTypingIndicators,
                 onMediaAutoDownload = model::setMediaAutoDownload,

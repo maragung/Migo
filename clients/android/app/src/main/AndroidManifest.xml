@@ -50,6 +50,19 @@
             </intent-filter>
         </activity>
 
+        <!-- The chat screen chat-list mode stacks for a conversation tapped in the list. It reads
+        the same process-held session view model the main activity reads (the application object
+        is the one that holds it), so the two activities are two windows onto one session: one
+        socket, one set of listeners, one unread count. Not exported because nothing outside the
+        app names it; the list starts it with the conversation's id and title as extras. XML
+        comments cannot contain a double hyphen, so this comment uses parentheses where prose
+        would reach for one. -->
+        <activity
+            android:name=".ChatActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.Migo" />
+
         <!-- The camera shot's door: TakePicture hands the camera app a content uri rather than a
              file path, because the camera is another app and must not see this app's private
              storage. The provider shares only what res/xml/file_paths.xml names (the camera

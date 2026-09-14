@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
+import com.migo.core.store.NavigationMode
 import com.migo.core.store.ThemeChoice
 
 /**
@@ -56,6 +57,7 @@ fun SettingsScreen(
     state: AppState.SignedIn,
     preferences: AppSettings,
     onTheme: (ThemeChoice) -> Unit,
+    onNavigationMode: (NavigationMode) -> Unit,
     onSendReadReceipts: (Boolean) -> Unit,
     onSendTypingIndicators: (Boolean) -> Unit,
     onMediaAutoDownload: (MediaAutoDownload) -> Unit,
@@ -211,6 +213,26 @@ fun SettingsScreen(
                 ThemeChoice.Dark to "Dark",
             ),
             onChoice = onTheme,
+        )
+        ChoiceRow(
+            title = "Navigation Mode",
+            sub = "How the app is navigated once signed in",
+            selected = preferences.navigationMode,
+            choices = listOf(
+                NavigationMode.Tabbed to "Tabbed",
+                NavigationMode.ChatList to "Chat List",
+            ),
+            onChoice = onNavigationMode,
+        )
+        Text(
+            text = "Tabbed is the window strip along the top: the home tabs and one tab per open " +
+                "conversation. Chat List is the bottom bar — Main, Friends, Rooms, Feed — where " +
+                "Main is the conversation list and a tapped conversation opens as its own screen. " +
+                "Both read the same session: the conversations, their unread, and the open chat " +
+                "stay put across a switch.",
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalMigoExtra.current.faint,
+            modifier = Modifier.padding(horizontal = 16.dp),
         )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
