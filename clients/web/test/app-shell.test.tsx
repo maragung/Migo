@@ -44,7 +44,11 @@ import type { Id } from '@migo/sdk';
 
 import { AppShell } from '../src/components/app-shell.js';
 import { ContactsWindow } from '../src/components/contacts-window.js';
-import { MobileTabBar, MOBILE_NAV_ORDER } from '../src/components/mobile-tab-bar.js';
+import {
+  MobileTabBar,
+  MOBILE_NAV_META,
+  MOBILE_NAV_ORDER,
+} from '../src/components/mobile-tab-bar.js';
 import type { MobileNavTab } from '../src/components/mobile-tab-bar.js';
 import { RetroWindow } from '../src/components/retro-window.js';
 import { Taskbar } from '../src/components/desktop-taskbar.js';
@@ -324,6 +328,7 @@ function strip(fields?: {
   navTab?: MobileNavTab;
   hiddenNavs?: readonly MobileNavTab[];
   navUnread?: Readonly<Record<MobileNavTab, number>>;
+  chatListMode?: boolean;
 }): string {
   return renderToStaticMarkup(
     <MobileTabBar
@@ -332,7 +337,8 @@ function strip(fields?: {
       unreadWin={fields?.unreadWin ?? {}}
       navTab={fields?.navTab ?? 'feed'}
       hiddenNavs={fields?.hiddenNavs ?? []}
-      navUnread={fields?.navUnread ?? { friends: 0, rooms: 0, feed: 0 }}
+      navUnread={fields?.navUnread ?? { main: 0, friends: 0, rooms: 0, feed: 0 }}
+      chatListMode={fields?.chatListMode ?? false}
       onSelectNav={NOOP}
       onCloseNav={NOOP}
       onReopenNav={NOOP}
@@ -346,9 +352,7 @@ test('the strip offers the home tabs in the reference order, and only Feed close
   const markup = strip();
 
   let at = -1;
-  for (const label of MOBILE_NAV_ORDER.map(
-    (tab) => ({ friends: 'Friends', rooms: 'Rooms', feed: 'Feed' })[tab],
-  )) {
+  for (const label of MOBILE_NAV_ORDER.map((tab) => MOBILE_NAV_META[tab].label)) {
     const found = markup.indexOf(`>${label}</button>`);
     assert.ok(found !== -1, `the "${label}" home tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
@@ -370,6 +374,42 @@ test('a closed home tab comes back through the "+"', () => {
   assert.ok(
     !markup.includes('aria-label="Close Feed tab"'),
     'a closed tab is gone from the strip, not merely marked',
+  );
+});
+
+test('the tabbed strip never offers a Main tab', () => {
+  const markup = strip();
+
+  assert.ok(!markup.includes('>Main</button>'), 'the tabbed home is the three it has always been');
+});
+
+test('the chat-list strip leads with Main, and Main is the home itself', () => {
+  const markup = strip({
+    chatListMode: true,
+    navTab: 'main',
+    navUnread: { main: 3, friends: 0, rooms: 0, feed: 0 },
+  });
+
+  // The order the mode promises: Main, then Friends, Rooms, Feed — Main first because the list
+  // is the mode's point, the other three exactly where the tabbed strip keeps them. The needle
+  // stops at the label's closing bracket, not the button's: Main carries this strip's badge, so
+  // its label is followed by the badge's span, not by the button's end.
+  let at = -1;
+  for (const label of ['Main', 'Friends', 'Rooms', 'Feed']) {
+    const found = markup.indexOf(`>${label}<`);
+    assert.ok(found !== -1, `the "${label}" home tab is missing from the chat-list strip`);
+    assert.ok(found > at, `the "${label}" tab is out of the chat-list order`);
+    at = found;
+  }
+  // Main is the home itself, like Friends and Rooms: it ships without an X, so the list cannot
+  // be closed out from under the mode.
+  assert.ok(!markup.includes('Close Main'), 'the Main tab must not be closable');
+  assert.ok(markup.includes('aria-label="Close Feed tab"'), 'the Feed tab stays closable');
+  assert.ok(markup.includes('>3</span>'), 'the Main tab carries the unread badge');
+  assert.equal(
+    (markup.match(/task-btn-active/g) ?? []).length,
+    1,
+    'exactly one tab may carry the active mark',
   );
 });
 
