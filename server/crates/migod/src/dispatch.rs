@@ -1319,11 +1319,24 @@ impl Dispatcher for AppDispatcher {
             // event to the other party's user topic; the service owns every
             // rule and never sends a frame itself.
             Opcode::CallInvite => {
-                calls::handle_invite(context, frame, &self.calls, &self.notify).await
+                calls::handle_invite(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.notify,
+                    &self.presence_relay,
+                )
+                .await
             }
-            Opcode::CallAnswer => calls::handle_answer(context, frame, &self.calls).await,
-            Opcode::CallDecline => calls::handle_decline(context, frame, &self.calls).await,
-            Opcode::CallCancel => calls::handle_cancel(context, frame, &self.calls).await,
+            Opcode::CallAnswer => {
+                calls::handle_answer(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallDecline => {
+                calls::handle_decline(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallCancel => {
+                calls::handle_cancel(context, frame, &self.calls, &self.presence_relay).await
+            }
             Opcode::CallEnd => {
                 // The id may name a 1:1 call or a group call; the group
                 // handler answers the frame when it does, and the 1:1 handler
@@ -1331,20 +1344,32 @@ impl Dispatcher for AppDispatcher {
                 // handoff, not an error the caller sees.
                 match calls::handle_group_end(context, frame, &self.calls).await {
                     Ok(true) => Ok(()),
-                    Ok(false) => calls::handle_end(context, frame, &self.calls).await,
+                    Ok(false) => {
+                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
+                    }
                     Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {
-                        calls::handle_end(context, frame, &self.calls).await
+                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
                     }
                     Err(error) => Err(error),
                 }
             }
-            Opcode::CallSdp => calls::handle_sdp(context, frame, &self.calls).await,
-            Opcode::CallIce => calls::handle_ice(context, frame, &self.calls).await,
-            Opcode::CallRenegotiate => calls::handle_renegotiate(context, frame, &self.calls).await,
-            Opcode::CallKeyUpdate => calls::handle_key_update(context, frame, &self.calls).await,
+            Opcode::CallSdp => {
+                calls::handle_sdp(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallIce => {
+                calls::handle_ice(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallRenegotiate => {
+                calls::handle_renegotiate(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallKeyUpdate => {
+                calls::handle_key_update(context, frame, &self.calls, &self.presence_relay).await
+            }
             Opcode::CallStats => calls::handle_stats(context, frame).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
-            Opcode::CallSfuJoin => calls::handle_sfu_join(context, frame, &self.calls).await,
+            Opcode::CallSfuJoin => {
+                calls::handle_sfu_join(context, frame, &self.calls, &self.presence_relay).await
+            }
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),
@@ -1430,7 +1455,7 @@ impl Dispatcher for AppDispatcher {
         // meant.
         if !self.room_presence.reachable(account_id) {
             match self.calls.end_disconnected(account_id, now).await {
-                Ok(retired) => self.publish_network_ends(account_id, &retired, now),
+                Ok(retired) => self.publish_network_ends(account_id, &retired, now).await,
                 Err(error) => {
                     tracing::warn!(%error, "cannot end the calls of a departing last session")
                 }
@@ -1447,7 +1472,17 @@ impl AppDispatcher {
     /// cares — the survivor — is reached on their user topic. The departed account's own
     /// topic gets nothing; it holds no session to receive it, and its next client learns
     /// the call's state from the row the end wrote.
-    fn publish_network_ends(&self, departed: Id, retired: &[migo_calls::Call], now: Timestamp) {
+    ///
+    /// The survivor's sessions may sit on another node, so the federated half rides the
+    /// same publish (section 170's user-topic watch table, in the `FED_CALL_RELAY`
+    /// envelope) — warn-not-fail for the same reason the local half is: the socket is
+    /// already gone, and there is no request to retry into a second end.
+    async fn publish_network_ends(
+        &self,
+        departed: Id,
+        retired: &[migo_calls::Call],
+        now: Timestamp,
+    ) {
         let Some(gateway) = self.gateway.get() else {
             return;
         };
@@ -1465,6 +1500,16 @@ impl AppDispatcher {
                 &event,
                 now,
             );
+            if let Err(error) = self
+                .presence_relay
+                .forward_call(other, Opcode::CallStateEvent, &event, now)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "cannot enqueue the federated half of a network-ended call"
+                );
+            }
             tracing::info!(call_id = %call.call_id, "a last session died mid-call; the survivor told");
         }
     }

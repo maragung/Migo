@@ -779,15 +779,7 @@ impl IngestRouter {
             Opcode::FedCallRelay => {
                 let relay: migo_protocol::FedEvent =
                     from_frame(&inner).map_err(fault::from_wire)?;
-                tracing::info!(
-                    from = %relay.from,
-                    kind = %relay.kind,
-                    bytes = relay.payload.len(),
-                    "call relay ingested from the mesh"
-                );
-                self.note(inner.header.opcode, inner.payload.len());
-                self.meters.ingested();
-                Ok(())
+                self.route_call_relay(peer, relay).await
             }
             Opcode::FedRoomSubscribe => {
                 let routing: migo_protocol::FedRouting =
@@ -1317,6 +1309,87 @@ impl IngestRouter {
             "user-topic event ingested from the mesh"
         );
 
+        self.note(inner.header.opcode, inner.payload.len());
+        self.meters.ingested();
+        Ok(())
+    }
+
+    /// Publishes a forwarded call event into the local hub.
+    ///
+    /// The call twin of the user-topic path above, arriving in the envelope the
+    /// registry allocated for exactly this traffic (section 169): the outer
+    /// `FED_CALL_RELAY` carries a `FedEvent` whose payload is a `FedUserEvent`
+    /// — the same envelope shape the user tier rides, so the receiving node
+    /// learns whose topic the frame places itself on — and the envelope's own
+    /// payload is the encoded call frame, handed to the hub exactly as the
+    /// origin node's request path would have pushed it (section 145).
+    ///
+    /// The inner opcode is held to a call allow-list rather than widening the
+    /// user-topic tier's to cover it: the registry gave call signaling its own
+    /// opcode so the two streams stay separately countable, and an envelope
+    /// that arrives carrying anything but a call frame is a wire violation to
+    /// refuse, not a frame to place on somebody's topic. `CALL_RENEGOTIATE` is
+    /// absent on purpose — the origin's relay path projects a renegotiation to
+    /// `CALL_SDP` before publishing, so the name never crosses.
+    ///
+    /// No coalescing key, mirroring the origin's request path: a ring is
+    /// Critical, a state event is authoritative, and the relays are sealed
+    /// facts — none of them may collapse.
+    ///
+    /// There is no onward half, for the same reason the user-topic path has
+    /// none: a call event is published by the node whose session caused it,
+    /// and that origin reaches every watcher directly because the user-topic
+    /// subscribe is a broadcast — every peer holds the table.
+    async fn route_call_relay(&self, peer: Id, relay: migo_protocol::FedEvent) -> Result<()> {
+        let migo_protocol::FedEvent {
+            from: _,
+            kind: _,
+            payload,
+        } = relay;
+        let envelope_frame = Frame::decode(Bytes::from(payload)).map_err(fault::from_wire)?;
+        if Opcode::from_wire(envelope_frame.header.opcode) != Some(Opcode::FedUserEvent) {
+            return Err(fault::validation(
+                "opcode",
+                "a call relay envelope carries a user-topic envelope",
+            ));
+        }
+        let envelope: migo_protocol::FedUserEvent =
+            from_frame(&envelope_frame).map_err(fault::from_wire)?;
+        let migo_protocol::FedUserEvent { user_id, payload } = envelope;
+        let payload = Bytes::from(payload);
+        let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
+        let inner_opcode = Opcode::from_wire(inner.header.opcode)
+            .ok_or_else(|| fault::validation("opcode", "not a known call event"))?;
+        match inner_opcode {
+            Opcode::CallInviteEvent
+            | Opcode::CallStateEvent
+            | Opcode::CallSdp
+            | Opcode::CallIce
+            | Opcode::CallKeyUpdate
+            | Opcode::CallSfuEvent => {}
+            _ => {
+                return Err(fault::validation(
+                    "opcode",
+                    "a call relay envelope carries a call event",
+                ));
+            }
+        }
+        let now = self.clock.now();
+        if let Some(gateway) = &self.gateway {
+            gateway.broadcast_frame_to_topic(
+                &user_topic(user_id),
+                inner_opcode,
+                &payload,
+                None,
+                now,
+            );
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            subject = %user_id.to_text(),
+            opcode = inner_opcode.name(),
+            "call event ingested from the mesh"
+        );
         self.note(inner.header.opcode, inner.payload.len());
         self.meters.ingested();
         Ok(())
