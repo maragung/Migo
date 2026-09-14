@@ -1927,7 +1927,7 @@ where
         caller: &Caller,
         room_id: Id,
         to: Id,
-    ) -> Result<Option<Fanout>> {
+    ) -> Result<Vec<Fanout>> {
         Self::require_identity(caller)?;
         if to.is_nil() {
             return Err(fault::validation("to", "an account id is required"));
