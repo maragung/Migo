@@ -66,7 +66,8 @@ export type IconName =
   | 'video'
   | 'clock'
   | 'arrow-up'
-  | 'arrow-down';
+  | 'arrow-down'
+  | 'info';
 
 /** The drawn body of each icon, as `<path>`/`<circle>` elements under one `<g>`. */
 const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
@@ -359,6 +360,13 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
     <>
       <path d="M12 5v14" />
       <path d="m6.5 13.5 5.5 5.5 5.5-5.5" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <path d="M12 7.5v.2" />
     </>
   ),
 };

@@ -1,21 +1,15 @@
 /**
- * What the sidebar may claim a conversation's last message said, and what the header may claim
- * about encryption.
+ * What the sidebar may claim a conversation's last message said.
  *
- * Both surfaces state facts to a user who cannot verify them by clicking, so both are pinned:
+ * The surface states a fact to a user who cannot verify it by clicking, so it is pinned:
  *
- *   1. **The preview line only ever shows what the client actually knows.** The summary's
- *      `lastMessage` is a sealed event; its body becomes readable only through the provider's
- *      decrypt replay. When that has not (or cannot) happen, the line falls back to the event's
- *      cleartext *kind* placeholder — never to envelope bytes, a claimed mime type, or a guess. A
- *      regression that printed anything from inside the envelope would leak ciphertext onto the
- *      sidebar and read as corruption; one that guessed "Message" for every kind would quietly
- *      erase the 📎 / 🎤 / 🎉 vocabulary the bubbles also use.
- *   2. **The encryption label follows the server's `EncryptionMode`, not the conversation kind.**
- *      Kind says who is in a conversation; the mode says what protects it. A refactor that
- *      re-derived the label from `kind` (the old rule) would call an unencrypted room encrypted
- *      — exactly the claim the protocol's comment says the UI is *allowed* to make only from the
- *      mode.
+ * **The preview line only ever shows what the client actually knows.** The summary's
+ * `lastMessage` is a sealed event; its body becomes readable only through the provider's
+ * decrypt replay. When that has not (or cannot) happen, the line falls back to the event's
+ * cleartext *kind* placeholder — never to envelope bytes, a claimed mime type, or a guess. A
+ * regression that printed anything from inside the envelope would leak ciphertext onto the
+ * sidebar and read as corruption; one that guessed "Message" for every kind would quietly
+ * erase the 📎 / 🎤 / 🎉 vocabulary the bubbles also use.
  */
 
 import assert from 'node:assert/strict';
@@ -25,7 +19,6 @@ import { ContentType, ConversationKind, EncryptionMode, MessageKind } from '@mig
 import type { ConversationSummary, Id, MessageEvent } from '@migo/sdk';
 
 import { lastMessagePreviewLine } from '../src/components/conversation-list.js';
-import { encryptionLabelFor } from '../src/components/chat-window.js';
 import { messagePreview, truncate } from '../src/lib/message-preview.js';
 
 function sealedEvent(kind: MessageKind): MessageEvent {
@@ -140,16 +133,4 @@ test('a non-text body previews as its label, and truncation is word-aware', () =
   );
   // The truncation helper is exported for combined lines; it never widens a short one.
   assert.equal(truncate('short', 40), 'short');
-});
-
-test('the encryption label follows the summary\u2019s EncryptionMode, not the kind', () => {
-  assert.equal(encryptionLabelFor(EncryptionMode.EndToEnd), '🔒 End-to-end encrypted');
-  assert.equal(
-    encryptionLabelFor(EncryptionMode.Transport),
-    'Encrypted transport (server can read for moderation)',
-  );
-  assert.equal(encryptionLabelFor(EncryptionMode.None), 'Not encrypted');
-  // Unknown is the server saying "do not claim anything"; no label is rendered for it.
-  assert.equal(encryptionLabelFor(EncryptionMode.Unknown), null);
-  assert.equal(encryptionLabelFor(undefined), null);
 });

@@ -51,7 +51,9 @@ import { PersonPickRow } from './new-conversation-dialog.js';
 import { voteTally } from './room-info-panel.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
+import { UserProfileModal } from './user-profile-modal.js';
 
 /** The founder role as a plain number, so the gates compare number to number like the room panel's. */
 const ROLE_FOUNDER: number = ConversationRole.Founder;
@@ -94,7 +96,10 @@ export function canVoteKickGroup(targetRole: number, isSelf: boolean): boolean {
   return !isSelf && targetRole !== ROLE_FOUNDER;
 }
 
-/** One roster row: avatar, name, the role badge, any running mute, and the actions on the member. */
+/**
+ * One roster row: avatar, name, the role badge, any running mute — and, on a click, the member
+ * menu, the same entry the room roster takes.
+ */
 export function GroupRosterRow({
   entry,
   name,
@@ -104,6 +109,8 @@ export function GroupRosterRow({
   canVote = false,
   canFound = false,
   busy = false,
+  onViewProfile,
+  onGift,
   onVoteKick,
   onMute,
   onUnmute,
@@ -122,80 +129,154 @@ export function GroupRosterRow({
   canFound?: boolean;
   /** True while an action on this row is in flight, so its controls disable together. */
   busy?: boolean;
+  /** Open this member's profile; supplied by openers that can show one. */
+  onViewProfile?: () => void;
+  /** Hand this member to the gift flow; never supplied for the viewer's own row. */
+  onGift?: () => void;
   onVoteKick?: () => void;
   onMute?: (ms: number) => void;
   onUnmute?: () => void;
   onKick?: () => void;
 }): ReactNode {
+  const [open, setOpen] = useState(false);
   const mutedUntil = entry.mutedUntil;
   const muted = mutedUntil !== undefined && mutedUntil > now;
   const departed = entry.leftAt !== undefined;
+  const showVote = !departed && canVote && onVoteKick !== undefined;
+  const showFounder = !departed && canFound;
+  const hasMenu =
+    !departed && (onViewProfile !== undefined || onGift !== undefined || showVote || showFounder);
+  const close = (): void => setOpen(false);
   return (
-    <div className={`person-row roster-row${departed ? ' departed' : ''}`}>
-      <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
-      <div className="person-main">
-        <span className="person-name">{name}</span>
-        <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
-        {muted && mutedUntil !== undefined ? (
-          <span className="person-note">Muted until {formatRelative(mutedUntil)}</span>
-        ) : null}
-        {tally !== undefined ? (
-          <span className="person-note vote-tally">Vote to kick: {tally}</span>
-        ) : null}
-      </div>
-      <span className={`role-badge role-${groupRoleLabel(entry.role).toLowerCase()}`}>
-        {groupRoleLabel(entry.role)}
-      </span>
-      {!departed && (canVote || canFound) ? (
-        <div className="person-actions roster-actions">
-          {canVote && onVoteKick !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={onVoteKick}
-              title="Call a vote to remove this person. When half the group agrees, they are kicked. A vote costs nothing — only a founder's outright kick is priced."
-            >
-              Vote kick
-            </button>
+    <div className={`roster-row-wrap${departed ? ' departed' : ''}`}>
+      <button
+        type="button"
+        className={`person-row roster-row${departed ? ' departed' : ''}`}
+        onClick={() => setOpen(!open)}
+        disabled={!hasMenu}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={hasMenu ? `Options for ${name}` : undefined}
+      >
+        <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
+        <div className="person-main">
+          <span className="person-name">{name}</span>
+          <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
+          {muted && mutedUntil !== undefined ? (
+            <span className="person-note">Muted until {formatRelative(mutedUntil)}</span>
           ) : null}
-          {canFound && muted && onUnmute !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={onUnmute}
-              title="Lift this group mute now."
-            >
-              Unmute
-            </button>
-          ) : null}
-          {canFound && !muted && onMute !== undefined
-            ? MUTE_TERMS.map((term) => (
-                <button
-                  key={term.label}
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={busy}
-                  onClick={() => onMute(term.ms)}
-                  title={`Silence this person for the whole group for ${term.label}. They keep every other right, including the vote.`}
-                >
-                  Mute {term.label}
-                </button>
-              ))
-            : null}
-          {canFound && onKick !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-danger"
-              disabled={busy}
-              onClick={onKick}
-              title="Remove this person outright, no vote — a founder's call. Costs 1 Kick Point, or $MIG 1 if you have none."
-            >
-              Kick
-            </button>
+          {tally !== undefined ? (
+            <span className="person-note vote-tally">Vote to kick: {tally}</span>
           ) : null}
         </div>
+        <span className={`role-badge role-${groupRoleLabel(entry.role).toLowerCase()}`}>
+          {groupRoleLabel(entry.role)}
+        </span>
+        {hasMenu ? <Icon name="chevron-right" size={14} className="roster-menu-cue" /> : null}
+      </button>
+      {hasMenu ? (
+        <>
+          {open ? (
+            <button
+              type="button"
+              className="menu-backdrop"
+              onClick={close}
+              aria-label="Close the member menu"
+            />
+          ) : null}
+          <div className="roster-menu" role="menu" hidden={!open}>
+            {onViewProfile !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                onClick={() => {
+                  close();
+                  onViewProfile();
+                }}
+              >
+                View profile
+              </button>
+            ) : null}
+            {onGift !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                onClick={() => {
+                  close();
+                  onGift();
+                }}
+                title="Send this person a gift from the shop."
+              >
+                Gift
+              </button>
+            ) : null}
+            {showVote ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onVoteKick?.();
+                }}
+                title="Call a vote to remove this person. When half the group agrees, they are kicked. A vote costs nothing — only a founder's outright kick is priced."
+              >
+                Vote kick
+              </button>
+            ) : null}
+            {showFounder && muted && onUnmute !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onUnmute();
+                }}
+                title="Lift this group mute now."
+              >
+                Unmute
+              </button>
+            ) : null}
+            {showFounder && !muted && onMute !== undefined
+              ? MUTE_TERMS.map((term) => (
+                  <button
+                    key={term.label}
+                    type="button"
+                    role="menuitem"
+                    className="roster-menu-item"
+                    disabled={busy}
+                    onClick={() => {
+                      close();
+                      onMute(term.ms);
+                    }}
+                    title={`Silence this person for the whole group for ${term.label}. They keep every other right, including the vote.`}
+                  >
+                    Mute {term.label}
+                  </button>
+                ))
+              : null}
+            {showFounder && onKick !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item roster-menu-danger"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onKick();
+                }}
+                title="Remove this person outright, no vote — a founder's call. Costs 1 Kick Point, or $MIG 1 if you have none."
+              >
+                Kick
+              </button>
+            ) : null}
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -207,10 +288,13 @@ export function GroupRosterRow({
 export function GroupInfoPanel({
   conversationId,
   title,
+  onGift,
 }: {
   conversationId: Id;
   /** The group's current title, for the rename field's starting value. */
   title: string;
+  /** Hand a member to the opener's gift flow (the chat's picker, pre-aimed at the member). */
+  onGift?: (targetId: Id) => void;
 }): ReactNode {
   const { client, accountId } = useMigo();
   const { forgetConversation, noteConversation } = useConversations();
@@ -224,6 +308,8 @@ export function GroupInfoPanel({
   const [leaving, setLeaving] = useState(false);
   const [renameValue, setRenameValue] = useState(title);
   const [renaming, setRenaming] = useState(false);
+  // The member whose profile a row's "View profile" opened, until the modal closes.
+  const [profileId, setProfileId] = useState<Id | null>(null);
 
   // The invite section's own state: the friends quick-pick, the debounced username search, and the
   // seats already taken.
@@ -704,6 +790,8 @@ export function GroupInfoPanel({
                     canVote={canVote}
                     canFound={canFound}
                     busy={busyIds.has(entry.accountId)}
+                    onViewProfile={() => setProfileId(entry.accountId)}
+                    onGift={onGift && !isSelf ? () => onGift(entry.accountId) : undefined}
                     onVoteKick={canVote ? () => castVote(entry.accountId) : undefined}
                     onMute={canFound ? (ms) => muteFor(entry.accountId, ms) : undefined}
                     onUnmute={canFound ? () => unmute(entry.accountId) : undefined}
@@ -715,6 +803,9 @@ export function GroupInfoPanel({
           )}
         </div>
       )}
+      {profileId !== null ? (
+        <UserProfileModal userId={profileId} onClose={() => setProfileId(null)} />
+      ) : null}
     </div>
   );
 }

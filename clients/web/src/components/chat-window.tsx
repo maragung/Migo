@@ -31,10 +31,10 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useSafety } from '@/lib/migo/safety.js';
 import { useSectionNav } from '@/lib/migo/section-nav.js';
 import { useGroupNotices } from '@/lib/migo/use-group-notices.js';
-import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
+import { useRooms } from '@/lib/migo/rooms-provider.js';
 import { useMuted, muteFilter } from '@/lib/migo/muted-provider.js';
 import { resolveMediaObject } from '@/lib/migo/media.js';
-import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
+import { usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 import { useOwnedPacks } from '@/lib/migo/use-owned-packs.js';
@@ -82,26 +82,6 @@ const AUTOSAVE_INTERVAL_MS = 2 * 60 * 1000;
 function newIntentKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * The lock label the header may claim, from the summary's {@link EncryptionMode}.
- *
- * The mode is the server's own statement of what the UI is allowed to claim, so the label is
- * derived from it and never from the conversation kind: kind says who is in the conversation, not
- * how (or whether) the transport protects it. `Unknown` renders no label rather than a guess.
- */
-export function encryptionLabelFor(mode: EncryptionMode | undefined): string | null {
-  switch (mode) {
-    case EncryptionMode.EndToEnd:
-      return '🔒 End-to-end encrypted';
-    case EncryptionMode.Transport:
-      return 'Encrypted transport (server can read for moderation)';
-    case EncryptionMode.None:
-      return 'Not encrypted';
-    default:
-      return null;
-  }
 }
 
 /**
@@ -348,16 +328,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     : (summary?.title ??
       roomInfo?.name ??
       (summary?.kind === ConversationKind.Room ? 'Room' : 'Conversation'));
-  // A room's status line is its live shape — how many are in, how many are here — with the topic
-  // as the header's second line when the room states one. Without room info the line is the
-  // conversation's own membership, which is the honest fallback for a room the shell has not
-  // joined in this session and does not remember.
-  const subtitle = isDirect
-    ? presenceLabel(presence)
-    : isRoom
-      ? `${capacityLabel(roomInfo?.onlineCount, roomInfo?.maxMembers)} online · ${roomInfo?.memberCount ?? members.length} members`
-      : `${members.length || 0} members`;
-  const encryptionLabel = encryptionLabelFor(summary?.encryption);
+  // The header no longer restates the title or the roster's live shape: the tab strip already
+  // names the thread, and the counts lived in a line a person could not act on. What stays is
+  // the avatar — a 1:1's profile entry — and a room's topic, the one line only this surface
+  // carries.
   const avatarId = (peerId ?? conversationId) as string;
   // Sender names and avatars are for multi-party conversations; in a 1:1 the alignment already
   // says who spoke.
@@ -498,6 +472,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             className="thread-identity"
             onClick={() => setProfileOpen(true)}
             aria-label={`View ${title}'s profile`}
+            title={`${title}'s profile`}
           >
             <Avatar
               name={title}
@@ -506,35 +481,15 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
               avatarUrl={peerProfile?.avatarUrl}
               presence={presence}
             />
-            <div className="thread-heading">
-              <div className="name">{title}</div>
-              <div className="status">{subtitle}</div>
-            </div>
           </button>
         ) : (
           <>
             <Avatar name={title} id={avatarId} size={38} />
-            <div className="thread-heading">
-              <div className="name">
-                {isRoom ? (
-                  <span className="room-glyph" aria-hidden="true">
-                    #
-                  </span>
-                ) : null}
-                {title}
-              </div>
-              <div className="status">{subtitle}</div>
-              {isRoom && roomInfo?.topic ? (
-                <div className="thread-topic">{roomInfo.topic}</div>
-              ) : null}
-            </div>
+            {isRoom && roomInfo?.topic ? (
+              <div className="thread-topic">{roomInfo.topic}</div>
+            ) : null}
           </>
         )}
-        {encryptionLabel ? (
-          <span className="thread-lock" title={encryptionLabel}>
-            {encryptionLabel}
-          </span>
-        ) : null}
         <button
           type="button"
           className={`icon-btn ${searchOpen ? 'active' : ''}`}
@@ -568,7 +523,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             aria-expanded={roomInfoOpen}
             title="Room details"
           >
-            ⓘ
+            <Icon name="info" size={20} />
           </button>
         ) : null}
         {isGroup ? (
@@ -580,7 +535,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             aria-expanded={groupInfoOpen}
             title="Group details — members, invites, mute, kick"
           >
-            ⓘ
+            <Icon name="info" size={20} />
           </button>
         ) : null}
         {isDirect && peerId !== null ? (
@@ -592,7 +547,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             aria-expanded={safetyOpen}
             title="Safety numbers — verify this conversation"
           >
-            ⓘ
+            <Icon name="info" size={20} />
           </button>
         ) : null}
         {/* A 1:1 is the one conversation the wire's 1:1 invite can name a callee for; a group
@@ -625,11 +580,31 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       ) : null}
 
       {isRoom && roomInfoOpen && roomInfo !== null ? (
-        <RoomInfoPanel roomId={roomInfo.roomId} conversationId={conversationId} />
+        <RoomInfoPanel
+          roomId={roomInfo.roomId}
+          conversationId={conversationId}
+          onGift={(target) => {
+            // The room roster hands the chat's own gift flow a member: the picker opens aimed at
+            // them, with the same fresh intent key the composer's own path mints.
+            setGiftKey(newIntentKey());
+            setGiftRecipient(target);
+            setGiftOpen(true);
+          }}
+        />
       ) : null}
 
       {isGroup && groupInfoOpen ? (
-        <GroupInfoPanel conversationId={conversationId} title={summary?.title ?? 'Group'} />
+        <GroupInfoPanel
+          conversationId={conversationId}
+          title={summary?.title ?? 'Group'}
+          onGift={(target) => {
+            // The group roster hands the chat's own gift flow a member, aimed and keyed like the
+            // composer's own path into the picker.
+            setGiftKey(newIntentKey());
+            setGiftRecipient(target);
+            setGiftOpen(true);
+          }}
+        />
       ) : null}
 
       {isDirect && safetyOpen ? <DirectInfoPanel safety={safety} /> : null}

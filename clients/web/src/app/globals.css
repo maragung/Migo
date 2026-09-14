@@ -1366,29 +1366,8 @@ main {
   background: var(--nav-bg);
   color: var(--nav-ink);
 }
-.thread-heading {
+.thread-topic {
   min-width: 0;
-}
-.thread-heading .name {
-  font-size: var(--fs-title-sm);
-  font-weight: 700;
-  color: #ffffff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.thread-heading .status {
-  font-size: var(--fs-meta);
-  color: rgba(255, 255, 255, 0.78);
-}
-.thread-lock {
-  margin-left: auto;
-  font-size: var(--fs-meta);
-  color: rgba(255, 255, 255, 0.72);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  text-align: right;
 }
 /* Header controls sit on the teal, so they cannot use the page's button palette: a translucent
    chip on the band, brightening on hover — the same treatment the tab strip's chips take. */
@@ -1397,6 +1376,21 @@ main {
   background: var(--nav-chip);
   border-color: transparent;
   color: var(--nav-ink);
+}
+/* Every header control is the composer's send button's size — one row, one measure — so the
+   search, download, info, games, and call controls read as a set and land under a thumb at the
+   same target the send button already guarantees. */
+.thread-header .icon-btn,
+.thread-header .games-btn {
+  width: 46px;
+  height: 40px;
+  border-radius: 6px;
+  padding: 0;
+}
+/* The games control is the set's one word-bearer; in the header the glyph alone carries it, the
+   same reduction the phone width already makes. */
+.thread-header .games-btn .games-label {
+  display: none;
 }
 .thread-header .icon-btn:hover:not(:disabled),
 .thread-header .btn-ghost:hover:not(:disabled) {
@@ -1408,7 +1402,7 @@ main {
   outline: 2px solid #ffffff;
   outline-offset: 1px;
 }
-/* The peer identity button is the header's own title, not a chip: no fill, white ink. */
+/* The peer identity button is the avatar's own entry to the profile, not a chip: no fill. */
 .thread-header .thread-identity {
   background: transparent;
   border: 0;
@@ -1416,17 +1410,6 @@ main {
 }
 .thread-header .thread-identity:hover {
   background: var(--nav-chip);
-}
-/* In the single column the label is a guest of a crowded header: it ellipsises against the
-   space the title leaves (the full wording stays on the title/tooltip) instead of pushing the
-   controls off a 360px screen. */
-@media (max-width: 1023px) {
-  .thread-lock {
-    max-width: 34%;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
 }
 
 /* Screen-reader-only text: labels state (read/sent ticks) that the glyph alone cannot convey. */
@@ -2831,13 +2814,8 @@ main {
   color: var(--danger);
 }
 
-/* --- room affordances in the chat list and thread header --- */
+/* --- room affordances in the thread header --- */
 
-.room-glyph {
-  margin-right: 4px;
-  color: var(--text-faint);
-  font-weight: 700;
-}
 .thread-topic {
   font-size: 12px;
   color: var(--text-faint);
@@ -3333,17 +3311,73 @@ main {
   border-color: var(--accent-border);
   background: var(--accent-soft-strong);
 }
-/* The moderation controls on a roster row: compact, and free to wrap under the badge on a narrow
-   panel rather than shove the name out of view. */
-.roster-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
-  max-width: 58%;
+/* The moderation controls moved into the member menu; the row keeps its shape and gains the
+   wrap that positions the menu, the button reset that lets a row be clicked, and the chevron
+   that says so. */
+.roster-row-wrap {
+  position: relative;
 }
-.roster-actions .btn {
-  padding: 3px 8px;
-  font-size: 11px;
+button.person-row {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.person-row:disabled {
+  cursor: default;
+}
+.roster-menu-cue {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--text-faint);
+}
+/* The member menu: the same popover anatomy the games control uses, hung off the row it acts
+   on. Hidden through the attribute, so it is part of the row's own markup and not a second
+   surface to keep in step. */
+.roster-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: calc(var(--z-dropdown) + 1);
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.roster-menu[hidden] {
+  display: none;
+}
+.roster-menu-item {
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.roster-menu-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.roster-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.roster-menu-danger {
+  color: var(--danger);
+}
+.roster-menu-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
 }
 /* The live kick-vote count under a member's name: a quiet alarm, not a shout. */
 .vote-tally {
@@ -3447,9 +3481,6 @@ main {
   color: inherit;
   text-align: left;
   border-radius: var(--radius-sm);
-}
-.thread-identity:hover .thread-heading .name {
-  color: var(--accent);
 }
 .thread-identity:focus-visible {
   outline: 1px solid var(--accent);

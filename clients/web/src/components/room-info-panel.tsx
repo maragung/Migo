@@ -45,7 +45,9 @@ import { useRooms } from '@/lib/migo/rooms-provider.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
+import { UserProfileModal } from './user-profile-modal.js';
 
 /** How many roster rows one open reads; the server clamps its own ceiling above this. */
 const ROSTER_LIMIT = 100;
@@ -130,7 +132,15 @@ export function canSanction(myRole: number, targetRole: number, isGlobalAdmin: b
   return myRole >= ROLE_MODERATOR && myRole > targetRole;
 }
 
-/** One roster row: avatar, name, the role badge, and — when offered — the actions on the member. */
+/**
+ * One roster row: avatar, name, the role badge — and, on a click, the member menu.
+ *
+ * The row itself is the entry: tapping it opens the actions this viewer may take against the
+ * member (view profile, gift, vote kick, and the staff sanctions when rank admits them) instead
+ * of laying them out beside every name. The menu is rendered into the row and hidden until the
+ * click, so its contents are part of the row's own markup — the roster tests read exactly what a
+ * viewer would be offered, not an empty shell.
+ */
 export function RosterRow({
   entry,
   name,
@@ -139,6 +149,8 @@ export function RosterRow({
   canVote = false,
   canModerate = false,
   busy = false,
+  onViewProfile,
+  onGift,
   onVoteKick,
   onRoomMute,
   onKick,
@@ -159,70 +171,143 @@ export function RosterRow({
   onRoomMute?: () => void;
   onKick?: () => void;
   onBan?: () => void;
+  /** Open this member's profile; supplied by openers that can show one. */
+  onViewProfile?: () => void;
+  /** Hand this member to the gift flow; never supplied for the viewer's own row. */
+  onGift?: () => void;
 }): ReactNode {
+  const [open, setOpen] = useState(false);
   const showVote = canVote && onVoteKick !== undefined;
   const showStaff =
     canModerate && (onRoomMute !== undefined || onKick !== undefined || onBan !== undefined);
+  const hasMenu = onViewProfile !== undefined || onGift !== undefined || showVote || showStaff;
+  const close = (): void => setOpen(false);
   return (
-    <div className="person-row roster-row">
-      <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
-      <div className="person-main">
-        <span className="person-name">{name}</span>
-        <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
-        {tally !== undefined ? (
-          <span className="person-note vote-tally">Vote to kick: {tally}</span>
-        ) : null}
-      </div>
-      <span className={`role-badge role-${roleLabel(entry.role).toLowerCase()}`}>
-        {roleLabel(entry.role)}
-      </span>
-      {showVote || showStaff ? (
-        <div className="person-actions roster-actions">
-          {showVote ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={onVoteKick}
-              title="Call a vote to remove this person. When half the room agrees, they are kicked."
-            >
-              Vote kick
-            </button>
-          ) : null}
-          {showStaff && onRoomMute !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={onRoomMute}
-              title="Silences this person for everyone in the room (the server sets the term, around 30 days). Different from muting them just for yourself."
-            >
-              Silence in room
-            </button>
-          ) : null}
-          {showStaff && onKick !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={onKick}
-              title="Remove this person from the room. They can come back."
-            >
-              Kick
-            </button>
-          ) : null}
-          {showStaff && onBan !== undefined ? (
-            <button
-              type="button"
-              className="btn btn-danger"
-              disabled={busy}
-              onClick={onBan}
-              title="Remove this person and bar them from returning."
-            >
-              Ban
-            </button>
+    <div className="roster-row-wrap">
+      <button
+        type="button"
+        className="person-row roster-row"
+        onClick={() => setOpen(!open)}
+        disabled={!hasMenu}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={hasMenu ? `Options for ${name}` : undefined}
+      >
+        <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
+        <div className="person-main">
+          <span className="person-name">{name}</span>
+          <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
+          {tally !== undefined ? (
+            <span className="person-note vote-tally">Vote to kick: {tally}</span>
           ) : null}
         </div>
+        <span className={`role-badge role-${roleLabel(entry.role).toLowerCase()}`}>
+          {roleLabel(entry.role)}
+        </span>
+        {hasMenu ? <Icon name="chevron-right" size={14} className="roster-menu-cue" /> : null}
+      </button>
+      {hasMenu ? (
+        <>
+          {open ? (
+            <button
+              type="button"
+              className="menu-backdrop"
+              onClick={close}
+              aria-label="Close the member menu"
+            />
+          ) : null}
+          {/* The menu rides in the row's markup and is hidden until the click, so what the roster
+              offers a viewer is part of the row itself — one render, one place to read it. */}
+          <div className="roster-menu" role="menu" hidden={!open}>
+            {onViewProfile !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                onClick={() => {
+                  close();
+                  onViewProfile();
+                }}
+              >
+                View profile
+              </button>
+            ) : null}
+            {onGift !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                onClick={() => {
+                  close();
+                  onGift();
+                }}
+                title="Send this person a gift from the shop."
+              >
+                Gift
+              </button>
+            ) : null}
+            {showVote ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onVoteKick?.();
+                }}
+                title="Call a vote to remove this person. When half the room agrees, they are kicked."
+              >
+                Vote kick
+              </button>
+            ) : null}
+            {showStaff && onRoomMute !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onRoomMute();
+                }}
+                title="Silences this person for everyone in the room (the server sets the term, around 30 days). Different from muting them just for yourself."
+              >
+                Silence in room
+              </button>
+            ) : null}
+            {showStaff && onKick !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onKick();
+                }}
+                title="Remove this person from the room. They can come back."
+              >
+                Kick
+              </button>
+            ) : null}
+            {showStaff && onBan !== undefined ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="roster-menu-item roster-menu-danger"
+                disabled={busy}
+                onClick={() => {
+                  close();
+                  onBan();
+                }}
+                title="Remove this person and bar them from returning."
+              >
+                Ban
+              </button>
+            ) : null}
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -245,6 +330,8 @@ export function RosterList({
   isGlobalAdmin = false,
   tallies,
   busyIds,
+  onViewProfile,
+  onGift,
   onVoteKick,
   onRoomMute,
   onKick,
@@ -263,6 +350,10 @@ export function RosterList({
   tallies?: ReadonlyMap<Id, string>;
   /** Targets with an action in flight, so their row disables while it settles. */
   busyIds?: ReadonlySet<Id>;
+  /** Open a member's profile; every row offers it when the opener can show one. */
+  onViewProfile?: (targetId: Id) => void;
+  /** Hand a member to the gift flow; a viewer never gifts themselves. */
+  onGift?: (targetId: Id) => void;
   onVoteKick?: (targetId: Id) => void;
   onRoomMute?: (targetId: Id) => void;
   onKick?: (targetId: Id) => void;
@@ -289,6 +380,8 @@ export function RosterList({
             canVote={canVote}
             canModerate={canModerate}
             busy={busyIds?.has(entry.accountId) ?? false}
+            onViewProfile={onViewProfile ? () => onViewProfile(entry.accountId) : undefined}
+            onGift={onGift && !isSelf ? () => onGift(entry.accountId) : undefined}
             onVoteKick={onVoteKick ? () => onVoteKick(entry.accountId) : undefined}
             onRoomMute={onRoomMute ? () => onRoomMute(entry.accountId) : undefined}
             onKick={onKick ? () => onKick(entry.accountId) : undefined}
@@ -304,9 +397,12 @@ export function RosterList({
 export function RoomInfoPanel({
   roomId,
   conversationId,
+  onGift,
 }: {
   roomId: Id;
   conversationId: Id;
+  /** Hand a member to the opener's gift flow (the chat's picker, pre-aimed at the member). */
+  onGift?: (targetId: Id) => void;
 }): ReactNode {
   const { client, accountId } = useMigo();
   const { forgetConversation } = useConversations();
@@ -322,6 +418,8 @@ export function RoomInfoPanel({
   const [busyIds, setBusyIds] = useState<ReadonlySet<Id>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
+  // The member whose profile a row's "View profile" opened, until the modal closes.
+  const [profileId, setProfileId] = useState<Id | null>(null);
 
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
@@ -583,6 +681,8 @@ export function RoomInfoPanel({
             isGlobalAdmin={isGlobalAdmin}
             tallies={tallyLabels}
             busyIds={busyIds}
+            onViewProfile={setProfileId}
+            onGift={onGift}
             onVoteKick={castVote}
             onRoomMute={silence}
             onKick={kick}
@@ -590,6 +690,9 @@ export function RoomInfoPanel({
           />
         </>
       )}
+      {profileId !== null ? (
+        <UserProfileModal userId={profileId} onClose={() => setProfileId(null)} />
+      ) : null}
     </div>
   );
 }
