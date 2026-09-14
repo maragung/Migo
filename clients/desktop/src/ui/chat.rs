@@ -183,6 +183,27 @@ pub struct ChatState {
     /// person's chat into another's. Rooms never hold an arm — a room is server-readable, so
     /// its transcripts are the server's memory, not a promise a sender can make.
     pub disappearing: HashSet<Id>,
+    /// The load-earlier row's own state, per conversation — the row a budget-stopped walk
+    /// arms at the top of the scroll, the same row the web client's `hasEarlier` draws. Kept
+    /// per conversation because the row belongs to the thread's history, not to whichever
+    /// window is showing it.
+    pub earlier: HashMap<Id, EarlierState>,
+}
+
+/// The load-earlier row's state for one conversation.
+#[derive(Default)]
+pub struct EarlierState {
+    /// The cursor the next downward ask starts from: the last page's `from_seq`. Zero until a
+    /// page has arrived, which is the first ask's own word for "from the newest" — a
+    /// budget-stopped walk is short at the tip, so the tip is where the row begins.
+    pub cursor: u64,
+    /// Whether a downward ask is in flight: the row draws its quiet self and a second click
+    /// sends nothing, because the page the first click asked for is the row's whole answer.
+    pub loading: bool,
+    /// Whether older history may remain. Armed by a budget-stopped walk, withdrawn only by
+    /// the row's own downward walk reaching the bottom — never by a later forward walk, which
+    /// cannot know what the row already paged in below it.
+    pub more: bool,
 }
 
 /// The thread search's state for one conversation.
@@ -553,12 +574,58 @@ impl ChatState {
         }
     }
 
-    /// The highest sequence number held for a conversation, for the next sync request.
-    pub fn have_seq(&self, conversation_id: Id) -> u64 {
-        self.messages
+    /// Takes a forward walk's verdict for the thread it paged.
+    ///
+    /// `more` — the walk stopped at its page budget with the server still holding history
+    /// above — arms the load-earlier row. On a thread that already held rows the arm is
+    /// one-way, exactly the web client's rule: the pages the row itself paged in below may
+    /// have already established that older history exists, and a forward walk cannot un-know
+    /// that. A fresh replay's verdict is taken whole, because the walk that armed the row is
+    /// the walk that can withdraw it — and a fresh replay's row starts from the newest, which
+    /// is the cursor's own default.
+    pub fn note_history(&mut self, conversation_id: Id, more: bool) {
+        let held = self
+            .messages
             .get(&conversation_id)
-            .and_then(|thread| thread.iter().map(|m| m.seq).max())
-            .unwrap_or(0)
+            .is_some_and(|thread| !thread.is_empty());
+        let earlier = self.earlier.entry(conversation_id).or_default();
+        // a forward page also settles the row — an earlier ask whose reply was lost to a
+        // refused reconnect would otherwise sit on "loading" forever.
+        earlier.loading = false;
+        if held {
+            earlier.more |= more;
+        } else {
+            earlier.more = more;
+        }
+    }
+
+    /// Merges a load-earlier page and takes the page's own verdict for the row that asked.
+    ///
+    /// The "everything known" test runs *before* the merge, because the merge is what makes
+    /// every id held: a page that changes nothing is the downward walk meeting history the
+    /// thread already has — the natural end of the walk even when the server's `more` still
+    /// says otherwise (a full page may be the last one, and the server cannot know what this
+    /// thread holds).
+    pub fn absorb_earlier(
+        &mut self,
+        conversation_id: Id,
+        from_seq: u64,
+        more: bool,
+        page: Vec<Message>,
+    ) {
+        let all_known = !page.is_empty()
+            && self.messages.get(&conversation_id).is_some_and(|thread| {
+                page.iter().all(|message| {
+                    thread
+                        .iter()
+                        .any(|held| held.message_id == message.message_id)
+                })
+            });
+        self.absorb_history(conversation_id, page);
+        let earlier = self.earlier.entry(conversation_id).or_default();
+        earlier.cursor = from_seq;
+        earlier.loading = false;
+        earlier.more = more && !all_known;
     }
 
     /// Files one observed peer device: an update for a device already known, a new row
@@ -637,9 +704,18 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
     state.selected = Some(conversation_id);
     state.open_seq = state.open_seq.saturating_add(1);
     state.scroll_to_end = true;
+    // The thread's own word for whether it holds anything decides the replay's floor — the
+    // web client's `messagesRef` test, on the desktop's own terms: an empty thread replays
+    // from the beginning, a held one continues from the worker's contiguous watermark. The
+    // max-seq this open used to send is exactly the cursor §152 forbids: it stands above any
+    // hole below it, and a sync asked from it would leave the hole unfilled for good.
+    let held = state
+        .messages
+        .get(&conversation_id)
+        .is_some_and(|thread| !thread.is_empty());
     context.issue(Command::History {
         conversation_id,
-        have_seq: state.have_seq(conversation_id),
+        held,
     });
 
     // Report the read watermark on open rather than on scroll. A read receipt is a disclosure about
@@ -789,6 +865,7 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         .stick_to_bottom(true)
         .show(ui, |ui| {
             ui.add_space(space::MD);
+            load_earlier_row(ui, context, state, conversation_id);
             safety_block(ui, context, state, conversation_id);
             let empty = Vec::new();
             let thread = state.messages.get(&conversation_id).unwrap_or(&empty);
@@ -893,6 +970,48 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
             group_notices_tail(ui, context, state, conversation_id);
             ui.add_space(space::SM);
         });
+}
+
+/// The load-earlier row, at the top of the scroll: the thread's own admission that history
+/// exists above what it holds, and the click that pages the next chunk of it down.
+///
+/// Armed by a budget-stopped catch-up walk ([`ChatState::note_history`]); withdrawn only by
+/// the row's own downward walk — reaching the bottom, or paging a page the thread already
+/// held whole ([`ChatState::absorb_earlier`]). While a page is in flight the row draws its
+/// quiet self and the click sends nothing, because the page it is waiting for is the row's
+/// whole answer.
+fn load_earlier_row(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
+    let Some(earlier) = state.earlier.get_mut(&conversation_id) else {
+        return;
+    };
+    if !earlier.more && !earlier.loading {
+        return;
+    }
+    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        if earlier.loading {
+            let colors = palette(context.theme);
+            ui.label(
+                RichText::new("Loading earlier messages…")
+                    .text_style(crate::theme::named(crate::theme::text_style::CAPTION))
+                    .color(colors.text_muted),
+            );
+        } else {
+            let cursor = earlier.cursor;
+            if widgets::ghost_button(ui, context.theme, "Load earlier").clicked() {
+                earlier.loading = true;
+                context.issue(Command::HistoryEarlier {
+                    conversation_id,
+                    before_seq: cursor,
+                });
+            }
+        }
+    });
+    ui.add_space(space::SM);
 }
 
 /// The transcript save row, under the header, while the header's floppy left it open.
