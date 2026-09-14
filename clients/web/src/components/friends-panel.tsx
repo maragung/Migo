@@ -6,6 +6,7 @@ import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
+import { debounce } from '@/lib/debounce.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMuted } from '@/lib/migo/muted-provider.js';
@@ -36,6 +37,11 @@ const KIND_PENDING_INCOMING: number = RelationshipKind.PendingIncoming;
 const KIND_PENDING_OUTGOING: number = RelationshipKind.PendingOutgoing;
 const KIND_BLOCK: number = RelationshipKind.Block;
 const KIND_MUTE: number = RelationshipKind.Mute;
+/**
+ * How long a friend-event re-read waits for the events to stop arriving — the same quiet window
+ * the search's debounce uses, sized for a burst of echoes rather than a typing rhythm.
+ */
+const FRIEND_EVENT_DEBOUNCE_MS = 300;
 
 /**
  * The Friends tab: the relationship graph, pending requests, suggestions, people search, and the
@@ -106,14 +112,21 @@ export function FriendsPanel({
     void reload();
   }, [reload]);
 
-  // A friend event means the graph changed under us; re-read rather than guess the shape of change.
+  // A friend event means the graph changed under us; re-read rather than guess the shape of
+  // change — debounced, because one acceptance can arrive as several events (the request's
+  // removal and the friendship's arrival, each echoed per device), and the graph read the burst
+  // would have triggered per event answers the same question the last event asks. The last event
+  // wins the read: it is the freshest word on what moved.
   useEffect(() => {
     if (!client) {
       return;
     }
-    return client.social.onFriendEvent(() => {
-      void reload();
-    });
+    const reRead = debounce(() => void reload(), FRIEND_EVENT_DEBOUNCE_MS);
+    const off = client.social.onFriendEvent(reRead);
+    return () => {
+      off();
+      reRead.cancel();
+    };
   }, [client, reload]);
 
   // The Message action: an existing direct conversation opens; otherwise one is created. The

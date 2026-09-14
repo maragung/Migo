@@ -21,6 +21,7 @@ import type { ReactNode } from 'react';
 import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, RoomSummary } from '@migo/sdk';
 
+import { debounce } from '@/lib/debounce.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMePresence } from '@/lib/migo/use-me-presence.js';
@@ -41,6 +42,9 @@ import type { WinKind } from './window-types.js';
 
 /** The relationship kind as a plain number, so the filter compares number to number. */
 const KIND_FRIEND: number = RelationshipKind.Friend;
+
+/** How long a friend-event re-read waits for the events to stop arriving (see the debounce). */
+const FRIEND_EVENT_DEBOUNCE_MS = 300;
 
 /** How many rooms one directory read asks for. */
 const ROOMS_PAGE = 30;
@@ -106,13 +110,19 @@ export function MobileHome({
     void reloadFriends();
   }, [reloadFriends]);
 
+  // The friend events re-read the graph debounced: one acceptance can arrive as several events
+  // (each echoed per device), and a read per event would ask the same question the last event
+  // already answers.
   useEffect(() => {
     if (!client) {
       return;
     }
-    return client.social.onFriendEvent(() => {
-      void reloadFriends();
-    });
+    const reRead = debounce(() => void reloadFriends(), FRIEND_EVENT_DEBOUNCE_MS);
+    const off = client.social.onFriendEvent(reRead);
+    return () => {
+      off();
+      reRead.cancel();
+    };
   }, [client, reloadFriends]);
 
   // The public directory, read once per visit; the room records the shell already watches overlay
