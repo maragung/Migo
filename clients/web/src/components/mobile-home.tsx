@@ -297,15 +297,16 @@ export function MobileHome({
           <span className="mhome-view-title">{viewTitle}</span>
           {nav === 'friends' ? (
             <>
-              <button
-                type="button"
-                className="tbtn tbtn-sm"
-                onClick={() => onOpenWindow('search')}
-                aria-label="Search people"
-                title="Search people"
-              >
-                <Icon name="search" size={17} />
-              </button>
+              {/* The friends search lives here, in the header, left of the new-conversation
+                  control — the field itself, not an icon that opens it somewhere else. */}
+              <input
+                type="search"
+                className="mhome-viewhead-search"
+                placeholder="Search friends..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                aria-label="Search friends"
+              />
               <button
                 type="button"
                 className="tbtn tbtn-sm"
@@ -337,26 +338,6 @@ export function MobileHome({
           {/* ===== FRIENDS ===== */}
           {nav === 'friends' ? (
             <>
-              <div className="mhome-search">
-                <Icon name="search" size={15} className="mhome-search-icon" />
-                <input
-                  className="mhome-search-input"
-                  placeholder="Search friends..."
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  aria-label="Search friends"
-                />
-                {query.length > 0 ? (
-                  <button
-                    type="button"
-                    className="mhome-search-clear"
-                    onClick={() => setQuery('')}
-                    aria-label="Clear search"
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                ) : null}
-              </div>
               {friendsError !== null ? <div className="list-hint">{friendsError}</div> : null}
               {visibleFriends === null ? (
                 <div className="mhome-loading">
@@ -404,12 +385,9 @@ export function MobileHome({
                   ) : null}
                 </>
               )}
-            </>
-          ) : null}
 
-          {/* ===== ROOMS ===== */}
-          {nav === 'rooms' ? (
-            <>
+              {/* The group chats are a Friends matter — the people are here — so the groups list
+                  and its start control live in this tab, leaving Rooms to rooms. */}
               <div className="list-section-head list-section-head-row">
                 <span>Your groups ({groups.length})</span>
                 <button
@@ -447,7 +425,12 @@ export function MobileHome({
                   No groups yet — tap <b>New group</b> to start one with your friends.
                 </div>
               ) : null}
+            </>
+          ) : null}
 
+          {/* ===== ROOMS ===== */}
+          {nav === 'rooms' ? (
+            <>
               <div className="list-section-head">Public rooms ({directory?.length ?? 0})</div>
               {directory === null ? (
                 <div className="mhome-loading">

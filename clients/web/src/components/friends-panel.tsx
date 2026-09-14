@@ -181,11 +181,19 @@ export function FriendsPanel({
   async function onSearch(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const text = query.trim();
-    if (!client || text.length === 0) {
+    if (!client) {
+      return;
+    }
+    // An emptied field is a return to the list, not a search for nothing: the header's field is
+    // always present, so clearing it is how a person says "show me my friends again".
+    if (text.length === 0) {
+      setResults(null);
+      setView('friends');
       return;
     }
     try {
       setResults(await client.social.search(text, 20));
+      setView('search');
     } catch (cause) {
       setError(friendlyError(cause));
     }
@@ -254,21 +262,27 @@ export function FriendsPanel({
   return (
     <div className="panel panel-flush">
       {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
-          the right-aligned icons switch between them (the search sits left of Requests, and
-          New chat rides at the group's edge), and each view icon carries its count when there
-          is something to count, so a pending request is visible without visiting it. */}
+          the search field sits in the header itself (left of the new-conversation control, not
+          an icon that opens a field somewhere below), the right-aligned icons switch between
+          the views, and each view icon carries its count when there is something to count, so
+          a pending request is visible without visiting it. */}
       <div className="panel-head">
         <h1 className="panel-title">Friends</h1>
         <div className="panel-head-icons" role="group" aria-label="Friend lists">
-          <button
-            type="button"
-            className={`panel-head-icon${view === 'search' ? ' chosen' : ''}`}
-            aria-pressed={view === 'search'}
-            title="Search"
-            onClick={() => setView(view === 'search' ? 'friends' : 'search')}
+          <form
+            className="panel-head-search"
+            role="search"
+            onSubmit={(event) => void onSearch(event)}
           >
-            <Icon name="search" size={16} />
-          </button>
+            <input
+              type="search"
+              className="input"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by username"
+              aria-label="Search people by username"
+            />
+          </form>
           <button
             type="button"
             className={`panel-head-icon${view === 'requests' ? ' chosen' : ''}`}
@@ -360,23 +374,8 @@ export function FriendsPanel({
         </>
       ) : view === 'search' ? (
         <>
-          {/* The search the header's search icon opens: the field and its button live here,
-              one view among the panel's lists, not a permanent fixture above them. */}
-          <form className="panel-search" role="search" onSubmit={(event) => void onSearch(event)}>
-            <input
-              type="search"
-              className="input"
-              value={query}
-              // The icon was just tapped to get here, so the field is where the hands already are.
-              autoFocus
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search by username"
-              aria-label="Search people by username"
-            />
-            <button type="submit" className="btn">
-              Search
-            </button>
-          </form>
+          {/* The results of the header's search field: the field itself lives in the panel
+              head now, so this view is what it finds, not where it lives. */}
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
               <h2 className="panel-heading">Search results</h2>
