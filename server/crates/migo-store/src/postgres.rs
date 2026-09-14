@@ -2736,7 +2736,10 @@ impl MessagingStore for PostgresStore {
         // tombstone exactly as the origin's own delete path takes it.
         if let Some(deleted_at) = replica.deleted_at {
             let edited_at = match (row.edited_at, replica.edited_at.map(stamp_of)) {
-                (Some(held), Some(event)) => Some(held.max(event)),
+                // Spelled through Ord because sea_orm's ExprTrait is also in scope
+                // here and names a `max` of its own; the plain method call would
+                // be ambiguous between the two.
+                (Some(held), Some(event)) => Some(std::cmp::Ord::max(held, event)),
                 (held, event) => held.or(event),
             };
             let applied = entity::message::Entity::update_many()
