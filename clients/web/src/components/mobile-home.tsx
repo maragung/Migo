@@ -317,27 +317,18 @@ export function MobileHome({
               </button>
             </>
           ) : null}
+          {/* The Rooms tab is rooms-only: a group chat is started from the Friends tab, where the
+              people who would be in it already are. */}
           {nav === 'rooms' ? (
-            <>
-              <button
-                type="button"
-                className="tbtn tbtn-sm"
-                onClick={() => setGroupDialogOpen(true)}
-                aria-label="New group chat"
-                title="New group chat"
-              >
-                <Icon name="user-plus" size={17} />
-              </button>
-              <button
-                type="button"
-                className="tbtn tbtn-sm"
-                onClick={() => onOpenWindow('search')}
-                aria-label="Search rooms"
-                title="Search rooms"
-              >
-                <Icon name="rooms" size={17} />
-              </button>
-            </>
+            <button
+              type="button"
+              className="tbtn tbtn-sm"
+              onClick={() => onOpenWindow('search')}
+              aria-label="Search rooms"
+              title="Search rooms"
+            >
+              <Icon name="rooms" size={17} />
+            </button>
           ) : null}
         </div>
 
