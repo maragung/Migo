@@ -67,7 +67,7 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -623,6 +623,14 @@ pub(crate) struct IngestRouter {
     conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
     presence: Option<Arc<crate::presence_relay::PresenceRelay>>,
     replication: Option<Arc<crate::replication::ReplicationRelay>>,
+    /// The room-presence tally (section 170): the same member events this path publishes into
+    /// the hub are the only window a node has onto who is online on the nodes a frame came
+    /// from, so the ingest half hands each one to the tally before it finishes. Late-bound
+    /// rather than a constructor argument because the tally is assembled beside the
+    /// dispatcher, after this transport — the same cycle the tally's own gateway handle
+    /// exists to break — and an unset cell leaves the tally blind to remote members, which
+    /// is the pre-federation behaviour rather than a wrong answer.
+    room_presence: OnceLock<Arc<crate::room_presence::RoomPresence>>,
     /// The local rows, for the one ingest question the wire event cannot answer: which
     /// conversation speaks for a room whose member just left. A removal that arrives over
     /// the mesh must take the removed account's topics away on *this* node too — the
@@ -653,6 +661,7 @@ impl IngestRouter {
             conversations,
             presence,
             replication,
+            room_presence: OnceLock::new(),
             store,
             meters: MeshMeters::new(registry),
             clock,
@@ -786,15 +795,7 @@ impl IngestRouter {
             Opcode::FedCallRelay => {
                 let relay: migo_protocol::FedEvent =
                     from_frame(&inner).map_err(fault::from_wire)?;
-                tracing::info!(
-                    from = %relay.from,
-                    kind = %relay.kind,
-                    bytes = relay.payload.len(),
-                    "call relay ingested from the mesh"
-                );
-                self.note(inner.header.opcode, inner.payload.len());
-                self.meters.ingested();
-                Ok(())
+                self.route_call_relay(peer, relay).await
             }
             Opcode::FedRoomSubscribe => {
                 let routing: migo_protocol::FedRouting =
@@ -1017,6 +1018,22 @@ impl IngestRouter {
         // revocation only reached the sessions it holds).
         if let Some(account_id) = removed {
             self.revoke_room_member(room_id, account_id).await;
+        }
+        // The tally's half: a member event that crossed the mesh is the only word this node
+        // gets about members whose sessions live on the sending side (section 170). A join or
+        // a reconnect puts them in the room's online count as served here; a disconnect is
+        // either recorded as owed — the sender owns the grace — or repaired on the spot when
+        // the account still holds sessions here, because then the member never went dark and
+        // the origin's announcement was a frame for a change that did not happen (section
+        // 156). The decode is the same one the removal gate above already proved valid.
+        if inner_opcode == Opcode::RoomMemberEvent {
+            let event: migo_protocol::RoomMemberEvent =
+                from_frame(&inner).map_err(fault::from_wire)?;
+            if let Some(room_presence) = self.room_presence.get() {
+                room_presence
+                    .note_remote_member(room_id, event.user_id, event.change, now)
+                    .await;
+            }
         }
         // The home node's second obligation: the event came from a peer that
         // already delivered it locally, so the other watching nodes are the
@@ -1251,12 +1268,24 @@ impl IngestRouter {
         Ok(applied)
     }
     ///
-    /// The inner payload is itself an encoded frame — the presence event as the origin
+    /// The inner payload is itself an encoded frame — the event as the origin
     /// node's session would have pushed it — and the subject's user topic is the one place
     /// it belongs, named by the envelope's `user_id` the same way a room lifecycle event
     /// is placed by its envelope's room id: the peer is authenticated and the envelope is
     /// the fact the watcher registered, while the frame's own `user_id` is data the
     /// publish does not need to re-derive a topic from.
+    ///
+    /// Which frames may ride the envelope is an allow-list, not a free choice:
+    /// a user topic's audience is the subject's own devices and their watchers,
+    /// and only the frames the origin's own publish path puts on that topic
+    /// belong there. Presence started the tier; the bell's notification, the
+    /// social graph's friend hint, and a sealed group-key distribution ride it
+    /// too, each coalesced exactly as the origin's local publish coalesced it
+    /// (section 154) — presence and the bell keyed by the subject, the hint
+    /// and the key distribution delivered whole, because a graph move and a
+    /// sealed envelope are facts, not states. Anything else sealed inside the
+    /// envelope is refused: publishing it would deliver a frame the local
+    /// publish path would never have sent there.
     ///
     /// The coalescing mirrors the origin node's publish path exactly (section 154): keyed
     /// by the subject, so a backed-up consumer keeps only the latest state — which also
@@ -1273,14 +1302,107 @@ impl IngestRouter {
         let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
         let inner_opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known user event"))?;
-        if inner_opcode != Opcode::PresenceEvent {
-            // The envelope names a presence stream; anything else sealed inside it is not
-            // this tier's to place, and publishing it to a user topic would deliver a
-            // frame the local publish path would never have sent there.
+        let coalesce = match inner_opcode {
+            // The two per-subject state streams: presence, and the bell's
+            // notification, whose key is the same hash the gateway's
+            // out-of-band ring derives — so an in-band and an out-of-band
+            // copy of one recipient's burst collapse into one stream for a
+            // subscriber watching both halves.
+            Opcode::PresenceEvent | Opcode::NotificationEvent => {
+                Some(crate::dispatch::coalesce_key_of(&user_id))
+            }
+            // Facts, delivered whole: a graph move names one edge, and a
+            // sealed key distribution names one device's envelope — collapsing
+            // either would lose an arrival, not a stale state.
+            Opcode::FriendEvent | Opcode::GroupKeyDistribute => None,
+            _ => {
+                return Err(fault::validation(
+                    "opcode",
+                    "a user event envelope carries a user-topic event",
+                ));
+            }
+        };
+        let now = self.clock.now();
+        if let Some(gateway) = &self.gateway {
+            gateway.broadcast_frame_to_topic(
+                &user_topic(user_id),
+                inner_opcode,
+                &payload,
+                coalesce,
+                now,
+            );
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            subject = %user_id.to_text(),
+            opcode = inner_opcode.name(),
+            "user-topic event ingested from the mesh"
+        );
+
+        self.note(inner.header.opcode, inner.payload.len());
+        self.meters.ingested();
+        Ok(())
+    }
+
+    /// Publishes a forwarded call event into the local hub.
+    ///
+    /// The call twin of the user-topic path above, arriving in the envelope the
+    /// registry allocated for exactly this traffic (section 169): the outer
+    /// `FED_CALL_RELAY` carries a `FedEvent` whose payload is a `FedUserEvent`
+    /// — the same envelope shape the user tier rides, so the receiving node
+    /// learns whose topic the frame places itself on — and the envelope's own
+    /// payload is the encoded call frame, handed to the hub exactly as the
+    /// origin node's request path would have pushed it (section 145).
+    ///
+    /// The inner opcode is held to a call allow-list rather than widening the
+    /// user-topic tier's to cover it: the registry gave call signaling its own
+    /// opcode so the two streams stay separately countable, and an envelope
+    /// that arrives carrying anything but a call frame is a wire violation to
+    /// refuse, not a frame to place on somebody's topic. `CALL_RENEGOTIATE` is
+    /// absent on purpose — the origin's relay path projects a renegotiation to
+    /// `CALL_SDP` before publishing, so the name never crosses.
+    ///
+    /// No coalescing key, mirroring the origin's request path: a ring is
+    /// Critical, a state event is authoritative, and the relays are sealed
+    /// facts — none of them may collapse.
+    ///
+    /// There is no onward half, for the same reason the user-topic path has
+    /// none: a call event is published by the node whose session caused it,
+    /// and that origin reaches every watcher directly because the user-topic
+    /// subscribe is a broadcast — every peer holds the table.
+    async fn route_call_relay(&self, peer: Id, relay: migo_protocol::FedEvent) -> Result<()> {
+        let migo_protocol::FedEvent {
+            from: _,
+            kind: _,
+            payload,
+        } = relay;
+        let envelope_frame = Frame::decode(Bytes::from(payload)).map_err(fault::from_wire)?;
+        if Opcode::from_wire(envelope_frame.header.opcode) != Some(Opcode::FedUserEvent) {
             return Err(fault::validation(
                 "opcode",
-                "a user event envelope carries a presence event",
+                "a call relay envelope carries a user-topic envelope",
             ));
+        }
+        let envelope: migo_protocol::FedUserEvent =
+            from_frame(&envelope_frame).map_err(fault::from_wire)?;
+        let migo_protocol::FedUserEvent { user_id, payload } = envelope;
+        let payload = Bytes::from(payload);
+        let inner = Frame::decode(payload.clone()).map_err(fault::from_wire)?;
+        let inner_opcode = Opcode::from_wire(inner.header.opcode)
+            .ok_or_else(|| fault::validation("opcode", "not a known call event"))?;
+        match inner_opcode {
+            Opcode::CallInviteEvent
+            | Opcode::CallStateEvent
+            | Opcode::CallSdp
+            | Opcode::CallIce
+            | Opcode::CallKeyUpdate
+            | Opcode::CallSfuEvent => {}
+            _ => {
+                return Err(fault::validation(
+                    "opcode",
+                    "a call relay envelope carries a call event",
+                ));
+            }
         }
         let now = self.clock.now();
         if let Some(gateway) = &self.gateway {
@@ -1288,16 +1410,16 @@ impl IngestRouter {
                 &user_topic(user_id),
                 inner_opcode,
                 &payload,
-                Some(crate::dispatch::coalesce_key_of(&user_id)),
+                None,
                 now,
             );
         }
         tracing::debug!(
             from = %peer.to_text(),
             subject = %user_id.to_text(),
-            "user-topic presence event ingested from the mesh"
+            opcode = inner_opcode.name(),
+            "call event ingested from the mesh"
         );
-
         self.note(inner.header.opcode, inner.payload.len());
         self.meters.ingested();
         Ok(())
@@ -1841,6 +1963,16 @@ impl MeshTransport {
             clock,
             budget,
         }
+    }
+
+    /// Hands the ingest path the room-presence tally.
+    ///
+    /// Late-bound for the same reason the tally's own gateway handle is: the transport is
+    /// built before the dispatcher, and the tally is glue the composition root assembles
+    /// beside it. Until the cell is filled the ingest path leaves the tally unchanged,
+    /// which is the pre-federation behaviour rather than a wrong one.
+    pub fn set_room_presence(&self, presence: Arc<crate::room_presence::RoomPresence>) {
+        let _ = self.router.room_presence.set(presence);
     }
 
     /// Binds the mesh listener and spawns its accept loop, returning the bound address —
@@ -2792,6 +2924,98 @@ mod tests {
             transport_a.ingested(),
             vec![(Opcode::PresenceEvent.to_wire(), expected)],
             "A ingested the presence event, sealed as a local subscriber would have seen it"
+        );
+    }
+
+    /// The call twin of the wire test above: a call event published by the node whose
+    /// session caused it crosses as a `FED_CALL_RELAY` and is ingested as the call frame
+    /// it carries — placed on the audience's user topic the way the origin's own request
+    /// path would have pushed it (section 145), sealed and unopened.
+    #[tokio::test]
+    async fn a_call_relay_crosses_the_wire_and_is_ingested_as_a_call_event() {
+        let (mesh_a, mesh_b, a_id, _b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let callee = Id::from(0x7777);
+        // B is the node the caller's session lives on, so B is the one whose forward half
+        // fires; A is the node holding the callee's socket and owing them the ring.
+        let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
+        let transport_a = Arc::new(MeshTransport::new(
+            mesh_a.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        let watch = migo_protocol::FedUserWatch {
+            epoch: mesh_b.epoch(),
+            user_id: callee,
+        };
+        relay_b
+            .register_watcher(a_id, &watch)
+            .expect("a current epoch admits the watch");
+
+        let event = migo_protocol::CallInviteEvent {
+            call_id: Id::from(0x0C0C),
+            conversation_id: Id::from(0x2222),
+            caller_id: Id::from(0x0707),
+            caller_device: Id::from(0x0708),
+            media_kind: 0,
+            expires_at: Timestamp::from_millis(NOW + 30_000),
+            sealed_offer: vec![0x11; 48],
+        };
+        relay_b
+            .forward_call(callee, Opcode::CallInviteEvent, &event, now)
+            .await
+            .expect("the call event forwards");
+
+        let due = mesh_b.due(now).await.expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            1,
+            "one copy, for the one node that holds the callee's sessions"
+        );
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
+        let server_mesh = mesh_a;
+        let server_router = transport_a.router_ref().clone();
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_b,
+            transport_a.router_ref(),
+            &peer_view,
+            &due,
+            now,
+            &client_budget,
+        )
+        .await
+        .expect("the relay is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 1, "the watermark covered the relay");
+
+        let expected = framed(Opcode::CallInviteEvent, 0, &event)
+            .expect("the call event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_a.ingested(),
+            vec![(Opcode::CallInviteEvent.to_wire(), expected)],
+            "A ingested the ring, sealed as a local subscriber would have seen it"
         );
     }
 

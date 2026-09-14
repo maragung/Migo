@@ -421,6 +421,12 @@ pub struct App {
     /// tier's watch table lives (section 170), and the relay has no listener of its own to
     /// name an address by.
     pub presence_relay: Arc<crate::presence_relay::PresenceRelay>,
+    /// The room half of the mesh: which rooms this node's sessions watch and — when this node
+    /// homes a room — the table of every peer that watches it (section 170). Held for the same
+    /// reason `presence_relay` is: a cross-node test needs the one place the room tier's watch
+    /// table lives to wait out the mesh hop deterministically, and the relay has no listener
+    /// of its own to name an address by.
+    pub room_relay: Arc<crate::room_relay::RoomRelay>,
     /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
     pub calls: SharedCallkeeper,
 }
@@ -573,19 +579,38 @@ impl App {
         // during that startup window is quietly dropped: the row is still written and
         // the push still queued, and no socket exists yet to have missed anything.
         let bell_gateway = Arc::new(GatewayHandle::new());
-        let bell: migo_notify::SharedBell =
-            Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway)));
-        let notify = migo_notify::open(
-            store.clone(),
-            cache.clone(),
-            limiter.clone(),
-            sender,
-            bell,
-            Box::new(OsRandom),
-            &node_secret,
-            migo_notify::NotifyConfig::default(),
-            &registry,
-        );
+        // The bell also carries the notification frame to the recipient's
+        // watchers on other nodes over the user-topic tier (section 170), so a
+        // bell that rings on the home node rings on every node the member has
+        // a session on. The relay is another one-slot cell: the notify service
+        // opens before the mesh does, so the cell is bound here, empty, and
+        // filled once the presence relay exists — before the listener opens.
+        let bell_relay = Arc::new(crate::presence_relay::RelayHandle::new());
+        let bell: migo_notify::SharedBell = Arc::new(crate::ports::FederatedBell::new(
+            Arc::new(crate::ports::GatewayBell::new(Arc::clone(&bell_gateway))),
+            Arc::clone(&bell_relay),
+        ));
+        // The row-replication tier's handle, late-bound for the same reason the
+        // gateway handle below is: federation opens a layer after the services,
+        // and every pull-on-demand half must not exist before the mesh it pulls
+        // over does. The composition root fills it once the relay is built —
+        // both the messaging gate's and the notifier wrapper's, because both
+        // write rows for accounts whose home may be another node.
+        let replication_handle = Arc::new(crate::replication::ReplicationHandle::new());
+        let notify: migo_notify::SharedNotifier = Arc::new(crate::ports::FederatedNotifier::new(
+            migo_notify::open(
+                store.clone(),
+                cache.clone(),
+                limiter.clone(),
+                sender,
+                bell,
+                Box::new(OsRandom),
+                &node_secret,
+                migo_notify::NotifyConfig::default(),
+                &registry,
+            ),
+            Arc::clone(&replication_handle),
+        ));
 
         // The economy's announcements become notifications: a gift that arrives while
         // its recipient is offline is waiting in their inbox, not lost, and a recipient
@@ -612,13 +637,6 @@ impl App {
         // price before a founder's removal lands — the same layering rule,
         // joined here because neither messaging nor economy may depend on the
         // other. The economy is built above messaging for exactly this seam.
-        //
-        // The gate also holds the row-replication tier's handle, late-bound
-        // for the same reason the gateway handle below is: federation opens a
-        // layer after messaging, and the gate's pull-on-demand half must not
-        // exist before the mesh it pulls over does. The composition root fills
-        // it once the relay is built.
-        let replication_handle = Arc::new(crate::replication::ReplicationHandle::new());
         let messaging = migo_messaging::open(
             store.clone(),
             cache.clone(),
@@ -805,6 +823,23 @@ impl App {
             store.clone(),
         ));
 
+        // The room-presence tally: which accounts hold live sessions, and through it each
+        // room's online count as this node serves it. Built beside the room relay because
+        // its publisher is the federated one — a disconnect or a reconnect this node
+        // announces owes every watching node a copy — and passed to both of its consumers:
+        // the dispatcher, whose connection edges drive it, and the mesh transport, whose
+        // ingest path is the only window onto members whose sessions live on other nodes.
+        let room_presence = Arc::new(crate::room_presence::RoomPresence::new(
+            store.clone(),
+            rooms.clone(),
+            Arc::new(crate::room_relay::FederatedPublisher::new(
+                Arc::new(crate::room_presence::GatewayPublisher::new(Arc::clone(
+                    &gateway_handle,
+                ))),
+                Arc::clone(&room_relay),
+            )),
+        ));
+
         // The user-topic tier of the same fan-out (section 170): the relay the
         // presence publish paths forward through and the mesh transport's
         // ingest path registers watchers into. It holds no store and no
@@ -815,6 +850,11 @@ impl App {
         let presence_relay = Arc::new(crate::presence_relay::PresenceRelay::new(
             federation.clone(),
         ));
+        // The bell's cell can be filled now, ahead of the listener: any ring
+        // that lands before this point stayed local by design (the row and
+        // the push are the notifier's to finish), and every ring after it
+        // carries the frame to the recipient's watching nodes as well.
+        bell_relay.set(Arc::clone(&presence_relay));
 
         // The row-replication tier (section 170's account-to-node routing map):
         // the ask half the fail-closed reads above trigger, and the answer half
@@ -854,6 +894,7 @@ impl App {
             federation.clone(),
             bots.clone(),
             calls.clone(),
+            room_presence.clone(),
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),
             Arc::clone(&conversation_relay),
@@ -969,6 +1010,10 @@ impl App {
             clock.clone(),
             config.federation.handshake_timeout_ms,
         ));
+        // The ingest path's tally half, bound before any listener or runner can run: a
+        // member event that crosses from here on must reach the room-presence bookkeeping
+        // the dispatcher's connection edges also drive.
+        mesh_transport.set_room_presence(Arc::clone(&room_presence));
         let mut mesh_bind: Option<SocketAddr> = None;
         if let Some(bind) = config.node.mesh_bind.as_deref() {
             let bound = mesh_transport
@@ -1045,6 +1090,7 @@ impl App {
                 config.federation.reanchor_interval_ms,
             ),
             presence_relay,
+            room_relay,
             calls,
         })
     }

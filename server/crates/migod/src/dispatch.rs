@@ -98,8 +98,8 @@ use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial
 use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
 use crate::replication::ReplicationRelay;
-use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
-use crate::room_relay::{FederatedPublisher, RoomRelay};
+use crate::room_presence::{GatewayHandle, RoomPresence};
+use crate::room_relay::RoomRelay;
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -150,9 +150,10 @@ pub struct AppDispatcher {
     bots: SharedBots,
     calls: SharedCallkeeper,
     /// The per-account session tally behind room online counts and the reconnect grace. Built
-    /// here rather than passed in, because it is glue this dispatcher owns and nothing else
-    /// holds — it reads the same store and rooms handle the dispatcher already has, and it
-    /// publishes through the same late-bound gateway.
+    /// by the composition root rather than here, because the mesh transport's ingest path
+    /// shares the same tally — a member event that crossed the mesh is the only word this
+    /// node gets about who is online on the nodes it came from — and neither the dispatcher
+    /// nor the transport may own the other.
     room_presence: Arc<RoomPresence>,
     /// The late-bound gateway, filled by the composition root once the gateway is open. Used to
     /// publish presence and room lifecycle events out of band — with no client request in hand —
@@ -207,25 +208,13 @@ impl AppDispatcher {
         federation: SharedMesh,
         bots: SharedBots,
         calls: SharedCallkeeper,
+        room_presence: Arc<RoomPresence>,
         gateway: Arc<GatewayHandle>,
         room_relay: Arc<RoomRelay>,
         conversation_relay: Arc<ConversationRelay>,
         presence_relay: Arc<PresenceRelay>,
         replication: Arc<ReplicationRelay>,
     ) -> Self {
-        // The room-presence component reads the same store and rooms handle and publishes through
-        // the same gateway handle, so it is assembled from what this call already holds rather
-        // than threaded through as one more argument. Its publisher is wrapped in the
-        // federated one, so an out-of-band room event owes its federated copy — the tiered
-        // fanout of section 170 — without the room-presence component knowing a mesh exists.
-        let room_presence = Arc::new(RoomPresence::new(
-            migo_store::SharedStore::clone(&store),
-            SharedRooms::clone(&rooms),
-            Arc::new(FederatedPublisher::new(
-                Arc::new(GatewayPublisher::new(Arc::clone(&gateway))),
-                Arc::clone(&room_relay),
-            )),
-        ));
         Self {
             store,
             messaging,
@@ -931,6 +920,31 @@ impl Dispatcher for AppDispatcher {
                         "cannot publish a sealed key distribution to its member"
                     );
                 }
+                // The federated half of the same distribution: the target
+                // member's devices may hold their sessions on another node,
+                // and the sealed envelope reaches their user topic there the
+                // same way it reached this node's hub — through the user-topic
+                // tier (section 170), sealed exactly as the local publish
+                // sealed it, because the sender already holds an
+                // acknowledgement that promises the distribution was taken. A
+                // failure to enqueue is logged rather than failed, for the
+                // same reason the local publish above is.
+                if let Err(error) = self
+                    .presence_relay
+                    .forward_frame(
+                        request.to_account,
+                        Opcode::GroupKeyDistribute,
+                        &request,
+                        now,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        target = %request.to_account.to_text(),
+                        "cannot enqueue the federated half of a sealed key distribution"
+                    );
+                }
                 Ok(())
             }
             Opcode::ConversationUpdate => {
@@ -1224,12 +1238,28 @@ impl Dispatcher for AppDispatcher {
 
             // --- social ---
             Opcode::FriendRequest => {
-                social::handle_friend_request(context, frame, &self.social, &self.notify).await
+                social::handle_friend_request(
+                    context,
+                    frame,
+                    &self.social,
+                    &self.presence_relay,
+                    &self.notify,
+                )
+                .await
             }
             Opcode::FriendRespond => {
-                social::handle_friend_respond(context, frame, &self.social, &self.notify).await
+                social::handle_friend_respond(
+                    context,
+                    frame,
+                    &self.social,
+                    &self.presence_relay,
+                    &self.notify,
+                )
+                .await
             }
-            Opcode::BlockSet => social::handle_block_set(context, frame, &self.social).await,
+            Opcode::BlockSet => {
+                social::handle_block_set(context, frame, &self.social, &self.presence_relay).await
+            }
             Opcode::MuteSet => social::handle_mute_set(context, frame, &self.social).await,
             Opcode::RelationshipList => {
                 social::handle_relationship_list(context, frame, &self.social).await
@@ -1326,11 +1356,24 @@ impl Dispatcher for AppDispatcher {
             // event to the other party's user topic; the service owns every
             // rule and never sends a frame itself.
             Opcode::CallInvite => {
-                calls::handle_invite(context, frame, &self.calls, &self.notify).await
+                calls::handle_invite(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.notify,
+                    &self.presence_relay,
+                )
+                .await
             }
-            Opcode::CallAnswer => calls::handle_answer(context, frame, &self.calls).await,
-            Opcode::CallDecline => calls::handle_decline(context, frame, &self.calls).await,
-            Opcode::CallCancel => calls::handle_cancel(context, frame, &self.calls).await,
+            Opcode::CallAnswer => {
+                calls::handle_answer(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallDecline => {
+                calls::handle_decline(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallCancel => {
+                calls::handle_cancel(context, frame, &self.calls, &self.presence_relay).await
+            }
             Opcode::CallEnd => {
                 // The id may name a 1:1 call or a group call; the group
                 // handler answers the frame when it does, and the 1:1 handler
@@ -1338,20 +1381,32 @@ impl Dispatcher for AppDispatcher {
                 // handoff, not an error the caller sees.
                 match calls::handle_group_end(context, frame, &self.calls).await {
                     Ok(true) => Ok(()),
-                    Ok(false) => calls::handle_end(context, frame, &self.calls).await,
+                    Ok(false) => {
+                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
+                    }
                     Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {
-                        calls::handle_end(context, frame, &self.calls).await
+                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
                     }
                     Err(error) => Err(error),
                 }
             }
-            Opcode::CallSdp => calls::handle_sdp(context, frame, &self.calls).await,
-            Opcode::CallIce => calls::handle_ice(context, frame, &self.calls).await,
-            Opcode::CallRenegotiate => calls::handle_renegotiate(context, frame, &self.calls).await,
-            Opcode::CallKeyUpdate => calls::handle_key_update(context, frame, &self.calls).await,
+            Opcode::CallSdp => {
+                calls::handle_sdp(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallIce => {
+                calls::handle_ice(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallRenegotiate => {
+                calls::handle_renegotiate(context, frame, &self.calls, &self.presence_relay).await
+            }
+            Opcode::CallKeyUpdate => {
+                calls::handle_key_update(context, frame, &self.calls, &self.presence_relay).await
+            }
             Opcode::CallStats => calls::handle_stats(context, frame).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
-            Opcode::CallSfuJoin => calls::handle_sfu_join(context, frame, &self.calls).await,
+            Opcode::CallSfuJoin => {
+                calls::handle_sfu_join(context, frame, &self.calls, &self.presence_relay).await
+            }
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),
@@ -1407,11 +1462,13 @@ impl Dispatcher for AppDispatcher {
     /// Two call facts ride the same edge. A group seat held by the departing device is stamped
     /// gone — the seat sweep retires it once the grace window passes without a re-join, so a
     /// roster never renders a participant whose session died (audit area 6, section 166). And an
-    /// account whose *last* session went down mid-call cannot end the call itself — nothing is
-    /// running to send the end — so the node ends its answered calls as `Network` and tells the
-    /// survivor now, rather than leaving them to a client-side media timeout (section 180). Both
-    /// are best-effort, logged rather than failed, for the same reason the presence fan-out is:
-    /// the socket is already gone, and there is no request to fail.
+    /// account whose last session *anywhere* went down mid-call cannot end the call itself —
+    /// nothing is running to send the end — so the node ends its answered calls as `Network` and
+    /// tells the survivor now, rather than leaving them to a client-side media timeout (section
+    /// 180). "Anywhere" is the tally's to answer: a member whose last socket *here* dropped but
+    /// who is online on another node (section 170) is reachable still, and their calls are not
+    /// this node's to end. Both are best-effort, logged rather than failed, for the same reason
+    /// the presence fan-out is: the socket is already gone, and there is no request to fail.
     async fn session_ended(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
         let account_id = identity.account_id();
         let caller =
@@ -1427,14 +1484,15 @@ impl Dispatcher for AppDispatcher {
         {
             tracing::warn!(%error, "cannot tell the call service a group seat's session ended");
         }
-        // The last socket of the account: the calls above are calls nobody on
-        // this account can speak for anymore. The tally is read after the
-        // decrement above, and a session that comes up a moment later is the
-        // reconnect this cannot see — the call it lost is a call its client
-        // must re-dial, which is what a network death already meant.
-        if self.room_presence.session_count(account_id) == 0 {
+        // The last socket of the account, here or anywhere: the calls above are calls
+        // nobody on this account can speak for anymore. The tally is read after the
+        // decrement above — and a session that comes up a moment later is the reconnect
+        // this cannot see, exactly as one that is already up on another node is. The call
+        // it lost is a call its client must re-dial, which is what a network death already
+        // meant.
+        if !self.room_presence.reachable(account_id) {
             match self.calls.end_disconnected(account_id, now).await {
-                Ok(retired) => self.publish_network_ends(account_id, &retired, now),
+                Ok(retired) => self.publish_network_ends(account_id, &retired, now).await,
                 Err(error) => {
                     tracing::warn!(%error, "cannot end the calls of a departing last session")
                 }
@@ -1451,7 +1509,17 @@ impl AppDispatcher {
     /// cares — the survivor — is reached on their user topic. The departed account's own
     /// topic gets nothing; it holds no session to receive it, and its next client learns
     /// the call's state from the row the end wrote.
-    fn publish_network_ends(&self, departed: Id, retired: &[migo_calls::Call], now: Timestamp) {
+    ///
+    /// The survivor's sessions may sit on another node, so the federated half rides the
+    /// same publish (section 170's user-topic watch table, in the `FED_CALL_RELAY`
+    /// envelope) — warn-not-fail for the same reason the local half is: the socket is
+    /// already gone, and there is no request to retry into a second end.
+    async fn publish_network_ends(
+        &self,
+        departed: Id,
+        retired: &[migo_calls::Call],
+        now: Timestamp,
+    ) {
         let Some(gateway) = self.gateway.get() else {
             return;
         };
@@ -1469,6 +1537,16 @@ impl AppDispatcher {
                 &event,
                 now,
             );
+            if let Err(error) = self
+                .presence_relay
+                .forward_call(other, Opcode::CallStateEvent, &event, now)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "cannot enqueue the federated half of a network-ended call"
+                );
+            }
             tracing::info!(call_id = %call.call_id, "a last session died mid-call; the survivor told");
         }
     }

@@ -46,7 +46,9 @@ use migo_games::Rewards;
 use migo_media::{Grant, Head, Storage, SNIFF_BYTES};
 use migo_messaging::KickTariff;
 use migo_moderation::{Powers, Roster};
-use migo_protocol::{fault, NotificationEvent};
+use migo_notify::{Event, RawToken};
+use migo_protocol::{fault, NotificationEvent, Opcode};
+use migo_store::model::NotificationPosition;
 
 /// A filesystem-backed [`Storage`]: object bytes as files under one root directory.
 ///
@@ -637,5 +639,158 @@ impl migo_notify::Bell for GatewayBell {
         if let Some(gateway) = self.gateway.get() {
             gateway.emit_notification(recipient, event, now);
         }
+    }
+}
+
+/// A [`Bell`](migo_notify::Bell) that rings locally and, when the recipient's
+/// user topic has watchers on other nodes, carries the same notification frame
+/// there over the user-topic tier (FED_USER_EVENT, section 170).
+///
+/// The notify service opens before the mesh does, so the relay is held in the
+/// same kind of one-slot cell the gateway handle uses: until the composition
+/// root fills it, a ring stays local, which is the pre-mesh startup window and
+/// costs a member nothing — the row and the push are already the notifier's to
+/// finish. Because `Bell::ring` is synchronous, the federated half runs on its
+/// own task; it is best-effort and logged, never a reason to unring the local
+/// one.
+pub struct FederatedBell {
+    bell: migo_notify::SharedBell,
+    relay: Arc<crate::presence_relay::RelayHandle>,
+}
+
+impl FederatedBell {
+    /// Builds the ring over the local bell and a cell the composition root
+    /// fills with the user-topic relay once the mesh is up.
+    #[must_use]
+    pub fn new(
+        bell: migo_notify::SharedBell,
+        relay: Arc<crate::presence_relay::RelayHandle>,
+    ) -> Self {
+        Self { bell, relay }
+    }
+}
+
+impl migo_notify::Bell for FederatedBell {
+    fn ring(&self, recipient: Id, event: &NotificationEvent, now: Timestamp) {
+        self.bell.ring(recipient, event, now);
+        let relay = Arc::clone(&self.relay);
+        let event = event.clone();
+        tokio::spawn(async move {
+            if let Err(error) = relay
+                .forward_frame(recipient, Opcode::NotificationEvent, &event, now)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    recipient = %recipient.to_text(),
+                    "cannot enqueue the federated half of a notification bell"
+                );
+            }
+        });
+    }
+}
+
+// --- the notifier's replication half ------------------------------------------------
+//
+// A notification's row is written on the node whose service raised the event, and a
+// store with foreign keys refuses a row for an account it has never seen — the same
+// wall the messaging gate meets when a send names a peer whose rows live elsewhere.
+// The gate climbs it by asking the mesh first (the row-replication tier, section 170),
+// and this adapter applies the same discipline to the notify path: before the row is
+// written, the recipient's account rows are ensured locally, pulled from whichever
+// peer holds them when this node does not.
+//
+// What this deliberately does NOT promise: that the row becomes readable where the
+// recipient reads. The pull carries an account, a profile, and edges — never a
+// notification row — so an inbox read on another node still sees only what was
+// written there. The realtime half is the bell the adapter above carries across, and
+// the stored half stays a fact of the node that wrote it until the wire grows a row
+// shape for it. Ensuring the account is still worth doing: it is what makes the write
+// itself sound on a store that enforces its foreign keys, and it is the same
+// best-effort, logged-not-failed posture the gate holds — a pull that cannot be
+// answered leaves the write to fail exactly as it would have, now with a reason in
+// the log.
+
+/// A [`Notifier`](migo_notify::Notifier) that ensures the recipient's account rows
+/// exist locally before the inbox row is written, pulling them over the mesh when
+/// this node does not hold them.
+pub struct FederatedNotifier {
+    notifier: migo_notify::SharedNotifier,
+    replication: Arc<ReplicationHandle>,
+}
+
+impl FederatedNotifier {
+    /// Builds the wrapper over the process's notifier and the row-replication
+    /// tier's late-bound handle.
+    #[must_use]
+    pub fn new(notifier: migo_notify::SharedNotifier, replication: Arc<ReplicationHandle>) -> Self {
+        Self {
+            notifier,
+            replication,
+        }
+    }
+
+    /// The best-effort pull for one recipient: the actor is the `regarding` id
+    /// the ask names, because the owner's answer is scoped to what the asker
+    /// may see of that pair.
+    async fn ensure_recipient(&self, account_id: Id, actor_id: Option<Id>, at: Timestamp) {
+        let regarding = actor_id.unwrap_or(account_id);
+        let relay = match self.replication.get() {
+            Some(relay) => relay,
+            None => return, // the startup window: no mesh to ask yet
+        };
+        if !relay.ensure_account(account_id, regarding, at).await {
+            tracing::warn!(
+                recipient = %account_id.to_text(),
+                "the recipient's account rows could not be pulled before the notification was \
+                 stored; the write proceeds on what this node holds"
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl migo_notify::Notifier for FederatedNotifier {
+    async fn notify(&self, event: Event) -> Result<migo_notify::Delivery> {
+        self.ensure_recipient(event.account_id, event.actor_id, event.at)
+            .await;
+        self.notifier.notify(event).await
+    }
+
+    async fn notify_many(&self, recipients: &[Id], event: Event) -> Result<migo_notify::Delivery> {
+        for recipient in recipients {
+            self.ensure_recipient(*recipient, event.actor_id, event.at)
+                .await;
+        }
+        self.notifier.notify_many(recipients, event).await
+    }
+
+    async fn inbox(
+        &self,
+        caller: &migo_notify::Caller,
+        limit: u16,
+        after: Option<NotificationPosition>,
+    ) -> Result<migo_notify::Inbox> {
+        self.notifier.inbox(caller, limit, after).await
+    }
+
+    async fn badge(&self, caller: &migo_notify::Caller) -> Result<u32> {
+        self.notifier.badge(caller).await
+    }
+
+    async fn acknowledge(&self, caller: &migo_notify::Caller, through: Timestamp) -> Result<u32> {
+        self.notifier.acknowledge(caller, through).await
+    }
+
+    async fn register(&self, caller: &migo_notify::Caller, token: RawToken) -> Result<()> {
+        self.notifier.register(caller, token).await
+    }
+
+    async fn unregister(&self, caller: &migo_notify::Caller) -> Result<()> {
+        self.notifier.unregister(caller).await
+    }
+
+    async fn sweep(&self, before: Timestamp, limit: u16) -> Result<u64> {
+        self.notifier.sweep(before, limit).await
     }
 }

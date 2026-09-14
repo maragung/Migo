@@ -524,6 +524,28 @@ impl Meters {
         }
     }
 
+    /// The frames-written counter's current value, for a composition test that needs
+    /// the number in a failure message rather than on a dashboard.
+    pub(crate) fn frames_out_total(&self) -> u64 {
+        self.frames_out.get()
+    }
+
+    /// The dropped-frame counters' current values by delivery class, for the same
+    /// readers `frames_out_total` serves: a frame that vanishes between an ingest log
+    /// and a silent socket is named here or nowhere, because the drop itself is silent.
+    pub(crate) fn dropped_frames_total(&self) -> Vec<(&'static str, u64)> {
+        Dropped::ALL
+            .iter()
+            .map(|class| {
+                let value = self
+                    .frames_dropped
+                    .get(class.index())
+                    .map_or(0, |counter| counter.get());
+                (class.label(), value)
+            })
+            .collect()
+    }
+
     pub(crate) fn resume(&self, outcome: ResumeOutcome) {
         if let Some(counter) = self.resume.get(outcome.index()) {
             counter.inc();
