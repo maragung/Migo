@@ -13,6 +13,10 @@
  * All three views read the real client: the friends list is the relationship graph, the rooms view
  * is the account's group chats plus the public directory, and the feed is the activity stream
  * panel itself.
+ *
+ * Chat List Mode adds a fourth view, `main`, ahead of the three: the conversation list, from
+ * which a tap opens the thread as the phone's full-screen window. The mode adds the tab; the
+ * other three views and their behaviour are untouched by it.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -31,6 +35,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { useRooms } from '@/lib/migo/rooms-provider.js';
 
 import { Avatar } from './avatar.js';
+import { ConversationList } from './conversation-list.js';
 import { Icon } from './icons.js';
 import { ListFooter } from './list-footer.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
@@ -187,11 +192,13 @@ export function MobileHome({
     0;
 
   const viewTitle =
-    nav === 'friends'
-      ? `Friends · ${onlineCount}/${friendEntries?.length ?? 0} online`
-      : nav === 'rooms'
-        ? `Rooms · ${groups.length} group${groups.length === 1 ? '' : 's'} · ${directory?.length ?? 0} public`
-        : 'Recent activity';
+    nav === 'main'
+      ? `Chats · ${items.length} conversation${items.length === 1 ? '' : 's'}`
+      : nav === 'friends'
+        ? `Friends · ${onlineCount}/${friendEntries?.length ?? 0} online`
+        : nav === 'rooms'
+          ? `Rooms · ${groups.length} group${groups.length === 1 ? '' : 's'} · ${directory?.length ?? 0} public`
+          : 'Recent activity';
 
   function commitStatus(): void {
     me.publish(me.presence, statusDraft.trim());
@@ -209,7 +216,9 @@ export function MobileHome({
       ? 'tap a room to see options'
       : nav === 'friends'
         ? 'tap a friend to see options'
-        : 'Migo activity';
+        : nav === 'main'
+          ? 'tap a conversation to open it'
+          : 'Migo activity';
 
   return (
     <div className="mhome">
@@ -335,6 +344,12 @@ export function MobileHome({
 
         {/* ---- body ---- */}
         <div className="win-body retro-scroll mhome-body">
+          {/* ===== MAIN (Chat List Mode) ===== */}
+          {/* The conversation list itself, unchanged from the surface every other client lists
+              chats on — the mode adds the tab, not a second list. A tap opens the thread as the
+              phone's full-screen window, and Back returns here. */}
+          {nav === 'main' ? <ConversationList /> : null}
+
           {/* ===== FRIENDS ===== */}
           {nav === 'friends' ? (
             <>
@@ -499,7 +514,9 @@ export function MobileHome({
         </div>
 
         {/* ---- footer ---- */}
-        <ListFooter tab={nav} hint={footerHint} />
+        {/* Main is the chats list wearing the strip's name, so the footer's band says "chats";
+            the other tabs map straight through. */}
+        <ListFooter tab={nav === 'main' ? 'chats' : nav} hint={footerHint} />
       </div>
 
       {/* ---- me sheet (account) ---- */}
