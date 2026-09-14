@@ -381,8 +381,8 @@ async fn await_watcher(app: &App, subject: Id, watcher: Id) {
 #[tokio::test]
 async fn a_friend_request_rings_the_recipient_on_the_other_node() {
     let fleet = fleet().await;
-    let alice_grant = registered_grant(&fleet.app_a, "user topicalice").await;
-    let bob_grant = registered_grant(&fleet.app_b, "user topicbob").await;
+    let alice_grant = registered_grant(&fleet.app_a, "user_topicalice").await;
+    let bob_grant = registered_grant(&fleet.app_b, "user_topicbob").await;
 
     // The sender connects on her node; the recipient connects on his. His
     // self-subscription is what puts him in alpha's watch table.
@@ -443,8 +443,8 @@ async fn a_friend_request_rings_the_recipient_on_the_other_node() {
 #[tokio::test]
 async fn a_sealed_key_distribution_reaches_the_member_on_the_other_node() {
     let fleet = fleet().await;
-    let alice_grant = registered_grant(&fleet.app_a, "sealed alice").await;
-    let bob_grant = registered_grant(&fleet.app_b, "sealed bob").await;
+    let alice_grant = registered_grant(&fleet.app_a, "sealed_alice").await;
+    let bob_grant = registered_grant(&fleet.app_b, "sealed_bob").await;
 
     // The group whose keys are being distributed: created on the sender's
     // node over the shared store, so both members are store facts and the

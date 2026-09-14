@@ -2883,6 +2883,98 @@ mod tests {
         );
     }
 
+    /// The call twin of the wire test above: a call event published by the node whose
+    /// session caused it crosses as a `FED_CALL_RELAY` and is ingested as the call frame
+    /// it carries — placed on the audience's user topic the way the origin's own request
+    /// path would have pushed it (section 145), sealed and unopened.
+    #[tokio::test]
+    async fn a_call_relay_crosses_the_wire_and_is_ingested_as_a_call_event() {
+        let (mesh_a, mesh_b, a_id, _b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let callee = Id::from(0x7777);
+        // B is the node the caller's session lives on, so B is the one whose forward half
+        // fires; A is the node holding the callee's socket and owing them the ring.
+        let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
+        let transport_a = Arc::new(MeshTransport::new(
+            mesh_a.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        let watch = migo_protocol::FedUserWatch {
+            epoch: mesh_b.epoch(),
+            user_id: callee,
+        };
+        relay_b
+            .register_watcher(a_id, &watch)
+            .expect("a current epoch admits the watch");
+
+        let event = migo_protocol::CallInviteEvent {
+            call_id: Id::from(0x0C0C),
+            conversation_id: Id::from(0x2222),
+            caller_id: Id::from(0x0707),
+            caller_device: Id::from(0x0708),
+            media_kind: 0,
+            expires_at: Timestamp::from_millis(NOW + 30_000),
+            sealed_offer: vec![0x11; 48],
+        };
+        relay_b
+            .forward_call(callee, Opcode::CallInviteEvent, &event, now)
+            .await
+            .expect("the call event forwards");
+
+        let due = mesh_b.due(now).await.expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            1,
+            "one copy, for the one node that holds the callee's sessions"
+        );
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
+        let server_mesh = mesh_a;
+        let server_router = transport_a.router_ref().clone();
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_b,
+            transport_a.router_ref(),
+            &peer_view,
+            &due,
+            now,
+            &client_budget,
+        )
+        .await
+        .expect("the relay is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 1, "the watermark covered the relay");
+
+        let expected = framed(Opcode::CallInviteEvent, 0, &event)
+            .expect("the call event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_a.ingested(),
+            vec![(Opcode::CallInviteEvent.to_wire(), expected)],
+            "A ingested the ring, sealed as a local subscriber would have seen it"
+        );
+    }
+
     /// Tiered fanout, forward half: the home node enqueues one federated copy per watching
     /// *node* — not per session, and not per member — and the receiving node ingests the
     /// member and vote events exactly as a local publish would have carried them.

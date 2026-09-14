@@ -376,6 +376,17 @@ impl Client {
 /// what carries it across — then carries the cancellation back the same way.
 #[tokio::test]
 async fn a_ring_places_and_cancels_across_nodes() {
+    // Diagnostics: the federated half's failures are warn-level logs on nodes whose
+    // sockets stay silent, so the suite captures what both nodes logged while it ran.
+    // A second `try_init` failure would mean something else already installed a global
+    // subscriber; nothing else in this binary does, so silence is fine here.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "migod=debug,migo_federation=info,migo_gateway=warn",
+        ))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
     // The fleet: two nodes over one store, each with its own ephemeral mesh listener.
     // The call will be placed on alpha, which holds the call row its own store built.
     let store = migo_store::open(&StoreConfig::default())
