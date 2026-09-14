@@ -28,7 +28,7 @@
 //! because then a test could pass here and fail in production. Nothing awaits
 //! while the guard is held.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};

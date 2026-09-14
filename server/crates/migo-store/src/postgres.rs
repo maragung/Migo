@@ -4057,10 +4057,10 @@ impl KickVoteStore for PostgresStore {
                         .do_nothing()
                         .to_owned(),
                 )
-                .exec(&transaction)
+                .exec_without_returning(&transaction)
                 .await
                 .context("cast_kick_vote: open tally")?;
-                if opened.rows_affected == 0 {
+                if opened == 0 {
                     // Another node's tally landed between the read and the
                     // insert. The next lap reads it under a lock.
                     continue;
@@ -4130,7 +4130,7 @@ impl KickVoteStore for PostgresStore {
                     .do_nothing()
                     .to_owned(),
                 )
-                .exec(&transaction)
+                .exec_without_returning(&transaction)
                 .await
                 .context("cast_kick_vote: voice")?;
             let votes = entity::kick_vote_voter::Entity::find()
@@ -4138,7 +4138,7 @@ impl KickVoteStore for PostgresStore {
                 .count(&transaction)
                 .await
                 .context("cast_kick_vote: count voices")?;
-            if inserted.rows_affected == 0 {
+            if inserted == 0 {
                 result = Some(KickVoteResult::Unchanged {
                     votes: votes as u32,
                 });

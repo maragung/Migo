@@ -30,7 +30,7 @@ use crate::model::{
     Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote,
     Conversation, ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device,
     Entitlement, EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, KickVoteCast,
-    KickVoteResult, LedgerAccount, LedgerAccountKind, LedgerPosition, LedgerTransaction,
+    LedgerAccount, LedgerAccountKind, LedgerPosition, LedgerTransaction,
     MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer,
     NewRoom, NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition,
     OutboxRecord, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
