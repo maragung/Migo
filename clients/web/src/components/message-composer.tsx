@@ -60,13 +60,9 @@ interface ComposerProps {
   replyPreview?: ReplyPreview | null;
   /** Clears the reply target (the bar's X). */
   onCancelReply?: () => void;
-  /** Toggles the inline gift picker (the 🎁 beside the attach button). */
-  onGift?: () => void;
-  /** Whether the gift picker is open, so the control reflects it. */
-  giftOpen?: boolean;
   /** Whether the emoticon picker is open, so the smile control reflects it. */
   emoticonOpen?: boolean;
-  /** Toggles the inline emoticon/sticker picker (the 😊 beside the attach button). */
+  /** Toggles the inline emoticon/sticker picker (the 😊 left of the input). */
   onToggleEmoticon?: () => void;
   /**
    * The disappearing-message lifetime the composer has armed, or null when the next message is a
@@ -85,6 +81,23 @@ interface ComposerProps {
   insertRef?: RefObject<{ insert: (glyph: string) => void } | null>;
 }
 
+/**
+ * The attach menu's four ways to pick what the next message carries, each with the file input
+ * filter (and camera hint) that makes the platform's picker honest about it. A photo and an image
+ * differ exactly by the camera: a photo is taken, an image is chosen.
+ */
+const ATTACH_SOURCES: ReadonlyArray<{
+  key: 'file' | 'photo' | 'video' | 'image';
+  label: string;
+  accept?: string;
+  capture?: boolean;
+}> = [
+  { key: 'file', label: 'Pick a file' },
+  { key: 'photo', label: 'Take a photo', accept: 'image/*', capture: true },
+  { key: 'video', label: 'Pick a video', accept: 'video/*' },
+  { key: 'image', label: 'Pick an image', accept: 'image/*' },
+];
+
 export function MessageComposer({
   onSend,
   onAttach,
@@ -93,8 +106,6 @@ export function MessageComposer({
   disabled,
   replyPreview,
   onCancelReply,
-  onGift,
-  giftOpen,
   emoticonOpen,
   onToggleEmoticon,
   expiresAfterMs,
@@ -109,10 +120,11 @@ export function MessageComposer({
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [sendingVoice, setSendingVoice] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [attachOpen, setAttachOpen] = useState(false);
   const typingActiveRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // The insert handle the picker (a sibling, rendered by the chat window) uses. Filling the ref
@@ -308,6 +320,12 @@ export function MessageComposer({
     void attach(file);
   }
 
+  /** Opens one of the attach menu's pickers; the menu closes as the platform picker opens. */
+  function pickFrom(key: string): void {
+    setAttachOpen(false);
+    fileInputRefs.current[key]?.click();
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -344,7 +362,99 @@ export function MessageComposer({
           maxDurationMs={VOICE_NOTE_MAX_MS}
         />
       ) : (
+        // The row is chat and only chat: the two picker controls (emoticons, attachments) sit
+        // left of the input, the mic and the send right of it. Everything else a thread offers —
+        // gifting, games — lives in the header, where actions about the conversation belong.
         <div className="composer">
+          {onToggleEmoticon !== undefined ? (
+            <button
+              type="button"
+              className={`attach-btn ${emoticonOpen ? 'active' : ''}`}
+              onClick={onToggleEmoticon}
+              disabled={disabled || uploading}
+              aria-label={emoticonOpen ? 'Close emoticon picker' : 'Open emoticon picker'}
+              aria-pressed={emoticonOpen}
+              title="Emoticons and stickers"
+            >
+              <Icon name="smile" size={20} />
+            </button>
+          ) : null}
+          {onAttach !== undefined ? (
+            <div className="attach-wrap">
+              {ATTACH_SOURCES.map((source) => (
+                <input
+                  key={source.key}
+                  ref={(element) => {
+                    fileInputRefs.current[source.key] = element;
+                  }}
+                  type="file"
+                  accept={source.accept}
+                  {...(source.capture ? { capture: 'environment' as const } : {})}
+                  onChange={onFileChange}
+                  hidden
+                  aria-label={source.label}
+                />
+              ))}
+              {attachOpen ? (
+                <button
+                  type="button"
+                  className="menu-backdrop"
+                  onClick={() => setAttachOpen(false)}
+                  aria-label="Close the attach menu"
+                />
+              ) : null}
+              <button
+                type="button"
+                className={`attach-btn ${attachOpen ? 'active' : ''}`}
+                onClick={() => setAttachOpen(!attachOpen)}
+                disabled={disabled || uploading}
+                aria-label="Attach a file"
+                aria-haspopup="menu"
+                aria-expanded={attachOpen}
+                title="Attach a file, photo, video, or image"
+              >
+                <Icon name="attach" size={20} />
+              </button>
+              {/* The menu rides in the row's markup behind the hidden attribute — the same
+                  anatomy the member menus use — so its offers are part of the composer's own
+                  render, not a shell that appears only after a click. */}
+              <div className="attach-menu" role="menu" hidden={!attachOpen}>
+                {ATTACH_SOURCES.map((source) => (
+                  <button
+                    key={source.key}
+                    type="button"
+                    role="menuitem"
+                    className="attach-menu-item"
+                    onClick={() => pickFrom(source.key)}
+                    disabled={disabled || uploading}
+                  >
+                    {source.label}
+                  </button>
+                ))}
+                {onToggleDisappearing !== undefined ? (
+                  <>
+                    <div className="attach-menu-sep" role="separator" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="attach-menu-item"
+                      onClick={() => onToggleDisappearing()}
+                      disabled={disabled || uploading}
+                      aria-pressed={expiresAfterMs != null}
+                      aria-label="Send a disappearing message"
+                      title={
+                        expiresAfterMs != null
+                          ? `Disappearing on — new messages vanish after ${DISAPPEARING_LABEL}`
+                          : `New messages vanish after ${DISAPPEARING_LABEL}`
+                      }
+                    >
+                      {expiresAfterMs != null ? '⏳ Disappearing on' : 'Disappearing messages'}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <textarea
             ref={textareaRef}
             value={text}
@@ -356,71 +466,6 @@ export function MessageComposer({
             disabled={disabled || uploading}
             aria-label="Message"
           />
-          {onAttach !== undefined ? (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                onChange={onFileChange}
-                hidden
-                aria-label="Attach a file"
-              />
-              <button
-                type="button"
-                className="attach-btn"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled || uploading}
-                aria-label="Attach a file"
-              >
-                <Icon name="attach" size={20} />
-              </button>
-            </>
-          ) : null}
-          {onToggleEmoticon !== undefined ? (
-            <button
-              type="button"
-              className={`attach-btn ${emoticonOpen ? 'active' : ''}`}
-              onClick={onToggleEmoticon}
-              disabled={disabled || uploading}
-              aria-label={emoticonOpen ? 'Close emoticon picker' : 'Open emoticon picker'}
-              aria-pressed={emoticonOpen}
-            >
-              <Icon name="smile" size={20} />
-            </button>
-          ) : null}
-          {onGift !== undefined ? (
-            <button
-              type="button"
-              className={`attach-btn ${giftOpen ? 'active' : ''}`}
-              onClick={onGift}
-              disabled={disabled || uploading}
-              aria-label={giftOpen ? 'Close gift picker' : 'Send a gift'}
-              aria-pressed={giftOpen}
-            >
-              <Icon name="gift" size={20} />
-            </button>
-          ) : null}
-          {onToggleDisappearing !== undefined ? (
-            <button
-              type="button"
-              className={`attach-btn ${expiresAfterMs != null ? 'active' : ''}`}
-              onClick={onToggleDisappearing}
-              disabled={disabled || uploading}
-              aria-label={
-                expiresAfterMs != null
-                  ? 'Stop disappearing messages'
-                  : 'Send a disappearing message'
-              }
-              aria-pressed={expiresAfterMs != null}
-              title={
-                expiresAfterMs != null
-                  ? `Disappearing on — new messages vanish after ${DISAPPEARING_LABEL}`
-                  : `New messages vanish after ${DISAPPEARING_LABEL}`
-              }
-            >
-              <Icon name="clock" size={20} />
-            </button>
-          ) : null}
           {onVoiceNote !== undefined ? (
             <button
               type="button"
@@ -428,6 +473,7 @@ export function MessageComposer({
               onClick={startVoiceNote}
               disabled={disabled || uploading || sending || sendingVoice}
               aria-label="Record a voice note"
+              title="Record a voice note"
             >
               <Icon name="mic" size={20} />
             </button>
