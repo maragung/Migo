@@ -4,6 +4,9 @@ import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.BadgesReq
 import com.migo.core.protocol.BadgesResponse
 import com.migo.core.protocol.EconomyEvent
+import com.migo.core.protocol.Entitlement
+import com.migo.core.protocol.EntitlementsReq
+import com.migo.core.protocol.EntitlementsResponse
 import com.migo.core.protocol.GiftCatalogueReq
 import com.migo.core.protocol.GiftCatalogueResponse
 import com.migo.core.protocol.GiftListing
@@ -207,5 +210,23 @@ class EconomyDomain(
             { r -> LeaderboardResponse.decode(r) },
         )
         return response.ranks
+    }
+
+    /**
+     * Reads the caller's entitlements: the catalogue codes this account owns, oldest first.
+     *
+     * A port of the web SDK's own read. The catalogue on the server is a price list -- SKU, coins --
+     * and the SKU's slug names a pack; the art a slug stands for is the client's to ship, so this
+     * read is the SKU set that says which of the store's packs to show. A `null` limit asks for the
+     * server's default page; the cursor of a full page names the next.
+     */
+    suspend fun getEntitlements(): List<Entitlement> {
+        val request = EntitlementsReq()
+        val response = rpc.call(
+            Op.ENTITLEMENTS,
+            { w -> request.encode(w) },
+            { r -> EntitlementsResponse.decode(r) },
+        )
+        return response.items
     }
 }

@@ -1,8 +1,11 @@
 package com.migo.app.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.os.SystemClock
+import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -21,6 +24,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -30,12 +34,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -74,11 +81,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.migo.app.media.formatBytes
 import com.migo.app.media.formatDuration
+import com.migo.app.model.AttachSource
 import com.migo.app.model.Attachment
 import com.migo.app.model.AttachmentKind
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
+import com.migo.app.model.FREE_EMOTICONS
 import com.migo.app.model.GAME_KIND_GUESS_NUMBER
 import com.migo.app.model.GAME_STATUS_OPEN
 import com.migo.app.model.GROUP_MUTE_TERMS
@@ -93,6 +102,8 @@ import com.migo.app.model.VoteTally
 import com.migo.app.model.gameLabelOf
 import com.migo.app.model.groupRoleLabel
 import com.migo.app.model.guessFeedbackLine
+import com.migo.app.model.ownedEmoticons
+import com.migo.app.model.ownedStickerPacks
 import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
 import com.migo.core.domain.canFounderAct
@@ -103,6 +114,8 @@ import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
 import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.GiftListing
+import com.migo.core.protocol.PresenceState
+import com.migo.core.protocol.RelationshipKind
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.wire.Id
@@ -216,11 +229,13 @@ fun ChatScreen(
     /** Records the live search query; the filter runs on the messages this device already holds. */
     onSearchQuery: (String) -> Unit = {},
     /**
-     * Opens the file picker for an attachment, whose answer is sent into the conversation. Null in
-     * a server-readable room — attachments are an end-to-end feature (a room has no key channel to
-     * hand the recipients a sealed object's key), mirroring the web composer's own gating.
+     * Picks what the next message carries, in one of the four ways the attach menu names — any
+     * file, a photo from the camera, a video, an image — whose answer is sent into the
+     * conversation. Null in a server-readable room: attachments are an end-to-end feature (a room
+     * has no key channel to hand the recipients a sealed object's key), mirroring the web
+     * composer's own gating.
      */
-    onAttach: (() -> Unit)? = null,
+    onPickAttachment: ((AttachSource) -> Unit)? = null,
     /**
      * Starts a voice note: asks the microphone permission at the moment of use and begins the
      * recording. Offered in every conversation kind, because a voice note is speech and speech is
@@ -293,6 +308,30 @@ fun ChatScreen(
      * send again server-side, not a second charge.
      */
     onSendGift: (sku: String, recipient: Id, clientKey: String) -> Unit = { _, _, _ -> },
+    /**
+     * Reads the conversation's roster for the header gift's recipient list. The header's Gift aims
+     * at a person, and in a room or a group the person is chosen from the roster — which the member
+     * sheet reads on its own open, so the first gift from a cold thread asks for the same read.
+     */
+    onLoadGiftRecipients: () -> Unit = {},
+    /**
+     * The account's owned pack SKUs, as the composer's emoticon/sticker picker reads them; null
+     * while the read is in flight, which the picker renders as its own wait.
+     */
+    ownedPacks: Set<String>? = null,
+    /** Reads the owned pack SKUs, on the picker's first open and on a retry. */
+    onLoadOwnedPacks: () -> Unit = {},
+    /**
+     * Sends a friend request to the account the member profile sheet is about — the profile card's
+     * social line's own act, kept separate from the Friends screen's because the sheet's line
+     * re-reads only its edge.
+     */
+    onMemberFriendRequest: () -> Unit = {},
+    /**
+     * Answers a pending incoming friend request from the account the member profile sheet is
+     * about, either way.
+     */
+    onMemberFriendRespond: (Boolean) -> Unit = { },
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -350,10 +389,21 @@ fun ChatScreen(
     // it, and the warning banner reopens it, so the flag lives where both can reach it.
     val safetyOpen = remember { mutableStateOf(false) }
 
-    // The member the gift picker is aimed at, opened from a member menu's Gift. Local because the
-    // picker's life is the pick's life: it closes on the send, and the member it names is the one
-    // the menu was opened for, pre-aimed the way the web client's own picker is.
+    // The member the gift picker is aimed at, opened from a member menu's Gift or the header's.
+    // Local because the picker's life is the pick's life: it closes on the send, and the member it
+    // names is the one the menu was opened for, pre-aimed the way the web client's own picker is.
     var giftTarget by remember { mutableStateOf<GiftTarget?>(null) }
+
+    // The header gift's recipient selection, open when a room or a group gift has more than one
+    // person it could go to (a direct chat aims at its peer without asking). False once a choice
+    // is made or the sheet is dismissed; the roster it lists is the chat's own.
+    var giftPicking by remember { mutableStateOf(false) }
+
+    // The composer's two pickers: the emoticon/sticker sheet and the attach menu. Both are the
+    // row's own controls, so both flags live here, beside the gift state they share the bottom of
+    // the thread with.
+    var emoticonOpen by remember { mutableStateOf(false) }
+    var attachOpen by remember { mutableStateOf(false) }
 
     // The catalogue loads on first open and stays for the thread's life — a person who never
     // touches the button never pays for its data, and a failure is retried by closing and
@@ -379,6 +429,18 @@ fun ChatScreen(
                 onLeave = onLeave,
                 onOpenMembers = onOpenMembers,
                 onOpenGames = { gamesOpen.value = true },
+                onOpenGift = {
+                    // A direct chat has exactly one person a gift could go to, so the header aims
+                    // at the peer without asking; a room or a group offers the roster to choose
+                    // from, reading it first if the member sheet never has.
+                    val peer = chat.peerId
+                    if (peer != null) {
+                        giftTarget = GiftTarget(peer, chat.title)
+                    } else {
+                        onLoadGiftRecipients()
+                        giftPicking = true
+                    }
+                },
                 onOpenSafety = if (chat.peerId != null) {
                     { safetyOpen.value = true }
                 } else {
@@ -510,7 +572,13 @@ fun ChatScreen(
                     uploading = chat.uploading,
                     onDraft = onDraft,
                     onSend = onSend,
-                    onAttach = onAttach,
+                    onToggleEmoticons = {
+                        if (!emoticonOpen && ownedPacks == null) onLoadOwnedPacks()
+                        emoticonOpen = !emoticonOpen
+                    },
+                    emoticonsOpen = emoticonOpen,
+                    onOpenAttach = { attachOpen = true },
+                    onPickAttachment = onPickAttachment,
                     onVoiceNote = onVoiceNote,
                     recordingHeld = chat.recording,
                     heldElapsedMs = chat.recordingElapsedMs,
@@ -596,9 +664,10 @@ fun ChatScreen(
             )
         }
 
-        // The gift picker a member menu's Gift opens, aimed at the member the menu was for. The
-        // price rides on every row before the send — the same rule the Wallet panel's shop keeps,
-        // because a gift is a spend and a spend is agreed on its price, not surprised by it.
+        // The gift picker a member menu's Gift or the header's opens, aimed at the member it was
+        // opened for. The price rides on every row before the send — the same rule the Wallet
+        // panel's shop keeps, because a gift is a spend and a spend is agreed on its price, not
+        // surprised by it.
         giftTarget?.let { target ->
             GiftSheet(
                 target = target,
@@ -611,6 +680,49 @@ fun ChatScreen(
             )
         }
 
+        // The header gift's recipient selection for a room or a group: the roster the chat holds,
+        // read on open when the member sheet never has. A direct chat never gets here — its gift
+        // is aimed at the peer the moment the header is pressed.
+        if (giftPicking) {
+            GiftRecipientSheet(
+                chat = chat,
+                selfId = selfId,
+                avatarBytes = avatarBytes,
+                onDismiss = { giftPicking = false },
+                onPick = { userId, name ->
+                    giftPicking = false
+                    giftTarget = GiftTarget(userId, name)
+                },
+            )
+        }
+
+        // The attach menu the composer's file control opens: four ways to pick what the next
+        // message carries, each naming its promise honestly before the system picker opens. The
+        // disappearing toggle the web client folds in here has no Android counterpart to fold —
+        // this client's composer never carried one — so the menu keeps exactly its four picks.
+        if (attachOpen && onPickAttachment != null) {
+            val pick = onPickAttachment
+            AttachSheet(
+                onDismiss = { attachOpen = false },
+                onPick = { source ->
+                    attachOpen = false
+                    pick(source)
+                },
+            )
+        }
+
+        // The emoticon/sticker picker the composer's smile control opens: two tabs, one free
+        // baseline, every pack owned. Everything in either tab inserts as text — the glyphs are
+        // Unicode and the conversation is E2EE, a sticker riding out as ordinary message text the
+        // way an emoticon does.
+        if (emoticonOpen) {
+            EmoticonSheet(
+                owned = ownedPacks,
+                onDismiss = { emoticonOpen = false },
+                onInsert = { glyph -> onDraft(chat.draft + glyph) },
+            )
+        }
+
         // The member profile sheet a member menu's View profile opens. The mute-for-me control
         // rides here rather than in the menu, mirroring the web client's own profile card: it is
         // a personal choice about the person, and the person's card is where the web client
@@ -619,10 +731,13 @@ fun ChatScreen(
             MemberProfileSheet(
                 view = view,
                 avatarBytes = avatarBytes[view.userId],
+                selfId = selfId,
                 canMuteForMe = chat.roomId != null,
                 muted = view.userId in chat.muted,
                 onClose = onCloseMemberProfile,
                 onMuteForMe = { on -> onMuteForMe(view.userId, on) },
+                onFriendRequest = onMemberFriendRequest,
+                onFriendRespond = onMemberFriendRespond,
             )
         }
     }
@@ -635,6 +750,7 @@ private fun ChatHeader(
     onLeave: (() -> Unit)?,
     onOpenMembers: (() -> Unit)?,
     onOpenGames: () -> Unit,
+    onOpenGift: () -> Unit,
     onOpenSafety: (() -> Unit)? = null,
     onStartCall: ((Id, Boolean) -> Unit)? = null,
     onJoinGroupCall: (() -> Unit)? = null,
@@ -659,6 +775,11 @@ private fun ChatHeader(
             // and the controls, every one the composer's send button's own measure.
             Avatar(name = chat.title, bytes = chat.peerId?.let { avatarBytes[it] }, size = 36.dp)
             Spacer(modifier = Modifier.weight(1f))
+            // Gifting is a thread-level act — it picks a person and spends balance — so its control
+            // lives with the thread's other actions in the header, immediately left of games, not
+            // in the row the composer keeps exclusively for chat. Offered in every conversation
+            // kind, exactly as the web client's own header button is.
+            HeaderGlyphButton(glyph = "🎁", description = "Send a gift", onClick = onOpenGift)
             if (supportsGames) {
                 HeaderGlyphButton(glyph = "🎮", description = "Games", onClick = onOpenGames)
             }
@@ -1645,7 +1766,10 @@ private fun Composer(
     uploading: Boolean,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
-    onAttach: (() -> Unit)?,
+    onToggleEmoticons: () -> Unit,
+    emoticonsOpen: Boolean,
+    onOpenAttach: () -> Unit,
+    onPickAttachment: ((AttachSource) -> Unit)? = null,
     onVoiceNote: () -> Unit,
     recordingHeld: Boolean,
     heldElapsedMs: Long,
@@ -1666,7 +1790,34 @@ private fun Composer(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            if (onAttach != null) {
+            // The row is chat and only chat: the two picker controls (emoticons, attachments) sit
+            // left of the input, the mic and the send right of it. Everything else a thread offers
+            // -- gifting, games -- lives in the header, where actions about the conversation
+            // belong rather than acts of writing in it.
+            //
+            // The emoticon control opens the picker's two tabs (emoticons, then stickers) and is
+            // offered in every conversation kind, exactly as on the web client: a glyph is speech,
+            // and speech is what every conversation is for.
+            TextButton(
+                onClick = onToggleEmoticons,
+                enabled = !sending && !uploading,
+                modifier = Modifier
+                    .size(52.dp)
+                    .semantics {
+                        contentDescription = if (emoticonsOpen) {
+                            "Close emoticon picker"
+                        } else {
+                            "Open emoticon picker"
+                        }
+                    },
+            ) {
+                Text(text = if (emoticonsOpen) "😀" else "😊", fontSize = 18.sp)
+            }
+            // The attach control stands for four ways to pick what the next message carries, each
+            // named in the menu it opens; the picking itself is the shell's, because the system
+            // picker is an activity result only the shell can launch. While an upload runs, the
+            // control becomes the wait it caused — the row's one honest spinner.
+            if (onPickAttachment != null) {
                 if (uploading) {
                     Box(
                         modifier = Modifier.size(52.dp),
@@ -1675,7 +1826,13 @@ private fun Composer(
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     }
                 } else {
-                    TextButton(onClick = onAttach, enabled = !sending, modifier = Modifier.size(52.dp)) {
+                    TextButton(
+                        onClick = onOpenAttach,
+                        enabled = !sending,
+                        modifier = Modifier
+                            .size(52.dp)
+                            .semantics { contentDescription = "Attach a file, photo, video, or image" },
+                    ) {
                         Text(text = "📎", fontSize = 18.sp)
                     }
                 }
@@ -2722,35 +2879,58 @@ private fun GiftSheet(
     }
 }
 
+// The relationship kinds the profile card files its social line under, as plain numbers the wire
+// may extend past the enum's names — the same guard the Friends screen keeps.
+private val KIND_FRIEND: Long = RelationshipKind.Friend.wire.toLong()
+private val KIND_PENDING_INCOMING: Long = RelationshipKind.PendingIncoming.wire.toLong()
+private val KIND_PENDING_OUTGOING: Long = RelationshipKind.PendingOutgoing.wire.toLong()
+private val KIND_BLOCK: Long = RelationshipKind.Block.wire.toLong()
+
 /**
  * Another member's profile, as the member menu's View profile opens it.
  *
- * The facts are the profile service's own public answer — the name, the handle, the level, the
- * bio, the country, the badges — fetched fresh by the shell and drawn beside the avatar the
- * session already holds. A withheld answer (the wire serves nothing rather than explaining why)
- * is its own sentence, not a spinner that never ends and not a failure colour. The one action is
- * the personal mute, which the web client keeps on this same card: a choice about the person,
- * made where the person is being read.
+ * The facts are the ones the web client's own profile card carries: the profile service's public
+ * answer (the name with its verified mark, the handle, the presence word, the custom status in
+ * quotes, the bio, the country, the language), the standing the economy service answers for anyone
+ * (the level, the total XP, the level's progress bar, the badges with the dates they were earned),
+ * the XP-board rank when the person holds one on the board's first page, and the social line read
+ * from the one graph walk — ✓ Friends, Request sent, or the incoming request's Accept and Decline,
+ * with Add friend on every other known edge. The shareable public id carries its own copy button,
+ * the one identifier a person can hand out freely.
+ *
+ * Every standing fact degrades to a missing line rather than a broken card, and a withheld profile
+ * answer (the wire serves nothing rather than explaining why) is its own sentence, not a spinner
+ * that never ends and not a failure colour. The personal mute rides here rather than in the member
+ * menu, mirroring the web client's own profile card: a choice about the person, made where the
+ * person is being read.
  */
 @Composable
 private fun MemberProfileSheet(
     view: MemberProfileView,
     avatarBytes: ByteArray?,
+    selfId: Id,
     canMuteForMe: Boolean,
     muted: Boolean,
     onClose: () -> Unit,
     onMuteForMe: (Boolean) -> Unit,
+    onFriendRequest: () -> Unit,
+    onFriendRespond: (Boolean) -> Unit,
 ) {
+    // The clipboard the copy-id control writes to, and the mark that says it did: the platform's
+    // own service, fetched once, with the copied state outliving the tap that set it the same way
+    // the web client's does (until the sheet is reopened).
+    val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+    var idCopied by remember { mutableStateOf(false) }
     MigoSheet(title = view.name, onDismiss = onClose) {
         when {
-            view.failure != null -> Text(
+            view.profile == null && !view.settled -> LoadingRow()
+
+            view.profile == null && view.failure != null -> Text(
                 text = view.failure ?: "",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-
-            view.profile == null && !view.settled -> LoadingRow()
 
             // Settled with no profile is the wire's withheld rule: the server served nothing for
             // the id, and the honest sentence is the one that states that without guessing why.
@@ -2761,6 +2941,17 @@ private fun MemberProfileSheet(
             else -> {
                 val profile = view.profile
                 if (profile != null) {
+                    // A friend act's failure is stated without losing the card it was made from —
+                    // the profile has already landed, and the person is still worth reading while
+                    // the act that failed is being retried.
+                    if (view.failure != null) {
+                        Text(
+                            text = view.failure ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        )
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -2772,12 +2963,32 @@ private fun MemberProfileSheet(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
-                            ListRowName(text = profile.displayName.ifBlank { view.name })
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ListRowName(text = profile.displayName.ifBlank { view.name })
+                                if (profile.verified == true) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    // The verified mark, the same glyph the web card carries.
+                                    Text(
+                                        text = "✔",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
                             if (profile.username.isNotBlank()) {
                                 ListRowLine(text = "@" + profile.username)
                             }
-                            if (profile.level != null) {
-                                ListRowLine(text = "Level " + profile.level)
+                            // The presence word only when the wire named a state: "—" is the
+                            // unknown's own answer, and an unknown is a line that is not there.
+                            val presence = profile.presence
+                            if (presence != null && presence != PresenceState.Unknown) {
+                                ListRowLine(text = presenceLabel(presence))
+                            }
+                            view.progression?.let { standing ->
+                                ListRowLine(text = "Level " + standing.level)
+                            }
+                            profile.customStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                                ListRowLine(text = "“$status”")
                             }
                         }
                     }
@@ -2789,20 +3000,130 @@ private fun MemberProfileSheet(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         )
                     }
+                    // The facts, each one its own absence when its read did not answer: a card
+                    // without its country or its XP is still a card, exactly as on the web client.
                     val facts = buildList {
                         profile.country?.let { add("🌍 $it") }
-                        add("🪪 " + profile.publicId)
+                        profile.language?.let { add("🗣 $it") }
+                        view.progression?.let { standing -> add("⭐ ${standing.xp} XP") }
+                        view.rank?.let { held -> add("🏆 #$held on the XP board") }
                     }
-                    ListRowLine(
-                        text = facts.joinToString(" · "),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    val badges = profile.badges.orEmpty()
-                    if (badges.isNotEmpty()) {
+                    if (facts.isNotEmpty()) {
                         ListRowLine(
-                            text = badges.joinToString(" · ") { badge -> "🏅 $badge" },
+                            text = facts.joinToString(" · "),
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         )
+                    }
+                    // The shareable public id, with the copy that makes sharing it a tap: the one
+                    // identifier the account can hand out freely, so the button beside it is the
+                    // card's one piece of its own machinery.
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ListRowLine(
+                            text = "🪪 " + profile.publicId,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard?.setPrimaryClip(
+                                    ClipData.newPlainText("public id", profile.publicId),
+                                )
+                                idCopied = true
+                            },
+                            modifier = Modifier.semantics {
+                                contentDescription = if (idCopied) {
+                                    "Copied"
+                                } else {
+                                    "Copy the shareable id"
+                                }
+                            },
+                        ) {
+                            Text(
+                                text = if (idCopied) "✓ Copied" else "📋 Copy",
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                    // The level's progress bar, only when the wire named a span: a bar without its
+                    // denominator is a picture that promises a number it does not have.
+                    view.progression?.let { standing ->
+                        if (standing.xpForNextLevel > 0) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                            ) {
+                                LinearProgressIndicator(
+                                    progress = {
+                                        (standing.xpIntoLevel.toDouble() / standing.xpForNextLevel.toDouble())
+                                            .toFloat()
+                                            .coerceIn(0f, 1f)
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                ListRowLine(
+                                    text = "${standing.xpIntoLevel} / ${standing.xpForNextLevel} XP " +
+                                        "to level ${standing.level + 1}",
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                            }
+                        }
+                    }
+                    // The badges with the dates they were earned — the honours the economy service
+                    // answers for anyone, unread (null) being no row at all and read-empty being
+                    // the same honest nothing.
+                    val badges = view.badges
+                    if (!badges.isNullOrEmpty()) {
+                        for (badge in badges) {
+                            ListRowLine(
+                                text = "🏅 ${badge.badgeCode.replace('_', ' ')} · Earned " +
+                                    DateUtils.getRelativeTimeSpanString(badge.awardedAt),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    // The social line: what this account is to the person, and the one act that
+                    // state admits. Never for one's own card — a relationship to oneself is not a
+                    // fact the graph holds — and never for an unknown edge or a block, which the
+                    // wire states its own ways. Each act re-reads the edge, so the line says what
+                    // the wire says, not what the button hoped.
+                    if (view.userId != selfId) {
+                        val edge = view.relationship
+                        when (edge) {
+                            null, KIND_BLOCK -> Unit
+
+                            KIND_FRIEND -> ListRowLine(
+                                text = "✓ Friends",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            )
+
+                            KIND_PENDING_OUTGOING -> ListRowLine(
+                                text = "Request sent",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            )
+
+                            KIND_PENDING_INCOMING -> Column(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            ) {
+                                ListRowLine(text = "wants to be your friend")
+                                Row {
+                                    TextButton(
+                                        onClick = { onFriendRespond(true) },
+                                        enabled = !view.friendBusy,
+                                    ) { Text("Accept") }
+                                    TextButton(
+                                        onClick = { onFriendRespond(false) },
+                                        enabled = !view.friendBusy,
+                                    ) { Text("Decline", color = MaterialTheme.colorScheme.error) }
+                                }
+                            }
+
+                            else -> TextButton(
+                                onClick = onFriendRequest,
+                                enabled = !view.friendBusy,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            ) { Text("Add friend") }
+                        }
                     }
                 }
                 if (canMuteForMe) {
@@ -2812,6 +3133,227 @@ private fun MemberProfileSheet(
                         sub = "Hides this person's messages in this room for you",
                         onClick = { onMuteForMe(!muted) },
                     )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * The header gift's recipient picker for a room or a group: the people the conversation holds,
+ * each one a tap away from becoming the gift's aim.
+ *
+ * A direct chat never opens this sheet — its gift is aimed at the peer the moment the header's
+ * control is pressed — so the rows here are the conversation's own roster, read on open when the
+ * member sheet never has. One's own row is not offered (a gift to oneself is not a thing the shop
+ * sells), and a group's departed members are skipped for the same reason the invite quick-pick
+ * skips them: a row that aimed a gift at someone no longer in the room would be a button that can
+ * only fail politely.
+ */
+@Composable
+private fun GiftRecipientSheet(
+    chat: ChatState,
+    selfId: Id,
+    avatarBytes: Map<Id, ByteArray>,
+    onDismiss: () -> Unit,
+    onPick: (userId: Id, name: String) -> Unit,
+) {
+    MigoSheet(title = "Send a gift", onDismiss = onDismiss) {
+        when {
+            chat.rosterLoading && chat.roster == null && chat.groupRoster == null -> LoadingRow()
+
+            else -> {
+                val recipients = if (chat.kind == ConversationKind.Group) {
+                    chat.groupRoster
+                        ?.filter { !it.departed && it.userId != selfId }
+                        ?.map { it.userId to it.name }
+                        .orEmpty()
+                } else {
+                    chat.roster
+                        ?.filter { it.userId != selfId }
+                        ?.map { it.userId to it.name }
+                        .orEmpty()
+                }
+                if (recipients.isEmpty()) {
+                    Placeholder(text = "No one else is in this conversation.")
+                } else {
+                    for ((userId, name) in recipients) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(userId, name) }
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Avatar(name = name, bytes = avatarBytes[userId], size = 44.dp)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            ListRowName(text = name)
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * The composer's attach menu: the four ways a message's payload can be chosen, each naming its
+ * promise before the system's own picker opens.
+ *
+ * A port of the web composer's own menu, minus the one row that has no Android counterpart to
+ * fold in — the disappearing-messages toggle, which this client's composer never carried, so the
+ * menu keeps exactly its four picks and nothing invented to fill the web's shape. All four funnel
+ * into the same attachment send path; the choice only decides which picker the platform opens and
+ * which promise the row made.
+ */
+@Composable
+private fun AttachSheet(
+    onDismiss: () -> Unit,
+    onPick: (AttachSource) -> Unit,
+) {
+    MigoSheet(title = "Attach", onDismiss = onDismiss) {
+        SheetAction(
+            glyph = "📄",
+            label = "Pick a file",
+            sub = "Anything the picker offers",
+            onClick = { onPick(AttachSource.File) },
+        )
+        SheetAction(
+            glyph = "📷",
+            label = "Take a photo",
+            sub = "From the camera",
+            onClick = { onPick(AttachSource.Photo) },
+        )
+        SheetAction(
+            glyph = "🎬",
+            label = "Pick a video",
+            sub = "From the gallery",
+            onClick = { onPick(AttachSource.Video) },
+        )
+        SheetAction(
+            glyph = "🖼",
+            label = "Pick an image",
+            sub = "From the gallery",
+            onClick = { onPick(AttachSource.Image) },
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * The composer's emoticon picker: two tabs, the same shape the web client's picker keeps.
+ *
+ * The first tab is the emoticons — the free baseline every account can use plus whatever emoticon
+ * packs the account owns — and the second is the stickers, each owned pack under its own name.
+ * Everything inserts as text: the glyphs are Unicode, and a sticker rides out as ordinary message
+ * text the same way an emoticon does. The owned set arrives as null while the entitlements read is
+ * in flight, and the picker waits for it rather than guessing — the free baseline is not a
+ * substitute for an answer about what was paid for.
+ */
+@Composable
+private fun EmoticonSheet(
+    owned: Set<String>?,
+    onDismiss: () -> Unit,
+    onInsert: (glyph: String) -> Unit,
+) {
+    var stickersTab by remember { mutableStateOf(false) }
+    MigoSheet(title = "Emoticons", onDismiss = onDismiss) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+            TextButton(
+                onClick = { stickersTab = false },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    text = "Emoticons",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (stickersTab) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+            TextButton(
+                onClick = { stickersTab = true },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    text = "Stickers",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (stickersTab) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
+        when {
+            owned == null -> LoadingRow()
+
+            !stickersTab -> {
+                val glyphs = FREE_EMOTICONS + ownedEmoticons(owned)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp),
+                ) {
+                    for (row in glyphs.chunked(8)) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            for (glyph in row) {
+                                TextButton(
+                                    onClick = { onInsert(glyph) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .semantics { contentDescription = "Insert $glyph" },
+                                ) {
+                                    Text(text = glyph, style = MaterialTheme.typography.titleLarge)
+                                }
+                            }
+                            repeat(8 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                        }
+                    }
+                }
+            }
+
+            else -> {
+                val packs = ownedStickerPacks(owned)
+                if (packs.isEmpty()) {
+                    Placeholder(text = "You do not own any sticker packs yet.")
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp),
+                    ) {
+                        for (pack in packs) {
+                            SectionLabel(text = pack.name)
+                            for (row in pack.items.chunked(4)) {
+                                Row(modifier = Modifier.fillMaxWidth()) {
+                                    for (glyph in row) {
+                                        TextButton(
+                                            onClick = { onInsert(glyph) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .semantics { contentDescription = "Insert $glyph" },
+                                        ) {
+                                            Text(
+                                                text = glyph,
+                                                style = MaterialTheme.typography.headlineMedium,
+                                            )
+                                        }
+                                    }
+                                    repeat(4 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -787,6 +787,13 @@ data class ChatSafety(
  * open the same sheet. [settled] separates "still reading" from "read, and the server served
  * nothing": the wire's withheld rule (an id the server chooses not to serve is simply absent)
  * is a sentence of its own, not a spinner that never ends and not a failure colour.
+ *
+ * The standing facts — progression, badges, the XP-board rank, the social edge — are separate
+ * reads that each degrade to a missing line rather than a broken card, exactly as the web client's
+ * own profile card degrades them: a profile without its level or its friend line is still a
+ * profile. [badges] is null until its read settles (an empty row and an unread row are different
+ * facts), while [rank] and [relationship] are null for "no line" in both senses — off the board's
+ * first page, or an edge the graph walk did not name.
  */
 data class MemberProfileView(
     /** The account the sheet is about. */
@@ -799,7 +806,35 @@ data class MemberProfileView(
     val settled: Boolean = false,
     /** Why the read could not answer, when it could not. The profile is then null for good. */
     val failure: String? = null,
+    /** The person's XP standing, when the read answered; null is a missing line, never a broken card. */
+    val progression: ProgressionWire? = null,
+    /** The person's badges with their earned dates, once the read settles; null until then. */
+    val badges: List<BadgeWire>? = null,
+    /** The person's position on the XP board's first page, when they hold one; null is no rank line. */
+    val rank: Long? = null,
+    /** The viewer's edge to this person, as the wire's plain kind number; null when the graph named none. */
+    val relationship: Long? = null,
+    /** True while a friend request or an answer to one is in flight, so its control cannot double-fire. */
+    val friendBusy: Boolean = false,
 )
+
+/**
+ * The four ways the composer's attach control can pick what the next message carries.
+ *
+ * A photo and an image differ exactly by the camera: a photo is taken, an image is chosen. All
+ * four funnel into the one attachment send path — the picker's only job is to name the promise
+ * ("anything", "from the camera", "a video", "a picture") honestly before the system sheet opens.
+ */
+enum class AttachSource {
+    /** Anything the system's file picker offers. */
+    File,
+    /** A picture taken with the camera now. */
+    Photo,
+    /** A video chosen from the device. */
+    Video,
+    /** A picture chosen from the device. */
+    Image,
+}
 
 /**
  * A room's live shape, as the open chat reads it.
