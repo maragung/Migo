@@ -23,9 +23,15 @@
 //! beta ingests it and places the frame on bob's topic exactly as alpha's own
 //! hub would have. The invite's notification crosses the same way first — the
 //! bell is the tier's ungated half, so it is asserted before the ring it
-//! announces. Then alice cancels, and the `Ended(ByCaller)` state event crosses
-//! the same way — the frame the old code never sent, because no node but the
-//! publisher's own ever saw a call event at all.
+//! announces. Before any of it, two local probes place a friend hint and the
+//! bell's exact twin straight into beta's hub through the same calls the
+//! ingest arm makes, so a silent far socket is attributed to the mailbox or
+//! the crossing by evidence rather than by guesswork — and every wait's
+//! failure message carries the far node's own delivery counters, because a
+//! dropped bell leaves no log anywhere. Then alice cancels, and the
+//! `Ended(ByCaller)` state event crosses the same way — the frame the old
+//! code never sent, because no node but the publisher's own ever saw a call
+//! event at all.
 //!
 //! Determinism follows the client-seam house style: every exchange is bounded
 //! by a step budget, every expectation is asserted on frame contents, and the
@@ -98,6 +104,17 @@ fn mesh_peer_of(seed: &str, bind: SocketAddr, region: &str) -> MeshPeer {
         base_url: format!("wss://{bind}"),
         region: region.to_string(),
     }
+}
+
+/// The per-subject key the bell coalesces under: the same derivation the server's
+/// `coalesce_key_of` applies, replicated here because the function itself is private
+/// to the server crate. The twin bell below must cross the hub under the very key the
+/// federated bell will, or it would not be the twin it exists to be.
+fn coalesce_key_of(id: &Id) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Builds one node of the fleet: TCP and mesh listeners on ephemeral loopback ports, a
@@ -245,6 +262,16 @@ async fn send<M: Encode>(
 
 /// Reads one length-prefixed frame, allowing `limit` for it to arrive.
 async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Frame {
+    try_recv_within(stream, limit)
+        .await
+        .expect("the frame does not stall — silence here is the bug these tests exist to catch")
+}
+
+/// Reads one length-prefixed frame the way [`recv_within`] does, but reports the
+/// budget running out as `None` instead of panicking, so an event wait that polls
+/// the socket can be the one to name the failure — with everything it saw on the
+/// way, which a panic inside the read would have taken with it.
+async fn try_recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Option<Frame> {
     let body = tokio::time::timeout(limit, async {
         let mut head = [0u8; 4];
         stream
@@ -259,9 +286,8 @@ async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Fra
             .expect("the body arrives");
         body
     })
-    .await
-    .expect("the frame does not stall — silence here is the bug these tests exist to catch");
-    Frame::decode(body.into()).expect("the frame decodes")
+    .await?;
+    Some(Frame::decode(body.into()).expect("the frame decodes"))
 }
 
 /// A scripted client: a real TCP session speaking the length-prefixed framing,
@@ -379,11 +405,19 @@ impl Client {
     /// Reads until this session's stream carries a frame of the wanted opcode within
     /// `limit`, keeping the frames it passes over so a later wait can take them — the
     /// ring and its bell arrive in the far node's own order, so order-tolerance is a
-    /// requirement, not a courtesy. The frames seen on the way are carried into the
-    /// failure message, because a far node that ingested the event but delivered
-    /// nothing leaves no other trace: what the socket carried is the whole of the
-    /// evidence.
-    async fn next_event_of(&mut self, want: Opcode, limit: Duration) -> Frame {
+    /// requirement, not a courtesy.
+    ///
+    /// A timeout inside the read returns `None` rather than panicking, so the deadline
+    /// assert here is what fires when nothing arrives — and its message carries the
+    /// whole of the evidence: what this wait saw on the socket, what earlier waits
+    /// held, and the caller's `evidence` of the far node's own delivery counters. A
+    /// far node that ingested the event but delivered nothing leaves no other trace.
+    async fn next_event_of(
+        &mut self,
+        want: Opcode,
+        limit: Duration,
+        evidence: &dyn Fn() -> String,
+    ) -> Frame {
         if let Some(position) = self
             .held
             .iter()
@@ -397,12 +431,20 @@ impl Client {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             assert!(
                 !remaining.is_zero(),
-                "the {:?} frame never arrived within {:?}; the socket carried {:?}",
+                "the {:?} frame never arrived within {:?}; this wait saw {:?} on the \
+                 socket, earlier waits held {:?}, and the far node reports: {}",
                 want,
                 limit,
-                seen
+                seen,
+                self.held
+                    .iter()
+                    .filter_map(|frame| Opcode::from_wire(frame.header.opcode))
+                    .collect::<Vec<_>>(),
+                evidence()
             );
-            let frame = recv_within(&mut self.stream, remaining).await;
+            let Some(frame) = try_recv_within(&mut self.stream, remaining).await else {
+                continue;
+            };
             if let Some(opcode) = Opcode::from_wire(frame.header.opcode) {
                 if opcode == want {
                     return frame;
@@ -473,6 +515,18 @@ async fn a_ring_places_and_cancels_across_nodes() {
     let mut alice = Client::connect_fresh(a_addr, &alice_grant).await;
     let mut bob = Client::connect_fresh(b_addr, &bob_grant).await;
 
+    // The failure evidence: the frames this suite waits for are ones whose loss leaves
+    // no log anywhere — the bell is droppable by class, the ring is feature-gated — so
+    // every wait's failure message carries the far node's own delivery counters: what
+    // its gateway wrote, and what it dropped under backpressure.
+    let beta_evidence = || {
+        format!(
+            "beta's gateway wrote {} frames and dropped {:?}",
+            app_b.gateway.frames_out_total(),
+            app_b.gateway.dropped_frames_total(),
+        )
+    };
+
     // The deterministic barrier: bob's self-subscription on beta asked the mesh to
     // watch his user topic, and the ask is durable and async, so the test waits until
     // it has landed in alpha's table — polling the table, not sleeping — before the
@@ -513,11 +567,52 @@ async fn a_ring_places_and_cancels_across_nodes() {
         },
         app_b.clock.now(),
     );
-    let probe_frame = bob.next_event_of(Opcode::FriendEvent, STEP).await;
+    let probe_frame = bob
+        .next_event_of(Opcode::FriendEvent, STEP, &beta_evidence)
+        .await;
     let probe: FriendEvent = from_frame(&probe_frame).expect("the probe decodes");
     assert_eq!(
         probe.state, "probe",
         "the probe frame is the one the test placed on the topic"
+    );
+
+    // The bell's twin: the same notification frame the user-topic tier will carry,
+    // placed through the exact call the mesh's ingest arm makes — same topic, same
+    // opcode, same droppable delivery class, same per-subject coalescing key — still
+    // before any federated traffic exists to blame. A far phone that hears the probe
+    // but not the twin has a mailbox that refuses the bell's own delivery class; one
+    // that hears the twin but not the bell has an honest mailbox and a crossing that
+    // loses the mesh-carried bytes.
+    let twin = NotificationEvent {
+        kind: NotificationKind::IncomingCall,
+        at: app_b.clock.now(),
+        title: None,
+        body: None,
+        conversation_id: None,
+        room_id: None,
+        actor_id: Some(alice_grant.account_id),
+    };
+    let twin_frame =
+        to_frame(Opcode::NotificationEvent.to_wire(), 0, &twin).expect("the twin encodes");
+    let twin_bytes = twin_frame.encode().expect("the twin's record encodes");
+    app_b.gateway.broadcast_frame_to_topic(
+        &Topic {
+            kind: TopicKind::User,
+            id: bob_grant.account_id,
+        },
+        Opcode::NotificationEvent,
+        &twin_bytes,
+        Some(coalesce_key_of(&bob_grant.account_id)),
+        app_b.clock.now(),
+    );
+    let twin_back = bob
+        .next_event_of(Opcode::NotificationEvent, STEP, &beta_evidence)
+        .await;
+    let twin_bell: NotificationEvent = from_frame(&twin_back).expect("the twin decodes");
+    assert_eq!(
+        twin_bell.kind,
+        NotificationKind::IncomingCall,
+        "the twin bell is the frame the test placed on the topic"
     );
 
     // The ring: alice's invite is accepted by the row-holding node, and the invite
@@ -545,9 +640,10 @@ async fn a_ring_places_and_cancels_across_nodes() {
     // The bell first: the invite's notification rides the same user-topic tier the ring
     // does, but unlike the ring it carries no feature bit — section 72 gates the call
     // opcodes and not the bell — so it is the tier's own delivery this asserts, one hop
-    // the feature negotiation cannot touch.
+    // the feature negotiation cannot touch. Its twin already crossed the local mailbox
+    // above, so a failure here is the crossing's, named by the counters it carries.
     let bell_frame = bob
-        .next_event_of(Opcode::NotificationEvent, MESH_BUDGET)
+        .next_event_of(Opcode::NotificationEvent, MESH_BUDGET, &beta_evidence)
         .await;
     let bell: NotificationEvent = from_frame(&bell_frame).expect("the bell event decodes");
     assert_eq!(
@@ -557,7 +653,7 @@ async fn a_ring_places_and_cancels_across_nodes() {
     );
 
     let invite_frame = bob
-        .next_event_of(Opcode::CallInviteEvent, MESH_BUDGET)
+        .next_event_of(Opcode::CallInviteEvent, MESH_BUDGET, &beta_evidence)
         .await;
     let invite: CallInviteEvent = from_frame(&invite_frame).expect("the invite event decodes");
     assert_eq!(
@@ -578,7 +674,9 @@ async fn a_ring_places_and_cancels_across_nodes() {
     let _: migo_protocol::Acknowledged =
         alice.ask(Opcode::CallCancel, &CallCancel { call_id }).await;
 
-    let ended_frame = bob.next_event_of(Opcode::CallStateEvent, MESH_BUDGET).await;
+    let ended_frame = bob
+        .next_event_of(Opcode::CallStateEvent, MESH_BUDGET, &beta_evidence)
+        .await;
     let ended: CallStateEvent = from_frame(&ended_frame).expect("the end event decodes");
     assert_eq!(ended.call_id, call_id, "the cancellation names the ring");
     assert_eq!(ended.state, CallState::Ended.to_wire());

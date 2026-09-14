@@ -378,6 +378,26 @@ impl Gateway {
         );
     }
 
+    /// How many frames this gateway has written to client sockets since it opened.
+    ///
+    /// A reader for the cross-node suites: a far node whose ingest log shows an event
+    /// arriving while its socket stays silent is told apart from one whose writer never
+    /// wrote by this count, and by [`Gateway::dropped_frames_total`] when the loss was
+    /// backpressure.
+    pub fn frames_out_total(&self) -> u64 {
+        self.inner.meters.frames_out_total()
+    }
+
+    /// The frames dropped under backpressure since this gateway opened, labelled by
+    /// delivery class.
+    ///
+    /// The same reader's other half: section 151's droppable-class drops are silent by
+    /// design, counted only here, and a composition test that needs to name one finds
+    /// the number in this list.
+    pub fn dropped_frames_total(&self) -> Vec<(&'static str, u64)> {
+        self.inner.meters.dropped_frames_total()
+    }
+
     /// Publishes a server-originated frame to one topic, for callers outside a session.
     ///
     /// The mesh ingest path is the reason this exists: an event that arrives over the
