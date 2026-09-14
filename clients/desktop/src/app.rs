@@ -1309,12 +1309,13 @@ impl App {
             .unwrap_or_else(|| username.clone());
         let coins = self.wallet.coins;
         // The state word for the bar's dot, resolved here so the layout closure never borrows
-        // the connection it is drawn beside.
+        // the connection it is drawn beside. The hues are the same three every client wears:
+        // green connected, amber connecting or reconnecting, red gone.
         let (dot_color, dot_label) = match &self.connection {
             Connection::Online => (colors.positive, "Connected"),
             Connection::Connecting => (colors.warning, "Connecting"),
-            Connection::Offline => (colors.banner_ink, "Offline"),
-            Connection::Fallback(_) => (colors.accent, "Connected"),
+            Connection::Offline => (colors.danger, "Offline"),
+            Connection::Fallback(_) => (colors.positive, "Connected"),
             Connection::Failed(_) => (colors.danger, "Disconnected"),
         };
         let connection_detail = self.connection.label().to_owned();

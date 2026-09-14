@@ -115,19 +115,19 @@ fun LoadingRow(modifier: Modifier = Modifier) {
  *
  * Both, not one. The dot is what someone glances at and the word is what they read when the dot is not
  * green, and a colour on its own would say nothing to anybody who cannot tell this green from this
- * amber.
+ * amber. The hues are the same three every client wears: green for connected, amber for connecting and
+ * reconnecting alike, red for a connection that is gone and whose recovery the automatic retry owns.
  */
 @Composable
 fun ConnectionBadge(state: ConnectionState, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
-    // The restyle's status hues: green for here, amber for on the way, red for a connection the
-    // client has given up on, grey for gone. Fixed values rather than scheme roles, because these
-    // four colours mean the same thing on every surface they sit on.
+    // Fixed values rather than scheme roles, because these colours mean the same thing on every
+    // surface they sit on.
     val (label, tint) = when (state) {
         ConnectionState.Online -> Pair("Online", Color(0xFF3FCE6B))
         ConnectionState.Connecting -> Pair("Connecting", Color(0xFFF5B83D))
-        ConnectionState.Reconnecting -> Pair("Reconnecting", Color(0xFFE5503C))
-        ConnectionState.Closed -> Pair("Offline", Color(0xFFA8B8C2))
+        ConnectionState.Reconnecting -> Pair("Reconnecting", Color(0xFFF5B83D))
+        ConnectionState.Closed -> Pair("Offline", Color(0xFFE5503C))
     }
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(8.dp).background(tint, CircleShape))

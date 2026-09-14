@@ -12,16 +12,16 @@
  * the session gate — a call can start from a thread header and must keep ringing across window
  * switches — and the overlay it feeds renders after the desk so a live call sits over the whole
  * shell, not inside one window. The group-call manager sits inside it for the same reason: a
- * roster joined from a thread header outlives the window it started in. The connection Snackbar
- * sits at the same level for the same reason: "Reconnecting…" is news about the session, not about
- * whichever window is showing.
+ * roster joined from a thread header outlives the window it started in. The connection dot
+ * sits at the same level for the same reason: the transport's health is news about the session,
+ * not about whichever window is showing.
  */
 
 import type { ReactNode } from 'react';
 
 import { AppShell } from '@/components/app-shell.js';
 import { CallOverlay } from '@/components/call-overlay.js';
-import { ConnectionSnackbar } from '@/components/connection-snackbar.js';
+import { ConnectionStatusDot } from '@/components/connection-status-dot.js';
 import { GroupCallOverlay } from '@/components/group-call-overlay.js';
 import { RequireReady } from '@/components/require-ready.js';
 import { CallManagerProvider } from '@/lib/migo/call-manager.js';
@@ -42,7 +42,7 @@ export default function ChatLayout({ children }: { children: ReactNode }): React
                     shell's to draw, inside that conversation's window. */}
                 {children}
                 <AppShell />
-                <ConnectionSnackbar />
+                <ConnectionStatusDot />
                 <CallOverlay />
                 <GroupCallOverlay />
               </GroupCallManagerProvider>

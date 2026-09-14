@@ -2156,49 +2156,47 @@ main {
   place-items: center;
 }
 
-/* --- connection snackbar --- */
+/* --- connection dot --- */
 
-/* The one connection notice, fixed over the whole shell: "Reconnecting…" is news about the
-   session, not about whichever pane is showing, so it rides above both panes at the bottom of
-   the screen and disappears the moment the connection is healthy again. */
-.conn-snackbar {
+/* The one connection mark, worn in the corner whatever the transport is doing: green steady
+   while it works, yellow pulsing while it (re)connects, red once it has dropped and the
+   automatic retry owns the recovery. It sits above the taskbar whichever side the user docked
+   it, and never takes a pointer, so it cannot sit in the way of a click; what it means stays
+   one hover away through its title. Below the PC breakpoint the tab strip lives at the top of
+   the screen, so the corner is free and the dot drops to the very edge. */
+.conn-dot {
   position: fixed;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
+  right: 12px;
+  bottom: calc(44px + env(safe-area-inset-bottom, 0px));
   z-index: var(--z-toast);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(92vw, 480px);
-  padding: 8px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-  color: var(--text-dim);
-  font-size: var(--fs-meta);
-  box-shadow: var(--shadow);
-}
-.conn-snackbar .dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px var(--bg-elevated);
 }
-.conn-snackbar.snack-wait .dot {
+.conn-dot-up {
+  background: var(--positive);
+}
+.conn-dot-wait {
   background: var(--warning);
-  animation: pulse 1.3s infinite;
+  animation: conn-dot-pulse 1.3s infinite;
 }
-.conn-snackbar.snack-down .dot {
+.conn-dot-down {
   background: var(--danger);
 }
-@keyframes pulse {
+@keyframes conn-dot-pulse {
   0%,
   100% {
     opacity: 1;
   }
   50% {
     opacity: 0.3;
+  }
+}
+@media (max-width: 1023px) {
+  .conn-dot {
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   }
 }
 
