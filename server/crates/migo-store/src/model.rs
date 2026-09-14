@@ -905,6 +905,52 @@ impl Appended {
     }
 }
 
+/// A message row that crossed the mesh, to be held as a replica (section
+/// 170's message-row tier).
+///
+/// The shape of a [`MessageEvent`](migo_protocol::MessageEvent) read back into
+/// the store's own terms, which is honest about the one thing it is not: the
+/// wire event carries no `expires_at`, so a replica of a disappearing message
+/// never learns when it was due to vanish. The replica row is seated with no
+/// expiry and stays until a tombstone or the operator removes it — a recorded
+/// wire gap, not a decision this struct can make.
+///
+/// `deleted_at` is the receiving node's clock rather than the sender's,
+/// because the event that carries the tombstone carries no deletion time of
+/// its own; the row records when *this node* learned the message was gone,
+/// which is the only honest timestamp available at the boundary.
+#[derive(Clone, Debug)]
+pub struct ReplicaMessage {
+    /// Client-generated id, verbatim from the event.
+    pub message_id: Id,
+    /// Conversation, verbatim from the event.
+    pub conversation_id: Id,
+    /// Position in the conversation, verbatim from the event: the sending
+    /// node assigned it and the sending node is the sequencer of its own
+    /// sends (section 170), so a replica never renumbers what it receives.
+    pub seq: i64,
+    /// Sender.
+    pub sender_id: Id,
+    /// Sending device, absent when the event carried the protocol's nil id.
+    pub sender_device: Option<Id>,
+    /// Kind.
+    pub kind: MessageKind,
+    /// Payload, sealed and opaque to this node exactly as it was to every
+    /// other node on the way.
+    pub envelope: Vec<u8>,
+    /// Message being replied to.
+    pub reply_to: Option<Id>,
+    /// Server receipt time as stamped by the sending node.
+    pub created_at: Timestamp,
+    /// The edit the event carried, when it carried one. `None` on a plain
+    /// arrival and on a tombstone that never passed through an edit.
+    pub edited_at: Option<Timestamp>,
+    /// The tombstone the event carried, when it carried one — the receiving
+    /// clock, per the struct's own doc. `None` on a plain arrival and on an
+    /// edit.
+    pub deleted_at: Option<Timestamp>,
+}
+
 /// Per-member position in a conversation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Cursor {

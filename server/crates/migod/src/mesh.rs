@@ -1035,6 +1035,20 @@ impl IngestRouter {
                     .await;
             }
         }
+        // The message-row tier (section 170), the room's half: a room's chat
+        // rides this envelope as the same inner MessageEvent the
+        // conversation path carries, so it seats through the same one
+        // mechanism — two envelopes, one event shape, one store method —
+        // rather than a second half-version of the tier that would drift.
+        // A redelivered copy (the mesh is at-least-once) is the no-op the
+        // store's idempotence makes it.
+        if inner_opcode == Opcode::MessageEvent {
+            if let Some(store) = &self.store {
+                if let Ok(event) = from_frame::<migo_protocol::MessageEvent>(&inner) {
+                    crate::message_replica::seat(store, &event, now).await;
+                }
+            }
+        }
         // The home node's second obligation: the event came from a peer that
         // already delivered it locally, so the other watching nodes are the
         // ones still owed a copy.
@@ -1145,6 +1159,21 @@ impl IngestRouter {
                             }],
                         );
                     }
+                }
+            }
+        }
+        // The message-row tier (section 170): a message that crossed the mesh
+        // is seated as a row here too, not only pushed to the sessions that
+        // happen to be connected, so this node's own sync can answer for the
+        // transcript after a reconnect or from a device that never saw the
+        // live copy. The decode is the same one the placement already
+        // performed for a message event, and the seat never fails the ingest
+        // that carries it — the push half of the delivery has already
+        // succeeded by the time this runs.
+        if inner_opcode == Opcode::MessageEvent {
+            if let Some(store) = &self.store {
+                if let Ok(event) = from_frame::<migo_protocol::MessageEvent>(&inner) {
+                    crate::message_replica::seat(store, &event, now).await;
                 }
             }
         }

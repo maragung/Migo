@@ -25,6 +25,15 @@
 //! (`FED_CONVERSATION_EVENT`), the inner event frame sealed exactly as a
 //! local session would have received it.
 //!
+//! And since the message-row tier, the crossing is not push-only: the ingest
+//! path seats every `MessageEvent` that crosses as a *row* in the receiving
+//! node's store — idempotently, never over a row the node already holds, with
+//! the sending node's seq verbatim — so a sync asked on the far node answers
+//! from real rows rather than an empty transcript. This scenario drives that
+//! half too: each participant syncs from their own node for a message the
+//! *other* node accepted, and an edit and a deletion cross the same way and
+//! land on the far row, because the wire's one event shape carries all three.
+//!
 //! The sealed envelope is the whole security claim under test. Direct messages
 //! are sealed client-side (section 170's standing rule); the frames this
 //! scenario pushes across the mesh carry those bytes, and the test asserts
@@ -65,9 +74,9 @@ use migo_core::{Clock, Config, Id, OsRandom, Secret, SystemClock, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationKind, ConversationSummary, Decode,
-    Encode, Frame, Hello, MessageAccepted, MessageEvent, MessageKind, MessageSend, Opcode,
-    Platform, ProfileUpdate, SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome,
-    PROTOCOL_VERSION,
+    Encode, Frame, Hello, MessageAccepted, MessageDelete, MessageEdit, MessageEvent, MessageKind,
+    MessageSend, Opcode, Platform, ProfileUpdate, SubscribeRequest, SubscribeResponse, SyncRequest,
+    SyncResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_store::model::{Relationship, Visibility};
 use migo_store::SharedStore;
@@ -113,6 +122,11 @@ const ALICE_SEALED: &[u8] = b"sealed-by-alices-device-for-bob";
 /// reply leaves the non-home node, is carried to the home node, and is served
 /// from the home node's own hub to alice's session there.
 const BOB_SEALED: &[u8] = b"sealed-by-bobs-device-for-alice";
+
+/// What alice's device sealed as the replacement for her original message.
+/// The edit crosses as the same event shape the original send did, so the
+/// assertion is on sealed bytes here too, not on a flag.
+const ALICE_EDITED: &[u8] = b"sealed-by-alices-device-for-bob-edited";
 
 fn valid_token_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])
@@ -484,6 +498,53 @@ impl Client {
             .await;
         (message_id, accepted)
     }
+
+    /// Syncs forward from zero and hands back the row this node holds for one
+    /// message id, if it holds one yet.
+    ///
+    /// This is the poll primitive for the message-row tier's assertions,
+    /// because the live push and the row seat are two halves of one delivery
+    /// and the push can arrive first: the hub copy is published before the
+    /// ingest path seats the row, so a sync asked the instant the push lands
+    /// can honestly answer from a store that has not written yet. The caller
+    /// bounds the polling, exactly the way the send retry loop does.
+    async fn held_row(&mut self, conversation: Id, message_id: Id) -> Option<MessageEvent> {
+        let page: SyncResponse = self
+            .ask(
+                Opcode::Sync,
+                &SyncRequest {
+                    conversation_id: conversation,
+                    have_seq: 0,
+                    limit: 50,
+                    to_seq: None,
+                    backwards: None,
+                },
+            )
+            .await;
+        page.messages
+            .into_iter()
+            .find(|message| message.message_id == message_id)
+    }
+
+    /// Reads until the message event for one specific message arrives.
+    ///
+    /// The send retry loop's bounded waits can leave a straggler behind — a
+    /// late attempt's event is a perfectly legal `MessageEvent` that is
+    /// simply not the one being asked for — so matching on the message id
+    /// rather than the opcode alone is what keeps the later edit and
+    /// tombstone assertions honest.
+    async fn next_message_event_for(&mut self, message_id: Id) -> MessageEvent {
+        loop {
+            let frame = self.next_frame().await;
+            if Opcode::from_wire(frame.header.opcode) == Some(Opcode::MessageEvent) {
+                if let Ok(event) = from_frame::<MessageEvent>(&frame) {
+                    if event.message_id == message_id {
+                        return event;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The full scenario: two accounts registered on two different nodes, a
@@ -705,13 +766,21 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
     // yet — so the gate's pull runs here too: alice's account, profile, and
     // her edge toward bob cross from alpha inside this very request, and the
     // send proceeds against rows the mesh just delivered. The send itself
-    // lands in beta's store (its own seq — a private message needs no global
-    // order, section 170), and the forward half hands it to the conversation's
-    // home node, because beta holds no watch table and cannot tier it itself.
+    // lands in beta's store, and its number is the honest one for a node that
+    // now *holds* the conversation's rows: the seated replica of alice's
+    // message advanced beta's high-water mark to her seq or past it (a late
+    // straggler from the retry loop may have advanced it further by the time
+    // the append runs), so beta's own send is numbered beyond the mark —
+    // still beta sequencing its own sends (section 170), just no longer from
+    // a counter that pretends the replica never arrived — and the forward
+    // half hands it to the conversation's home node, because beta holds no
+    // watch table and cannot tier it itself.
     let (_, bob_accepted) = bob_client.send_message(conversation, BOB_SEALED).await;
-    assert_eq!(
-        bob_accepted.seq, 1,
-        "beta's own store numbers its own sends"
+    assert!(
+        bob_accepted.seq > alice_to_bob.seq,
+        "beta numbers its own send past the replica's high-water mark ({} > {})",
+        bob_accepted.seq,
+        alice_to_bob.seq
     );
 
     // And the pull inside that send left a replica behind, the mirror of the
@@ -770,4 +839,168 @@ async fn a_direct_conversations_sealed_messages_reach_a_peer_on_another_node() {
             "both participants are seated wherever the row is"
         );
     }
+
+    // --- the message-row tier, driven at the same seam -------------------
+    //
+    // Everything above proved the push; what follows proves the row. A node
+    // that watches a conversation now also holds its messages, so sync on
+    // either node answers from real rows. The polls are bounded the way the
+    // send retry loop is, because the live push and the row seat are two
+    // halves of one delivery and the push can arrive first.
+
+    // Bob syncs from beta — the node that never accepted alice's send — and
+    // the page holds her message as a row, sealed bytes and all, with the seq
+    // alpha assigned it verbatim. Before the tier this page was empty, which
+    // was the whole gap: a reconnect or a fresh device on the far node lost
+    // the transcript the push had already shown.
+    let mut alice_row = None;
+    for _ in 0..SEND_ATTEMPTS {
+        if let Some(row) = bob_client
+            .held_row(conversation, alice_to_bob.message_id)
+            .await
+        {
+            alice_row = Some(row);
+            break;
+        }
+    }
+    let alice_row = alice_row.expect("the crossed message is seated as a row on the far store");
+    assert_eq!(
+        alice_row.envelope, ALICE_SEALED,
+        "the row the far node holds carries the sealed bytes unopened"
+    );
+    assert_eq!(
+        alice_row.seq, alice_to_bob.seq,
+        "the replica carries the sending node's seq verbatim"
+    );
+    assert_eq!(alice_row.sender_id, alice.account_id);
+
+    // And the mirror: alice syncs from alpha — the node that never accepted
+    // bob's reply — and the page holds it, because the forwarded event seated
+    // the replica on the home node too. Bob's reply is found by sender rather
+    // than by id because alpha holds every retry attempt's row as well, all
+    // of them alice's own sends, and only one row there is bob's.
+    let mut bob_row = None;
+    for _ in 0..SEND_ATTEMPTS {
+        let page: SyncResponse = alice_client
+            .ask(
+                Opcode::Sync,
+                &SyncRequest {
+                    conversation_id: conversation,
+                    have_seq: 0,
+                    limit: 50,
+                    to_seq: None,
+                    backwards: None,
+                },
+            )
+            .await;
+        if let Some(row) = page
+            .messages
+            .into_iter()
+            .find(|message| message.sender_id == bob.account_id)
+        {
+            bob_row = Some(row);
+            break;
+        }
+    }
+    let bob_row = bob_row.expect("the forwarded reply is seated as a row on the home store");
+    assert_eq!(
+        bob_row.envelope, BOB_SEALED,
+        "the reply's row crossed back sealed exactly as bob's device left it"
+    );
+
+    // An edit crosses the same way: the wire's one event shape carries it,
+    // the far node's live push delivers it, and the far row carries it —
+    // envelope and edit stamp both, applied to the row the tier seated.
+    alice_client
+        .expect_ok(
+            Opcode::MessageEdit,
+            &MessageEdit {
+                message_id: alice_to_bob.message_id,
+                conversation_id: conversation,
+                envelope: ALICE_EDITED.to_vec(),
+            },
+        )
+        .await;
+    let edited_push = bob_client
+        .next_message_event_for(alice_to_bob.message_id)
+        .await;
+    assert_eq!(edited_push.envelope, ALICE_EDITED);
+    assert!(
+        edited_push.edited_at.is_some(),
+        "the crossing edit carries its stamp"
+    );
+    assert_eq!(edited_push.deleted, None);
+    let mut edited_row = None;
+    for _ in 0..SEND_ATTEMPTS {
+        let row = bob_client
+            .held_row(conversation, alice_to_bob.message_id)
+            .await
+            .expect("the row the edit applies to is held");
+        if row.edited_at.is_some() {
+            edited_row = Some(row);
+            break;
+        }
+    }
+    let edited_row = edited_row.expect("the far row carries the edit the event brought");
+    assert_eq!(edited_row.envelope, ALICE_EDITED);
+    assert!(edited_row.edited_at.is_some());
+    assert_eq!(edited_row.deleted, None);
+
+    // And a deletion crosses as a tombstone: the payload goes with it on the
+    // far node exactly as it went on the origin, so a fresh device on beta
+    // reads the same deletion bob's live session was pushed.
+    alice_client
+        .expect_ok(
+            Opcode::MessageDelete,
+            &MessageDelete {
+                message_id: alice_to_bob.message_id,
+                conversation_id: conversation,
+                for_everyone: true,
+            },
+        )
+        .await;
+    let tombstone_push = bob_client
+        .next_message_event_for(alice_to_bob.message_id)
+        .await;
+    assert_eq!(
+        tombstone_push.deleted,
+        Some(true),
+        "the crossing tombstone says deleted"
+    );
+    assert!(
+        tombstone_push.envelope.is_empty(),
+        "the tombstone carries no payload"
+    );
+    let mut gone_row = None;
+    for _ in 0..SEND_ATTEMPTS {
+        let row = bob_client
+            .held_row(conversation, alice_to_bob.message_id)
+            .await
+            .expect("the tombstoned row is still held");
+        if row.deleted == Some(true) {
+            gone_row = Some(row);
+            break;
+        }
+    }
+    let gone_row = gone_row.expect("the far row carries the tombstone the event brought");
+    assert!(
+        gone_row.envelope.is_empty(),
+        "a replica deletion that kept the ciphertext deleted nothing"
+    );
+
+    // The row the far store holds is the store's own shape too: the wire
+    // carries no expiry, so a replica is seated without one — the recorded
+    // gap, asserted here so it stays a documented fact rather than a
+    // surprise.
+    let stored = store_beta
+        .message(conversation, alice_to_bob.message_id)
+        .await
+        .expect("the far store reads")
+        .expect("the replica row is in the far store");
+    assert_eq!(stored.expires_at, None);
+    assert_eq!(
+        stored.deleted_by, None,
+        "the wire carries no deleter, so the replica tombstone records none"
+    );
+    assert_eq!(stored.envelope, Vec::<u8>::new());
 }
