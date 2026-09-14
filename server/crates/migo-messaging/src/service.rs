@@ -54,7 +54,6 @@
 //! *No presence.* Whether a recipient is online changes what the gateway does with
 //! a [`Fanout`], not whether one is produced.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -75,9 +74,9 @@ use migo_protocol::{
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{
-    Appended, Conversation, ConversationMember, Cursor, NewMessage, StoredMessage,
+    Appended, Conversation, ConversationMember, Cursor, KickVoteResult, NewMessage, StoredMessage,
 };
-use migo_store::traits::{clamp_limit, MessagingStore, SocialStore};
+use migo_store::traits::{clamp_limit, KickVoteStore, MessagingStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use migo_wire::limits::MAX_BYTES_LEN;
 use parking_lot::Mutex;
@@ -87,7 +86,7 @@ use crate::fanout::{Broadcast, Fanout};
 use crate::metrics::{Meters, SendOutcome, SyncOutcome};
 use crate::model::{
     Caller, MessagingConfig, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS,
-    MAX_TITLE_LEN, MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
+    MAX_TITLE_LEN, MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS,
 };
 use crate::redistribution::{Redistribution, RedistributionBook};
 use crate::traits::{Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
@@ -127,36 +126,10 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     /// which is what keeps a mutex off the critical path of a scheduler.
     random: Mutex<Box<dyn Random>>,
     meters: Meters,
-    /// The group kick votes currently open, keyed by conversation. One question
-    /// at a time per group; see [`OpenVote`] for the lazy expiry that keeps this
-    /// map from holding a vote nobody is answering.
-    votes: Mutex<HashMap<Id, OpenVote>>,
     /// The section 163 trigger book: which membership generation a group is on,
     /// and who the redistribution that follows a change is owed to. In memory
     /// on purpose — see [`crate::redistribution`] for why that is enough.
     redistribution: RedistributionBook,
-}
-
-/// A group kick vote in flight.
-struct OpenVote {
-    /// Who the vote would remove.
-    target: Id,
-    /// Who has voted, deduplicated by account: the same voice twice is the same
-    /// voice once, and the tally must not move for a retry.
-    voters: HashSet<Id>,
-    /// When the vote opened, for the lazy expiry.
-    opened_at: Timestamp,
-}
-
-impl OpenVote {
-    /// Whether this vote has outlived [`VOTE_TTL_MS`] with no new voice.
-    ///
-    /// Strictly greater, so a vote is alive for its whole sixtieth second — the
-    /// same edge a room's vote takes, and the one a client counting along at
-    /// home expects.
-    fn expired(&self, now: Timestamp) -> bool {
-        now.as_millis().saturating_sub(self.opened_at.as_millis()) > VOTE_TTL_MS
-    }
 }
 
 /// Builds the messaging service over the shared backends.
@@ -220,7 +193,6 @@ where
             config,
             random: Mutex::new(random),
             meters: Meters::new(registry),
-            votes: Mutex::new(HashMap::new()),
             redistribution: RedistributionBook::new(),
         }
     }
@@ -446,7 +418,7 @@ where
 #[async_trait]
 impl<S, C, L> Messaging for Messages<S, C, L>
 where
-    S: MessagingStore + SocialStore + ?Sized + Send + Sync,
+    S: MessagingStore + SocialStore + KickVoteStore + ?Sized + Send + Sync,
     C: TypingCache + ?Sized + Send + Sync,
     L: RateLimiter + ?Sized + Send + Sync,
 {
@@ -1524,27 +1496,23 @@ where
         // A vote aimed at the leaver closes as they go: the question it asked has
         // answered itself, and a tally still running against an empty seat is a
         // tally that could "pass" and remove nobody. The voters keep their record
-        // of it; the registry does not.
+        // of it; the store does not.
+        if let Some(closed) = self
+            .store
+            .close_kick_vote_if_target(request.conversation_id, caller.account_id)
+            .await?
         {
-            let mut votes = self.votes.lock();
-            if let Some(open) = votes.get(&request.conversation_id) {
-                if open.target == caller.account_id {
-                    let closed = votes
-                        .remove(&request.conversation_id)
-                        .expect("just checked present");
-                    fanouts.push(Fanout::unattributed(
-                        request.conversation_id,
-                        Broadcast::Vote(ConversationVoteEvent {
-                            conversation_id: request.conversation_id,
-                            target_id: closed.target,
-                            votes: closed.voters.len() as u32,
-                            needed: votes_needed(count),
-                            member_count: count,
-                            closed: Some(true),
-                        }),
-                    ));
-                }
-            }
+            fanouts.push(Fanout::unattributed(
+                request.conversation_id,
+                Broadcast::Vote(ConversationVoteEvent {
+                    conversation_id: request.conversation_id,
+                    target_id: closed.target_id,
+                    votes: closed.votes,
+                    needed: votes_needed(count),
+                    member_count: count,
+                    closed: Some(true),
+                }),
+            ));
         }
         fanouts.push(Fanout::to_conversation(
             request.conversation_id,
@@ -1732,26 +1700,22 @@ where
         // A vote running against the target is moot now, and it closes with the
         // same frame an expiry gets: a `closed` tally, not a silent drop, so a
         // client still rendering the running count stops.
+        if let Some(closed) = self
+            .store
+            .close_kick_vote_if_target(request.conversation_id, request.target_id)
+            .await?
         {
-            let mut votes = self.votes.lock();
-            if let Some(open) = votes.get(&request.conversation_id) {
-                if open.target == request.target_id {
-                    let closed = votes
-                        .remove(&request.conversation_id)
-                        .expect("just checked present");
-                    fanouts.push(Fanout::unattributed(
-                        request.conversation_id,
-                        Broadcast::Vote(ConversationVoteEvent {
-                            conversation_id: request.conversation_id,
-                            target_id: closed.target,
-                            votes: closed.voters.len() as u32,
-                            needed: votes_needed(count),
-                            member_count: count,
-                            closed: Some(true),
-                        }),
-                    ));
-                }
-            }
+            fanouts.push(Fanout::unattributed(
+                request.conversation_id,
+                Broadcast::Vote(ConversationVoteEvent {
+                    conversation_id: request.conversation_id,
+                    target_id: closed.target_id,
+                    votes: closed.votes,
+                    needed: votes_needed(count),
+                    member_count: count,
+                    closed: Some(true),
+                }),
+            ));
         }
         // `Kicked` and not `Left`: a client that could not tell a removal from a
         // departure could not colour the two differently in its roster.
@@ -1824,127 +1788,120 @@ where
         let needed = votes_needed(member_count);
 
         let mut fanouts = Vec::new();
+        // One call does the whole tally: the lazy expiry of a vote nobody
+        // finished, the one-question rule, the once-per-account rule, the
+        // threshold. It lives in the store and not in a registry here because
+        // the tally is a fact about the group — the one question every node
+        // over the deployment's store must agree is the question — and a
+        // per-process map is two nodes happily counting two different tallies
+        // against the same members. The lazy expiry rides the same call, so
+        // no timer exists and none is needed.
+        let cast = self
+            .store
+            .cast_kick_vote(
+                request.conversation_id,
+                request.target_id,
+                caller.account_id,
+                needed,
+                caller.now,
+            )
+            .await?;
+        if let Some(closed) = cast.expired {
+            // The group is told the old question closed — a client still
+            // rendering the running tally would otherwise show a question the
+            // server has stopped asking.
+            fanouts.push(Fanout::unattributed(
+                request.conversation_id,
+                Broadcast::Vote(ConversationVoteEvent {
+                    conversation_id: request.conversation_id,
+                    target_id: closed.target_id,
+                    votes: closed.votes,
+                    needed,
+                    member_count,
+                    closed: Some(true),
+                }),
+            ));
+        }
         let response;
         let mut passed = false;
-        {
-            let mut votes = self.votes.lock();
-            // The lazy expiry. A vote nobody finished is dropped the moment the
-            // group sees another one, and the group is told it closed — a client
-            // still rendering the old tally would otherwise show a question the
-            // server has stopped asking. No timer exists and none is needed.
-            if let Some(open) = votes.get(&request.conversation_id) {
-                if open.expired(caller.now) {
-                    let closed = votes
-                        .remove(&request.conversation_id)
-                        .expect("just checked present");
-                    fanouts.push(Fanout::unattributed(
-                        request.conversation_id,
-                        Broadcast::Vote(ConversationVoteEvent {
-                            conversation_id: request.conversation_id,
-                            target_id: closed.target,
-                            votes: closed.voters.len() as u32,
-                            needed,
-                            member_count,
-                            closed: Some(true),
-                        }),
-                    ));
-                }
-            }
-            match votes.get_mut(&request.conversation_id) {
-                Some(open) if open.target == request.target_id => {
-                    if !open.voters.insert(caller.account_id) {
-                        // The same voice twice. The tally did not move, so nothing
-                        // is published — the retry gets the same answer the first
-                        // call got, and no other member's screen moves.
-                        return Ok((
-                            ConversationVoteKickResponse {
-                                votes: open.voters.len() as u32,
-                                needed,
-                                member_count,
-                                open: true,
-                            },
-                            fanouts,
-                        ));
-                    }
-                    let count = open.voters.len() as u32;
-                    if count >= needed {
-                        // Passed. The registry entry is dropped here, inside the
-                        // lock, so a second vote starting while the kick's writes
-                        // run cannot see a tally that has already decided; the
-                        // writes themselves happen outside it.
-                        votes.remove(&request.conversation_id);
-                        passed = true;
-                        response = ConversationVoteKickResponse {
-                            votes: count,
-                            needed,
-                            member_count,
-                            open: false,
-                        };
-                    } else {
-                        response = ConversationVoteKickResponse {
-                            votes: count,
-                            needed,
-                            member_count,
-                            open: true,
-                        };
-                        fanouts.push(Fanout::to_conversation(
-                            request.conversation_id,
-                            caller.device_id,
-                            Broadcast::Vote(ConversationVoteEvent {
-                                conversation_id: request.conversation_id,
-                                target_id: request.target_id,
-                                votes: count,
-                                needed,
-                                member_count,
-                                closed: None,
-                            }),
-                        ));
-                    }
-                }
-                Some(_) => {
-                    // One question at a time per group: two interleaved tallies
-                    // would let a faction split the group's attention and pass
-                    // the one nobody was counting.
-                    return Err(fault::error(
-                        codes::VOTE_ALREADY_OPEN,
-                        "another kick vote is already open in this group",
-                    ));
-                }
-                None => {
-                    let mut voters = HashSet::new();
-                    voters.insert(caller.account_id);
-                    votes.insert(
-                        request.conversation_id,
-                        OpenVote {
-                            target: request.target_id,
-                            voters,
-                            opened_at: caller.now,
-                        },
-                    );
-                    response = ConversationVoteKickResponse {
-                        votes: 1,
+        match cast.result {
+            KickVoteResult::Unchanged { votes } => {
+                // The same voice twice. The tally did not move, so nothing
+                // is published — the retry gets the same answer the first
+                // call got, and no other member's screen moves.
+                return Ok((
+                    ConversationVoteKickResponse {
+                        votes,
                         needed,
                         member_count,
                         open: true,
-                    };
-                    fanouts.push(Fanout::to_conversation(
-                        request.conversation_id,
-                        caller.device_id,
-                        Broadcast::Vote(ConversationVoteEvent {
-                            conversation_id: request.conversation_id,
-                            target_id: request.target_id,
-                            votes: 1,
-                            needed,
-                            member_count,
-                            closed: None,
-                        }),
-                    ));
-                }
+                    },
+                    fanouts,
+                ));
+            }
+            KickVoteResult::Voice { votes } => {
+                response = ConversationVoteKickResponse {
+                    votes,
+                    needed,
+                    member_count,
+                    open: true,
+                };
+                fanouts.push(Fanout::to_conversation(
+                    request.conversation_id,
+                    caller.device_id,
+                    Broadcast::Vote(ConversationVoteEvent {
+                        conversation_id: request.conversation_id,
+                        target_id: request.target_id,
+                        votes,
+                        needed,
+                        member_count,
+                        closed: None,
+                    }),
+                ));
+            }
+            KickVoteResult::Passed { votes } => {
+                // Passed. The tally was dropped inside the store's own
+                // transaction, so a second vote starting while this kick's
+                // writes run cannot see a tally that has already decided.
+                passed = true;
+                response = ConversationVoteKickResponse {
+                    votes,
+                    needed,
+                    member_count,
+                    open: false,
+                };
+            }
+            KickVoteResult::AlreadyOpen => {
+                // One question at a time per group: two interleaved tallies
+                // would let a faction split the group's attention and pass
+                // the one nobody was counting.
+                return Err(fault::error(
+                    codes::VOTE_ALREADY_OPEN,
+                    "another kick vote is already open in this group",
+                ));
+            }
+            KickVoteResult::Opened { votes } => {
+                response = ConversationVoteKickResponse {
+                    votes,
+                    needed,
+                    member_count,
+                    open: true,
+                };
+                fanouts.push(Fanout::to_conversation(
+                    request.conversation_id,
+                    caller.device_id,
+                    Broadcast::Vote(ConversationVoteEvent {
+                        conversation_id: request.conversation_id,
+                        target_id: request.target_id,
+                        votes,
+                        needed,
+                        member_count,
+                        closed: None,
+                    }),
+                ));
             }
         }
         if passed {
-            // Outside the lock: this is a store write, and holding a mutex across
-            // an await would put the registry on a scheduler's critical path.
             self.store
                 .remove_member(request.conversation_id, request.target_id, caller.now)
                 .await?;

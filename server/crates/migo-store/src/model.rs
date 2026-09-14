@@ -1179,6 +1179,82 @@ impl RoomMember {
     }
 }
 
+/// How long a kick vote stays open with no new voice, in milliseconds.
+///
+/// The same sixty seconds for a room's vote and a group's: long enough for
+/// people who are present to weigh in, short enough that a vote nobody
+/// finishes is not still blocking the next one when they come back an hour
+/// later. It lives here and not in either service because the lazy expiry is
+/// the store's to perform — the next cast in the same subject closes the
+/// expired tally on its way in — so no timer exists and no vote ever costs a
+/// wakeup, and the number the services quote in their doc comments is the
+/// number the store actually enforces.
+pub const KICK_VOTE_TTL_MS: i64 = 60_000;
+
+/// What one cast of a kick vote did to the tally.
+///
+/// The service keeps the policy — who may vote, how many voices a removal
+/// needs, what the room or group is told — and the store keeps the count, so
+/// this is the whole contract between them: one call, one answer, and the
+/// answer's variants are the only ways a voice can land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KickVoteResult {
+    /// The voter had already spoken on this tally. The count did not move.
+    Unchanged {
+        /// Voices on the tally, the voter's earlier one included.
+        votes: u32,
+    },
+    /// A new voice on a running tally, still short of the threshold.
+    Voice {
+        /// Voices on the tally now.
+        votes: u32,
+    },
+    /// A new voice that met the threshold. The tally is closed and gone; the
+    /// removal it earned is the caller's to perform.
+    Passed {
+        /// Voices the tally closed at.
+        votes: u32,
+    },
+    /// No tally was running, so this voice opened one against the target it
+    /// named.
+    Opened {
+        /// Voices on the tally, which is one.
+        votes: u32,
+    },
+    /// A live tally against a *different* target is running. One question at
+    /// a time is the store's to enforce, because a per-process registry
+    /// cannot see the question another node opened.
+    AlreadyOpen,
+}
+
+/// A tally that closed before its question was answered — by its expiry, by
+/// its target's departure, or by reaching its threshold — with the count it
+/// closed at.
+///
+/// The caller owes the subject's members a `closed` frame for it: a client
+/// still rendering a running count would otherwise show a question the server
+/// has stopped asking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClosedKickVote {
+    /// Who the closed tally was aimed at.
+    pub target_id: Id,
+    /// Voices it had gathered when it closed.
+    pub votes: u32,
+}
+
+/// The answer to one cast of a kick vote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KickVoteCast {
+    /// The tally this cast closed because it had outlived
+    /// [`KICK_VOTE_TTL_MS`], if any. The expired question is reported rather
+    /// than silently dropped, and it is reported even when the cast itself
+    /// opened the next question, so the subject hears the closing and the
+    /// opening as two frames and not one confusing tally.
+    pub expired: Option<ClosedKickVote>,
+    /// What the voice that was cast did.
+    pub result: KickVoteResult,
+}
+
 /// A directed edge in the social graph.
 #[derive(Clone, Debug)]
 pub struct Relationship {

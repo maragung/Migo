@@ -79,6 +79,7 @@ impl MigratorTrait for Migrator {
             Box::new(RoomRevision),
             Box::new(ConversationHomeRegion),
             Box::new(DeviceInvisible),
+            Box::new(KickVote),
         ]
     }
 }
@@ -535,6 +536,36 @@ impl MigrationTrait for DeviceInvisible {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0014_device_invisible cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0015_kick_vote` -- the kick vote's tally, moved out of the per-process
+/// registries and onto the store so that every node over a shared database
+/// enforces the same one-question-at-a-time rule and counts the same voices.
+/// See `server/migrations/0015_kick_vote.sql`.
+struct KickVote;
+
+impl MigrationName for KickVote {
+    fn name(&self) -> &str {
+        "0015_kick_vote"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for KickVote {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("../../../migrations/0015_kick_vote.sql"))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0015_kick_vote cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

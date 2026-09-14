@@ -93,23 +93,25 @@ use crate::entity;
 use crate::migration::{Migrator, MIGRATION_LOCK_KEY};
 use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
-    AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation, ConversationMember,
+    AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote, Conversation, ConversationMember,
     ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
     EntitlementPosition, GameSession, Gender, GiftReceipt, GiftSent, GlobalAdmin,
-    IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerPosition,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
-    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
-    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange, MAX_GROUP_MEMBERS,
+    IdentityKeyStatus, KeyBundle, KickVoteCast, KickVoteResult, LedgerAccount, LedgerAccountKind,
+    LedgerLeg, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice,
+    NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession,
+    NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord, Patch,
+    PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration,
+    PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan,
+    RoomPosition, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpCaps,
+    XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
     ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, GlobalAdminStore,
-    IdentityKeyRow, IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore,
-    NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore,
-    SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
+    IdentityKeyRow, IdentityStore, KeyStore, KickVoteStore, LoginChallengeRow, MediaStore,
+    MessagingStore, NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter,
+    RoomStore, SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore,
+    MAX_LEDGER_LEGS,
 };
 
 /// A duplicate key. Postgres reports which index, and the caller needs to know:
@@ -4009,6 +4011,217 @@ impl RoomStore for PostgresStore {
             .await
             .context("clear_network_ban")?;
         Ok(outcome.rows_affected > 0)
+    }
+}
+
+#[async_trait]
+impl KickVoteStore for PostgresStore {
+    async fn cast_kick_vote(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+        voter: Id,
+        needed: u32,
+        now: Timestamp,
+    ) -> Result<KickVoteCast> {
+        let transaction = self.begin("cast_kick_vote").await?;
+        let subject = uuid_of(subject_id);
+        let target = uuid_of(target_id);
+        let voice = uuid_of(voter);
+        let mut expired = None;
+
+        // The loop exists for the one race a row lock cannot cover: opening a
+        // tally where none is running locks nothing, because there is no row
+        // to lock, so two nodes over this store can both read "no question"
+        // and both reach for the insert. The primary key is the whole
+        // one-question rule, so `on conflict do nothing` makes one of them
+        // the winner; the loser comes back around, finds the winner's row
+        // under a lock, and casts its voice against it — the same answer the
+        // in-process registry used to give two members opening the same
+        // question in the same millisecond.
+        let mut result = None;
+        for _ in 0..3 {
+            let open = entity::kick_vote::Entity::find_by_id(subject)
+                .lock(LockType::Update)
+                .one(&transaction)
+                .await
+                .context("cast_kick_vote: lock tally")?;
+            let Some(row) = open else {
+                let opened = entity::kick_vote::Entity::insert(entity::kick_vote::ActiveModel {
+                    subject_id: Set(subject),
+                    target_id: Set(target),
+                    opened_at: Set(stamp_of(now)),
+                })
+                .on_conflict(
+                    OnConflict::columns([entity::kick_vote::Column::SubjectId])
+                        .do_nothing()
+                        .to_owned(),
+                )
+                .exec(&transaction)
+                .await
+                .context("cast_kick_vote: open tally")?;
+                if opened.rows_affected == 0 {
+                    // Another node's tally landed between the read and the
+                    // insert. The next lap reads it under a lock.
+                    continue;
+                }
+                // A fresh subject cannot clash on the voter key, and a clash
+                // would mean the tally was not fresh after all.
+                entity::kick_vote_voter::Entity::insert(entity::kick_vote_voter::ActiveModel {
+                    subject_id: Set(subject),
+                    voter_id: Set(voice),
+                })
+                .exec(&transaction)
+                .await
+                .context("cast_kick_vote: first voice")?;
+                result = Some(KickVoteResult::Opened { votes: 1 });
+                break;
+            };
+
+            // The lazy expiry: a vote nobody finished is dropped the moment
+            // its subject sees another one, so no timer exists and no vote
+            // ever costs a wakeup. The voices go with the question they
+            // belonged to, counted before the delete, for the closing the
+            // caller owes the members.
+            let opened_at = instant_of(row.opened_at);
+            if now.as_millis().saturating_sub(opened_at.as_millis()) > KICK_VOTE_TTL_MS {
+                let votes = entity::kick_vote_voter::Entity::find()
+                    .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+                    .count(&transaction)
+                    .await
+                    .context("cast_kick_vote: count expired voices")?;
+                entity::kick_vote_voter::Entity::delete_many()
+                    .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+                    .exec(&transaction)
+                    .await
+                    .context("cast_kick_vote: drop expired voices")?;
+                entity::kick_vote::Entity::delete_by_id(subject)
+                    .exec(&transaction)
+                    .await
+                    .context("cast_kick_vote: drop expired tally")?;
+                expired = Some(ClosedKickVote {
+                    target_id: id_of(row.target_id),
+                    votes: votes as u32,
+                });
+                continue;
+            }
+
+            if row.target_id != target {
+                // One question at a time, and this is the one place every
+                // node over this store agrees on it.
+                result = Some(KickVoteResult::AlreadyOpen);
+                break;
+            }
+
+            // The once-per-account rule is the voter key: `do nothing` on a
+            // clash leaves the count where it was, which is the "same voice
+            // twice" answer rather than an error, because a retried voice is
+            // a success that moved nothing.
+            let inserted =
+                entity::kick_vote_voter::Entity::insert(entity::kick_vote_voter::ActiveModel {
+                    subject_id: Set(subject),
+                    voter_id: Set(voice),
+                })
+                .on_conflict(
+                    OnConflict::columns([
+                        entity::kick_vote_voter::Column::SubjectId,
+                        entity::kick_vote_voter::Column::VoterId,
+                    ])
+                    .do_nothing()
+                    .to_owned(),
+                )
+                .exec(&transaction)
+                .await
+                .context("cast_kick_vote: voice")?;
+            let votes = entity::kick_vote_voter::Entity::find()
+                .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+                .count(&transaction)
+                .await
+                .context("cast_kick_vote: count voices")?;
+            if inserted.rows_affected == 0 {
+                result = Some(KickVoteResult::Unchanged {
+                    votes: votes as u32,
+                });
+            } else if votes >= u64::from(needed) {
+                // The tally is dropped inside the same transaction that
+                // counted the threshold, so a second vote starting while the
+                // caller performs the removal cannot see a tally that has
+                // already decided.
+                entity::kick_vote_voter::Entity::delete_many()
+                    .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+                    .exec(&transaction)
+                    .await
+                    .context("cast_kick_vote: drop passed voices")?;
+                entity::kick_vote::Entity::delete_by_id(subject)
+                    .exec(&transaction)
+                    .await
+                    .context("cast_kick_vote: drop passed tally")?;
+                result = Some(KickVoteResult::Passed {
+                    votes: votes as u32,
+                });
+            } else {
+                result = Some(KickVoteResult::Voice {
+                    votes: votes as u32,
+                });
+            }
+            break;
+        }
+        transaction
+            .commit()
+            .await
+            .context("cast_kick_vote: commit")?;
+        let result = result.ok_or_else(|| {
+            fault::internal("two nodes raced the same tally open three times over")
+        })?;
+        Ok(KickVoteCast { expired, result })
+    }
+
+    async fn close_kick_vote_if_target(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+    ) -> Result<Option<ClosedKickVote>> {
+        let transaction = self.begin("close_kick_vote_if_target").await?;
+        let subject = uuid_of(subject_id);
+        let row = entity::kick_vote::Entity::find_by_id(subject)
+            .lock(LockType::Update)
+            .one(&transaction)
+            .await
+            .context("close_kick_vote_if_target: lock tally")?;
+        // The lock first and the condition after: a tally that is mid-cast on
+        // another node waits here rather than being closed out from under the
+        // count it is taking, and a tally aimed elsewhere is left exactly as
+        // it was — the caller is told nothing, because there is nothing to
+        // tell.
+        let Some(row) = row.filter(|row| row.target_id == uuid_of(target_id)) else {
+            transaction
+                .commit()
+                .await
+                .context("close_kick_vote_if_target: commit")?;
+            return Ok(None);
+        };
+        let votes = entity::kick_vote_voter::Entity::find()
+            .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+            .count(&transaction)
+            .await
+            .context("close_kick_vote_if_target: count voices")?;
+        entity::kick_vote_voter::Entity::delete_many()
+            .filter(entity::kick_vote_voter::Column::SubjectId.eq(subject))
+            .exec(&transaction)
+            .await
+            .context("close_kick_vote_if_target: drop voices")?;
+        entity::kick_vote::Entity::delete_by_id(subject)
+            .exec(&transaction)
+            .await
+            .context("close_kick_vote_if_target: drop tally")?;
+        transaction
+            .commit()
+            .await
+            .context("close_kick_vote_if_target: commit")?;
+        Ok(Some(ClosedKickVote {
+            target_id: id_of(row.target_id),
+            votes: votes as u32,
+        }))
     }
 }
 

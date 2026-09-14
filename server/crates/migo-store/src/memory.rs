@@ -39,23 +39,25 @@ use parking_lot::RwLock;
 
 use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
-    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
-    ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor, Device,
-    DeviceStatus, Entitlement, EntitlementPosition, GameSession, GiftReceipt, GiftSent,
-    GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerPosition,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
-    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
-    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange, MAX_GROUP_MEMBERS,
+    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote,
+    Conversation, ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor,
+    Device, DeviceStatus, Entitlement, EntitlementPosition, GameSession, GiftReceipt, GiftSent,
+    GlobalAdmin, IdentityKeyStatus, KeyBundle, KickVoteCast, KickVoteResult, LedgerAccount,
+    LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot,
+    NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
+    NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord,
+    Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration,
+    PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan,
+    RoomPosition, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpCaps,
+    XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
     ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, GlobalAdminStore,
-    IdentityKeyRow, IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore,
-    NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore,
-    SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
+    IdentityKeyRow, IdentityStore, KeyStore, KickVoteStore, LoginChallengeRow, MediaStore,
+    MessagingStore, NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter,
+    RoomStore, SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore,
+    MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.
@@ -230,6 +232,22 @@ struct State {
     /// Network-wide room bans, keyed by the banned account. Mirrors the
     /// `room_network_ban` table; the row's presence is the ban.
     network_bans: HashMap<Id, RoomNetworkBan>,
+    /// Kick-vote tallies in progress, at most one per subject, keyed by the
+    /// room or group conversation the vote runs in. Mirrors the `kick_vote`
+    /// and `kick_vote_voter` tables; the child table's rows live inside the
+    /// tally because a voter set is never read except through it.
+    kick_votes: HashMap<Id, OpenKickVote>,
+}
+
+/// One tally in progress, the memory shape of a `kick_vote` row with its
+/// voters beside it.
+struct OpenKickVote {
+    /// Who the vote would remove.
+    target: Id,
+    /// The accounts that have spoken, once each.
+    voters: HashSet<Id>,
+    /// When the first voice landed, for the lazy expiry.
+    opened_at: Timestamp,
 }
 
 impl State {
@@ -2242,6 +2260,97 @@ impl RoomStore for MemoryStore {
     async fn clear_network_ban(&self, account_id: Id) -> Result<bool> {
         let mut s = self.state.write();
         Ok(s.network_bans.remove(&account_id).is_some())
+    }
+}
+
+#[async_trait]
+impl KickVoteStore for MemoryStore {
+    async fn cast_kick_vote(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+        voter: Id,
+        needed: u32,
+        now: Timestamp,
+    ) -> Result<KickVoteCast> {
+        let mut s = self.state.write();
+        let mut expired = None;
+        // The lazy expiry, in the same breath as the cast: a vote nobody
+        // finished is dropped the moment its subject sees another one, so no
+        // timer exists and no vote ever costs a wakeup.
+        if let Some(open) = s.kick_votes.get(&subject_id) {
+            if now.as_millis().saturating_sub(open.opened_at.as_millis()) > KICK_VOTE_TTL_MS {
+                let closed = s
+                    .kick_votes
+                    .remove(&subject_id)
+                    .expect("just checked present");
+                expired = Some(ClosedKickVote {
+                    target_id: closed.target,
+                    votes: closed.voters.len() as u32,
+                });
+            }
+        }
+        let result = match s.kick_votes.get_mut(&subject_id) {
+            Some(open) if open.target == target_id => {
+                if !open.voters.insert(voter) {
+                    // The same voice twice. The tally did not move, and the
+                    // caller learns that from the variant rather than from an
+                    // error, because a retried voice is a success that
+                    // published nothing.
+                    KickVoteResult::Unchanged {
+                        votes: open.voters.len() as u32,
+                    }
+                } else {
+                    let votes = open.voters.len() as u32;
+                    if votes >= needed {
+                        // The tally is dropped here, inside the lock, so a
+                        // second vote starting while the caller performs the
+                        // removal cannot see a tally that has already decided.
+                        s.kick_votes.remove(&subject_id);
+                        KickVoteResult::Passed { votes }
+                    } else {
+                        KickVoteResult::Voice { votes }
+                    }
+                }
+            }
+            // One question at a time per subject, and the store is where that
+            // is true for every node over it, not just the one asked.
+            Some(_) => KickVoteResult::AlreadyOpen,
+            None => {
+                s.kick_votes.insert(
+                    subject_id,
+                    OpenKickVote {
+                        target: target_id,
+                        voters: HashSet::from([voter]),
+                        opened_at: now,
+                    },
+                );
+                KickVoteResult::Opened { votes: 1 }
+            }
+        };
+        Ok(KickVoteCast { expired, result })
+    }
+
+    async fn close_kick_vote_if_target(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+    ) -> Result<Option<ClosedKickVote>> {
+        let mut s = self.state.write();
+        if s.kick_votes
+            .get(&subject_id)
+            .is_some_and(|open| open.target == target_id)
+        {
+            let closed = s
+                .kick_votes
+                .remove(&subject_id)
+                .expect("just checked present");
+            return Ok(Some(ClosedKickVote {
+                target_id: closed.target,
+                votes: closed.voters.len() as u32,
+            }));
+        }
+        Ok(None)
     }
 }
 

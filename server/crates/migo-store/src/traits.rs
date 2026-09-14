@@ -27,14 +27,15 @@ use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 
 use crate::model::{
-    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
-    ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device, Entitlement,
-    EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, LedgerAccount,
-    LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot,
-    NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
-    NewXpAward, Notification, NotificationPosition, OutboxRecord, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship, Report,
-    Room, RoomMember, RoomPosition, Scope, Session, Standing, StoredMessage, XpCaps, XpChange,
+    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote,
+    Conversation, ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device,
+    Entitlement, EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, KickVoteCast,
+    KickVoteResult, LedgerAccount, LedgerAccountKind, LedgerPosition, LedgerTransaction,
+    MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer,
+    NewRoom, NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition,
+    OutboxRecord, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
+    PushRegistration, PushTarget, Relationship, Report, Room, RoomMember, RoomPosition, Scope,
+    Session, Standing, StoredMessage, XpCaps, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -686,6 +687,55 @@ pub enum RoomKindFilter {
     Public,
     /// Listed, but joining is moderated.
     Managed,
+}
+
+/// Kick votes: the tally the members of a room or a group hold.
+///
+/// A trait of its own rather than a wing of [`RoomStore`] or
+/// [`MessagingStore`] because both crates vote and neither owns the rule. The
+/// subject is whichever id the caller names — a room there, a group
+/// conversation here, the two id spaces being random 128-bit values that do
+/// not collide — and the tally is a fact about that subject, which is why it
+/// is stored at all: a per-process registry cannot see the question another
+/// node over the same store opened, and "one question at a time" is only true
+/// if every node asking it reads the same answer.
+#[async_trait]
+pub trait KickVoteStore: Send + Sync {
+    /// Casts one voice, opening the tally if none is running.
+    ///
+    /// One call does the whole of it — expiry of a stale tally, the
+    /// one-question rule, the once-per-account rule, the threshold — because
+    /// anything split across calls is a window in which two nodes count two
+    /// different tallies of the same subject. `needed` is the caller's policy,
+    /// read from the membership the caller already loaded; the store's job is
+    /// the count, not the arithmetic about who counts.
+    ///
+    /// # Errors
+    ///
+    /// Store failures propagate. A tally against a different target being
+    /// open is not an error but [`KickVoteResult::AlreadyOpen`], so the caller
+    /// can tell the refusal it owes the member from a failure it owes itself.
+    async fn cast_kick_vote(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+        voter: Id,
+        needed: u32,
+        now: Timestamp,
+    ) -> Result<KickVoteCast>;
+
+    /// Closes the tally running against `target_id`, if that is the open one.
+    ///
+    /// The target's departure answers the question by itself, and a tally
+    /// still running against an empty seat is a tally that could "pass" and
+    /// remove nobody. Returns the closed shape for the `closed` frame the
+    /// members are owed; `None` when no tally was running or the running one
+    /// aimed elsewhere, in which case there is nothing to say.
+    async fn close_kick_vote_if_target(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+    ) -> Result<Option<ClosedKickVote>>;
 }
 
 /// The social graph.
@@ -1716,6 +1766,7 @@ pub trait Store:
     + KeyStore
     + MessagingStore
     + RoomStore
+    + KickVoteStore
     + SocialStore
     + EconomyStore
     + ProgressionStore

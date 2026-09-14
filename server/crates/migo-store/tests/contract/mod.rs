@@ -4101,6 +4101,179 @@ pub async fn update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claima
         .expect("the released key is claimable again");
 }
 
+// --- kick votes ------------------------------------------------------------------
+//
+// The tally is a store fact because "one question at a time" is only true if
+// every node over the store asks the same one. These cases pin the contract the
+// two vote-holding services rely on: the threshold, the once-per-account rule,
+// the lazy expiry, and the close a departing target owes.
+
+pub async fn a_kick_vote_tally_opens_voices_and_closes_at_its_threshold(store: &SharedStore) {
+    seed_account(store, 8_100, "tallytarget").await;
+    seed_account(store, 8_101, "tallyvoice").await;
+    seed_account(store, 8_102, "tallysecond").await;
+    let subject = id(8_100_000);
+
+    let first = store
+        .cast_kick_vote(subject, id(8_100), id(8_101), 2, ts(10_000))
+        .await
+        .expect("the first voice opens the tally");
+    assert_eq!(first.expired, None, "nothing was running before it");
+    assert_eq!(first.result, KickVoteResult::Opened { votes: 1 });
+
+    // The same voice twice is the same voice once.
+    let again = store
+        .cast_kick_vote(subject, id(8_100), id(8_101), 2, ts(11_000))
+        .await
+        .expect("a retried voice is not an error");
+    assert_eq!(again.result, KickVoteResult::Unchanged { votes: 1 });
+
+    // A second voice meets the threshold: the tally closes and is gone, so the
+    // same question may be asked again from nothing.
+    let carried = store
+        .cast_kick_vote(subject, id(8_100), id(8_102), 2, ts(12_000))
+        .await
+        .expect("the second voice carries");
+    assert_eq!(carried.result, KickVoteResult::Passed { votes: 2 });
+    assert_eq!(carried.expired, None);
+    let reopened = store
+        .cast_kick_vote(subject, id(8_100), id(8_101), 2, ts(13_000))
+        .await
+        .expect("a passed tally leaves no question behind");
+    assert_eq!(reopened.result, KickVoteResult::Opened { votes: 1 });
+}
+
+pub async fn one_kick_vote_question_at_a_time_per_subject(store: &SharedStore) {
+    seed_account(store, 8_110, "firsttarget").await;
+    seed_account(store, 8_111, "othertarget").await;
+    seed_account(store, 8_112, "questioner").await;
+    seed_account(store, 8_113, "latevoice").await;
+    let subject = id(8_111_000);
+
+    let opened = store
+        .cast_kick_vote(subject, id(8_110), id(8_112), 3, ts(20_000))
+        .await
+        .expect("the first question opens");
+    assert_eq!(opened.result, KickVoteResult::Opened { votes: 1 });
+
+    // A different target while that one runs is the one refusal the contract
+    // makes, and it is an answer rather than an error: the caller tells the
+    // member, not the log.
+    let refused = store
+        .cast_kick_vote(subject, id(8_111), id(8_112), 3, ts(21_000))
+        .await
+        .expect("the cast itself does not fail");
+    assert_eq!(refused.expired, None);
+    assert_eq!(refused.result, KickVoteResult::AlreadyOpen);
+
+    // And the refusal disturbed nothing: the running question still counts.
+    let voice = store
+        .cast_kick_vote(subject, id(8_110), id(8_113), 3, ts(21_500))
+        .await
+        .expect("a voice for the running question is taken");
+    assert_eq!(voice.result, KickVoteResult::Voice { votes: 2 });
+}
+
+pub async fn an_unfinished_kick_vote_expires_lazily_on_the_next_cast(store: &SharedStore) {
+    seed_account(store, 8_120, "stale").await;
+    seed_account(store, 8_121, "fresh").await;
+    seed_account(store, 8_122, "asker").await;
+    seed_account(store, 8_123, "secondvoice").await;
+    let subject = id(8_122_000);
+
+    store
+        .cast_kick_vote(subject, id(8_120), id(8_122), 4, ts(30_000))
+        .await
+        .expect("the vote opens at t=30s");
+    store
+        .cast_kick_vote(subject, id(8_120), id(8_123), 4, ts(30_500))
+        .await
+        .expect("a second voice lands");
+
+    // The whole sixtieth second is alive: a voice at exactly the TTL joins the
+    // running tally rather than closing it.
+    let still = store
+        .cast_kick_vote(subject, id(8_120), id(8_121), 4, ts(90_000))
+        .await
+        .expect("the vote is alive for its whole sixtieth second");
+    assert_eq!(still.expired, None);
+    assert_eq!(still.result, KickVoteResult::Voice { votes: 3 });
+
+    // A second past that, the next question closes the old one on its way in,
+    // and reports it with the count it had — the closing the members are owed.
+    let next = store
+        .cast_kick_vote(subject, id(8_121), id(8_122), 2, ts(91_000))
+        .await
+        .expect("the expired tally is not in the way");
+    assert_eq!(
+        next.expired,
+        Some(ClosedKickVote {
+            target_id: id(8_120),
+            votes: 3,
+        })
+    );
+    assert_eq!(next.result, KickVoteResult::Opened { votes: 1 });
+}
+
+pub async fn a_kick_vote_closes_when_its_target_is_named_and_only_then(store: &SharedStore) {
+    seed_account(store, 8_130, "leaver").await;
+    seed_account(store, 8_131, "stayer").await;
+    seed_account(store, 8_132, "voter").await;
+    let subject = id(8_133_000);
+
+    store
+        .cast_kick_vote(subject, id(8_130), id(8_132), 2, ts(40_000))
+        .await
+        .expect("the tally opens");
+
+    // A close naming somebody else leaves the question standing.
+    assert!(
+        store
+            .close_kick_vote_if_target(subject, id(8_131))
+            .await
+            .expect("the close itself does not fail")
+            .is_none(),
+        "a tally is not closed by the departure of somebody it is not about"
+    );
+    let retry = store
+        .cast_kick_vote(subject, id(8_130), id(8_132), 2, ts(41_000))
+        .await
+        .expect("the running tally still takes voices");
+    assert_eq!(
+        retry.result,
+        KickVoteResult::Unchanged { votes: 1 },
+        "the refused close disturbed nothing"
+    );
+
+    // The target's own departure closes it, with the count it had, and closing
+    // twice is nothing the second time.
+    assert_eq!(
+        store
+            .close_kick_vote_if_target(subject, id(8_130))
+            .await
+            .expect("the target's departure closes the tally"),
+        Some(ClosedKickVote {
+            target_id: id(8_130),
+            votes: 1,
+        })
+    );
+    assert!(
+        store
+            .close_kick_vote_if_target(subject, id(8_130))
+            .await
+            .expect("a second close is not an error")
+            .is_none(),
+        "the tally is gone the moment it closes"
+    );
+
+    // And with it gone, the next cast opens rather than joins.
+    let reopened = store
+        .cast_kick_vote(subject, id(8_131), id(8_132), 2, ts(42_000))
+        .await
+        .expect("a closed tally leaves no question behind");
+    assert_eq!(reopened.result, KickVoteResult::Opened { votes: 1 });
+}
+
 /// Names every case in the suite, so a backend file lists none of them.
 ///
 /// A test that exists but is only wired into one backend is worse than no test:
@@ -4174,5 +4347,9 @@ macro_rules! for_each_contract_case {
         $case!(update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claimable);
         $case!(a_status_transition_lands_only_from_the_status_it_names);
         $case!(pending_depth_counts_what_one_peer_is_owed);
+        $case!(a_kick_vote_tally_opens_voices_and_closes_at_its_threshold);
+        $case!(one_kick_vote_question_at_a_time_per_subject);
+        $case!(an_unfinished_kick_vote_expires_lazily_on_the_next_cast);
+        $case!(a_kick_vote_closes_when_its_target_is_named_and_only_then);
     };
 }
