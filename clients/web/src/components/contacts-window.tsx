@@ -386,9 +386,11 @@ export function ContactsWindow({
 
       {/* List body */}
       <div className="win-body retro-scroll contacts-body">
-        {tab === 'friends' ? <FriendsPanel onOpenConversation={onOpenConversation} /> : null}
-        {tab === 'rooms' ? (
+        {tab === 'friends' ? (
           <>
+            <FriendsPanel onOpenConversation={onOpenConversation} />
+            {/* The group chats are a Friends matter — the people are here — so the groups list
+                and its start control live in this tab, leaving Rooms to rooms. */}
             <div className="list-section-head list-section-head-row">
               <span>Your groups ({groups.length})</span>
               <button
@@ -428,9 +430,9 @@ export function ContactsWindow({
                 No groups yet — press <b>New group</b> to create one with your friends.
               </div>
             ) : null}
-            <RoomsPanel onOpenConversation={onOpenConversation} />
           </>
         ) : null}
+        {tab === 'rooms' ? <RoomsPanel onOpenConversation={onOpenConversation} /> : null}
         {tab === 'feed' ? <SpacePanel onOpenConversation={onOpenConversation} /> : null}
       </div>
 

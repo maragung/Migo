@@ -1048,6 +1048,25 @@ main {
   flex: 1;
   min-width: 0;
 }
+/* The friends search, living in the panel head: a compact field that lines up with the view
+   icons beside it, left of the new-conversation control — the field itself, not a toggle. */
+.panel-head-search {
+  display: flex;
+  align-items: center;
+  margin-right: 4px;
+}
+.panel-head-search .input {
+  width: 170px;
+  min-width: 0;
+  height: var(--touch);
+  padding: 0 10px;
+  font-size: 13px;
+}
+@media (max-width: 1023px) {
+  .panel-head-search .input {
+    width: 130px;
+  }
+}
 .panel-section {
   border: none;
   margin: 0;
@@ -5796,41 +5815,26 @@ button.activity-row-btn:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.mhome-search {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-alt);
-  padding: 6px 10px;
-}
-.mhome-search-icon {
-  flex-shrink: 0;
-  color: var(--sys-ink);
-}
-.mhome-search-input {
+/* The friends search, moved into the view header: the field itself sits left of the
+   new-conversation control, not an icon that opens a field somewhere below. */
+.mhome-viewhead-search {
   min-width: 0;
   flex: 1;
-  border: none;
-  background: none;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-alt);
   color: var(--text);
   font-size: 12.5px;
   outline: none;
 }
-.mhome-search-input::placeholder {
-  color: var(--text-faint);
+.mhome-viewhead-search:focus-visible {
+  border-color: var(--accent);
 }
-.mhome-search-clear {
-  display: flex;
-  flex-shrink: 0;
-  border: none;
-  background: none;
-  color: var(--sys-ink);
-  cursor: pointer;
-  padding: 0;
+.mhome-viewhead-search::placeholder {
+  color: var(--text-faint);
 }
 .mhome-row {
   display: flex;
