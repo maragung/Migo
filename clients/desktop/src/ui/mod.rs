@@ -19,6 +19,7 @@ pub mod auth;
 pub mod call;
 pub mod captcha;
 pub mod chat;
+pub mod chat_list;
 pub mod desktop;
 pub mod friends;
 pub mod games;
@@ -33,6 +34,8 @@ pub mod wallet;
 pub mod widgets;
 
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection};
@@ -138,6 +141,40 @@ impl Place {
     }
 }
 
+/// How the signed-in desktop presents its conversations — the one navigation choice the shell
+/// offers, picked in Settings and remembered across restarts.
+///
+/// The two modes are two presentations of one chat state, not two chat systems: the
+/// conversations, messages, drafts, unread counts and the connection are shared, and only the
+/// shell's layout differs. [`NavigationMode::Tabbed`] is the desktop-OS model the reference's
+/// window manager draws — every conversation a floating, closable window of its own (see
+/// [`crate::ui::desktop`]) — and it is the default, because it is the behaviour every session
+/// before the choice existed was built around. [`NavigationMode::ChatList`] is the split view:
+/// the conversation list docked on the left of the window and one chat surface on the right
+/// whose contents follow the list's selection (see [`crate::ui::chat_list`]). No window is
+/// minted per conversation in the split view, and Friends, Rooms and Feed are exactly what
+/// they were in either mode, because the choice is about the chat area and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationMode {
+    /// One floating, closable window per conversation — the existing desktop, unchanged.
+    #[default]
+    Tabbed,
+    /// The chat list docked left, one chat window right, and no window per conversation.
+    ChatList,
+}
+
+impl NavigationMode {
+    /// The mode's own words, on the settings screen's buttons.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tabbed => "Tabbed Navigation",
+            Self::ChatList => "Chat List Mode",
+        }
+    }
+}
+
 /// Everything a screen may read, and the things it may write.
 pub struct Context<'a> {
     pub theme: Theme,
@@ -174,6 +211,19 @@ pub struct Context<'a> {
     /// settings panel hands the factor back and the shell applies it where the style lives —
     /// once, between frames, rather than from inside a layout closure mid-draw.
     pub zoom_choice: &'a mut Option<f32>,
+    /// How the shell is presenting conversations this frame.
+    ///
+    /// Read-only, like [`Context::chat_log_auto_save`]: the mode lives in the settings record,
+    /// the shell reads it when it lays the desktop out, and a screen that wants to change it
+    /// hands the choice back through [`Context::navigation_choice`] — the same one-way street
+    /// every other shell-owned fact here travels.
+    pub navigation_mode: NavigationMode,
+    /// A navigation-mode change requested from a screen, applied after the frame.
+    ///
+    /// Same reasoning as [`Context::theme_choice`]: the mode decides how the whole chat area is
+    /// laid out, so a settings panel that could rewrite it mid-draw would leave half a frame
+    /// drawn in a layout its own click had already left behind.
+    pub navigation_choice: &'a mut Option<NavigationMode>,
     /// Whether transcripts are written to the device when a conversation's window closes.
     ///
     /// Read-only: the toggle lives in the Settings screen, and its write goes back through
@@ -229,5 +279,10 @@ impl Context<'_> {
     /// Asks to redraw the whole window at another interface scale once this frame is finished.
     pub fn want_zoom(&mut self, zoom: f32) {
         *self.zoom_choice = Some(zoom);
+    }
+
+    /// Asks the shell to present conversations the other way once this frame is finished.
+    pub fn want_navigation(&mut self, mode: NavigationMode) {
+        *self.navigation_choice = Some(mode);
     }
 }

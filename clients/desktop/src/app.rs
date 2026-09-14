@@ -32,6 +32,7 @@ use crate::ui::auth::AuthState;
 use crate::ui::chat::{
     ChatState, ImageBlob, NotePreview, RecordingView, RoomNotice, MAX_ROOM_NOTICES,
 };
+use crate::ui::chat_list::ChatListState;
 use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
 use crate::ui::games::{GameRow, GamesState};
@@ -41,7 +42,7 @@ use crate::ui::server_form::AutoStatus;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
 use crate::ui::wallet::{TrackingTx, WalletState};
-use crate::ui::{widgets, ChatLogAction, Context, Place, Screen};
+use crate::ui::{widgets, ChatLogAction, Context, NavigationMode, Place, Screen};
 
 /// The whole application state.
 pub struct App {
@@ -61,6 +62,10 @@ pub struct App {
     account: Option<Account>,
     auth: AuthState,
     chat: ChatState,
+    /// The Chat List Mode's list state — the search box's text, kept between frames so a query
+    /// survives a conversation change and a mode switch. Session-scoped like the panes beside
+    /// it, not persisted like the mode itself: the words were asked of this session's list.
+    chat_list: ChatListState,
     friends: FriendsState,
     settings_panel: SettingsState,
     profile_panel: crate::ui::profile::ProfileState,
@@ -163,6 +168,7 @@ impl App {
             account: None,
             auth,
             chat: ChatState::default(),
+            chat_list: ChatListState::default(),
             friends: FriendsState::default(),
             settings_panel: SettingsState::default(),
             profile_panel: crate::ui::profile::ProfileState::default(),
@@ -323,6 +329,7 @@ impl App {
                             Some(desktop::BackupOffer::new(&username, credential));
                     }
                     self.friends = FriendsState::default();
+                    self.chat_list = ChatListState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
                     self.admins_panel = crate::ui::admins::AdminsState::default();
@@ -377,6 +384,7 @@ impl App {
                     // business: names, requests, who is online. It goes with the session for the same
                     // reason the threads do, and the pane starts its next session NotAsked.
                     self.friends = FriendsState::default();
+                    self.chat_list = ChatListState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
                     self.admins_panel = crate::ui::admins::AdminsState::default();
@@ -458,11 +466,18 @@ impl App {
                     {
                         conversation.preview = Some(preview);
                         conversation.updated_at = Some(at);
-                        // Only count it unread when the conversation has no window on the
-                        // desktop. A badge on a window someone is reading is noise; a window
-                        // that is open but buried under another still counts as being read,
-                        // because the person chose to keep it open.
-                        if incoming && !self.desktop.chats.contains(&conversation_id) {
+                        // Only count it unread when the conversation is not being read. In
+                        // tabbed navigation that is "has a window on the desktop" — a badge on
+                        // a window someone is reading is noise, and a window that is open but
+                        // buried under another still counts as being read, because the person
+                        // chose to keep it open. In Chat List Mode the one honest equivalent
+                        // is "is the conversation the split view is showing".
+                        let reading = if self.settings.navigation_mode == NavigationMode::ChatList {
+                            self.chat.selected == Some(conversation_id)
+                        } else {
+                            self.desktop.chats.contains(&conversation_id)
+                        };
+                        if incoming && !reading {
                             conversation.unread = conversation.unread.saturating_add(1);
                         }
                         // A message for a conversation with no window mints the window — the
@@ -470,8 +485,9 @@ impl App {
                         // comes into being when a packet arrives for it, not only when someone
                         // clicks. The mint does not steal the top spot: the taskbar button's
                         // unread badge is the attention signal, and the person's click still
-                        // raises.
-                        if incoming {
+                        // raises. Tabbed navigation only — Chat List Mode mints nothing, and
+                        // the row's own badge is the attention signal there.
+                        if incoming && self.settings.navigation_mode == NavigationMode::Tabbed {
                             self.desktop.open_chat(conversation_id);
                         }
                     } else {
@@ -1260,35 +1276,40 @@ impl App {
                 unread: 0,
             });
         }
-        for conversation_id in &self.desktop.chats {
-            let (label, kind, unread) = self
-                .chat
-                .conversations
-                .iter()
-                .find(|c| c.conversation_id == *conversation_id)
-                .map(|c| {
-                    let title = me
-                        .map(|me| c.display_title(me, &self.chat.names))
-                        .unwrap_or_else(|| crate::model::short_id(*conversation_id));
-                    // The kind word is the taskbar's own taxonomy: a room is what the server
-                    // names a room, a group is a conversation with more than two members, and
-                    // everything else is a private chat.
-                    let kind = if c.room_id.is_some() {
-                        "Room"
-                    } else if c.members.len() > 2 {
-                        "Group"
-                    } else {
-                        "Chat"
-                    };
-                    (title, kind, c.unread)
-                })
-                .unwrap_or_else(|| (crate::model::short_id(*conversation_id), "Chat", 0));
-            entries.push(TaskEntry {
-                id: desktop::chat_id(*conversation_id),
-                label,
-                kind,
-                unread,
-            });
+        // Chat List Mode lists no conversation windows, because it has none: the list docked
+        // on the left is the surface, and a taskbar button that toggled a window that does not
+        // exist would be a button lying about what it does. Tabbed navigation lists them all.
+        if self.settings.navigation_mode == NavigationMode::Tabbed {
+            for conversation_id in &self.desktop.chats {
+                let (label, kind, unread) = self
+                    .chat
+                    .conversations
+                    .iter()
+                    .find(|c| c.conversation_id == *conversation_id)
+                    .map(|c| {
+                        let title = me
+                            .map(|me| c.display_title(me, &self.chat.names))
+                            .unwrap_or_else(|| crate::model::short_id(*conversation_id));
+                        // The kind word is the taskbar's own taxonomy: a room is what the server
+                        // names a room, a group is a conversation with more than two members, and
+                        // everything else is a private chat.
+                        let kind = if c.room_id.is_some() {
+                            "Room"
+                        } else if c.members.len() > 2 {
+                            "Group"
+                        } else {
+                            "Chat"
+                        };
+                        (title, kind, c.unread)
+                    })
+                    .unwrap_or_else(|| (crate::model::short_id(*conversation_id), "Chat", 0));
+                entries.push(TaskEntry {
+                    id: desktop::chat_id(*conversation_id),
+                    label,
+                    kind,
+                    unread,
+                });
+            }
         }
         for place in &self.desktop.sides {
             entries.push(TaskEntry {
@@ -1313,6 +1334,7 @@ impl App {
         navigate: &mut Option<Screen>,
         theme_choice: &mut Option<Theme>,
         zoom_choice: &mut Option<f32>,
+        navigation_choice: &mut Option<NavigationMode>,
     ) {
         let colors = palette(self.theme);
         let mut open = self.desktop.contacts_open;
@@ -1356,7 +1378,14 @@ impl App {
                     });
                 });
             widgets::divider(ui, self.theme);
-            self.place_content(ui, tab, navigate, theme_choice, zoom_choice);
+            self.place_content(
+                ui,
+                tab,
+                navigate,
+                theme_choice,
+                zoom_choice,
+                navigation_choice,
+            );
         });
 
         self.desktop.contacts_open = open;
@@ -1577,6 +1606,10 @@ impl App {
     /// The title is resolved here rather than cached, because the names a title is made of can
     /// arrive after the window is minted — a window titled by an id's tail that never improves
     /// would read as a bug the server cannot fix.
+    // Eight parameters because a window is handed itself, its conversation, and the shell's
+    // four after-frame choice pointers: any window can be where a theme, a zoom, a screen, or
+    // a navigation mode is chosen, and the choice travels back the same way from every one.
+    #[allow(clippy::too_many_arguments)]
     fn chat_window(
         &mut self,
         ctx: &egui::Context,
@@ -1585,6 +1618,7 @@ impl App {
         navigate: &mut Option<Screen>,
         theme_choice: &mut Option<Theme>,
         zoom_choice: &mut Option<f32>,
+        navigation_choice: &mut Option<NavigationMode>,
     ) {
         let title = self.conversation_title(conversation_id);
 
@@ -1608,9 +1642,11 @@ impl App {
                 rich_presence: self.rich_presence,
                 chat_log_auto_save: self.settings.auto_save_chat_logs,
                 chat_log: &mut self.chat_log_actions,
+                navigation_mode: self.settings.navigation_mode,
                 navigate,
                 theme_choice,
                 zoom_choice,
+                navigation_choice,
             };
             crate::ui::chat::thread(ui, &mut context, &mut self.chat, conversation_id);
         });
@@ -1625,8 +1661,107 @@ impl App {
         }
     }
 
+    /// The Chat List Mode desktop: the conversation list docked on the left, the one chat
+    /// window on the right.
+    ///
+    /// This is the mode's whole presentation (see [`crate::ui::chat_list`]): no window is
+    /// minted per conversation — the right half is one surface whose contents follow the
+    /// list's selection — and everything else on the desktop (the Contacts window, the side
+    /// windows, the taskbar) is exactly what tabbed navigation draws, because the navigation
+    /// choice is about the chat area and nothing else. The chat itself is the same `thread`
+    /// the floating windows draw, driven by the same [`crate::ui::chat::open`] every other
+    /// door into a conversation uses.
+    ///
+    /// A selection change is the mode's "closing the window": the moment a click moves the
+    /// right half to another conversation is the moment the transcript of the one being left
+    /// is written, the same moment a window's close writes it in tabbed navigation (when
+    /// auto-save is on; [`Self::snapshot_chat_log`] holds the "when").
+    fn chat_list_split(
+        &mut self,
+        ui: &mut egui::Ui,
+        navigate: &mut Option<Screen>,
+        theme_choice: &mut Option<Theme>,
+        zoom_choice: &mut Option<f32>,
+        navigation_choice: &mut Option<NavigationMode>,
+    ) {
+        let colors = palette(self.theme);
+        let leaving = self.chat.selected;
+
+        // The list: born at about a quarter of the window and resizable, because a list
+        // someone cannot widen is a list someone will fight; egui remembers whatever the
+        // person drags it to, keyed by the panel's id.
+        let width = ui.available_width();
+        egui::Panel::left(egui::Id::new("migo-chat-list"))
+            .resizable(true)
+            .min_size(220.0)
+            .max_size(480.0)
+            .default_size((width * 0.25).clamp(220.0, 480.0))
+            .frame(egui::Frame::new().fill(colors.surface))
+            .show(ui, |ui| {
+                let mut context = Context {
+                    theme: self.theme,
+                    connection: &self.connection,
+                    account: self.account.as_ref(),
+                    server: &self.auth.server,
+                    commands: &mut self.commands,
+                    rich_presence: self.rich_presence,
+                    chat_log_auto_save: self.settings.auto_save_chat_logs,
+                    chat_log: &mut self.chat_log_actions,
+                    navigation_mode: self.settings.navigation_mode,
+                    navigate: &mut *navigate,
+                    theme_choice: &mut *theme_choice,
+                    zoom_choice: &mut *zoom_choice,
+                    navigation_choice: &mut *navigation_choice,
+                };
+                crate::ui::chat_list::show(ui, &mut context, &mut self.chat_list, &mut self.chat);
+            });
+
+        // The one moment a transcript is written: leaving a conversation, whichever side of
+        // the split the leaving started from.
+        if self.chat.selected != leaving {
+            if let Some(conversation_id) = leaving {
+                self.snapshot_chat_log(conversation_id);
+            }
+        }
+
+        // The chat window: everything the list left. The ground is painted rather than framed
+        // so the surface covers the whole half however short the thread is — the floating
+        // chrome a conversation window wears in tabbed navigation belongs to the window
+        // manager, and this half is not a window.
+        let rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::ZERO, colors.surface);
+        let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(space::SM)));
+        if let Some(conversation_id) = self.chat.selected {
+            let mut context = Context {
+                theme: self.theme,
+                connection: &self.connection,
+                account: self.account.as_ref(),
+                server: &self.auth.server,
+                commands: &mut self.commands,
+                rich_presence: self.rich_presence,
+                chat_log_auto_save: self.settings.auto_save_chat_logs,
+                chat_log: &mut self.chat_log_actions,
+                navigation_mode: self.settings.navigation_mode,
+                navigate: &mut *navigate,
+                theme_choice: &mut *theme_choice,
+                zoom_choice: &mut *zoom_choice,
+                navigation_choice: &mut *navigation_choice,
+            };
+            crate::ui::chat::thread(&mut pane, &mut context, &mut self.chat, conversation_id);
+        } else {
+            widgets::empty_state(
+                &mut pane,
+                self.theme,
+                "No conversation open",
+                "Pick one from the list beside this window.",
+            );
+        }
+    }
+
     /// One side window: a small floating pane opened from the account menu — profile, wallet,
     /// alerts, search, games, settings, and the owner's admins page.
+    #[allow(clippy::too_many_arguments)]
     fn side_window(
         &mut self,
         ctx: &egui::Context,
@@ -1635,6 +1770,7 @@ impl App {
         navigate: &mut Option<Screen>,
         theme_choice: &mut Option<Theme>,
         zoom_choice: &mut Option<f32>,
+        navigation_choice: &mut Option<NavigationMode>,
     ) {
         let mut open = true;
         desktop::floating(
@@ -1647,7 +1783,14 @@ impl App {
         )
         .open(&mut open)
         .show(ctx, |ui| {
-            self.place_content(ui, place, navigate, theme_choice, zoom_choice);
+            self.place_content(
+                ui,
+                place,
+                navigate,
+                theme_choice,
+                zoom_choice,
+                navigation_choice,
+            );
         });
 
         if !open {
@@ -1668,6 +1811,7 @@ impl App {
         navigate: &mut Option<Screen>,
         theme_choice: &mut Option<Theme>,
         zoom_choice: &mut Option<f32>,
+        navigation_choice: &mut Option<NavigationMode>,
     ) {
         let mut context = Context {
             theme: self.theme,
@@ -1678,9 +1822,11 @@ impl App {
             rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut self.chat_log_actions,
+            navigation_mode: self.settings.navigation_mode,
             navigate,
             theme_choice,
             zoom_choice,
+            navigation_choice,
         };
         match place {
             Place::Friends => {
@@ -1739,13 +1885,16 @@ impl App {
     ///
     /// The same [`crate::ui::chat::open`] the conversation list uses, driven with a scratch
     /// command buffer because the event that calls this arrives outside the frame that owns the
-    /// real one. Opening a conversation is opening a window: it lands on the desktop and, when
-    /// the frame is running, is raised to the top.
+    /// real one. In tabbed navigation, opening a conversation is opening a window: it lands on
+    /// the desktop and, when the frame is running, is raised to the top. In Chat List Mode it
+    /// is a selection — the split view's right half is the one window there is, and the list
+    /// already carries the row.
     fn open_conversation(&mut self, conversation_id: migo_core::Id) {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
         let mut theme_choice = None;
         let mut zoom_choice = None;
+        let mut navigation_choice = None;
         // The chat-log buffer rides along for the same reason the command buffer does: the
         // event that lands here arrives outside a frame, and the fields a Context carries
         // must all be present even on a path that pushes nothing.
@@ -1760,14 +1909,18 @@ impl App {
             rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut chat_log_actions,
+            navigation_mode: self.settings.navigation_mode,
             navigate: &mut navigate,
             theme_choice: &mut theme_choice,
             zoom_choice: &mut zoom_choice,
+            navigation_choice: &mut navigation_choice,
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
         self.chat_log_actions = chat_log_actions;
-        self.desktop.open_chat(conversation_id);
+        if self.settings.navigation_mode == NavigationMode::Tabbed {
+            self.desktop.open_chat(conversation_id);
+        }
     }
 
     /// One conversation's title, resolved the way its window's title bar resolves it — the
@@ -2015,6 +2168,8 @@ impl eframe::App for App {
         let mut theme_choice: Option<Theme> = None;
         // An interface-scale change requested from the settings panel, applied after the frame.
         let mut zoom_choice: Option<f32> = None;
+        // A navigation-mode change requested from the settings panel, applied after the frame.
+        let mut navigation_choice: Option<NavigationMode> = None;
         let screen = self.screen;
         let signed_in = screen == Screen::Chat && self.account.is_some();
 
@@ -2044,8 +2199,11 @@ impl eframe::App for App {
                 colors.surface
             }))
             .show(ui, |ui| {
-                // Signed in, the surface draws nothing: the desk is plain teal, only the ground
-                // the windows float on, and the windows own its whole height.
+                // Signed in under tabbed navigation, the surface draws nothing: the desk is
+                // plain teal, only the ground the windows float on, and the windows own its
+                // whole height. Chat List Mode replaces the ground itself with the split view
+                // — the list docked left, the one chat window right — because the mode has no
+                // windows to float.
                 if !signed_in {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
@@ -2061,11 +2219,21 @@ impl eframe::App for App {
                         rich_presence: self.rich_presence,
                         chat_log_auto_save: self.settings.auto_save_chat_logs,
                         chat_log: &mut self.chat_log_actions,
+                        navigation_mode: self.settings.navigation_mode,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
                         zoom_choice: &mut zoom_choice,
+                        navigation_choice: &mut navigation_choice,
                     };
                     crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
+                } else if self.settings.navigation_mode == NavigationMode::ChatList {
+                    self.chat_list_split(
+                        ui,
+                        &mut navigate,
+                        &mut theme_choice,
+                        &mut zoom_choice,
+                        &mut navigation_choice,
+                    );
                 }
             });
 
@@ -2076,19 +2244,31 @@ impl eframe::App for App {
             // signal that a window wants to exist when this frame is done.
             let open_seq_before = self.chat.open_seq;
 
-            self.contacts_window(&ctx, &mut navigate, &mut theme_choice, &mut zoom_choice);
+            self.contacts_window(
+                &ctx,
+                &mut navigate,
+                &mut theme_choice,
+                &mut zoom_choice,
+                &mut navigation_choice,
+            );
             // The conversation windows are drawn in open order, which is the cascade: a window's
             // index is its birthplace, and the list is cloned because closing one rewrites it.
-            let chats = self.desktop.chats.clone();
-            for (index, conversation_id) in chats.iter().copied().enumerate() {
-                self.chat_window(
-                    &ctx,
-                    index,
-                    conversation_id,
-                    &mut navigate,
-                    &mut theme_choice,
-                    &mut zoom_choice,
-                );
+            // Tabbed navigation only — Chat List Mode draws none, because a window per
+            // conversation is precisely what that mode does not do; its one chat window is the
+            // split view's right half, already drawn with the surface above.
+            if self.settings.navigation_mode == NavigationMode::Tabbed {
+                let chats = self.desktop.chats.clone();
+                for (index, conversation_id) in chats.iter().copied().enumerate() {
+                    self.chat_window(
+                        &ctx,
+                        index,
+                        conversation_id,
+                        &mut navigate,
+                        &mut theme_choice,
+                        &mut zoom_choice,
+                        &mut navigation_choice,
+                    );
+                }
             }
             for (index, place) in self.desktop.sides.clone().iter().copied().enumerate() {
                 self.side_window(
@@ -2098,11 +2278,16 @@ impl eframe::App for App {
                     &mut navigate,
                     &mut theme_choice,
                     &mut zoom_choice,
+                    &mut navigation_choice,
                 );
             }
 
             // Whatever door opened a conversation this frame opens its window and raises it.
-            if self.chat.open_seq != open_seq_before {
+            // Tabbed navigation only: Chat List Mode's open is a selection, and the selection
+            // is already what `chat::open` left behind.
+            if self.chat.open_seq != open_seq_before
+                && self.settings.navigation_mode == NavigationMode::Tabbed
+            {
                 if let Some(conversation_id) = self.chat.selected {
                     self.desktop.open_chat(conversation_id);
                     desktop::focus(&ctx, desktop::chat_id(conversation_id));
@@ -2116,7 +2301,10 @@ impl eframe::App for App {
             // over the call overlay answers the call (declines, ends, or dismisses — the call
             // screen owns the key while it is up), and a side window or the Contacts window is
             // closed by its own button, not by a key that could take the lists away by accident.
+            // And only in tabbed navigation, where there is a conversation window to close —
+            // Chat List Mode's one chat window is not a window, and the key owes it nothing.
             if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                && self.settings.navigation_mode == NavigationMode::Tabbed
                 && self.call.is_none()
                 && !self.desktop.logout_dialog
                 && self.desktop.backup_offer.is_none()
@@ -2204,6 +2392,24 @@ impl eframe::App for App {
             ctx.set_zoom_factor(zoom);
             self.settings.ui_scale = Some((zoom * 100.0).round() as u8);
             self.persist_settings();
+        }
+
+        // The settings panel's navigation mode. Same after-the-frame timing as the theme: the
+        // mode decides how the whole chat area is laid out, so it is applied once, between
+        // frames, and the choice is written back to the settings file so it outlives the
+        // window. Arriving at tabbed navigation also owes the selected conversation its
+        // window: the split view kept it on screen without one, and a switch that quietly
+        // dropped the thread the person was reading would be a mode change that closed their
+        // chat.
+        if let Some(mode) = navigation_choice {
+            self.settings.navigation_mode = mode;
+            self.persist_settings();
+            if mode == NavigationMode::Tabbed {
+                if let Some(conversation_id) = self.chat.selected {
+                    self.desktop.open_chat(conversation_id);
+                    desktop::focus(&ctx, desktop::chat_id(conversation_id));
+                }
+            }
         }
 
         // The frame's chat-log intent, applied after the frame for the same reason the command

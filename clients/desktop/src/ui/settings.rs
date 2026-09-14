@@ -33,7 +33,7 @@ use crate::model::{Connection, DeviceRow, EvmWalletRow, SessionRow};
 use crate::net::Command;
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets;
-use crate::ui::{ChatLogAction, Context};
+use crate::ui::{ChatLogAction, Context, NavigationMode};
 
 /// What the device list currently shows.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -614,6 +614,46 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
             "Theme: {} — switch it with the sun or moon on the banner.",
             context.theme.label()
         ))
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
+
+    // Navigation mode: the two ways the desktop can present its conversations. Drawn as the
+    // same two-selected-state-button control the auto-save row is, because the choice is the
+    // same shape — one of a small fixed set, one of them always current, and the default
+    // (tabbed) a state the pane must be able to show rather than imply by an unpressed
+    // toggle.
+    ui.add_space(space::SM);
+    ui.label(
+        RichText::new("Navigation mode")
+            .font(egui::FontId::proportional(font::BODY))
+            .color(colors.text),
+    );
+    ui.horizontal(|ui| {
+        for mode in [NavigationMode::Tabbed, NavigationMode::ChatList] {
+            let hover = match mode {
+                NavigationMode::Tabbed => {
+                    "Every conversation opens as its own floating, closable window."
+                }
+                NavigationMode::ChatList => {
+                    "A searchable list of conversations stays on the left; the one you pick \
+                     fills the single chat window on the right."
+                }
+            };
+            if ui
+                .add(egui::Button::new(mode.label()).selected(context.navigation_mode == mode))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                context.want_navigation(mode);
+            }
+        }
+    });
+    ui.label(
+        RichText::new(
+            "How chats are laid out, nothing else: Friends, Rooms and Feed are the same in \
+             both, and the choice applies the next frame and survives a restart.",
+        )
         .font(egui::FontId::proportional(font::TINY))
         .color(colors.text_muted),
     );

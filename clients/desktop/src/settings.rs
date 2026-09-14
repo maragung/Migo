@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{default_production_server_endpoint, rest_base_url, ServerEndpoint};
 use crate::theme::Theme;
+use crate::ui::NavigationMode;
 
 const SETTINGS_FILE: &str = "settings.json";
 pub const SETTINGS_VERSION: u32 = 1;
@@ -83,6 +84,15 @@ pub struct Settings {
     /// default.
     #[serde(default)]
     pub auto_save_chat_logs: bool,
+    /// How the signed-in desktop presents its conversations: one floating window per
+    /// conversation (the default, and the behaviour of every file written before the field
+    /// existed), or the Chat List split view — the list docked left, one chat window right.
+    /// A presentation choice, not a chat-state one: both modes share the same conversations,
+    /// connection, and unread counts. `#[serde(default)]` for the same reason the log toggle
+    /// is — a session upgraded into the split view without being asked would have had its
+    /// windows moved out from under it.
+    #[serde(default)]
+    pub navigation_mode: NavigationMode,
 }
 
 impl Settings {
@@ -99,6 +109,7 @@ impl Settings {
             theme: None,
             ui_scale: None,
             auto_save_chat_logs: false,
+            navigation_mode: NavigationMode::default(),
         }
     }
 
@@ -218,6 +229,7 @@ mod tests {
             theme: Some(Theme::Light),
             ui_scale: None,
             auto_save_chat_logs: false,
+            navigation_mode: NavigationMode::Tabbed,
         };
         save(&path, &record).expect("save");
         let loaded = load(&path).expect("load");
@@ -328,6 +340,7 @@ mod tests {
             theme: Some(Theme::Dark),
             ui_scale: None,
             auto_save_chat_logs: false,
+            navigation_mode: NavigationMode::Tabbed,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
@@ -356,6 +369,7 @@ mod tests {
             theme: None,
             ui_scale: None,
             auto_save_chat_logs: false,
+            navigation_mode: NavigationMode::Tabbed,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
     }
@@ -394,6 +408,48 @@ mod tests {
         fs::write(&old_path, old.to_string()).expect("write");
         let loaded = load(&old_path).expect("load");
         assert_eq!(loaded.server_mode, ServerMode::Manual);
+        assert_eq!(loaded.server.host, "localhost");
+        let _ = fs::remove_file(&old_path);
+    }
+
+    /// The navigation mode round-trips, and a file written before the field existed reads as
+    /// tabbed: the split view is an addition, and an upgrade that moved a long-standing
+    /// session's windows into a layout nobody asked for would be a settings file rewriting the
+    /// person's desktop behind their back.
+    #[test]
+    fn navigation_mode_round_trips_and_defaults_to_tabbed() {
+        let path = std::env::temp_dir().join("migo-desktop-test-navigation-mode.json");
+        let record = Settings {
+            navigation_mode: NavigationMode::ChatList,
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.navigation_mode, NavigationMode::ChatList);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"navigation_mode\": \"chat_list\""));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            Settings::default_for_dev().navigation_mode,
+            NavigationMode::Tabbed
+        );
+
+        let old_path = std::env::temp_dir().join("migo-desktop-test-navigation-mode-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&old_path, old.to_string()).expect("write");
+        let loaded = load(&old_path).expect("load");
+        assert_eq!(loaded.navigation_mode, NavigationMode::Tabbed);
         assert_eq!(loaded.server.host, "localhost");
         let _ = fs::remove_file(&old_path);
     }
