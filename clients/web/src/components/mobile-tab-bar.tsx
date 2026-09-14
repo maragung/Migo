@@ -19,25 +19,39 @@ import { Sheet, SheetAction } from './intent-sheet.js';
 import { KIND_ICON } from './window-types.js';
 import type { WinState } from './window-types.js';
 
-/** The home views the strip navigates between. */
-export type MobileNavTab = 'friends' | 'rooms' | 'feed';
+/**
+ * The home views the strip navigates between. `main` is the Chat List Mode extra — the
+ * conversation list the mode adds ahead of the other three — and it only appears in
+ * {@link MOBILE_NAV_ORDER_CHATLIST}; the tabbed order is unchanged by it.
+ */
+export type MobileNavTab = 'main' | 'friends' | 'rooms' | 'feed';
 
 /** The home tabs in strip order: Friends, then Rooms, then Feed beside it. */
 export const MOBILE_NAV_ORDER: readonly MobileNavTab[] = ['friends', 'rooms', 'feed'];
 
+/** The home tabs in Chat List Mode's order: the conversation list leads, the rest follow. */
+export const MOBILE_NAV_ORDER_CHATLIST: readonly MobileNavTab[] = [
+  'main',
+  'friends',
+  'rooms',
+  'feed',
+];
+
 /** The home tabs' names and icons. */
 export const MOBILE_NAV_META: Readonly<
-  Record<MobileNavTab, { label: string; icon: 'friends' | 'rooms' | 'space' }>
+  Record<MobileNavTab, { label: string; icon: 'friends' | 'rooms' | 'space' | 'chats' }>
 > = {
+  main: { label: 'Main', icon: 'chats' },
   friends: { label: 'Friends', icon: 'friends' },
   rooms: { label: 'Rooms', icon: 'rooms' },
   feed: { label: 'Feed', icon: 'space' },
 };
 
-/** Only Feed closes from its X; Friends and Rooms are the home itself. */
+/** Only Feed closes from its X; Friends, Rooms, and Main are the home itself. */
 const NAV_CLOSEABLE: Readonly<Record<MobileNavTab, boolean>> = {
   feed: true,
   friends: false,
+  main: false,
   rooms: false,
 };
 
@@ -58,6 +72,7 @@ export function MobileTabBar({
   navTab,
   hiddenNavs,
   navUnread,
+  chatListMode,
   onSelectNav,
   onCloseNav,
   onReopenNav,
@@ -73,6 +88,8 @@ export function MobileTabBar({
   hiddenNavs: readonly MobileNavTab[];
   /** Unread counts for the home tabs themselves. */
   navUnread: Readonly<Record<MobileNavTab, number>>;
+  /** Whether Chat List Mode is on — the strip then leads with the Main tab. */
+  chatListMode?: boolean;
   onSelectNav: (tab: MobileNavTab) => void;
   onCloseNav: (tab: MobileNavTab) => void;
   onReopenNav: (tab: MobileNavTab) => void;
@@ -142,7 +159,10 @@ export function MobileTabBar({
   }
 
   const atHome = activeId === null;
-  const visibleNavs = MOBILE_NAV_ORDER.filter((tab) => !hiddenNavs.includes(tab));
+  // The mode picks the order: the tabbed strip is exactly the three it has always been, and the
+  // chat-list strip leads with Main. The user cannot close Main, so hiddenNavs never hides it.
+  const order = chatListMode === true ? MOBILE_NAV_ORDER_CHATLIST : MOBILE_NAV_ORDER;
+  const visibleNavs = order.filter((tab) => !hiddenNavs.includes(tab));
 
   return (
     <div
@@ -292,17 +312,19 @@ export function MobileTabBar({
       ) : null}
 
       <Sheet open={reopenOpen} onClose={() => setReopenOpen(false)} title="Reopen tab">
-        {MOBILE_NAV_ORDER.filter((tab) => hiddenNavs.includes(tab)).map((id) => (
-          <SheetAction
-            key={id}
-            icon={MOBILE_NAV_META[id].icon}
-            label={MOBILE_NAV_META[id].label}
-            onClick={() => {
-              setReopenOpen(false);
-              onReopenNav(id);
-            }}
-          />
-        ))}
+        {order
+          .filter((tab) => hiddenNavs.includes(tab))
+          .map((id) => (
+            <SheetAction
+              key={id}
+              icon={MOBILE_NAV_META[id].icon}
+              label={MOBILE_NAV_META[id].label}
+              onClick={() => {
+                setReopenOpen(false);
+                onReopenNav(id);
+              }}
+            />
+          ))}
         <div className="sheet-tail" />
       </Sheet>
     </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { ConversationKind, MessageKind } from '@migo/sdk';
@@ -95,11 +95,12 @@ export function roomRowTitle(summary: ConversationSummary, room: RoomInfo | null
   return `# ${name}`;
 }
 
-export function ConversationList(): ReactNode {
+export function ConversationList({ searchable = false }: { searchable?: boolean }): ReactNode {
   const { accountId } = useMigo();
   const { items, loading, error, hasMore, loadMore, unread, lastPreviews } = useConversations();
   const rooms = useRooms();
   const openId = useOpenConversation();
+  const [query, setQuery] = useState('');
 
   // Profiles resolve the sidebar's two name surfaces: the 1:1 peer (row title, avatar) and the
   // sender whose name prefixes a group's last-message preview.
@@ -137,6 +138,25 @@ export function ConversationList(): ReactNode {
   );
   const presence = usePresenceOf(directPeers, profiles);
 
+  // The search field's cut of the list: rows whose title or subtitle line matches. Off unless the
+  // caller asked for a searchable list (the split view's pane), so the bare list is unchanged.
+  const visibleItems = useMemo(() => {
+    if (!searchable) {
+      return items;
+    }
+    const needle = query.trim().toLowerCase();
+    if (needle.length === 0) {
+      return items;
+    }
+    return items.filter((item) => {
+      const room = item.kind === ConversationKind.Room ? rooms.infoFor(item.conversationId) : null;
+      return (
+        peerNameFor(item, accountId, profiles, room).toLowerCase().includes(needle) ||
+        subtitleFor(item, accountId, profiles, lastPreviews, room).toLowerCase().includes(needle)
+      );
+    });
+  }, [searchable, items, query, accountId, profiles, rooms, lastPreviews]);
+
   if (items.length === 0 && loading) {
     return (
       <div className="center-fill">
@@ -158,9 +178,12 @@ export function ConversationList(): ReactNode {
     );
   }
 
-  return (
+  // The rows, exactly as the bare list has always rendered them — the searchable wrap below adds
+  // its field around this, and nothing else, so a caller that did not ask for search keeps the
+  // markup it had.
+  const rows = (
     <div className="conversation-list">
-      {items.map((item) => {
+      {visibleItems.map((item) => {
         const active = openId === item.conversationId;
         const room =
           item.kind === ConversationKind.Room ? rooms.infoFor(item.conversationId) : null;
@@ -190,6 +213,38 @@ export function ConversationList(): ReactNode {
           Load more
         </button>
       ) : null}
+    </div>
+  );
+
+  if (!searchable) {
+    return rows;
+  }
+
+  return (
+    <div className="conversation-list-wrap">
+      <div className="clist-search">
+        <Icon name="search" size={15} className="clist-search-icon" />
+        <input
+          type="search"
+          className="clist-search-input"
+          placeholder="Search chats..."
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          aria-label="Search chats"
+        />
+      </div>
+      {visibleItems.length === 0 ? (
+        <div className="center-fill">
+          <div>
+            <div className="emoji">
+              <Icon name="search" size={24} />
+            </div>
+            No chats match your search.
+          </div>
+        </div>
+      ) : (
+        rows
+      )}
     </div>
   );
 }

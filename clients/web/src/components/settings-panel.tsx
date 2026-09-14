@@ -17,6 +17,8 @@
  *   * **Penyimpanan & Data** — what this device is holding for the app (the storage estimate)
  *     and the one honest broom: clearing the saved chat logs, which names exactly what it keeps.
  *   * **Tampilan** — the theme.
+ *   * **Navigation** — how conversations are presented: the tabbed windows the client has always
+ *     had, or Chat List Mode's single list (the phone's Main tab, the desk's split view).
  *   * **Akun** — the door to the account panel (identity, email, passphrase, key file).
  *   * **Diagnostik** — the dev-build-only session wire counter (§171), so the bandwidth cost of
  *     a feature is visible while the feature is being written. It never appears in a production
@@ -47,6 +49,7 @@ import { getChoice, setChoice } from '@/lib/theme.js';
 import type { ThemeChoice } from '@/lib/theme.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useNavMode } from '@/lib/migo/nav-mode.js';
 import { collectAllConversationLogs } from '@/lib/migo/collect-chat-logs.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import {
@@ -471,6 +474,8 @@ export function SettingsPanel({
 
       <AppearanceSection />
 
+      <NavigationSection />
+
       {/* §171's runtime measurement is a development tool: the wire counter group never ships. */}
       {process.env.NODE_ENV !== 'production' ? <WireBytesSection /> : null}
 
@@ -758,6 +763,49 @@ function AppearanceSection(): ReactNode {
         ))}
       </div>
       <p className="muted">System follows this device's colour scheme; dark is Migo's home skin.</p>
+    </section>
+  );
+}
+
+/**
+ * The Navigation section: how the client presents its conversations.
+ *
+ * Tabbed Navigation is the layout the client has always had and is offered first because it is
+ * the default — the choice that changes nothing. Chat List Mode keeps every list and panel where
+ * it is and reroutes only the conversations: the phone's home gains a Main tab holding the
+ * conversation list, and the desk trades its per-conversation windows for one split view. The
+ * choice persists (see lib/migo/nav-mode.ts), so it survives a restart.
+ *
+ * Exported for the settings tests, like the other presentational halves above.
+ */
+export function NavigationSection(): ReactNode {
+  const [mode, pick] = useNavMode();
+  return (
+    <section className="panel-section" aria-label="Navigation">
+      <h2 className="panel-heading">Navigation</h2>
+      <div className="chip-row" role="group" aria-label="Navigation Mode">
+        <button
+          type="button"
+          className={`chip ${mode === 'tabbed' ? 'chip-active' : ''}`}
+          aria-pressed={mode === 'tabbed'}
+          onClick={() => pick('tabbed')}
+        >
+          Tabbed Navigation
+        </button>
+        <button
+          type="button"
+          className={`chip ${mode === 'chatlist' ? 'chip-active' : ''}`}
+          aria-pressed={mode === 'chatlist'}
+          onClick={() => pick('chatlist')}
+        >
+          Chat List Mode
+        </button>
+      </div>
+      <p className="muted">
+        Tabbed Navigation is the classic windows-and-strip layout. Chat List Mode opens your
+        conversations from one list — the phone&rsquo;s Main tab, the desk&rsquo;s split view.
+        Friends, Rooms, and Feed stay exactly as they are either way.
+      </p>
     </section>
   );
 }

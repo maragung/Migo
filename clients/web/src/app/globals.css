@@ -1294,6 +1294,94 @@ main {
   color: var(--text-faint);
 }
 
+/* --- Chat List Mode --- */
+
+/* The searchable list's wrap: the search field stays above the rows and scrolls with nothing —
+   the rows move, the question does not. */
+.conversation-list-wrap {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.clist-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.clist-search-icon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.clist-search-input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+.clist-search-input:focus-visible {
+  border-color: var(--accent);
+}
+.clist-search-input::placeholder {
+  color: var(--text-faint);
+}
+
+/* The desk's split view: the conversation list on the left (a quarter, bounded so a wide screen
+   does not stretch a list row into a paragraph), the single thread pane on the right. The holder
+   is positioned by the shell — it knows where the contacts window is — and this is the split. */
+.chat-split {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+.chat-split-list {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 25%;
+  min-width: 220px;
+  max-width: 340px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel-alt);
+}
+.chat-split-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.chat-split-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.chat-split-empty-title {
+  font-weight: 700;
+  color: var(--text);
+}
+.chat-split-empty-text {
+  margin: 0;
+  max-width: 320px;
+  font-size: var(--fs-meta);
+}
+
 /* --- avatar --- */
 
 .avatar {

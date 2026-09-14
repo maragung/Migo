@@ -23,6 +23,14 @@
  * A message that arrives for a conversation with no window mints one (the session's own rule),
  * without stealing focus from whoever has it; the shell's own unread counts (not the provider's,
  * which a mounted thread's mark-read clears) drive the badges.
+ *
+ * Chat List Mode (Settings → Navigation, see lib/migo/nav-mode.ts) reroutes only the
+ * conversations: on the phone the home gains a Main tab holding the conversation list, and a tap
+ * opens the thread as the same full-screen window it always was; on the desk the per-conversation
+ * windows are replaced by one split view — the list on the left, a single thread pane on the
+ * right — so no chat window is minted while the mode is on. Every list, panel, and window the
+ * tabbed layout offers is untouched by the mode; turning it off restores the windows exactly as
+ * they were.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -33,6 +41,7 @@ import type { ConversationSummary, Id, RoomSummary } from '@migo/sdk';
 
 import { AccountPanel } from './account-panel.js';
 import { AdminsPanel } from './admins-panel.js';
+import { ChatSplitView } from './chat-split-view.js';
 import { ChatWindow } from './chat-window.js';
 import { ConfirmDialog } from './confirm-dialog.js';
 import { ContactsWindow } from './contacts-window.js';
@@ -41,7 +50,7 @@ import { Icon } from './icons.js';
 import { MobileHome } from './mobile-home.js';
 import { MobileTabBar } from './mobile-tab-bar.js';
 import type { MobileNavTab } from './mobile-tab-bar.js';
-import { MOBILE_NAV_ORDER } from './mobile-tab-bar.js';
+import { MOBILE_NAV_ORDER, MOBILE_NAV_ORDER_CHATLIST } from './mobile-tab-bar.js';
 import { NotificationsPanel } from './notifications-panel.js';
 import { ProfilePanel } from './profile-panel.js';
 import { RetroWindow } from './retro-window.js';
@@ -61,6 +70,7 @@ import { useCall } from '@/lib/migo/call-manager.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useJoinRoom } from '@/lib/migo/use-join-room.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useNavMode } from '@/lib/migo/nav-mode.js';
 import {
   closeConversation,
   openConversation,
@@ -104,9 +114,15 @@ function sizeForKind(kind: WinKind): { w: number; h: number } {
 export function AppShell(): ReactNode {
   const { client, accountId, logout } = useMigo();
   const openId = useOpenConversation();
-  const { items, noteConversation } = useConversations();
+  const { items, noteConversation, unread } = useConversations();
   const rooms = useRooms();
   const { startCall } = useCall();
+
+  // ---- the navigation mode ----
+  // The stored choice (Settings → Navigation): `tabbed` is the layout below, unchanged; `chatlist`
+  // reroutes the conversations — the phone's Main tab, the desk's split view — and nothing else.
+  const [navMode] = useNavMode();
+  const chatList = navMode === 'chatlist';
 
   // ---- the desk's own state ----
   const [mounted, setMounted] = useState(false);
@@ -131,6 +147,32 @@ export function AppShell(): ReactNode {
   const [hiddenNavs, setHiddenNavs] = useState<MobileNavTab[]>([]);
   const [intentUser, setIntentUser] = useState<Id | null>(null);
   const [intentRoom, setIntentRoom] = useState<RoomSummary | null>(null);
+
+  // On the desk, Chat List Mode replaces the per-conversation windows with the split view; on the
+  // phone the full-screen thread window is the mode's "chat activity", so windows stay as they are.
+  const suppressChatWindows = !isMobile && chatList;
+  // The strip's tab order follows the mode: the tabbed order is the three it has always been;
+  // Chat List Mode leads with Main.
+  const navOrder = chatList ? MOBILE_NAV_ORDER_CHATLIST : MOBILE_NAV_ORDER;
+
+  // A mode switch must not strand the phone on a tab the new order does not hold: entering Chat
+  // List Mode lands on Main (the list is the mode's point), and leaving it returns a stranded
+  // Main to the Feed the tabbed home opens on. The desk needs no such correction — its home is
+  // the contacts window, which the mode does not touch.
+  useEffect(() => {
+    if (!isMobile) {
+      return;
+    }
+    setMobileNav((cur) => {
+      if (chatList && cur !== 'main') {
+        return 'main';
+      }
+      if (!chatList && cur === 'main') {
+        return 'feed';
+      }
+      return cur;
+    });
+  }, [chatList, isMobile]);
 
   const zRef = useRef(20);
   const cascadeRef = useRef(0);
@@ -284,7 +326,11 @@ export function AppShell(): ReactNode {
       return;
     }
     if (openId !== null) {
-      openWindow({ id: chatWinId(openId), kind: 'chat', conversationId: openId, title: '' });
+      // In the desk's Chat List Mode the fragment drives the split view's right pane instead —
+      // the pane reads openId directly, so there is no window to mint.
+      if (!suppressChatWindows) {
+        openWindow({ id: chatWinId(openId), kind: 'chat', conversationId: openId, title: '' });
+      }
       return;
     }
     if (prev !== null) {
@@ -297,7 +343,28 @@ export function AppShell(): ReactNode {
         setActiveId((cur) => (cur === gone ? null : cur));
       }
     }
-  }, [openId, openWindow]);
+  }, [openId, openWindow, suppressChatWindows]);
+
+  // ---- a mode switch reconciles the desk's chat windows with the mode's pane ----
+  // Entering Chat List Mode dissolves the chat windows the split view replaces; leaving it gives
+  // the still-open conversation its window back, because the fragment effect above only runs on
+  // an openId change and a mode flip is not one. Functional updates keep this idempotent, so the
+  // effect's re-runs on unrelated dependency moves mint nothing and dissolve nothing.
+  useEffect(() => {
+    if (isMobile) {
+      return;
+    }
+    if (chatList) {
+      setWindows((ws) => {
+        const next = ws.filter((w) => w.kind !== 'chat');
+        return next.length === ws.length ? ws : next;
+      });
+      return;
+    }
+    if (openId !== null && !winIdsRef.current.has(chatWinId(openId))) {
+      openWindow({ id: chatWinId(openId), kind: 'chat', conversationId: openId, title: '' });
+    }
+  }, [chatList, isMobile, openId, openWindow]);
 
   // ---- message arrival: mint windows, count attention ----
   winIdsRef.current = new Set(windows.map((w) => w.id));
@@ -315,6 +382,11 @@ export function AppShell(): ReactNode {
     }
     const off = client.conversations.onMember((event) => {
       if (event.userId !== accountId || event.change !== MemberChange.Joined) {
+        return;
+      }
+      // In the desk's Chat List Mode the list itself is the arrival surface: the conversation
+      // appears in it with its unread mark, and the pane opens on the user's tap.
+      if (suppressChatWindows) {
         return;
       }
       const id = chatWinId(event.conversationId);
@@ -346,7 +418,7 @@ export function AppShell(): ReactNode {
     return () => {
       off();
     };
-  }, [client, accountId, isMobile]);
+  }, [client, accountId, isMobile, suppressChatWindows]);
 
   useEffect(() => {
     if (client === null || accountId === null) {
@@ -355,6 +427,12 @@ export function AppShell(): ReactNode {
     const off = client.messaging.onMessage((message) => {
       if (message.senderId === accountId) {
         // Echoes of this account's own sends: the sending device already opened its window.
+        return;
+      }
+      // In the desk's Chat List Mode the list rows carry the attention (their unread marks read
+      // the provider, which no unmounted pane clears), so no window is minted and no per-window
+      // count is kept — there is no window to count for.
+      if (suppressChatWindows) {
         return;
       }
       const id = chatWinId(message.conversationId);
@@ -393,7 +471,7 @@ export function AppShell(): ReactNode {
     return () => {
       off();
     };
-  }, [client, accountId, isMobile]);
+  }, [client, accountId, isMobile, suppressChatWindows]);
 
   // ---- the phone's navigation ----
   /** Parks every window and returns to the home screen. */
@@ -503,16 +581,17 @@ export function AppShell(): ReactNode {
         return;
       }
       if (tab === 'chats') {
-        // No chats list survives the window metaphor; the friends list is where a person is.
+        // The tabbed layout has no chats list — the friends list is where a person is. Chat List
+        // Mode has one: the phone's Main tab.
         setContactsTab('friends');
         if (isMobile) {
-          selectMobileNav('friends');
+          selectMobileNav(chatList ? 'main' : 'friends');
         }
         return;
       }
       openPanelWindow(tab);
     },
-    [isMobile, openPanelWindow, selectMobileNav],
+    [chatList, isMobile, openPanelWindow, selectMobileNav],
   );
 
   // ---- titles ----
@@ -554,9 +633,15 @@ export function AppShell(): ReactNode {
   );
 
   // The home tabs' unread badges: the shell's own attention counts, by where the conversation
-  // belongs. Feed is activity, not messages — its badge stays empty.
+  // belongs. Feed is activity, not messages — its badge stays empty. Main is the chat list's own
+  // badge and reads the provider (not the per-window counts, which an unmounted pane never
+  // accrues): one mark per conversation with something unread, the same line the list rows and
+  // the me card's mail chip count.
   const navUnread = useMemo(() => {
-    const counts: Record<MobileNavTab, number> = { friends: 0, rooms: 0, feed: 0 };
+    const counts: Record<MobileNavTab, number> = { main: 0, friends: 0, rooms: 0, feed: 0 };
+    counts.main = items.filter(
+      (item) => unread.has(item.conversationId) || item.lastSeq > item.readSeq,
+    ).length;
     for (const w of windows) {
       if (w.kind !== 'chat' || w.conversationId === undefined) {
         continue;
@@ -573,7 +658,7 @@ export function AppShell(): ReactNode {
       }
     }
     return counts;
-  }, [windows, unreadWin, items]);
+  }, [windows, unreadWin, items, unread]);
 
   // The account's own profile, for the taskbar's logout title.
   const self = useProfile(accountId);
@@ -657,7 +742,7 @@ export function AppShell(): ReactNode {
     );
   }
 
-  const visibleNavs = MOBILE_NAV_ORDER.filter((tab) => !hiddenNavs.includes(tab));
+  const visibleNavs = navOrder.filter((tab) => !hiddenNavs.includes(tab));
 
   return (
     <SectionNavProvider navigate={navigate}>
@@ -694,14 +779,20 @@ export function AppShell(): ReactNode {
                 chat windows stay in the strip above.
               </p>
               <div className="mhome-empty-actions">
-                {MOBILE_NAV_ORDER.map((tab) => (
+                {navOrder.map((tab) => (
                   <button
                     key={tab}
                     type="button"
                     className="gloss-pill"
                     onClick={() => reopenMobileNav(tab)}
                   >
-                    {tab === 'friends' ? 'Friends' : tab === 'rooms' ? 'Rooms' : 'Feed'}
+                    {tab === 'main'
+                      ? 'Main'
+                      : tab === 'friends'
+                        ? 'Friends'
+                        : tab === 'rooms'
+                          ? 'Rooms'
+                          : 'Feed'}
                   </button>
                 ))}
               </div>
@@ -757,9 +848,35 @@ export function AppShell(): ReactNode {
           </button>
         ) : null}
 
+        {/* ===== the desk's Chat List Mode pane pair ===== */}
+        {/* The split view takes the desk right of the contacts window (or from the desk's own
+            left edge when the contacts window is minimized) and under a maximized contacts
+            window, which covers the desk as it always did. Its z sits below the contacts
+            window's own so the lists stay on top when the two overlap. */}
+        {!isMobile && chatList ? (
+          <div
+            className="chat-split-holder"
+            style={{
+              position: 'absolute',
+              left: contactsMin ? 12 : contactsSize.w + 24,
+              top: taskbarPos === 'top' ? 44 : 12,
+              right: 12,
+              bottom: taskbarPos === 'top' ? 12 : 46,
+              zIndex: 5,
+            }}
+          >
+            <ChatSplitView conversationId={openId} />
+          </div>
+        ) : null}
+
         {/* ===== the windows ===== */}
         {windows.map((w) => {
           if (isMobile && (w.id !== activeId || w.minimized)) {
+            return null;
+          }
+          // The belt to the mode effects' braces: a chat window that slips past the dissolution
+          // (a race between the switch and a mint) renders nothing rather than beside the pane.
+          if (w.kind === 'chat' && suppressChatWindows) {
             return null;
           }
           const size = sizeForKind(w.kind);
@@ -795,6 +912,7 @@ export function AppShell(): ReactNode {
             navTab={mobileNav}
             hiddenNavs={hiddenNavs}
             navUnread={navUnread}
+            chatListMode={chatList}
             onSelectNav={selectMobileNav}
             onCloseNav={closeMobileNav}
             onReopenNav={reopenMobileNav}
