@@ -13,10 +13,9 @@
 //! The tier works at the ingest boundary, which is the one place every copy
 //! of a conversation event already passes through on every node:
 //! [`IngestRouter::route_conversation_event`](crate::mesh::IngestRouter::route_conversation_event)
-//! for the conversations a room does not own, and
-//! [`route_room_event`](crate::mesh::IngestRouter::route_room_event) for the
+//! for the conversations a room does not own, and `route_room_event` for the
 //! chat a room *does* own — the same inner frame in both envelopes, a
-//! [`MessageEvent`](migo_protocol::MessageEvent), which is why both routes
+//! [`MessageEvent`], which is why both routes
 //! call the one [`seat`] here rather than each growing its own half of a
 //! mechanism. When the inner frame is a message, the row is written to this
 //! node's store through [`replicate_message`](migo_store::traits::MessagingStore::replicate_message),
@@ -42,7 +41,7 @@
 //!
 //! The honest limits, recorded rather than papered over:
 //!
-//! * **Expiry.** [`MessageEvent`](migo_protocol::MessageEvent) carries no
+//! * **Expiry.** [`MessageEvent`] carries no
 //!   `expires_at`, so a replica of a disappearing message never learns when
 //!   it was due to vanish; the replica row is seated without an expiry and
 //!   stays until a tombstone or the operator removes it. That is a wire gap,
