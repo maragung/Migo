@@ -47,9 +47,9 @@ use crate::model::{
     NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
     NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord,
     Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration,
-    PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan,
-    RoomPosition, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpCaps,
-    XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
+    PushTarget, Receipt, Relationship, ReplicaMessage, Report, RevokeReason, Room, RoomMember,
+    RoomNetworkBan, RoomPosition, Scope, Session, Standing, StoredMessage, Visibility,
+    WalletStatus, XpCaps, XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -1434,6 +1434,112 @@ impl MessagingStore for MemoryStore {
         // mean "delete" only removed it from one screen.
         message.envelope.clear();
         Ok(Some(message.clone()))
+    }
+
+    async fn replicate_message(&self, replica: ReplicaMessage) -> Result<bool> {
+        let mut s = self.state.write();
+        // A conversation this node cannot name is not the arrival's to invent:
+        // the watching node pulled the row before it subscribed, and the home
+        // node holds it by definition, so a missing row here means the event
+        // raced the row across the mesh and the redelivery the tier owes will
+        // seat both.
+        if !s.conversations.contains_key(&replica.conversation_id) {
+            return Ok(false);
+        }
+        // A held row is never re-seated. The three shapes an arrival can take
+        // all funnel through this branch first, because every one of them is
+        // "a row this node already holds, plus a fact the event carries about
+        // it" — a plain redelivery carries no fact, an edit carries a newer
+        // envelope, a tombstone carries the deletion.
+        if let Some(seq) = s
+            .message_seq
+            .get(&(replica.conversation_id, replica.message_id))
+        {
+            let seq = *seq;
+            let Some(list) = s.messages.get_mut(&replica.conversation_id) else {
+                return Ok(false);
+            };
+            let Some(message) = list.iter_mut().find(|m| m.seq == seq) else {
+                return Ok(false);
+            };
+            // The tombstone outranks the edit, the same order the origin's own
+            // paths settle on: a deleted message is not editable back into
+            // existence, and the first tombstone is final — a redelivered copy
+            // finds the row already deleted and writes nothing. The envelope
+            // goes with the tombstone exactly as the origin's own delete path
+            // takes it.
+            if replica.deleted_at.is_some() {
+                if message.deleted_at.is_some() {
+                    return Ok(false);
+                }
+                message.deleted_at = replica.deleted_at;
+                if replica
+                    .edited_at
+                    .is_some_and(|at| message.edited_at.is_none_or(|held| held < at))
+                {
+                    message.edited_at = replica.edited_at;
+                }
+                message.envelope.clear();
+                return Ok(true);
+            }
+            // An edit lands only on a live row and only when it is newer than
+            // what the row holds, so a stale redelivery cannot un-edit a
+            // newer edit.
+            if replica.edited_at.is_some_and(|at| {
+                message.deleted_at.is_none() && message.edited_at.is_none_or(|held| held < at)
+            }) {
+                message.envelope = replica.envelope;
+                message.edited_at = replica.edited_at;
+                return Ok(true);
+            }
+            // A plain arrival for a held row — the redelivery the at-least-once
+            // mesh produces — is the no-op the never-overwrite posture makes it.
+            return Ok(false);
+        }
+        // An edit or a tombstone for a row this node does not hold has nothing
+        // to apply to, and seating a half-state (a tombstone for a message this
+        // node never received) would invent a hole the sync path reports as
+        // truncation anyway, which is the honest answer it already gives.
+        if replica.deleted_at.is_some() || replica.edited_at.is_some() {
+            return Ok(false);
+        }
+        // A plain arrival seats the row verbatim. The list is ascending by seq
+        // by contract, and a replica's seq can land below the tail — the
+        // sending node numbers its own sends, and two nodes' numbers are not
+        // one order — so the seat is a sorted insert rather than a push.
+        // Monotonic, never an assignment: a replica's seq can sit below the
+        // held high-water mark — the sending node numbers its own sends — and
+        // the mark must not move backwards for anyone.
+        if let Some(conversation) = s.conversations.get_mut(&replica.conversation_id) {
+            if replica.seq > conversation.last_seq {
+                conversation.last_seq = replica.seq;
+                conversation.last_message_at = Some(replica.created_at);
+            }
+        }
+        let message = StoredMessage {
+            message_id: replica.message_id,
+            conversation_id: replica.conversation_id,
+            seq: replica.seq,
+            sender_id: replica.sender_id,
+            sender_device: replica.sender_device,
+            kind: replica.kind,
+            envelope: replica.envelope,
+            reply_to: replica.reply_to,
+            // The wire event carries no expiry, so the replica never learns
+            // when a disappearing message was due to vanish — a recorded wire
+            // gap, seated here as "no expiry" rather than a guess.
+            expires_at: None,
+            created_at: replica.created_at,
+            edited_at: replica.edited_at,
+            deleted_at: replica.deleted_at,
+            deleted_by: None,
+        };
+        s.message_seq
+            .insert((replica.conversation_id, replica.message_id), replica.seq);
+        let list = s.messages.entry(replica.conversation_id).or_default();
+        let at = list.partition_point(|m| m.seq <= replica.seq);
+        list.insert(at, message);
+        Ok(true)
     }
 
     async fn cursor(&self, conversation_id: Id, account_id: Id) -> Result<Cursor> {

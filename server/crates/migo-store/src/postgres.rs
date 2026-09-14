@@ -101,9 +101,9 @@ use crate::model::{
     NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession,
     NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord, Patch,
     PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration,
-    PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan,
-    RoomPosition, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpCaps,
-    XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
+    PushTarget, Receipt, Relationship, ReplicaMessage, Report, RevokeReason, Room, RoomMember,
+    RoomNetworkBan, RoomPosition, Scope, Session, Standing, StoredMessage, Visibility,
+    WalletStatus, XpCaps, XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -2648,6 +2648,151 @@ impl MessagingStore for PostgresStore {
             .await
             .context("delete_message")?;
         Ok(rows.into_iter().next().map(Into::into))
+    }
+
+    async fn replicate_message(&self, replica: ReplicaMessage) -> Result<bool> {
+        let transaction = self.begin("replicate_message").await?;
+        let conversation_id = uuid_of(replica.conversation_id);
+        let message_id = uuid_of(replica.message_id);
+
+        // The conversation row's lock is the same serialisation point
+        // `append_message` takes: it makes the existence read and the
+        // monotonic `last_seq` advance below one fact, so a replica and a
+        // local send cannot interleave into a high-water mark that moves
+        // backwards.
+        let locked = entity::conversation::Entity::find_by_id(conversation_id)
+            .select_only()
+            .column(entity::conversation::Column::LastSeq)
+            .lock(LockType::Update)
+            .into_tuple::<i64>()
+            .one(&transaction)
+            .await
+            .context("replicate_message: lock conversation")?;
+        let Some(last_seq) = locked else {
+            // A conversation this node cannot name is not the arrival's to
+            // invent. The transaction drops without a write, which is the
+            // rollback an unused begin owes.
+            return Ok(false);
+        };
+
+        let held = entity::message::Entity::find()
+            .filter(entity::message::Column::ConversationId.eq(conversation_id))
+            .filter(entity::message::Column::MessageId.eq(message_id))
+            .one(&transaction)
+            .await
+            .context("replicate_message: dedup")?;
+
+        let Some(row) = held else {
+            // An edit or a tombstone for a row this node does not hold has
+            // nothing to apply to, and seating the half-state would invent a
+            // hole the sync path already reports honestly as truncation.
+            if replica.deleted_at.is_some() || replica.edited_at.is_some() {
+                return Ok(false);
+            }
+            if replica.seq > last_seq {
+                entity::conversation::Entity::update_many()
+                    .filter(entity::conversation::Column::ConversationId.eq(conversation_id))
+                    .set(entity::conversation::ActiveModel {
+                        last_seq: Set(replica.seq),
+                        last_message_at: Set(Some(stamp_of(replica.created_at))),
+                        ..Default::default()
+                    })
+                    .exec(&transaction)
+                    .await
+                    .context("replicate_message: advance sequence")?;
+            }
+            entity::message::Entity::insert(entity::message::ActiveModel {
+                message_id: Set(message_id),
+                conversation_id: Set(conversation_id),
+                seq: Set(replica.seq),
+                sender_id: Set(uuid_of(replica.sender_id)),
+                sender_device: Set(replica.sender_device.map(uuid_of)),
+                kind: Set(wire_i16(replica.kind.to_wire())),
+                envelope: Set(replica.envelope),
+                reply_to: Set(replica.reply_to.map(uuid_of)),
+                // The wire event carries no expiry, so the replica never
+                // learns when a disappearing message was due to vanish — a
+                // recorded wire gap, seated as "no expiry" rather than a guess.
+                expires_at: Set(None),
+                created_at: Set(stamp_of(replica.created_at)),
+                edited_at: Set(replica.edited_at.map(stamp_of)),
+                deleted_at: Set(replica.deleted_at.map(stamp_of)),
+                deleted_by: Set(None),
+            })
+            .exec_without_returning(&transaction)
+            .await
+            .context("replicate_message: insert")?;
+            transaction
+                .commit()
+                .await
+                .context("replicate_message: commit")?;
+            return Ok(true);
+        };
+
+        // A tombstone the event carried. The `deleted_at is null` guard makes
+        // the first application the only one that writes, so a redelivery is
+        // the no-op the at-least-once mesh owes; `deleted_by` stays absent
+        // because the wire does not carry it, and the envelope goes with the
+        // tombstone exactly as the origin's own delete path takes it.
+        if let Some(deleted_at) = replica.deleted_at {
+            let edited_at = match (row.edited_at, replica.edited_at.map(stamp_of)) {
+                (Some(held), Some(event)) => Some(held.max(event)),
+                (held, event) => held.or(event),
+            };
+            let applied = entity::message::Entity::update_many()
+                .filter(entity::message::Column::ConversationId.eq(conversation_id))
+                .filter(entity::message::Column::MessageId.eq(message_id))
+                .filter(entity::message::Column::DeletedAt.is_null())
+                .set(entity::message::ActiveModel {
+                    envelope: Set(Vec::new()),
+                    deleted_at: Set(Some(stamp_of(deleted_at))),
+                    edited_at: Set(edited_at),
+                    ..Default::default()
+                })
+                .exec(&transaction)
+                .await
+                .context("replicate_message: tombstone")?;
+            transaction
+                .commit()
+                .await
+                .context("replicate_message: commit tombstone")?;
+            return Ok(applied.rows_affected > 0);
+        }
+
+        // An edit the event carried. The guards make the write conditional
+        // rather than checked-then-written: it lands only on a live row, and
+        // only when the event's edit is newer than the row's, so a stale
+        // redelivery cannot un-edit a newer edit.
+        if let Some(edited_at) = replica.edited_at {
+            let applied = entity::message::Entity::update_many()
+                .filter(entity::message::Column::ConversationId.eq(conversation_id))
+                .filter(entity::message::Column::MessageId.eq(message_id))
+                .filter(entity::message::Column::DeletedAt.is_null())
+                .filter(
+                    Condition::any()
+                        .add(entity::message::Column::EditedAt.is_null())
+                        .add(entity::message::Column::EditedAt.lt(stamp_of(edited_at))),
+                )
+                .set(entity::message::ActiveModel {
+                    envelope: Set(replica.envelope),
+                    edited_at: Set(Some(stamp_of(edited_at))),
+                    ..Default::default()
+                })
+                .exec(&transaction)
+                .await
+                .context("replicate_message: edit")?;
+            transaction
+                .commit()
+                .await
+                .context("replicate_message: commit edit")?;
+            return Ok(applied.rows_affected > 0);
+        }
+
+        // A plain arrival for a row this node already holds: the redelivery
+        // the at-least-once mesh produces, and the no-op the
+        // never-overwrite posture makes it. A peer cannot overwrite local
+        // truth, whatever envelope it claims to carry.
+        Ok(false)
     }
 
     async fn cursor(&self, conversation_id: Id, account_id: Id) -> Result<Cursor> {

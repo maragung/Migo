@@ -184,6 +184,32 @@ fn message_row(value: u128, conversation_id: Id, sender_id: Id, created_at: i64)
     }
 }
 
+/// A message row as it crosses the mesh, in the store's own terms: everything
+/// the wire event carries and nothing it does not. No expiry, because the
+/// event carries none; no deleter, because the event carries none; a seq,
+/// because the sending node assigned one and a replica never renumbers it.
+fn replica_row(
+    value: u128,
+    conversation_id: Id,
+    sender_id: Id,
+    seq: i64,
+    created_at: i64,
+) -> ReplicaMessage {
+    ReplicaMessage {
+        message_id: id(value),
+        conversation_id,
+        seq,
+        sender_id,
+        sender_device: None,
+        kind: MessageKind::Text,
+        envelope: vec![9, 9, 9, 9],
+        reply_to: None,
+        created_at: ts(created_at),
+        edited_at: None,
+        deleted_at: None,
+    }
+}
+
 fn room_row(
     room_id: Id,
     conversation_id: Id,
@@ -1514,6 +1540,202 @@ pub async fn deleting_a_message_takes_the_payload_with_it(store: &SharedStore) {
     );
     assert!(store
         .message(conversation_id, id(999))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// A replicated message seats its row verbatim, exactly once, and never over
+/// a row the node already holds.
+///
+/// This is the half of the message-row tier the store can promise on its own:
+/// the seq came from the sending node, which is the sequencer of its own
+/// sends; the mesh is at-least-once, so the same arrival comes more than
+/// once; and "a peer cannot overwrite local truth" binds a replica arrival
+/// exactly as tightly as it binds a replicated row.
+pub async fn a_replicated_message_seats_verbatim_and_only_once(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let conversation = seed_group(store, id(50), vec![alice]).await;
+    let conversation_id = conversation.conversation_id;
+
+    // A local send holds seq 1 before anything crosses the mesh.
+    store
+        .append_message(message_row(61, conversation_id, alice, 3_000))
+        .await
+        .unwrap();
+
+    // A plain arrival seats with the sender's seq verbatim and lifts the
+    // high-water mark to it. The sync path's truncation answer is only honest
+    // when last_seq never sits below a row the node holds.
+    assert!(store
+        .replicate_message(replica_row(70, conversation_id, alice, 7, 3_050))
+        .await
+        .unwrap());
+    let seated = store
+        .message(conversation_id, id(70))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        seated.seq, 7,
+        "the sending node is the sequencer of its own sends; a replica never renumbers"
+    );
+    assert_eq!(seated.envelope, vec![9, 9, 9, 9]);
+    assert_eq!(
+        seated.expires_at, None,
+        "the wire event carries no expiry, so the replica is seated without one"
+    );
+    assert_eq!(
+        seated.deleted_by, None,
+        "the wire event carries no deleter, so the replica row records none"
+    );
+    let after = store.conversation(conversation_id).await.unwrap().unwrap();
+    assert_eq!(after.last_seq, 7);
+    assert_eq!(after.last_message_at, Some(ts(3_050)));
+
+    // A second arrival numbered below the mark still seats — the two nodes'
+    // numbers are not one order, section 170's open sequencing gap — but the
+    // mark itself must not move backwards for anyone.
+    assert!(store
+        .replicate_message(replica_row(71, conversation_id, alice, 3, 3_100))
+        .await
+        .unwrap());
+    let after = store.conversation(conversation_id).await.unwrap().unwrap();
+    assert_eq!(
+        after.last_seq, 7,
+        "the high-water mark is a max, never an assignment"
+    );
+    assert_eq!(after.last_message_at, Some(ts(3_050)));
+
+    // The mesh is at-least-once: the same arrival delivered twice is one row,
+    // and the second delivery writes nothing.
+    assert!(!store
+        .replicate_message(replica_row(70, conversation_id, alice, 7, 3_050))
+        .await
+        .unwrap());
+
+    // A plain arrival that claims a message id this node already holds — here
+    // the local send — cannot overwrite it, whatever envelope it carries.
+    let mut impostor = replica_row(61, conversation_id, alice, 9, 3_200);
+    impostor.envelope = vec![7, 7, 7];
+    assert!(!store.replicate_message(impostor).await.unwrap());
+    let local = store
+        .message(conversation_id, id(61))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(local.seq, 1);
+    assert_eq!(
+        local.envelope,
+        vec![0xde, 0xad, 0xbe, 0xef],
+        "a peer cannot overwrite local truth, whatever envelope it claims to carry"
+    );
+
+    // A conversation this node cannot name is not the arrival's to invent.
+    assert!(!store
+        .replicate_message(replica_row(72, id(999), alice, 1, 3_300))
+        .await
+        .unwrap());
+    assert!(store.message(id(999), id(72)).await.unwrap().is_none());
+}
+
+/// A replicated edit or tombstone lands only on a row the node already holds,
+/// only when it is newer, and the first tombstone is final.
+///
+/// The wire's message event is one carrier for all three shapes — a plain
+/// arrival, an edit, a tombstone — so the differences between them have to be
+/// settled by the store, not by the sender choosing a different envelope.
+pub async fn a_replicated_edit_and_tombstone_apply_only_to_held_rows(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let conversation = seed_group(store, id(50), vec![alice]).await;
+    let conversation_id = conversation.conversation_id;
+
+    // The row arrives the way every replica row does: as a plain message
+    // seated by the ingest path.
+    assert!(store
+        .replicate_message(replica_row(61, conversation_id, alice, 4, 3_000))
+        .await
+        .unwrap());
+
+    // An edit the event carries lands on the held row, envelope and all.
+    let mut edit = replica_row(61, conversation_id, alice, 4, 3_000);
+    edit.envelope = vec![1, 1, 1];
+    edit.edited_at = Some(ts(3_100));
+    assert!(store.replicate_message(edit.clone()).await.unwrap());
+    let edited = store
+        .message(conversation_id, id(61))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.envelope, vec![1, 1, 1]);
+    assert_eq!(edited.edited_at, Some(ts(3_100)));
+
+    // A redelivered edit is the no-op the at-least-once mesh owes...
+    assert!(!store.replicate_message(edit).await.unwrap());
+    // ...and a stale one cannot un-edit a newer edit.
+    let mut stale = replica_row(61, conversation_id, alice, 4, 3_000);
+    stale.envelope = vec![2, 2];
+    stale.edited_at = Some(ts(3_050));
+    assert!(!store.replicate_message(stale).await.unwrap());
+    let still = store
+        .message(conversation_id, id(61))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        still.envelope,
+        vec![1, 1, 1],
+        "a stale redelivery cannot un-edit a newer edit"
+    );
+
+    // The tombstone takes the payload with it, exactly as the origin's own
+    // delete path does, and the first tombstone is final.
+    let mut tombstone = replica_row(61, conversation_id, alice, 4, 3_000);
+    tombstone.envelope = Vec::new();
+    tombstone.deleted_at = Some(ts(3_200));
+    assert!(store.replicate_message(tombstone.clone()).await.unwrap());
+    let deleted = store
+        .message(conversation_id, id(61))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted.deleted_at, Some(ts(3_200)));
+    assert_eq!(
+        deleted.deleted_by, None,
+        "the wire event carries no deleter, so the tombstone records none"
+    );
+    assert!(
+        deleted.envelope.is_empty(),
+        "a replica deletion that keeps the ciphertext deleted nothing"
+    );
+
+    // A redelivered tombstone writes nothing...
+    assert!(!store.replicate_message(tombstone).await.unwrap());
+    // ...and an edit cannot resurrect the row.
+    let mut revive = replica_row(61, conversation_id, alice, 4, 3_000);
+    revive.envelope = vec![3, 3, 3];
+    revive.edited_at = Some(ts(3_300));
+    assert!(!store.replicate_message(revive).await.unwrap());
+    let gone = store
+        .message(conversation_id, id(61))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(gone.envelope.is_empty());
+    assert_eq!(gone.deleted_at, Some(ts(3_200)));
+
+    // An edit or a tombstone for a row this node never held writes nothing:
+    // seating the half-state would invent a hole the sync path already
+    // reports honestly as truncation.
+    let mut edit_of_nothing = replica_row(99, conversation_id, alice, 5, 3_400);
+    edit_of_nothing.envelope = vec![4, 4];
+    edit_of_nothing.edited_at = Some(ts(3_410));
+    assert!(!store.replicate_message(edit_of_nothing).await.unwrap());
+    let mut tombstone_of_nothing = replica_row(99, conversation_id, alice, 5, 3_400);
+    tombstone_of_nothing.deleted_at = Some(ts(3_420));
+    assert!(!store.replicate_message(tombstone_of_nothing).await.unwrap());
+    assert!(store
+        .message(conversation_id, id(99))
         .await
         .unwrap()
         .is_none());
@@ -4311,6 +4533,8 @@ macro_rules! for_each_contract_case {
         $case!(history_clamps_an_abusive_limit);
         $case!(a_cursor_only_moves_forward_and_never_past_the_end);
         $case!(deleting_a_message_takes_the_payload_with_it);
+        $case!(a_replicated_message_seats_verbatim_and_only_once);
+        $case!(a_replicated_edit_and_tombstone_apply_only_to_held_rows);
         $case!(leaving_a_conversation_keeps_the_membership_row);
         $case!(a_group_refuses_a_seat_beyond_its_ceiling_at_the_store);
         $case!(the_group_setters_touch_only_their_own_row);

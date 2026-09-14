@@ -34,8 +34,8 @@ use crate::model::{
     NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession,
     NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord, PeerRecord,
     Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget,
-    Relationship, Report, Room, RoomMember, RoomPosition, Scope, Session, Standing, StoredMessage,
-    XpCaps, XpChange,
+    Relationship, ReplicaMessage, Report, Room, RoomMember, RoomPosition, Scope, Session, Standing,
+    StoredMessage, XpCaps, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -437,6 +437,43 @@ pub trait MessagingStore: Send + Sync {
         by: Id,
         at: Timestamp,
     ) -> Result<Option<StoredMessage>>;
+
+    /// Seats a message row that crossed the mesh, reporting whether anything
+    /// was written (section 170's message-row tier).
+    ///
+    /// The ingest half of the tier: a node that watches a conversation — or
+    /// homes it — receives the conversation's events as sealed frames, and the
+    /// frame for a message is the only copy of the row that node will ever be
+    /// offered, because the frozen IDL has no opcode to ask a peer for message
+    /// rows. What lands here is what a later local sync reads, which is the
+    /// whole point: a transcript that only existed as live pushes left every
+    /// reconnecting device on this node with an empty thread.
+    ///
+    /// The contract is one posture, applied to three shapes of arrival:
+    ///
+    /// - a **plain** message (no edit, no tombstone) seats a row the node does
+    ///   not hold, with its `seq` verbatim — the sending node is the sequencer
+    ///   of its own sends — and raises the conversation's `last_seq`
+    ///   monotonically to `max(held, seq)` so a syncing client's `more` flag
+    ///   stays truthful. A row the node already holds is left alone: a peer
+    ///   cannot overwrite local truth, the same posture the row-replication
+    ///   tier holds, and a redelivered copy (at least once, section 153) is
+    ///   the idempotent no-op that posture makes it.
+    /// - an **edit** applies to a row the node holds — envelope and
+    ///   `edited_at` — and only when the event's `edited_at` is newer than the
+    ///   row's, so a stale redelivery cannot un-edit a newer edit. An edit for
+    ///   a row the node does not hold has nothing to apply to and writes
+    ///   nothing.
+    /// - a **tombstone** applies to a row the node holds — payload cleared,
+    ///   `deleted_at` set, `deleted_by` left absent because the wire does not
+    ///   carry it — and only the first tombstone lands, so a redelivery is a
+    ///   no-op. A tombstone for a row the node does not hold writes nothing:
+    ///   the hole it names was already a hole here.
+    ///
+    /// A conversation whose row this node does not hold answers `Ok(false)`
+    /// rather than an error, because the node cannot serve a conversation it
+    /// cannot name and the arrival is not the row's to invent.
+    async fn replicate_message(&self, replica: ReplicaMessage) -> Result<bool>;
 
     /// Reads a member's cursor.
     async fn cursor(&self, conversation_id: Id, account_id: Id) -> Result<Cursor>;
