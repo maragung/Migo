@@ -10,6 +10,13 @@
  * keeping the list ordered by sequence number. Sending optimistically echoes the sent message locally,
  * because the server's fan-out excludes our own sending device.
  *
+ * The thread's own catch-up runs at the two moments it must: a thread opening, and a session reset on
+ * a held thread. A hole that opens *between* those moments — anywhere, including a conversation whose
+ * thread is not open — is no longer this hook's to notice: the SDK's watermark tracking detects the
+ * sequence jump on the next live delivery and schedules its own bounded fill (§152's gapless space,
+ * §158's fetch-exactly-the-hole), replaying the missing pages through this same decrypted stream, so
+ * the transcript (and every other surface listening to it) heals without the thread being opened.
+ *
  * Deletions and read receipts arrive as separate stream events and are folded into the same state: a
  * deletion turns the message it names into a tombstone (the row keeps its sequence, so the thread
  * never develops a hole a sync would misread as lost data), and a peer's Read receipt advances a

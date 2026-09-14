@@ -23,7 +23,10 @@
  *
  * Leaving is a one-way door and says so: `rooms.leave` is called, the conversation is dropped
  * from the shared list ({@link forgetConversation}), and the thread closes — a room the account
- * has left must not linger in the sidebar as a conversation it can no longer open.
+ * has left must not linger in the sidebar as a conversation it can no longer open. The room's
+ * whole client-side life ends in the same breath ({@link MigoClient.teardownRoom}): both topics,
+ * the crypto state, and the bridge, so a re-join starts fresh chains rather than reusing keys
+ * the departed members may still hold.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -33,6 +36,7 @@ import { RoomRole, SanctionAction } from '@migo/sdk';
 import type { AdminStanding, Id, RosterEntry } from '@migo/sdk';
 
 import { formatRelative } from '@/lib/format.js';
+import { debounce } from '@/lib/debounce.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
@@ -45,6 +49,11 @@ import { Spinner } from './spinner.js';
 
 /** How many roster rows one open reads; the server clamps its own ceiling above this. */
 const ROSTER_LIMIT = 100;
+/**
+ * How long a member-event re-read waits for the movement to stop, so a burst of joins and leaves
+ * costs one roster read rather than one per event.
+ */
+const MEMBER_EVENT_DEBOUNCE_MS = 300;
 
 /**
  * The label a roster role renders as, from the plain number the wire carries.
@@ -330,6 +339,29 @@ export function RoomInfoPanel({
     void reload();
   }, [reload]);
 
+  // The roster is live membership, not a snapshot the open froze: a member event for this room
+  // re-reads the list, debounced so a burst of movement costs one read. Without this a departed
+  // member keeps their row — and the panel keeps presenting them as present — for as long as it
+  // stays open, the purely-visual twin of the delivery the server already stopped. The read, not
+  // a patch, is the honest reaction: a joiner's row needs the role and join time only the roster
+  // carries, so even a patching implementation would end in a read for half the events.
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+    const refresh = debounce(() => void reload(), MEMBER_EVENT_DEBOUNCE_MS);
+    const off = client.rooms.onMember((event) => {
+      if (event.roomId !== roomId) {
+        return;
+      }
+      refresh();
+    });
+    return () => {
+      off();
+      refresh.cancel();
+    };
+  }, [client, roomId, reload]);
+
   // The viewer's global-admin standing, read once: it lets a server admin moderate a room whose
   // rank they do not hold. A failure (not an admin, or the endpoint unreachable) leaves the safe
   // default — no elevated controls.
@@ -504,12 +536,14 @@ export function RoomInfoPanel({
         // and the directory row would keep showing a room of one that nobody is in.
         forgetRoom(roomId);
         forgetConversation(conversationId);
-        // The server revoked both topics the moment the leave landed; these drops are for the
-        // client's own tracked set, so a later session reset does not re-ask for a room the
-        // account is no longer in. Fire-and-forget: a refusal here is tidying a set the server
-        // has already cleaned, not a failure the leaver needs to read.
-        void client.unwatchRoom(roomId).catch(() => {});
-        void client.unwatchConversation(conversationId).catch(() => {});
+        // The room's whole client-side life ends in one call: both topics unsubscribed in a
+        // single frame (the server revoked them the moment the leave landed; this is the tracked
+        // set a later session reset would otherwise re-ask, and be refused), the conversation's
+        // crypto state forgotten — a re-join must start fresh chains rather than reuse keys the
+        // departed members may still hold, §163 — and the SDK's room-to-conversation bridge
+        // dropped. Fire-and-forget: a refusal here is tidying a set the server has already
+        // cleaned, not a failure the leaver needs to read.
+        void client.teardownRoom(roomId, conversationId).catch(() => {});
         closeConversation();
       })
       .catch((cause: unknown) => {

@@ -10,6 +10,7 @@ import com.migo.core.domain.DeviceDirectory
 import com.migo.core.domain.EconomyDomain
 import com.migo.core.domain.EventErrorHandler
 import com.migo.core.domain.GamesDomain
+import com.migo.core.domain.GapFiller
 import com.migo.core.domain.GroupCallJoinedEvent
 import com.migo.core.domain.GroupCallLeftEvent
 import com.migo.core.domain.GroupCallRoster
@@ -33,6 +34,7 @@ import com.migo.core.domain.SocialDomain
 import com.migo.core.domain.Subscription
 import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
+import com.migo.core.domain.WatermarkTracker
 import com.migo.core.net.AdminStanding
 import com.migo.core.net.AdminView
 import com.migo.core.net.CaptchaProof
@@ -332,7 +334,7 @@ class MigoClient private constructor(
     private val options: MigoClientOptions,
     private val ownedScope: CoroutineScope?,
     private val scope: CoroutineScope,
-) : DeviceDirectory, PeerBundleSource {
+) : DeviceDirectory, PeerBundleSource, GapFiller {
 
     private val rest = Rest(options.baseUrl, options.restClient)
     private val socketClient: OkHttpClient = options.socketClient ?: Gateway.httpClient()
@@ -351,6 +353,16 @@ class MigoClient private constructor(
 
     /** The group layer. Built once for the same reason: a reconnect must not retire a sender key. */
     private val groupCrypto = GroupCrypto(keyStore, options.groupPersistence)
+
+    /**
+     * The contiguous-sequence ledger, built once for the same reason the crypto layers are: a
+     * reconnect must not forget what is held. Every per-connection [MessagingDomain] advances this
+     * same instance, so the watermark a reset resync reads — section 158's local `last_seq` —
+     * survives the reconnect that prompted the read. This client is the [GapFiller], because
+     * paging the missing events in means asking this client's sync domain and replaying them
+     * through this client's messaging domain.
+     */
+    private val watermarks = WatermarkTracker(scope, this, options.onEventError)
 
     // Application-facing streams. Owned here rather than on the domains so a handler registered once
     // keeps receiving across the reconnects that rebuild them.
@@ -1132,6 +1144,73 @@ class MigoClient private constructor(
     }
 
     /**
+     * Rebuilds a room's bridge and watch after a restart, from the room id alone.
+     *
+     * The room-to-conversation map is in-memory only, and a restarted app knows its rooms by room
+     * id — the join reply is the one wire moment that names both halves, and it is gone. Without
+     * this the bridge is never rebuilt ([applyRoomMemberEvent] folds a room's joins into nothing),
+     * the membership cache goes stale, and the next send seals for the group as it stood before
+     * any movement the session missed — a joiner who can never decrypt (section 163 makes the
+     * sender-key audience the sender's own choice, and the pending buffer only masks the silence).
+     * This is the restore path: it learns the room's conversation id the one way the wire offers
+     * — a `rooms.join`, which section 156 makes free of fanout for a member already seated — and
+     * then runs [startRoomConversation]'s prime: the roster is paged into the membership cache and
+     * both topics are subscribed.
+     *
+     * Cheap and idempotent by design, because a restore loop calls it for every persisted room: a
+     * room whose bridge already stands is answered from the map with no wire work at all, so the
+     * first pass pays one join and one roster walk per room and every later pass pays nothing. The
+     * join's honest edges are the join's own: a room the account departed while this device was
+     * away is re-entered (the caller believed it was still in), and one it was banned from refuses.
+     *
+     * Returns the conversation id — the handle a restore needs to open the thread.
+     */
+    suspend fun rehydrateRoom(roomId: Id, rosterPageSize: Int = 500): Id {
+        cacheLock.withLock { roomConversations[roomId] }?.let { return it }
+        val session = requireConnected()
+        val handle = session.rooms.join(roomId)
+        startRoomConversation(handle.conversationId, roomId, rosterPageSize)
+        return handle.conversationId
+    }
+
+    /**
+     * Tears a room down in one call: both of its topics are unsubscribed in a single frame, the
+     * conversation's crypto state is forgotten, and the bridge and the membership cache are
+     * dropped.
+     *
+     * A leaver otherwise orchestrates four calls by hand — `unwatchRoom`, `unwatchConversation`,
+     * `messaging.forget`, `invalidateConversation` — and must carry the room's conversation id
+     * correctly across all of them. Missing any one leaves residue with its own symptom: a tracked
+     * topic the next session reset re-asks (and the server refuses, section 156's leaver
+     * revocation), a sender key kept live for a room that can no longer be read, a stale membership
+     * an already-departed member could still be sealed for, or a bridge entry that misroutes the
+     * next member event. This is the one call that does all four, in the order that stops the
+     * inflow first.
+     *
+     * Call it after `rooms.leave` resolves — the same moment `unwatchRoom` documents — or when a
+     * restored session learns (from a refused [rehydrateRoom], or a self-departure event) that a
+     * persisted room is no longer theirs. The conversation id is taken from the bridge; pass
+     * `conversationId` when the bridge was never built, the reload-then-leave shape where the
+     * caller knows both ids from its own persistence. With neither, only the room topic is
+     * dropped: nothing is mapped, so there is nothing else to clean. Idempotent throughout.
+     */
+    suspend fun teardownRoom(roomId: Id, conversationId: Id? = null) {
+        val bridged = cacheLock.withLock { roomConversations[roomId] } ?: conversationId
+        val topics = ArrayList<Topic>(2)
+        topics.add(Topic(TopicKind.Room, roomId))
+        if (bridged != null) {
+            topics.add(Topic(TopicKind.Conversation, bridged))
+        }
+        // One frame for both topics: the wire carries a topic list on purpose, and a leaver's
+        // goodbye should not cost two round trips.
+        unsubscribe(topics)
+        if (bridged == null) return
+        requireConnected().messaging.forget(bridged)
+        invalidateConversation(bridged)
+        cacheLock.withLock { roomConversations.remove(roomId) }
+    }
+
+    /**
      * Lists conversations, priming each one's membership and subscribing to all of them.
      *
      * One SUBSCRIBE for the whole page rather than one per conversation: the topics are known together,
@@ -1167,6 +1246,50 @@ class MigoClient private constructor(
             session.messaging.ingest(event)
         }
         return response
+    }
+
+    /**
+     * The highest sequence number this client holds contiguously for a conversation, or null when
+     * nothing has been ingested for it yet.
+     *
+     * Section 158's reconnect order asks the client to compare the server's `last_seq` against its
+     * own and sync *only* the gap; this is the local half of that comparison, and the cursor an
+     * open-chat catch-up should start from — it counts the key exchanges and tombstones the
+     * transcript cache never sees, so it is never behind the last rendered message. `null` means
+     * the caller picks its own floor (a fresh thread replays from the beginning; one whose history
+     * is gone replays from whatever the server can still serve).
+     */
+    fun watermark(conversationId: Id): Long? = watermarks.watermark(conversationId)
+
+    /**
+     * Fills a mid-session gap: pages the missing range in and replays it through the live path.
+     *
+     * This is the [GapFiller] seam the watermark tracker calls when a live sequence lands above
+     * watermark + 1 — a hole, in a space section 152 says is gapless — and nothing else is already
+     * filling that conversation. Each page is asked from the watermark as it stands (ingest
+     * advances it) and bounded to [GAP_FILL_PAGE_LIMIT] events; the whole fill is bounded to
+     * [MAX_GAP_FILL_PAGES] pages, so one trigger can never become an unbounded walk, and what
+     * remains of a larger hole continues on the next above-gap event. The web client parks each
+     * page on its visibility gate between pages; this core has no visibility concept of its own —
+     * the app module decides what runs while backgrounded, and the fill here is short by budget. A
+     * page that does not move the watermark ends the fill: the hole is the server's to answer
+     * (history gone, or a truncation the caller must render), not ours to re-ask in a loop.
+     */
+    override suspend fun fillGap(conversationId: Id, toSeq: Long) {
+        val session = requireConnected()
+        for (page in 0 until MAX_GAP_FILL_PAGES) {
+            val haveSeq = watermarks.watermark(conversationId) ?: return
+            if (haveSeq >= toSeq) return
+            val response = session.sync.fetch(conversationId, haveSeq, GAP_FILL_PAGE_LIMIT, toSeq = toSeq)
+            for (event in response.messages) {
+                session.messaging.ingest(event)
+            }
+            if (!response.more || watermarks.watermark(conversationId) == haveSeq) {
+                // The server has no more to give for this hole, or gave nothing the watermark
+                // moved on — either way the fill has nothing further to ask.
+                return
+            }
+        }
     }
 
     // --- membership cache priming ---
@@ -1251,7 +1374,7 @@ class MigoClient private constructor(
         val audience = cacheLock.withLock {
             val listed = cached ?: throw SdkError(
                 "membership for conversation $conversationId is unknown; call startConversation, " +
-                    "loadConversations, or rememberMembers first",
+                    "rehydrateRoom, loadConversations, or rememberMembers first",
             )
             LinkedHashSet(listed.ids).apply { add(session.accountId) }
         }
@@ -1484,6 +1607,7 @@ class MigoClient private constructor(
                 sessionCrypto,
                 groupCrypto,
                 this,
+                watermarks,
                 options.onEventError,
             ),
             conversations = ConversationsDomain(rpc, options.onEventError),
@@ -1749,6 +1873,12 @@ class MigoClient private constructor(
             }
             return MigoClient(options, owned, supplied ?: owned!!)
         }
+
+        /** One page of a gap fill: the same bound the TypeScript SDK pages its fills by. */
+        private const val GAP_FILL_PAGE_LIMIT = 200L
+
+        /** One fill's whole page budget, so a trigger can never become an unbounded walk. */
+        private const val MAX_GAP_FILL_PAGES = 5
     }
 }
 

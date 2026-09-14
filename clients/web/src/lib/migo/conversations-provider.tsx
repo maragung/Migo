@@ -9,6 +9,12 @@
  * any extra step. Live inbound messages reorder the list and set an unread mark; opening a conversation
  * clears it. Nothing polls — reordering is driven by the SDK's message stream.
  *
+ * That stream is also how a background conversation heals. A mid-session hole in any listed
+ * conversation is detected by the SDK's own watermark tracking, which schedules a bounded catch-up
+ * fetching exactly the missing range (§158) and replays it through the same decryption path live
+ * delivery uses — so the pages this provider's handlers receive include the repair, and a
+ * conversation the user never opened still reorders, previews, and marks unread on its own.
+ *
  * The group lifecycle lands here too: a group's member events patch the summary's member list (and
  * rotate the sender-key chain, the crypto cost of membership churn), and its state deltas carry a
  * rename onto the row's title — see {@link applyMemberEvent} and {@link applyStateEvent}, the pure

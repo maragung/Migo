@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom';
 import { ConversationKind, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
+import { debounce } from '@/lib/debounce.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
@@ -21,6 +22,12 @@ const KIND_FRIEND: number = RelationshipKind.Friend;
 
 /** How long the search input idles before a query goes to the server, in milliseconds. */
 export const SEARCH_DEBOUNCE_MS = 300;
+
+/**
+ * How long a friend-event re-read of the quick-pick waits for the events to stop arriving — the
+ * same quiet window the search uses, for the same reason: a burst of echoes is one question.
+ */
+const FRIEND_EVENT_DEBOUNCE_MS = 300;
 
 /** How many people one search asks the server for. */
 const SEARCH_LIMIT = 10;
@@ -111,7 +118,9 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
 
   // The friends quick-pick loads once; it is the graph the panel already knows. A friend
   // event re-reads it, because the dialog can be open while the graph moves elsewhere —
-  // a request accepted from the phone is a new row the quick-pick owes this screen.
+  // a request accepted from the phone is a new row the quick-pick owes this screen. The
+  // re-read is debounced: one acceptance can arrive as several events (each echoed per
+  // device), and a read per event would ask the same question the last event answers.
   useEffect(() => {
     if (!client) {
       return;
@@ -130,10 +139,12 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
         });
     };
     reload();
-    const off = client.social.onFriendEvent(reload);
+    const reRead = debounce(reload, FRIEND_EVENT_DEBOUNCE_MS);
+    const off = client.social.onFriendEvent(reRead);
     return () => {
       cancelled = true;
       off();
+      reRead.cancel();
     };
   }, [client]);
 

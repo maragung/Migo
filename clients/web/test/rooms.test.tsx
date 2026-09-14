@@ -35,6 +35,7 @@ import {
   capacityLabel,
   departedRoomOf,
   roomInfoOf,
+  rotationDue,
 } from '../src/lib/migo/rooms-provider.js';
 import { roomRowTitle } from '../src/components/conversation-list.js';
 import { clearRoomInfo, loadRoomInfo, saveRoomInfo } from '../src/lib/storage/room-info-store.js';
@@ -235,5 +236,52 @@ test('no account or no held room means nothing to drop', () => {
   assert.equal(
     departedRoomOf(memberEvent(MemberChange.Kicked, ME, 'room_unknown' as Id), ME, byRoomId),
     null,
+  );
+});
+
+// rotationDue: the crypto half of a member event, the desktop client's rule now pinned here too.
+// A departure leaves the departing member holding the room's sender key, and §163's rule is that
+// membership churn re-seals — the next send rotates and distributes to whoever belongs now. The
+// set is deliberately the desktop's (net/mod.rs's on_room_member): a disconnect's grace period may
+// yet return the member, but the chain must not bet on it. Everything else — a join, a return, a
+// changeless legacy frame — keeps the chain: a joiner's key starts at the current position so
+// history stays sealed to them, and a changeless frame must not guess off the joined flag, the
+// same restraint departedRoomOf applies above.
+
+test('a leave, a disconnect, a kick, and a ban each rotate the room conversation’s sender key', () => {
+  for (const change of [
+    MemberChange.Left,
+    MemberChange.Disconnected,
+    MemberChange.Kicked,
+    MemberChange.Banned,
+  ]) {
+    assert.equal(
+      rotationDue(memberEvent(change, OTHER)),
+      true,
+      `${MemberChange[change]} must cost the chain its key`,
+    );
+  }
+});
+
+test('a join, a return, and a changeless legacy frame keep the chain', () => {
+  for (const change of [MemberChange.Joined, MemberChange.Reconnected]) {
+    assert.equal(
+      rotationDue(memberEvent(change, OTHER)),
+      false,
+      `${MemberChange[change]} is not a departure, so the chain must not rotate`,
+    );
+  }
+  // The legacy flag predates the change enum; a modern server's departures always carry the
+  // change, so a changeless frame must not guess a departure off the flag alone.
+  const legacy: RoomMemberEvent = {
+    roomId: ROOM.roomId,
+    userId: OTHER,
+    joined: false,
+    memberCount: 11,
+  };
+  assert.equal(
+    rotationDue(legacy),
+    false,
+    'a changeless frame must not rotate off the joined flag alone',
   );
 });
