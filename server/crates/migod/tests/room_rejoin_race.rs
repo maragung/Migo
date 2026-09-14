@@ -55,7 +55,6 @@ use migo_protocol::{
     RoomJoinRequest, RoomJoinResponse, RoomLeaveRequest, RoomMemberEvent, SubscribeRequest,
     SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
-use migo_store::traits::FederationStore;
 use migo_store::SharedStore;
 use migod::App;
 
