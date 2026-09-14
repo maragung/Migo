@@ -2266,12 +2266,13 @@ fn member_profile_window(
                             }
                         });
                     }
-                    Some(_) => {
-                        if ui.button("Add friend").clicked() {
-                            friend_request = true;
-                        }
+                    // The button rides the arm's guard so the arm stays one clause: egui paints
+                    // it once per frame either way, and an unclicked press simply falls through
+                    // to the quiet arm below.
+                    Some(_) if ui.button("Add friend").clicked() => {
+                        friend_request = true;
                     }
-                    None => {}
+                    _ => {}
                 }
             }
         });
