@@ -1606,6 +1606,10 @@ impl App {
     /// The title is resolved here rather than cached, because the names a title is made of can
     /// arrive after the window is minted — a window titled by an id's tail that never improves
     /// would read as a bug the server cannot fix.
+    // Eight parameters because a window is handed itself, its conversation, and the shell's
+    // four after-frame choice pointers: any window can be where a theme, a zoom, a screen, or
+    // a navigation mode is chosen, and the choice travels back the same way from every one.
+    #[allow(clippy::too_many_arguments)]
     fn chat_window(
         &mut self,
         ctx: &egui::Context,
@@ -1757,6 +1761,7 @@ impl App {
 
     /// One side window: a small floating pane opened from the account menu — profile, wallet,
     /// alerts, search, games, settings, and the owner's admins page.
+    #[allow(clippy::too_many_arguments)]
     fn side_window(
         &mut self,
         ctx: &egui::Context,
