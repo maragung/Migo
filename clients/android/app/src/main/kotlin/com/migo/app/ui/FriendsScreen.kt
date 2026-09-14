@@ -97,20 +97,37 @@ fun FriendsScreen(
     val outgoing = entries.filter { it.kind == kindOutgoing }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
-        ScreenTitle(title = "Friends") {
-            // The new-group entry sits beside Refresh because a group starts from people, and the
-            // Friends view is where the people are.
+        // The header carries the search inline, to the left of the new-group control: a search
+        // that lives below the row of actions it filters for is a search the eye has to leave the
+        // names to find, and the Friends list is the one surface whose whole point is finding a
+        // person. The field keeps the debounce it always had — typing is not yet asking, but a
+        // pause is — so the filtering behaviour is the field's old one, only relocated.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Friends",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            OutlinedTextField(
+                value = field,
+                onValueChange = { field = it },
+                placeholder = { Text("Search by username") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                modifier = Modifier.weight(1f),
+            )
+            // The new-group entry sits beside the search because a group starts from people, and
+            // the Friends view is where the people are.
             TextButton(onClick = onOpenGroup, enabled = !state.friends.loading) { Text("New group") }
             TextButton(onClick = onRefresh, enabled = !state.friends.loading) { Text("Refresh") }
         }
-        OutlinedTextField(
-            value = field,
-            onValueChange = { field = it },
-            placeholder = { Text("Search by username") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-        )
+        Spacer(modifier = Modifier.height(4.dp))
 
         if (state.friends.loading && entries.isEmpty()) {
             LoadingRow()

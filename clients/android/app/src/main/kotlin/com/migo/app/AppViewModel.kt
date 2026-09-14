@@ -46,6 +46,7 @@ import com.migo.app.model.GAME_STATUS_OPEN
 import com.migo.app.model.GroupLiveInfo
 import com.migo.app.model.GroupMember
 import com.migo.app.model.MediaObject
+import com.migo.app.model.MemberProfileView
 import com.migo.app.model.PreparedChainTx
 import com.migo.app.model.RoomLiveInfo
 import com.migo.app.model.RoomNotice
@@ -391,6 +392,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _avatarBytes = MutableStateFlow<Map<Id, ByteArray>>(emptyMap())
 
     val avatarBytes: StateFlow<Map<Id, ByteArray>> = _avatarBytes.asStateFlow()
+
+    /**
+     * The member profile sheet's state, or null while no member's profile is open. A stable flow
+     * beside [avatarBytes] for the same reason: the read is the model's while the surface belongs
+     * to whichever member sheet named the person, and the sheet must survive the roster
+     * recompositions around it without refetching.
+     */
+    private val _memberProfile = MutableStateFlow<MemberProfileView?>(null)
+
+    val memberProfile: StateFlow<MemberProfileView?> = _memberProfile.asStateFlow()
 
     /** Which account ids have an avatar download in flight, so concurrent surfaces share one. */
     private val avatarsInFlight = HashSet<Id>()
@@ -4914,6 +4925,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         typingTimeouts.expire(Long.MAX_VALUE)
         _callState.value = CallUiState()
         _groupCallState.value = GroupCallUiState()
+        _memberProfile.value = null
         subscriptions.forEach { it.cancel() }
         subscriptions.clear()
     }
@@ -5766,6 +5778,51 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The display name this shell has learned for an account, or null when it never heard one. */
     fun nameOf(userId: Id): String? = names[userId]
+
+    /**
+     * Opens the member profile sheet for one account, as a member row's View profile asks.
+     *
+     * The read is fresh against the profile service — the roster's name is a cache, and a profile
+     * a person is about to read is worth its own round trip — and the avatar follows through
+     * [rememberAvatar], so the sheet's picture is the same one every other surface of this person
+     * holds. A null answer is the wire's withheld rule (an id the server chooses not to serve is
+     * simply absent, never an error), which the sheet states as its own sentence once
+     * [MemberProfileView.settled] says the read is no longer running. The update is guarded on
+     * the id so a slow read for one member cannot land on the sheet of another the person opened
+     * in the meantime.
+     */
+    fun openMemberProfile(userId: Id, name: String) {
+        val live = session ?: return
+        _memberProfile.value = MemberProfileView(userId = userId, name = name)
+        viewModelScope.launch {
+            try {
+                val profile = live.client.profile.fetchOne(userId)
+                if (profile != null) rememberAvatar(profile)
+                _memberProfile.update { current ->
+                    if (current?.userId == userId) {
+                        current.copy(profile = profile, settled = true)
+                    } else {
+                        current
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _memberProfile.update { current ->
+                    if (current?.userId == userId) {
+                        current.copy(settled = true, failure = readable(failure))
+                    } else {
+                        current
+                    }
+                }
+            }
+        }
+    }
+
+    /** Closes the member profile sheet; the state goes with it, so a reopen reads fresh. */
+    fun closeMemberProfile() {
+        _memberProfile.value = null
+    }
 
     /**
      * The best name this client can give a conversation.

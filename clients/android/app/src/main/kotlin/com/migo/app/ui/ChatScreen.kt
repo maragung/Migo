@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -56,6 +57,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -81,6 +84,7 @@ import com.migo.app.model.GAME_STATUS_OPEN
 import com.migo.app.model.GROUP_MUTE_TERMS
 import com.migo.app.model.GroupMember
 import com.migo.app.model.MediaObject
+import com.migo.app.model.MemberProfileView
 import com.migo.app.model.QUICK_REACTIONS
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
@@ -98,6 +102,7 @@ import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
 import com.migo.core.protocol.GameViewWire
+import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.wire.Id
@@ -268,6 +273,26 @@ fun ChatScreen(
      * from. Absent keys render as the monogram, which is the avatar's loading state.
      */
     avatarBytes: Map<Id, ByteArray> = emptyMap(),
+    /**
+     * Opens the member profile sheet for the given account, handed the id and the name the roster
+     * row already knew, from a member menu's View profile.
+     */
+    onViewMember: (Id, String) -> Unit = { _, _ -> },
+    /** The member profile sheet's state; held by the shell because the profile read is the model's. */
+    memberProfile: MemberProfileView? = null,
+    /** Closes the member profile sheet. */
+    onCloseMemberProfile: () -> Unit = {},
+    /**
+     * The gift shop's catalogue, the same list the Wallet panel draws; a member menu's Gift opens
+     * the picker over it, pre-aimed at the member the menu was opened for.
+     */
+    giftCatalogue: List<GiftListing> = emptyList(),
+    /**
+     * Sends a gift from the member menu's picker, handed the sku, the member it is aimed at, and
+     * the intent's idempotency key minted with the pick — a retry of the same pick is the first
+     * send again server-side, not a second charge.
+     */
+    onSendGift: (sku: String, recipient: Id, clientKey: String) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -324,6 +349,11 @@ fun ChatScreen(
     // The verification sheet's own state, for the same reason: the header's Safety control opens
     // it, and the warning banner reopens it, so the flag lives where both can reach it.
     val safetyOpen = remember { mutableStateOf(false) }
+
+    // The member the gift picker is aimed at, opened from a member menu's Gift. Local because the
+    // picker's life is the pick's life: it closes on the send, and the member it names is the one
+    // the menu was opened for, pre-aimed the way the web client's own picker is.
+    var giftTarget by remember { mutableStateOf<GiftTarget?>(null) }
 
     // The catalogue loads on first open and stays for the thread's life — a person who never
     // touches the button never pays for its data, and a failure is retried by closing and
@@ -504,6 +534,8 @@ fun ChatScreen(
                 selfId = selfId,
                 avatarBytes = avatarBytes,
                 onClose = onCloseMembers,
+                onViewProfile = onViewMember,
+                onGift = { userId, name -> giftTarget = GiftTarget(userId, name) },
                 onVoteKick = onVoteKick,
                 onSanction = onSanction,
                 onMuteForMe = onMuteForMe,
@@ -520,6 +552,8 @@ fun ChatScreen(
                 invitees = groupInvitees,
                 avatarBytes = avatarBytes,
                 onClose = onCloseGroupMembers,
+                onViewProfile = onViewMember,
+                onGift = { userId, name -> giftTarget = GiftTarget(userId, name) },
                 onInvite = onInvite,
                 onVoteKick = onGroupVoteKick,
                 onMute = onGroupMute,
@@ -561,6 +595,36 @@ fun ChatScreen(
                 onAcknowledge = onAcknowledgeSafety,
             )
         }
+
+        // The gift picker a member menu's Gift opens, aimed at the member the menu was for. The
+        // price rides on every row before the send — the same rule the Wallet panel's shop keeps,
+        // because a gift is a spend and a spend is agreed on its price, not surprised by it.
+        giftTarget?.let { target ->
+            GiftSheet(
+                target = target,
+                catalogue = giftCatalogue,
+                onDismiss = { giftTarget = null },
+                onSend = { sku ->
+                    giftTarget = null
+                    onSendGift(sku, target.userId, java.util.UUID.randomUUID().toString())
+                },
+            )
+        }
+
+        // The member profile sheet a member menu's View profile opens. The mute-for-me control
+        // rides here rather than in the menu, mirroring the web client's own profile card: it is
+        // a personal choice about the person, and the person's card is where the web client
+        // puts it. Offered only for a room chat, the one conversation the mute is a fact of.
+        memberProfile?.let { view ->
+            MemberProfileSheet(
+                view = view,
+                avatarBytes = avatarBytes[view.userId],
+                canMuteForMe = chat.roomId != null,
+                muted = view.userId in chat.muted,
+                onClose = onCloseMemberProfile,
+                onMuteForMe = { on -> onMuteForMe(view.userId, on) },
+            )
+        }
     }
 }
 
@@ -588,26 +652,15 @@ private fun ChatHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // No back control: the window strip above is the chat's own way back, the mobile
-            // reference's windows having no title bars.
+            // reference's windows having no title bars. No title either, and no second line: the
+            // strip's tab already names the thread, and the counts and the encryption label the
+            // header once carried were facts a person could not act on from where they read them.
+            // What stays is the avatar — a direct chat's picture of the peer, a room's own mark —
+            // and the controls, every one the composer's send button's own measure.
             Avatar(name = chat.title, bytes = chat.peerId?.let { avatarBytes[it] }, size = 36.dp)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = chat.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                )
-                Text(
-                    text = roomSubtitle(chat),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Spacer(modifier = Modifier.weight(1f))
             if (supportsGames) {
-                TextButton(onClick = onOpenGames) {
-                    Text("Games")
-                }
+                HeaderGlyphButton(glyph = "🎮", description = "Games", onClick = onOpenGames)
             }
             // A direct chat's one header extra: the door to its safety numbers. It is the room
             // chat's Members control in reverse — the room's security surface is who is in it, the
@@ -615,9 +668,7 @@ private fun ChatHeader(
             // than the room's absence, because the safety read itself needs that id: a chat with
             // no peer to read offers no door.
             if (chat.peerId != null && onOpenSafety != null) {
-                TextButton(onClick = onOpenSafety) {
-                    Text("Safety")
-                }
+                HeaderGlyphButton(glyph = "🛡", description = "Safety numbers", onClick = onOpenSafety)
             }
             // The direct chat's other extras: the two calls, the conversation's other halves.
             // Same peer-id gate as Safety -- the call buttons dial the peer, and a chat with no
@@ -627,55 +678,65 @@ private fun ChatHeader(
             // font, the app's own rule (and the web client's, whose buttons these are a port of).
             if (chat.peerId != null && onStartCall != null) {
                 val peer = chat.peerId
-                TextButton(onClick = { onStartCall(peer, false) }) {
-                    Text("📞")
-                }
-                TextButton(onClick = { onStartCall(peer, true) }) {
-                    Text("🎥")
-                }
+                HeaderGlyphButton(
+                    glyph = "📞",
+                    description = "Voice call",
+                    onClick = { onStartCall(peer, false) },
+                )
+                HeaderGlyphButton(
+                    glyph = "🎥",
+                    description = "Video call",
+                    onClick = { onStartCall(peer, true) },
+                )
             }
             // The thread's own search, before the Log control as on the web. Offered in every
             // conversation kind — the filter runs on what the thread already holds, so there is no
-            // conversation feature for it to depend on. The label is the toggle's own sentence:
-            // tapping it again closes the field, and the toggle clears the query either way.
-            TextButton(onClick = onToggleSearch) {
-                Text(if (chat.searchOpen) "Close search" else "Search")
-            }
+            // conversation feature for it to depend on. The description is the toggle's own
+            // sentence: tapping it again closes the field, and the toggle clears the query either
+            // way.
+            HeaderGlyphButton(
+                glyph = "🔍",
+                description = if (chat.searchOpen) "Close search" else "Search",
+                onClick = onToggleSearch,
+            )
             // The conversation's own record: the transcript this device holds, handed to whatever
             // the system shares text with. Offered in every conversation kind — a log is a log
             // whether the room is encrypted or not — and stated as plaintext by the share sheet
             // it opens into.
             if (onExportLog != null) {
-                TextButton(onClick = onExportLog) {
-                    Text("Log")
-                }
+                HeaderGlyphButton(glyph = "⬇", description = "Log", onClick = onExportLog)
             }
             if (chat.roomId != null && onOpenMembers != null) {
-                TextButton(onClick = onOpenMembers) {
-                    Text("Members")
-                }
-            }
-            if (chat.roomId != null && onLeave != null) {
-                TextButton(onClick = onLeave) {
-                    Text("Leave", color = MaterialTheme.colorScheme.error)
-                }
+                HeaderGlyphButton(glyph = "👥", description = "Members", onClick = onOpenMembers)
             }
             // The group's call door: one button, joining the roster, exactly the web client's own
             // single control. The glyph is the direct chat's own phone -- the web button's glyph --
             // and the kind gate keeps the two controls from ever sharing a header, because the
             // direct chat dials a person and the group joins a conversation.
             if (chat.kind == ConversationKind.Group && onJoinGroupCall != null) {
-                TextButton(onClick = onJoinGroupCall) {
-                    Text("📞")
-                }
+                HeaderGlyphButton(
+                    glyph = "📞",
+                    description = "Join group call",
+                    onClick = onJoinGroupCall,
+                )
             }
-            // The group's member-sheet door: the same word the room's control uses, because the
+            // The group's member-sheet door: the same glyph the room's control uses, because the
             // question it answers -- who is in here -- is the same question. Gated on the kind
             // rather than the roster's presence, so a group the sheet has not read yet still
             // offers the door that reads it.
             if (chat.kind == ConversationKind.Group && onOpenGroupMembers != null) {
-                TextButton(onClick = onOpenGroupMembers) {
-                    Text("Members")
+                HeaderGlyphButton(
+                    glyph = "👥",
+                    description = "Members",
+                    onClick = onOpenGroupMembers,
+                )
+            }
+            // Leave stays a word rather than a glyph, and the danger red: it is the one control in
+            // the row that ends the conversation rather than using it, and a word that says so is
+            // cheaper to read than a glyph that would have to be guessed.
+            if (chat.roomId != null && onLeave != null) {
+                TextButton(onClick = onLeave) {
+                    Text("Leave", color = MaterialTheme.colorScheme.error)
                 }
             }
             if (chat.kind == ConversationKind.Group && onLeaveGroup != null) {
@@ -688,30 +749,28 @@ private fun ChatHeader(
 }
 
 /**
- * The header's second line.
+ * One header control, drawn to the composer's send button's own measure.
  *
- * A room speaks its live shape -- how many are online now, of a capacity when it declares one, and
- * how many are members in all -- so "2/33 online · 33 members" reads at a glance the way the product
- * asks. The counts come from the room's own event streams, which do not always arrive at once, so a
- * room whose totals are not yet known keeps the plain word rather than showing a confident zero. A
- * direct chat says what it is: encrypted end to end, which a room deliberately is not (§178).
+ * The send button is a fixed 52dp square, so every control beside it is too: a row of controls
+ * that each took the width of their own label would be a row that breathes as the labels
+ * translate, and a header that changes shape between conversations is a header a person has to
+ * re-find. The glyphs are emoji characters — the app's own icon convention, the same rule the
+ * composer's attach and mic buttons keep — and the description carries the word the label once
+ * did, because a control that only a picture names is a control a screen reader cannot name.
  */
-private fun roomSubtitle(chat: ChatState): String {
-    if (chat.kind == ConversationKind.Group) {
-        // A group speaks its size the way a room speaks its occupancy: how many belong. The count
-        // is unknown until a summary or a member event has named it, and the honest word for that
-        // is the group itself, not a confident zero.
-        val count = chat.group?.memberCount ?: 0L
-        return if (count > 0L) "$count members · encrypted end to end" else "Group · encrypted end to end"
-    }
-    if (chat.roomId == null) return "Encrypted end to end"
-    val room = chat.room ?: return "Room"
-    if (room.memberCount <= 0L) return "Room"
-    val members = "${room.memberCount} members"
-    return if (room.maxMembers != null && room.maxMembers > 0L) {
-        "${room.onlineCount}/${room.maxMembers} online · $members"
-    } else {
-        "${room.onlineCount} online · $members"
+@Composable
+private fun HeaderGlyphButton(
+    glyph: String,
+    description: String,
+    onClick: () -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(52.dp)
+            .semantics { contentDescription = description },
+    ) {
+        Text(text = glyph, fontSize = 18.sp)
     }
 }
 
@@ -1980,8 +2039,8 @@ data class GroupInviteCandidate(
 )
 
 /**
- * The group's member sheet: the rename, the invite quick-pick, and the roster with the actions
- * each viewer may take.
+ * The group's member sheet: the rename, the invite quick-pick, and the roster whose rows open the
+ * member menu.
  *
  * # Who may do what
  *
@@ -1991,9 +2050,10 @@ data class GroupInviteCandidate(
  * - **Invite** is every member's right. The quick-pick lists the friends this shell knows who are
  *   not already seated; a person not in the graph is reached from the Friends screen's search, the
  *   same path a direct chat starts from.
- * - **Rename**, **mute**, and a straight **kick** are the founders' controls. A founder cannot
- *   touch the other founder -- a group built by two cannot be halved by one of them -- and cannot
- *   mute or kick themselves either.
+ * - **Rename** is the founders' control, and the roster's **mute terms** and a straight **kick**
+ *   are theirs too, offered in the member menu a row's tap opens. A founder cannot touch the other
+ *   founder -- a group built by two cannot be halved by one of them -- and cannot mute or kick
+ *   themselves either.
  * - **Vote kick** is the members' own recourse, open to everyone, never against yourself and never
  *   against a founder. Half the group rounded up carries it, and the running tally arrives on the
  *   broadcast vote stream so every member watches the same count climb.
@@ -2005,6 +2065,8 @@ private fun GroupMembersSheet(
     invitees: List<GroupInviteCandidate>,
     avatarBytes: Map<Id, ByteArray>,
     onClose: () -> Unit,
+    onViewProfile: (Id, String) -> Unit,
+    onGift: (Id, String) -> Unit,
     onInvite: (Id) -> Unit,
     onVoteKick: (Id) -> Unit,
     onMute: (Id, Long?) -> Unit,
@@ -2107,6 +2169,12 @@ private fun GroupMembersSheet(
                                     tally = chat.votes[member.userId],
                                     now = now,
                                     acting = member.userId in chat.acting,
+                                    onViewProfile = { onViewProfile(member.userId, member.name) },
+                                    onGift = if (member.userId != selfId && !member.departed) {
+                                        { onGift(member.userId, member.name) }
+                                    } else {
+                                        null
+                                    },
                                     onVoteKick = { onVoteKick(member.userId) },
                                     onMute = { term -> onMute(member.userId, term) },
                                     onKick = { onKick(member.userId) },
@@ -2149,9 +2217,10 @@ private fun GroupInviteRow(name: String, avatarBytes: ByteArray?, busy: Boolean,
 }
 
 /**
- * One group roster row: the member, their role, any running group mute, and the actions this
- * viewer may take on them -- the vote for everyone, the founder's controls for a founder over a
- * plain member. A departed member reads as "was here" without actions, because history is not
+ * One group roster row: the member, their role, any running group mute — and, on a tap, the member
+ * menu the room roster's rows open too. The gating is the pair of predicates the sheet has always
+ * kept: the vote for everyone but oneself and a founder, the founder's controls for a founder over
+ * a plain member. A departed member reads as "was here" and opens nothing, because history is not
  * deletable and neither is a row that explains it.
  */
 @Composable
@@ -2163,6 +2232,8 @@ private fun GroupMemberRow(
     tally: VoteTally?,
     now: Long,
     acting: Boolean,
+    onViewProfile: () -> Unit,
+    onGift: (() -> Unit)?,
     onVoteKick: () -> Unit,
     onMute: (Long?) -> Unit,
     onKick: () -> Unit,
@@ -2170,70 +2241,106 @@ private fun GroupMemberRow(
     val founder = canFounderAct(myRole, member.role, isSelf)
     val canVote = canVoteKickGroup(member.role, isSelf)
     val muted = member.mutedUntil != null && member.mutedUntil > now
+    val menuOpen = remember { mutableStateOf(false) }
+    val sub = buildString {
+        append(groupRoleLabel(member.role))
+        if (member.departed) append(" · left")
+        if (muted && member.mutedUntil != null) append(" · muted")
+    }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (isSelf) member.name + " (you)" else member.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (member.departed) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    maxLines = 1,
-                )
-                val sub = buildString {
-                    append(groupRoleLabel(member.role))
-                    if (member.departed) append(" · left")
-                    if (muted && member.mutedUntil != null) append(" · muted")
-                }
-                Text(
-                    text = sub,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (acting) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-            }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !member.departed) { menuOpen.value = true }
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (isSelf) member.name + " (you)" else member.name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (member.departed) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                maxLines = 1,
+            )
+            Text(
+                text = sub,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        if (!isSelf && !member.departed) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (canVote) {
-                    TextButton(onClick = onVoteKick, enabled = !acting) {
-                        Text(if (tally != null) "Vote kick ${tally.votes}/${tally.needed}" else "Vote kick")
-                    }
-                }
-                if (founder && muted) {
-                    TextButton(onClick = { onMute(null) }, enabled = !acting) {
-                        Text("Unmute")
-                    }
-                }
+        if (acting) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+        }
+        if (!member.departed) {
+            Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        }
+    }
+
+    if (menuOpen.value && !member.departed) {
+        MemberMenuSheet(
+            title = member.name,
+            avatarName = member.name,
+            avatarBytes = avatarBytes,
+            sub = sub,
+            acting = acting,
+            onDismiss = { menuOpen.value = false },
+            onViewProfile = onViewProfile,
+            onGift = onGift,
+        ) {
+            if (canVote) {
+                SheetAction(
+                    glyph = "🗳",
+                    label = if (tally != null) "Vote kick ${tally.votes}/${tally.needed}" else "Vote kick",
+                    sub = "When half the group agrees, they are kicked",
+                    enabled = !acting,
+                    onClick = {
+                        menuOpen.value = false
+                        onVoteKick()
+                    },
+                )
+            }
+            if (founder && muted) {
+                SheetAction(
+                    glyph = "🔊",
+                    label = "Unmute",
+                    sub = "Lift this group mute now",
+                    enabled = !acting,
+                    onClick = {
+                        menuOpen.value = false
+                        onMute(null)
+                    },
+                )
             }
             if (founder && !muted) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    for ((label, term) in GROUP_MUTE_TERMS) {
-                        TextButton(onClick = { onMute(term) }, enabled = !acting) {
-                            Text("Mute $label")
-                        }
-                    }
+                for ((label, term) in GROUP_MUTE_TERMS) {
+                    SheetAction(
+                        glyph = "🔇",
+                        label = "Mute $label",
+                        sub = "Silenced for the whole group; every other right kept",
+                        enabled = !acting,
+                        onClick = {
+                            menuOpen.value = false
+                            onMute(term)
+                        },
+                    )
                 }
             }
             if (founder) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ConfirmTextButton(label = "Kick", enabled = !acting, onConfirm = onKick)
-                }
-                // The tariff's price, stated where the spend is agreed: a kick spends a Kick Point
-                // when one is held and a coin when not, and a short wallet refuses rather than
-                // half-charging. The vote is every member's free recourse.
-                Text(
-                    text = "A kick spends 1 KP, else 1 \$MIG. Vote kick is free.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                ConfirmSheetAction(
+                    glyph = "⛔",
+                    label = "Kick",
+                    sub = "A kick spends 1 KP, else 1 \$MIG. Vote kick is free.",
+                    enabled = !acting,
+                    onConfirm = {
+                        menuOpen.value = false
+                        onKick()
+                    },
                 )
             }
         }
@@ -2245,12 +2352,16 @@ private fun GroupMemberRow(
  * The member sheet: who is in the room, and what this account may do about them.
  *
  * It covers the thread as a full surface rather than a panel beside it, because a roster is a list
- * that scrolls and a phone has no room for one alongside a chat. Every row but one's own and the
- * Owner's offers a vote-kick -- the one power an ordinary member holds -- and shows the running tally
- * once a vote is open. The staff powers (mute, kick, ban) appear only on a row this account outranks,
- * and only when this account is a Moderator or above; a kick or a ban asks twice, because removing
- * somebody is not a thing a single mis-tap should do. "Mute for me" is a personal choice on every
- * row, and the muted accounts who are not in the room gather in their own list with an Unmute.
+ * that scrolls and a phone has no room for one alongside a chat. A row is no longer a line of
+ * buttons: tapping it opens the member menu — the profile, the gift, the vote, and the staff
+ * powers where rank admits them — so the roster reads as a list of people first and a set of
+ * controls second, the same shape the web client's roster now keeps. The vote is the one power an
+ * ordinary member holds, offered on every row but one's own and the Owner's, with the running
+ * tally once a vote is open; the staff powers (silence, kick, ban) appear in the menu only on a
+ * row this account outranks, and only when this account is a Moderator or above, with a kick or a
+ * ban asking twice because removing somebody is not a thing a single mis-tap should do. "Mute for
+ * me" is a personal choice that lives on the profile the menu opens, and the muted accounts who
+ * are not in the room gather in their own list with an Unmute.
  */
 @Composable
 private fun MembersSheet(
@@ -2258,6 +2369,8 @@ private fun MembersSheet(
     selfId: Id,
     avatarBytes: Map<Id, ByteArray>,
     onClose: () -> Unit,
+    onViewProfile: (Id, String) -> Unit,
+    onGift: (Id, String) -> Unit,
     onVoteKick: (Id) -> Unit,
     onSanction: (Id, SanctionAction) -> Unit,
     onMuteForMe: (Id, Boolean) -> Unit,
@@ -2306,11 +2419,15 @@ private fun MembersSheet(
                                 isSelf = member.userId == selfId,
                                 myRole = myRole,
                                 tally = chat.votes[member.userId],
-                                muted = member.userId in chat.muted,
                                 acting = member.userId in chat.acting,
+                                onViewProfile = { onViewProfile(member.userId, member.name) },
+                                onGift = if (member.userId != selfId) {
+                                    { onGift(member.userId, member.name) }
+                                } else {
+                                    null
+                                },
                                 onVoteKick = { onVoteKick(member.userId) },
                                 onSanction = { action -> onSanction(member.userId, action) },
-                                onMuteForMe = { on -> onMuteForMe(member.userId, on) },
                             )
                         }
 
@@ -2337,11 +2454,14 @@ private fun MembersSheet(
 }
 
 /**
- * One roster row: the member, their role, and the actions this account may take on them.
+ * One roster row: the member, their role, and — on a tap — the member menu.
  *
- * The actions sit under the name in up to two lines so a row never runs off a narrow screen: the
- * vote and the personal mute on one, and the staff powers -- shown only to a Moderator-or-above over
- * a strictly lower role -- on the next. One's own row carries no actions at all.
+ * The row itself is the entry: tapping it opens the actions this viewer may take against the
+ * member (the profile, the gift, the vote, and the staff sanctions when rank admits them) instead
+ * of laying them out beside every name. One's own row still opens, carrying the profile alone —
+ * a person may read their own card — and the gating predicates are the ones the row always kept:
+ * the vote for everyone but oneself and the Owner, the staff powers for a Moderator-or-above over
+ * a strictly lower role.
  */
 @Composable
 private fun MemberRow(
@@ -2350,55 +2470,98 @@ private fun MemberRow(
     isSelf: Boolean,
     myRole: RoomRole,
     tally: VoteTally?,
-    muted: Boolean,
     acting: Boolean,
+    onViewProfile: () -> Unit,
+    onGift: (() -> Unit)?,
     onVoteKick: () -> Unit,
     onSanction: (SanctionAction) -> Unit,
-    onMuteForMe: (Boolean) -> Unit,
 ) {
     val staff = !isSelf && myRole.wire >= RoomRole.Moderator.wire && member.role.wire < myRole.wire
     val canVote = !isSelf && member.role != RoomRole.Owner
+    val menuOpen = remember { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (isSelf) member.name + " (you)" else member.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                )
-                Text(
-                    text = roleLabel(member.role),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (acting) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-            }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = { menuOpen.value = true })
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (isSelf) member.name + " (you)" else member.name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+            Text(
+                text = roleLabel(member.role),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        if (!isSelf) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (canVote) {
-                    TextButton(onClick = onVoteKick, enabled = !acting) {
-                        Text(if (tally != null) "Vote kick ${tally.votes}/${tally.needed}" else "Vote kick")
-                    }
-                }
-                TextButton(onClick = { onMuteForMe(!muted) }, enabled = !acting) {
-                    Text(if (muted) "Unmute" else "Mute for me")
-                }
+        if (acting) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+        }
+        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+    }
+
+    if (menuOpen.value) {
+        MemberMenuSheet(
+            title = member.name,
+            avatarName = member.name,
+            avatarBytes = avatarBytes,
+            sub = roleLabel(member.role),
+            acting = acting,
+            onDismiss = { menuOpen.value = false },
+            onViewProfile = onViewProfile,
+            onGift = onGift,
+        ) {
+            if (canVote) {
+                SheetAction(
+                    glyph = "🗳",
+                    label = if (tally != null) "Vote kick ${tally.votes}/${tally.needed}" else "Vote kick",
+                    sub = "When half the room agrees, they are kicked",
+                    enabled = !acting,
+                    onClick = {
+                        menuOpen.value = false
+                        onVoteKick()
+                    },
+                )
             }
             if (staff) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ConfirmTextButton(label = "Kick", enabled = !acting) { onSanction(SanctionAction.Kick) }
-                    ConfirmTextButton(label = "Ban", enabled = !acting) { onSanction(SanctionAction.Ban) }
-                    TextButton(onClick = { onSanction(SanctionAction.Mute) }, enabled = !acting) {
-                        Text("Mute")
-                    }
-                }
+                SheetAction(
+                    glyph = "🔇",
+                    label = "Silence in room",
+                    sub = "For everyone — the server sets the term",
+                    enabled = !acting,
+                    onClick = {
+                        menuOpen.value = false
+                        onSanction(SanctionAction.Mute)
+                    },
+                )
+                ConfirmSheetAction(
+                    glyph = "⛔",
+                    label = "Kick",
+                    sub = "Removed from the room; they can come back",
+                    enabled = !acting,
+                    onConfirm = {
+                        menuOpen.value = false
+                        onSanction(SanctionAction.Kick)
+                    },
+                )
+                ConfirmSheetAction(
+                    glyph = "🚫",
+                    label = "Ban",
+                    sub = "Removed and barred from returning",
+                    enabled = !acting,
+                    onConfirm = {
+                        menuOpen.value = false
+                        onSanction(SanctionAction.Ban)
+                    },
+                )
             }
         }
     }
@@ -2427,29 +2590,232 @@ private fun MutedRow(name: String, avatarBytes: ByteArray?, acting: Boolean, onU
 }
 
 /**
- * A destructive text button that asks once before it acts.
+ * A destructive member-menu action that asks once before it acts.
  *
- * The first tap turns the label into "Sure?"; the second, within the same button, is the one that
- * fires. A removal a single mis-tap could cause is not one this sheet should make on a single tap.
+ * The first tap turns the label into "Sure?"; the second, within the same row, is the one that
+ * fires. A removal a single mis-tap could cause is not one this menu should make on a single tap —
+ * the same rule the roster's inline buttons kept, carried into the menu that replaced them.
  */
 @Composable
-private fun ConfirmTextButton(label: String, enabled: Boolean, onConfirm: () -> Unit) {
+private fun ConfirmSheetAction(
+    glyph: String,
+    label: String,
+    sub: String?,
+    enabled: Boolean,
+    onConfirm: () -> Unit,
+) {
     val armed = remember { mutableStateOf(false) }
-    TextButton(
+    SheetAction(
+        glyph = glyph,
+        label = if (armed.value) "Sure?" else label,
+        sub = sub,
+        danger = true,
+        enabled = enabled,
         onClick = {
             if (armed.value) {
                 onConfirm()
-                armed.value = false
             } else {
                 armed.value = true
             }
         },
-        enabled = enabled,
-    ) {
-        Text(
-            text = if (armed.value) "Sure?" else label,
-            color = MaterialTheme.colorScheme.error,
+    )
+}
+
+/**
+ * The member menu a roster row's tap opens: the person's head, the two doors every menu carries,
+ * and whatever actions the roster's own rules admit beneath them.
+ *
+ * The head is the member as the row already drew them — the avatar, the name, the role line — so
+ * the menu never has to say who it is about in any other words. View profile and Gift come first,
+ * the same order the web client's menu keeps, because they are the two acts that are *for* the
+ * person rather than against them; the sanctions and the vote follow in the caller's [actions],
+ * gated by the predicates the roster has always kept.
+ */
+@Composable
+private fun MemberMenuSheet(
+    title: String,
+    avatarName: String,
+    avatarBytes: ByteArray?,
+    sub: String,
+    acting: Boolean,
+    onDismiss: () -> Unit,
+    onViewProfile: () -> Unit,
+    onGift: (() -> Unit)?,
+    actions: @Composable () -> Unit,
+) {
+    MigoSheet(title = title, onDismiss = onDismiss) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Avatar(name = avatarName, bytes = avatarBytes, size = 44.dp)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column {
+                ListRowName(text = avatarName)
+                ListRowLine(text = sub)
+            }
+        }
+        SheetAction(
+            glyph = "☺",
+            label = "View profile",
+            onClick = {
+                onDismiss()
+                onViewProfile()
+            },
         )
+        if (onGift != null) {
+            SheetAction(
+                glyph = "🎁",
+                label = "Gift",
+                sub = "From the gift shop",
+                enabled = !acting,
+                onClick = {
+                    onDismiss()
+                    onGift()
+                },
+            )
+        }
+        actions()
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/** The member the gift picker is aimed at: who they are, by id and the name the roster knew. */
+private data class GiftTarget(
+    val userId: Id,
+    val name: String,
+)
+
+/**
+ * The gift picker a member menu's Gift opens, pre-aimed at the member the menu was for.
+ *
+ * The web client's own picker states the price on every card before the send, because a gift is a
+ * spend and the spend is agreed on its price; the rows here keep the same rule — the price rides
+ * under the name, and the tap that picks the gift is the tap that sends it. One tap is enough
+ * because the picker closes on it: a second gift costs a deliberate reopen, not a jittery thumb.
+ */
+@Composable
+private fun GiftSheet(
+    target: GiftTarget,
+    catalogue: List<GiftListing>,
+    onDismiss: () -> Unit,
+    onSend: (sku: String) -> Unit,
+) {
+    MigoSheet(title = "Send a gift", onDismiss = onDismiss) {
+        ListRowLine(
+            text = "To " + target.name,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        if (catalogue.isEmpty()) {
+            Placeholder(text = "The gift shop is empty on this server.")
+        } else {
+            for (gift in catalogue) {
+                SheetAction(
+                    glyph = "🎁",
+                    label = gift.name,
+                    sub = "${gift.price} \$MIG · ${gift.category}",
+                    onClick = { onSend(gift.sku) },
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * Another member's profile, as the member menu's View profile opens it.
+ *
+ * The facts are the profile service's own public answer — the name, the handle, the level, the
+ * bio, the country, the badges — fetched fresh by the shell and drawn beside the avatar the
+ * session already holds. A withheld answer (the wire serves nothing rather than explaining why)
+ * is its own sentence, not a spinner that never ends and not a failure colour. The one action is
+ * the personal mute, which the web client keeps on this same card: a choice about the person,
+ * made where the person is being read.
+ */
+@Composable
+private fun MemberProfileSheet(
+    view: MemberProfileView,
+    avatarBytes: ByteArray?,
+    canMuteForMe: Boolean,
+    muted: Boolean,
+    onClose: () -> Unit,
+    onMuteForMe: (Boolean) -> Unit,
+) {
+    MigoSheet(title = view.name, onDismiss = onClose) {
+        when {
+            view.failure != null -> Text(
+                text = view.failure ?: "",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+
+            view.profile == null && !view.settled -> LoadingRow()
+
+            // Settled with no profile is the wire's withheld rule: the server served nothing for
+            // the id, and the honest sentence is the one that states that without guessing why.
+            view.profile == null -> Placeholder(
+                text = "This account's profile is not available.",
+            )
+
+            else -> {
+                val profile = view.profile
+                if (profile != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(
+                            name = profile.displayName.ifBlank { view.name },
+                            bytes = avatarBytes,
+                            size = 56.dp,
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            ListRowName(text = profile.displayName.ifBlank { view.name })
+                            if (profile.username.isNotBlank()) {
+                                ListRowLine(text = "@" + profile.username)
+                            }
+                            if (profile.level != null) {
+                                ListRowLine(text = "Level " + profile.level)
+                            }
+                        }
+                    }
+                    if (!profile.bio.isNullOrBlank()) {
+                        Text(
+                            text = profile.bio ?: "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        )
+                    }
+                    val facts = buildList {
+                        profile.country?.let { add("🌍 $it") }
+                        add("🪪 " + profile.publicId)
+                    }
+                    ListRowLine(
+                        text = facts.joinToString(" · "),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                    val badges = profile.badges.orEmpty()
+                    if (badges.isNotEmpty()) {
+                        ListRowLine(
+                            text = badges.joinToString(" · ") { badge -> "🏅 $badge" },
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+                if (canMuteForMe) {
+                    SheetAction(
+                        glyph = if (muted) "🔊" else "🔇",
+                        label = if (muted) "Unmute" else "Mute for me",
+                        sub = "Hides this person's messages in this room for you",
+                        onClick = { onMuteForMe(!muted) },
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 

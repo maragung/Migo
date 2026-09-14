@@ -779,6 +779,29 @@ data class ChatSafety(
 )
 
 /**
+ * Another member's profile, as the member menu's View profile reads it.
+ *
+ * The shell holds this rather than the chat, because the read is the model's (a fresh fetch
+ * against the profile service, the avatar following through the session's own map) while the
+ * surface is whatever member sheet named the person — a room roster row and a group roster row
+ * open the same sheet. [settled] separates "still reading" from "read, and the server served
+ * nothing": the wire's withheld rule (an id the server chooses not to serve is simply absent)
+ * is a sentence of its own, not a spinner that never ends and not a failure colour.
+ */
+data class MemberProfileView(
+    /** The account the sheet is about. */
+    val userId: Id,
+    /** The name the roster row already knew, shown until the profile's own lands. */
+    val name: String,
+    /** The profile once the read answers; null until then, and null after a withheld answer. */
+    val profile: UserProfile? = null,
+    /** True once the read has answered either way, so null stops meaning "wait". */
+    val settled: Boolean = false,
+    /** Why the read could not answer, when it could not. The profile is then null for good. */
+    val failure: String? = null,
+)
+
+/**
  * A room's live shape, as the open chat reads it.
  *
  * Seeded from the [RoomSummary] a join, a create or the directory handed back, then kept current by
