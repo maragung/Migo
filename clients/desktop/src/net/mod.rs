@@ -2984,7 +2984,10 @@ impl Worker {
                     } = error
                     {
                         self.session = None;
-                        self.connect().await;
+                        // Boxed because `connect` recurses here: the refused-resume re-connect
+                        // asks for nothing, so the recursion is one level deep, but the future
+                        // still cannot hold itself by value.
+                        Box::pin(self.connect()).await;
                         return;
                     }
                 }
