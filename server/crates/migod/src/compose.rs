@@ -395,18 +395,32 @@ pub struct App {
     pub bots: SharedBots,
     /// Federation: the server-to-server mesh of trusted, allow-listed peer nodes.
     pub federation: SharedMesh,
+    /// The room half of the mesh's tiered fan-out (section 170): which peer
+    /// nodes hold subscribers of which rooms, and the watch asks this node
+    /// owes the rooms' home nodes. Held for the same reason `federation` and
+    /// `presence_relay` are — the relay has no listener of its own to name an
+    /// address by — and public because the re-anchor task that keeps the tier
+    /// alive across a home node's restart is started from an `App`, in a wire
+    /// test by hand.
+    pub room_relay: Arc<crate::room_relay::RoomRelay>,
+    /// The conversation half of the same tier, for the conversations a room
+    /// does not own: which peer nodes hold subscribers of which direct and
+    /// group conversations, and the watch asks this node owes their home
+    /// nodes. Held beside the room half so the composition root keeps both
+    /// halves of both tiers in one place.
+    pub conversation_relay: Arc<crate::conversation_relay::ConversationRelay>,
+    /// How often the relay re-anchor re-sends this node's watch asks
+    /// (`federation.reanchor_interval_ms`). Held on the `App` because
+    /// [`serve`](App::serve) starts the task and owns no configuration to
+    /// re-read, and public with the rest so a test that shrinks it through
+    /// the environment can see what the node actually runs with.
+    pub federation_reanchor_interval: std::time::Duration,
     /// The presence half of the mesh: which subjects this node's sessions watch, and the
     /// peers asked to forward each subject's stream. Held for the same reason `federation`
     /// is: a test or an operator's tool that links nodes needs the one place the user-topic
     /// tier's watch table lives (section 170), and the relay has no listener of its own to
     /// name an address by.
     pub presence_relay: Arc<crate::presence_relay::PresenceRelay>,
-    /// The room half of the mesh: which rooms this node's sessions watch and — when this node
-    /// homes a room — the table of every peer that watches it (section 170). Held for the same
-    /// reason `presence_relay` is: a cross-node test needs the one place the room tier's watch
-    /// table lives to wait out the mesh hop deterministically, and the relay has no listener
-    /// of its own to name an address by.
-    pub room_relay: Arc<crate::room_relay::RoomRelay>,
     /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
     pub calls: SharedCallkeeper,
 }
@@ -1064,8 +1078,12 @@ impl App {
             games,
             bots,
             federation,
-            presence_relay,
             room_relay,
+            conversation_relay,
+            federation_reanchor_interval: std::time::Duration::from_millis(
+                config.federation.reanchor_interval_ms,
+            ),
+            presence_relay,
             calls,
         })
     }

@@ -118,25 +118,17 @@ impl MessagingConfig {
 
 /// Members a group may have, including its creator.
 ///
-/// A group is fanned out to synchronously and every member's cursor is written
-/// on every send, so the number is a latency budget rather than a product
-/// preference. Anything larger belongs in a room, which has a home region, a
-/// sequencer, and a member count column for exactly this reason.
-pub const MAX_GROUP_MEMBERS: usize = 256;
+/// The constant itself lives on the store's model, beside the conversation it
+/// caps: the store's `add_member` enforces it under the write lock, so the
+/// number belongs to the layer that can make it true. It is re-exported here
+/// because the service's friendly pre-check and every test that asserts the
+/// ceiling have always reached for it through this module.
+pub use migo_store::model::MAX_GROUP_MEMBERS;
 
 /// The longest group title the wire accepts, in characters a person typed — the
 /// same rule and the same number as a room's name, so a group and a room show
 /// the same discipline in a list they share.
 pub const MAX_TITLE_LEN: usize = 64;
-
-/// How long a group kick vote stays open with no new voice, in milliseconds.
-///
-/// The same sixty seconds a room's vote gets: long enough for people who are
-/// present to weigh in, short enough that a vote nobody finishes is not still
-/// blocking the next one when they come back an hour later. Expired votes are
-/// dropped lazily — the next vote in the same conversation closes the old one —
-/// so no timer exists and no vote ever costs a wakeup.
-pub const VOTE_TTL_MS: i64 = 60_000;
 
 /// Conversations returned when the caller does not say how many.
 ///

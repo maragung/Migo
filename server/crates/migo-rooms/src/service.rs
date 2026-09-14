@@ -50,7 +50,6 @@
 //! It does not deliver frames, count who is online, assign sequence numbers, or
 //! enforce slow mode. [`crate::traits`] records why for each one.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -63,9 +62,10 @@ use migo_protocol::{
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{
-    join_policy, NewModerationAction, NewRoom, Patch, Room, RoomMember, RoomNetworkBan,
+    join_policy, KickVoteResult, NewModerationAction, NewRoom, Patch, Room, RoomMember,
+    RoomNetworkBan,
 };
-use migo_store::traits::{GlobalAdminStore, MessagingStore, RoomStore, SocialStore};
+use migo_store::traits::{GlobalAdminStore, KickVoteStore, MessagingStore, RoomStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
@@ -119,16 +119,6 @@ const MAX_SEARCH_SCAN: u16 = 200;
 /// The sequence reported for a conversation that has no messages yet.
 const NO_MESSAGES_YET: u64 = 0;
 
-/// How long a kick vote stays open without reaching its tally, in milliseconds.
-///
-/// One minute. Long enough for a room to weigh in, short enough that a vote
-/// nobody seconded is not still sitting on the roster an hour later being
-/// mistaken for a live question. There is no timer: the registry is swept
-/// lazily, on the next vote this room sees, because a background job that wakes
-/// to close an unremarkable vote is a scheduler entry per room for no
-/// observable benefit — the client that cares is told the moment it asks.
-const VOTE_TTL_MS: i64 = 60 * 1_000;
-
 /// How many times a global admin may kick one account before the next kick
 /// bars it from every room on the service.
 ///
@@ -139,30 +129,6 @@ const VOTE_TTL_MS: i64 = 60 * 1_000;
 /// pattern of an account that does not behave anywhere, and the fourth refusal
 /// is the whole network's.
 const GLOBAL_ADMIN_KICKS_BEFORE_BAN: u64 = 3;
-
-/// A kick vote in progress, in the registry keyed by room.
-///
-/// In memory and not in the store because a vote is not a fact about a room —
-/// it is a minute-long tally about the people currently in it, and persisting
-/// it would make a restart replay votes whose members have since left. The
-/// room's membership rows, the only thing a vote can change, are stored; the
-/// tally is not.
-#[derive(Clone, Debug)]
-struct OpenVote {
-    /// Who the vote would remove.
-    target: Id,
-    /// The accounts that have spoken, once each.
-    voters: HashSet<Id>,
-    /// When the first voice landed, for the lazy expiry.
-    opened_at: Timestamp,
-}
-
-impl OpenVote {
-    /// Whether this vote has outlived [`VOTE_TTL_MS`] as of `now`.
-    fn expired(&self, now: Timestamp) -> bool {
-        now.as_millis() - self.opened_at.as_millis() > VOTE_TTL_MS
-    }
-}
 
 /// Voices a kick needs, from a room of `member_count`.
 ///
@@ -198,13 +164,6 @@ pub struct Rooms<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     random: Mutex<Box<dyn Random>>,
     config: RoomsConfig,
     meters: Meters,
-    /// Kick votes in progress, at most one per room, keyed by room id.
-    ///
-    /// Kept here and not in the store for the reason [`OpenVote`] records: a
-    /// tally is a minute-long question to whoever is present, and not a fact
-    /// about the room that survives them. The lock is never held across an
-    /// `await` — the pass path drops it before it writes.
-    votes: Mutex<HashMap<Id, OpenVote>>,
 }
 
 /// Builds the rooms service the composition root hands around.
@@ -251,7 +210,6 @@ where
             random: Mutex::new(random),
             config,
             meters: Meters::new(registry),
-            votes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -728,7 +686,14 @@ fn member_event(
 #[async_trait]
 impl<S, L> Roomkeeper for Rooms<S, L>
 where
-    S: RoomStore + MessagingStore + SocialStore + GlobalAdminStore + ?Sized + Send + Sync,
+    S: RoomStore
+        + MessagingStore
+        + SocialStore
+        + GlobalAdminStore
+        + KickVoteStore
+        + ?Sized
+        + Send
+        + Sync,
     L: RateLimiter + ?Sized + Send + Sync,
 {
     async fn create(&self, caller: &Caller, request: NewRoomRequest) -> Result<RoomSummary> {
@@ -1814,138 +1779,127 @@ where
         let member_count = self.current_count(room_id).await?;
         let needed = votes_needed(member_count);
         let mut fanouts = Vec::new();
+        // One call does the whole tally: the lazy expiry of a vote nobody
+        // finished, the one-question rule, the once-per-account rule, the
+        // threshold. It lives in the store and not in a registry here because
+        // the tally is a fact about the room — the one question every node
+        // over the deployment's store must agree is the question — and a
+        // per-process map is two nodes happily counting two different tallies
+        // against the same members. The lazy expiry rides the same call, so
+        // no timer exists and no vote ever costs a wakeup.
+        let cast = self
+            .store
+            .cast_kick_vote(room_id, target_id, caller.account_id, needed, caller.now)
+            .await?;
+        if let Some(closed) = cast.expired {
+            // The room is told the old question closed — a client still
+            // rendering the running tally would otherwise show a question the
+            // server has stopped asking.
+            fanouts.push(Fanout::unattributed(
+                room_id,
+                Broadcast::Vote(RoomVoteEvent {
+                    room_id,
+                    target_id: closed.target_id,
+                    votes: closed.votes,
+                    needed,
+                    member_count,
+                    closed: Some(true),
+                }),
+            ));
+        }
         let response;
         let mut passed = false;
-        {
-            let mut votes = self.votes.lock();
-            // The lazy expiry. A vote nobody finished is dropped the moment this
-            // room sees another one, and the room is told it closed — a client
-            // still rendering the old tally would otherwise show a question the
-            // server has stopped asking.
-            if let Some(open) = votes.get(&room_id) {
-                if open.expired(caller.now) {
-                    let closed = votes.remove(&room_id).expect("just checked present");
-                    fanouts.push(Fanout::unattributed(
-                        room_id,
-                        Broadcast::Vote(RoomVoteEvent {
-                            room_id,
-                            target_id: closed.target,
-                            votes: closed.voters.len() as u32,
-                            needed,
-                            member_count,
-                            closed: Some(true),
-                        }),
-                    ));
-                }
-            }
-            match votes.get_mut(&room_id) {
-                Some(open) if open.target == target_id => {
-                    if !open.voters.insert(caller.account_id) {
-                        // The same voice twice. The tally did not move, so nothing
-                        // is published and nothing is re-counted — the retry gets
-                        // the same answer the first call got.
-                        self.meters.vote(VoteOutcome::Unchanged);
-                        return Ok((
-                            RoomVoteKickResponse {
-                                room_id,
-                                target_id,
-                                votes: open.voters.len() as u32,
-                                needed,
-                                member_count,
-                                open: true,
-                            },
-                            fanouts,
-                        ));
-                    }
-                    let count = open.voters.len() as u32;
-                    if count >= needed {
-                        // Passed. The registry entry is dropped here, inside the
-                        // lock, so a second vote starting while the kick's writes
-                        // run cannot see a tally that has already decided; the
-                        // writes themselves happen outside it.
-                        votes.remove(&room_id);
-                        passed = true;
-                        response = RoomVoteKickResponse {
-                            room_id,
-                            target_id,
-                            votes: count,
-                            needed,
-                            member_count,
-                            open: false,
-                        };
-                    } else {
-                        self.meters.vote(VoteOutcome::Voice);
-                        response = RoomVoteKickResponse {
-                            room_id,
-                            target_id,
-                            votes: count,
-                            needed,
-                            member_count,
-                            open: true,
-                        };
-                        fanouts.push(Fanout::vote(
-                            room_id,
-                            caller.device_id,
-                            RoomVoteEvent {
-                                room_id,
-                                target_id,
-                                votes: count,
-                                needed,
-                                member_count,
-                                closed: None,
-                            },
-                        ));
-                    }
-                }
-                Some(_) => {
-                    // A different target's vote is running. One question at a
-                    // time per room: two interleaved tallies would let a faction
-                    // split the room's attention and pass the one nobody was
-                    // counting.
-                    self.meters.vote(VoteOutcome::AlreadyOpen);
-                    return Err(fault::error(
-                        codes::VOTE_ALREADY_OPEN,
-                        "another kick vote is already open in this room",
-                    ));
-                }
-                None => {
-                    let mut voters = HashSet::new();
-                    voters.insert(caller.account_id);
-                    votes.insert(
-                        room_id,
-                        OpenVote {
-                            target: target_id,
-                            voters,
-                            opened_at: caller.now,
-                        },
-                    );
-                    self.meters.vote(VoteOutcome::Opened);
-                    response = RoomVoteKickResponse {
+        match cast.result {
+            KickVoteResult::Unchanged { votes } => {
+                // The same voice twice. The tally did not move, so nothing is
+                // published and nothing is re-counted — the retry gets the
+                // same answer the first call got.
+                self.meters.vote(VoteOutcome::Unchanged);
+                return Ok((
+                    RoomVoteKickResponse {
                         room_id,
                         target_id,
-                        votes: 1,
+                        votes,
                         needed,
                         member_count,
                         open: true,
-                    };
-                    fanouts.push(Fanout::vote(
+                    },
+                    fanouts,
+                ));
+            }
+            KickVoteResult::Voice { votes } => {
+                self.meters.vote(VoteOutcome::Voice);
+                response = RoomVoteKickResponse {
+                    room_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    open: true,
+                };
+                fanouts.push(Fanout::vote(
+                    room_id,
+                    caller.device_id,
+                    RoomVoteEvent {
                         room_id,
-                        caller.device_id,
-                        RoomVoteEvent {
-                            room_id,
-                            target_id,
-                            votes: 1,
-                            needed,
-                            member_count,
-                            closed: None,
-                        },
-                    ));
-                }
+                        target_id,
+                        votes,
+                        needed,
+                        member_count,
+                        closed: None,
+                    },
+                ));
+            }
+            KickVoteResult::Passed { votes } => {
+                // Passed. The tally was dropped inside the store's own
+                // transaction, so a second vote starting while this kick's
+                // writes run cannot see a tally that has already decided.
+                passed = true;
+                response = RoomVoteKickResponse {
+                    room_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    open: false,
+                };
+            }
+            KickVoteResult::AlreadyOpen => {
+                // A different target's vote is running. One question at a
+                // time per room: two interleaved tallies would let a faction
+                // split the room's attention and pass the one nobody was
+                // counting.
+                self.meters.vote(VoteOutcome::AlreadyOpen);
+                return Err(fault::error(
+                    codes::VOTE_ALREADY_OPEN,
+                    "another kick vote is already open in this room",
+                ));
+            }
+            KickVoteResult::Opened { votes } => {
+                self.meters.vote(VoteOutcome::Opened);
+                response = RoomVoteKickResponse {
+                    room_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    open: true,
+                };
+                fanouts.push(Fanout::vote(
+                    room_id,
+                    caller.device_id,
+                    RoomVoteEvent {
+                        room_id,
+                        target_id,
+                        votes,
+                        needed,
+                        member_count,
+                        closed: None,
+                    },
+                ));
             }
         }
         if passed {
-            // Outside the lock: this is a store write, and holding a mutex across
-            // an await would put the registry on the scheduler's critical path.
             let revision = self
                 .store
                 .leave_room(room_id, target_id, caller.now)
@@ -1973,7 +1927,7 @@ where
         caller: &Caller,
         room_id: Id,
         to: Id,
-    ) -> Result<Option<Fanout>> {
+    ) -> Result<Vec<Fanout>> {
         Self::require_identity(caller)?;
         if to.is_nil() {
             return Err(fault::validation("to", "an account id is required"));
@@ -2001,29 +1955,50 @@ where
         if to == caller.account_id {
             // Already the owner. The store treats this as a no-op too; returning early
             // keeps the counter honest about how many transfers happened.
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let revision = self
             .store
             .transfer_room_ownership(room_id, caller.account_id, to, caller.now)
             .await?;
         self.meters.transfer();
-        // One event, about the incoming owner. The outgoing owner's demotion to
-        // Manager is deliberately not broadcast: two frames would arrive in an order
-        // the gateway does not promise, and a client that saw the demotion first would
-        // render a room with no owner.
-        Ok(Some(Fanout::member(
-            room_id,
-            caller.device_id,
-            member_event(
+        // Two events, in the order the room has to apply them: the incoming owner
+        // first, so no client ever renders a room nobody holds, and the outgoing
+        // owner's demotion second, so their other devices stop rendering a rank
+        // that was given away — until now the demotion was written to the row and
+        // never told, and the previous owner's clients kept drawing a crown the
+        // store had already taken back. Both frames name the same revision,
+        // because one write moved the room forward once, and each excludes the
+        // transferring device alone, whose reply is the acknowledgment of the
+        // whole transfer. The order is the gateway's to keep: fanouts publish
+        // in the order a service returns them, the same discipline a sanction's
+        // many rooms already rely on.
+        Ok(vec![
+            Fanout::member(
                 room_id,
-                to,
-                true,
-                Some(RoomRole::Owner),
-                None,
-                view::revision(revision),
+                caller.device_id,
+                member_event(
+                    room_id,
+                    to,
+                    true,
+                    Some(RoomRole::Owner),
+                    None,
+                    view::revision(revision),
+                ),
             ),
-        )))
+            Fanout::member(
+                room_id,
+                caller.device_id,
+                member_event(
+                    room_id,
+                    caller.account_id,
+                    true,
+                    Some(RoomRole::Manager),
+                    None,
+                    view::revision(revision),
+                ),
+            ),
+        ])
     }
 
     async fn authorize(&self, caller: &Caller, room_id: Id, needed: u64) -> Result<Authorized> {

@@ -2106,6 +2106,205 @@ async fn a_member_event_survives_a_disconnect_into_the_resume() {
     tokio::join!(h.serve(&first), drive);
 }
 
+/// A resume whose `WELCOME` cannot be written is stored back, not lost.
+///
+/// The handshake takes the retained state out of the ring the moment it plans
+/// the resume — a take is the only way one resume consumes its buffer exactly
+/// once — and for a long time the only failure that handed the state back was
+/// the OVERLOADED refusal, which happens *before* the take. The one path after
+/// it was the unwritable `WELCOME`: a connection that died mid-write, the very
+/// shape of flakiness a resume exists for, and the buffer was dropped with it
+/// — the client's next attempt started from zero instead of the backlog it was
+/// owed. The take is now paid back on that path too, exactly as the OVERLOADED
+/// refusal pays it back, so one dead socket costs one retry and nothing else.
+#[tokio::test]
+async fn a_resume_whose_welcome_cannot_be_written_is_stored_for_the_next_attempt() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(GrantAll);
+    let h = builder.build();
+
+    let conversation = Topic {
+        kind: TopicKind::Conversation,
+        id: id(0x5EED),
+    };
+
+    // The session that will be dropped: authenticated, subscribed, and holding
+    // exactly one unacknowledged member event — the backlog the resume owes.
+    let first = Pipe::new();
+    first.keep_open();
+    first.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    first.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![conversation.clone()],
+        },
+    );
+
+    let joined = ConversationMemberEvent {
+        conversation_id: conversation.id,
+        user_id: id(0x00B7),
+        change: MemberChange::Joined,
+        member_count: 2,
+        group_key_epoch: None,
+    };
+
+    let drive = async {
+        for _ in 0..500 {
+            if subscribe_answered(&first) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            subscribe_answered(&first),
+            "the session must hold the conversation topic before the member event"
+        );
+
+        h.gateway.broadcast_to_topic(
+            &conversation,
+            Opcode::ConversationMemberEvent,
+            &joined,
+            ts(NOW),
+        );
+        for _ in 0..500 {
+            if first
+                .sent()
+                .iter()
+                .any(|frame| frame.header.opcode == Opcode::ConversationMemberEvent.to_wire())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            first
+                .sent()
+                .iter()
+                .any(|frame| frame.header.opcode == Opcode::ConversationMemberEvent.to_wire()),
+            "the live session received the member event"
+        );
+
+        let session_id = welcome_in(&first.sent()).session_id;
+
+        // The drop: involuntary, so the backlog is retained (section 150).
+        first.sever();
+        for _ in 0..500 {
+            if h.sessions_closed("transport_error") > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert!(
+            h.sessions_closed("transport_error") > 0,
+            "the first session must close as a transport error before the resume"
+        );
+
+        // The doomed resume: a connection that reads the HELLO — so the plan is
+        // made and the retained state is taken — but cannot take the WELCOME.
+        // The stall is what places the handshake mid-write: the send is parked
+        // with the frame accepted and the socket refusing it, and the sever is
+        // what kills it there, the exact shape of a connection that died while
+        // writing the greeting.
+        let doomed = Pipe::new();
+        doomed.stall_sends();
+        doomed.client(
+            Opcode::Hello,
+            1,
+            &Hello {
+                protocol_version: PROTOCOL_VERSION,
+                access_token: Some(VALID_TOKEN.to_string()),
+                device_id: Some(device_of(ACCOUNT)),
+                resume: Some(ResumeRequest {
+                    session_id,
+                    last_frame_seq: 0,
+                }),
+                ..Default::default()
+            },
+        );
+        let failed = h.serve(&doomed);
+        tokio::pin!(failed);
+        for _ in 0..500 {
+            if doomed.send_parked() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::timeout(Duration::ZERO, &mut failed).await.ok();
+        }
+        assert!(
+            doomed.send_parked(),
+            "the doomed resume must reach the WELCOME mid-write before it dies"
+        );
+        doomed.sever();
+        doomed.release_sends();
+        failed.await;
+        assert!(
+            doomed.sent().is_empty(),
+            "the doomed connection never took the WELCOME it was owed"
+        );
+
+        // The proof: a third connection, same session id, same claim of having
+        // seen nothing. The backlog must still be there — the take the doomed
+        // attempt made was paid back the moment its WELCOME failed — and the
+        // member event comes back exactly as the first resume test receives it.
+        let third = Pipe::new();
+        third.keep_open();
+        third.client(
+            Opcode::Hello,
+            1,
+            &Hello {
+                protocol_version: PROTOCOL_VERSION,
+                access_token: Some(VALID_TOKEN.to_string()),
+                device_id: Some(device_of(ACCOUNT)),
+                resume: Some(ResumeRequest {
+                    session_id,
+                    last_frame_seq: 0,
+                }),
+                ..Default::default()
+            },
+        );
+        let resumed = h.serve(&third);
+        tokio::pin!(resumed);
+        for _ in 0..500 {
+            if third
+                .sent()
+                .iter()
+                .any(|frame| frame.header.opcode == Opcode::ConversationMemberEvent.to_wire())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::timeout(Duration::ZERO, &mut resumed)
+                .await
+                .ok();
+        }
+        let welcome = welcome_in(&third.sent());
+        assert_eq!(
+            welcome.session_id, session_id,
+            "the third connection resumes the session, not a fresh one"
+        );
+        assert_eq!(
+            welcome.resumed,
+            Some(true),
+            "the WELCOME says the resume was served"
+        );
+        assert!(
+            third
+                .sent()
+                .iter()
+                .any(|frame| { frame.header.opcode == Opcode::ConversationMemberEvent.to_wire() }),
+            "the backlog survived the resume whose WELCOME could not be written"
+        );
+        third.hangup();
+        resumed.await;
+    };
+    tokio::join!(h.serve(&first), drive);
+}
+
 #[tokio::test]
 async fn a_subscribe_on_a_null_dispatcher_grants_nothing() {
     // The default dispatcher a bare gateway stands up with has no domain to ask, so it answers

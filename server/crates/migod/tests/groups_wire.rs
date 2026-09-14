@@ -28,7 +28,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
+use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationInviteRequest, ConversationKind,
@@ -41,6 +41,10 @@ use migod::App;
 /// How long any single exchange may take before the test declares the server
 /// stuck — silence being the bug class both tests exist to catch.
 const STEP: Duration = Duration::from_secs(5);
+
+/// How long to listen for stragglers before declaring a count complete: the
+/// window in which a second, duplicated reaction would have arrived.
+const QUIET: Duration = Duration::from_secs(1);
 
 fn valid_token_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])
@@ -85,6 +89,25 @@ async fn registered_grant(app: &App, username: &str) -> Grant {
         )
         .await
         .expect("a development app registers an account")
+}
+
+/// Signs an existing account in on a second device — the laptop to the phone —
+/// because a reaction re-sent from another device of one account is only
+/// observable when both devices hold live sessions of that account.
+async fn second_device_grant(app: &App, username: &str) -> Grant {
+    app.auth
+        .sign_in(
+            SignIn {
+                identifier: username.to_string(),
+                passphrase: Secret::new("correct-horse-battery-staple"),
+                device: DeviceClaim::new(Platform::Web, "the other device"),
+                captcha: None,
+                server: None,
+            },
+            &RequestContext::at(app.clock.now()),
+        )
+        .await
+        .expect("a fresh second sign-in needs no captcha and succeeds")
 }
 
 /// Sends one request frame as a length-prefixed record.
@@ -134,6 +157,28 @@ struct LiveSession {
 
 impl LiveSession {
     async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        // The test-open burst can trip the connection limiter — a founder, a
+        // witness, and a sender's second device are several handshakes from
+        // one IP inside the limiter's window — and the refusal names a time
+        // at which the answer changes, so the session waits exactly as long
+        // as it is told and tries again, the way a client with manners does.
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            match Self::handshake(addr, grant).await {
+                Ok(session) => return session,
+                Err(retry_after_ms) => backoff = retry_after_ms,
+            }
+        }
+        panic!("the handshake never succeeds even after backing off as instructed");
+    }
+
+    /// One full connection attempt, returning the retry-after the server
+    /// asked for when it refuses the handshake — at the HELLO or at the
+    /// self-subscription — as rate-limited.
+    async fn handshake(addr: SocketAddr, grant: &Grant) -> Result<Self, u64> {
         let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
             .await
             .expect("connecting does not stall")
@@ -153,11 +198,15 @@ impl LiveSession {
             Some(Opcode::Hello),
             "the handshake is answered with a WELCOME"
         );
-        assert!(
-            !welcome_frame.header.is_error(),
-            "the handshake is not refused: {:?}",
-            from_frame::<migo_protocol::Error>(&welcome_frame)
-        );
+        if welcome_frame.header.is_error() {
+            let refusal: migo_protocol::Error =
+                from_frame(&welcome_frame).expect("the refusal decodes");
+            assert!(
+                refusal.code == migo_protocol::codes::RATE_LIMITED,
+                "the handshake is refused outright: {refusal:?}"
+            );
+            return Err(u64::from(refusal.retry_after_ms.unwrap_or(1000)));
+        }
         let welcome: Welcome = from_frame(&welcome_frame).expect("the WELCOME decodes");
         assert_eq!(welcome.authenticated_user, Some(grant.account_id));
 
@@ -176,11 +225,15 @@ impl LiveSession {
         loop {
             let frame = recv_within(&mut stream, STEP).await;
             if frame.header.correlation == 2 {
-                assert!(
-                    !frame.header.is_error(),
-                    "the self-subscription is accepted: {:?}",
-                    from_frame::<migo_protocol::Error>(&frame)
-                );
+                if frame.header.is_error() {
+                    let refusal: migo_protocol::Error =
+                        from_frame(&frame).expect("the refusal decodes");
+                    assert!(
+                        refusal.code == migo_protocol::codes::RATE_LIMITED,
+                        "the self-subscription is refused outright: {refusal:?}"
+                    );
+                    return Err(u64::from(refusal.retry_after_ms.unwrap_or(1000)));
+                }
                 let confirmation: SubscribeResponse =
                     from_frame(&frame).expect("the SUBSCRIBE reply decodes");
                 assert_eq!(
@@ -188,7 +241,7 @@ impl LiveSession {
                     1,
                     "the own user topic is accepted"
                 );
-                return Self { stream };
+                return Ok(Self { stream });
             }
         }
     }
@@ -451,6 +504,167 @@ async fn a_retried_reaction_is_one_reaction_not_two() {
     assert_eq!(
         reactions, 1,
         "a retried reaction is delivered once — the retry converged on the stored row"
+    );
+}
+
+#[tokio::test]
+async fn a_reaction_repeated_from_a_second_device_is_still_one_reaction() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let sender = registered_grant(&app, "reactioner").await;
+    let laptop = second_device_grant(&app, "reactioner").await;
+    let witness = registered_grant(&app, "reactionwitness").await;
+
+    let mut sender_session = LiveSession::connect(addr, &sender).await;
+    let mut laptop_session = LiveSession::connect(addr, &laptop).await;
+    let mut witness_session = LiveSession::connect(addr, &witness).await;
+
+    // Default message privacy accepts friends only, so the two accounts are
+    // made friends first — through the domain service, as the dispatcher tests
+    // do it, because the wire path here is the reaction, not the friendship.
+    let friender = migo_social::Caller::new(
+        sender.account_id,
+        sender.device_id,
+        migo_ratelimit::TrustTier::Established,
+        app.clock.now(),
+    );
+    let accepter = migo_social::Caller::new(
+        witness.account_id,
+        witness.device_id,
+        migo_ratelimit::TrustTier::Established,
+        app.clock.now(),
+    );
+    app.social
+        .request_friend(&friender, witness.account_id)
+        .await
+        .expect("a friend request between fresh accounts must be taken");
+    app.social
+        .respond_friend(&accepter, sender.account_id, true)
+        .await
+        .expect("the friend request must be accepted");
+
+    // A direct conversation between the two: the smallest audience a reaction
+    // can travel to, and the one the witness can subscribe to.
+    let summary: migo_protocol::ConversationSummary = sender_session
+        .ask(
+            Opcode::ConversationCreate,
+            41,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Direct,
+                members: vec![witness.account_id],
+                title: None,
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // The witness listens on the conversation's own topic, which is where a
+    // message's fanout goes — and where a device-duplicated reaction would
+    // land twice.
+    let _: migo_protocol::SubscribeResponse = witness_session
+        .ask(
+            Opcode::Subscribe,
+            41,
+            &SubscribeRequest {
+                topics: vec![Topic {
+                    kind: TopicKind::Conversation,
+                    id: conversation_id,
+                }],
+            },
+        )
+        .await;
+
+    // The message to react to.
+    let message_id = migo_core::Id::generate(
+        app.clock.now().as_unix_ms().max(0) as u64,
+        &mut migo_core::OsRandom,
+    );
+    let accepted: migo_protocol::MessageAccepted = sender_session
+        .ask(
+            Opcode::MessageSend,
+            42,
+            &MessageSend {
+                message_id,
+                conversation_id,
+                kind: MessageKind::Text,
+                envelope: b"the message being reacted to".to_vec(),
+                reply_to: None,
+                expires_in_ms: None,
+                sender_key_id: None,
+            },
+        )
+        .await;
+    assert!(!accepted.duplicate.unwrap_or(false), "the message is new");
+
+    // The same reaction, tapped once on the phone and once on the laptop: one
+    // account, one message, one emoji — the device is the only thing that
+    // differs. The reaction belongs to the account, so both deliveries must
+    // converge on one row, exactly as a retry from the phone does.
+    let reaction = ReactionSet {
+        target_message_id: message_id,
+        conversation_id,
+        envelope: b"a sealed reaction".to_vec(),
+    };
+    let first: migo_protocol::Acknowledged =
+        sender_session.ask(Opcode::ReactionSet, 43, &reaction).await;
+    assert!(first.ok, "the phone's reaction is accepted");
+    let second: migo_protocol::Acknowledged =
+        laptop_session.ask(Opcode::ReactionSet, 44, &reaction).await;
+    assert!(
+        second.ok,
+        "the laptop's reaction is accepted — it is the same reaction"
+    );
+
+    // The witness's topic saw the plain message, then must see exactly one
+    // reaction event. The count only settles after a quiet window, because the
+    // second — duplicated — reaction, were the bug present, would arrive as
+    // late as any fanout does. A second distinct reaction event would render
+    // the reaction twice and notify twice for one user action.
+    let mut reactions = 0;
+    let mut saw_plain_message = false;
+    let outcome = tokio::time::timeout(STEP, async {
+        loop {
+            let arrived = tokio::time::timeout(QUIET, async {
+                let mut head = [0u8; 4];
+                witness_session
+                    .stream
+                    .read_exact(&mut head)
+                    .await
+                    .expect("the length of an arriving frame is readable");
+                let len = u32::from_be_bytes(head) as usize;
+                let mut body = vec![0u8; len];
+                witness_session
+                    .stream
+                    .read_exact(&mut body)
+                    .await
+                    .expect("the body of an arriving frame is readable");
+                body
+            })
+            .await;
+            let body = match arrived {
+                Ok(body) => body,
+                Err(_) => return,
+            };
+            let frame = Frame::decode(Bytes::from(body)).expect("the frame decodes");
+            if Opcode::from_wire(frame.header.opcode) == Some(Opcode::MessageEvent) {
+                let event: migo_protocol::MessageEvent =
+                    from_frame(&frame).expect("the message event decodes");
+                if event.reply_to == Some(message_id) {
+                    reactions += 1;
+                } else {
+                    saw_plain_message = true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        outcome.is_ok() && saw_plain_message,
+        "the witness saw the message and settled within the step budget"
+    );
+    assert_eq!(
+        reactions, 1,
+        "one reaction from two devices is delivered once — the reaction is the account's, not the device's"
     );
 }
 

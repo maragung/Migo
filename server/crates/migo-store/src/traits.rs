@@ -27,14 +27,15 @@ use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 
 use crate::model::{
-    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
-    ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device, Entitlement,
-    EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, LedgerAccount,
-    LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot,
-    NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
-    NewXpAward, Notification, NotificationPosition, OutboxRecord, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship, Report,
-    Room, RoomMember, RoomPosition, Scope, Session, Standing, StoredMessage, XpCaps, XpChange,
+    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote,
+    Conversation, ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device,
+    Entitlement, EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, KickVoteCast,
+    LedgerAccount, LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount,
+    NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession,
+    NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord, PeerRecord,
+    Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget,
+    Relationship, Report, Room, RoomMember, RoomPosition, Scope, Session, Standing, StoredMessage,
+    XpCaps, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -187,6 +188,15 @@ pub trait DeviceStore: Send + Sync {
     /// write must not be an error.
     async fn set_device_credential(&self, device_id: Id, public_key: &[u8]) -> Result<()>;
 
+    /// Stamps the device's invisibility preference.
+    ///
+    /// Written by `PRESENCE_SET` before any fan-out, so a store that refuses
+    /// the write also refuses the hiding — the safe direction for a preference
+    /// whose whole job is not being seen. A missing device is an error, the
+    /// same posture as [`set_device_credential`](Self::set_device_credential):
+    /// a preference for a row that does not exist is a caller bug.
+    async fn set_device_invisible(&self, device_id: Id, invisible: bool) -> Result<()>;
+
     /// Revokes a device. Its sessions must be revoked by the caller in the same
     /// operation; the store does not do it implicitly, because a silent cascade
     /// is the kind of behaviour that surprises people during an incident.
@@ -326,6 +336,15 @@ pub trait MessagingStore: Send + Sync {
     async fn is_member(&self, conversation_id: Id, account_id: Id) -> Result<bool>;
 
     /// Adds a member.
+    ///
+    /// The capacity backstop for a group lives here and not in the caller: a
+    /// check that only runs before the write is a check two racing invites can
+    /// both step over, so the seat is counted under the same lock or
+    /// transaction it lands in, and a group already holding
+    /// [`MAX_GROUP_MEMBERS`](crate::model::MAX_GROUP_MEMBERS) active members is
+    /// refused with `GROUP_FULL`. The refusal is keyed to whether this call
+    /// would raise the active count — a fresh seat or a departed member coming
+    /// back — so re-adding a member who never left stays a quiet no-op.
     async fn add_member(&self, member: ConversationMember) -> Result<()>;
 
     /// Marks a member as having left. The row stays, so history access remains
@@ -668,6 +687,56 @@ pub enum RoomKindFilter {
     Public,
     /// Listed, but joining is moderated.
     Managed,
+}
+
+/// Kick votes: the tally the members of a room or a group hold.
+///
+/// A trait of its own rather than a wing of [`RoomStore`] or
+/// [`MessagingStore`] because both crates vote and neither owns the rule. The
+/// subject is whichever id the caller names — a room there, a group
+/// conversation here, the two id spaces being random 128-bit values that do
+/// not collide — and the tally is a fact about that subject, which is why it
+/// is stored at all: a per-process registry cannot see the question another
+/// node over the same store opened, and "one question at a time" is only true
+/// if every node asking it reads the same answer.
+#[async_trait]
+pub trait KickVoteStore: Send + Sync {
+    /// Casts one voice, opening the tally if none is running.
+    ///
+    /// One call does the whole of it — expiry of a stale tally, the
+    /// one-question rule, the once-per-account rule, the threshold — because
+    /// anything split across calls is a window in which two nodes count two
+    /// different tallies of the same subject. `needed` is the caller's policy,
+    /// read from the membership the caller already loaded; the store's job is
+    /// the count, not the arithmetic about who counts.
+    ///
+    /// # Errors
+    ///
+    /// Store failures propagate. A tally against a different target being
+    /// open is not an error but the `KickVoteResult::AlreadyOpen` variant, so
+    /// the caller can tell the refusal it owes the member from a failure it
+    /// owes itself.
+    async fn cast_kick_vote(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+        voter: Id,
+        needed: u32,
+        now: Timestamp,
+    ) -> Result<KickVoteCast>;
+
+    /// Closes the tally running against `target_id`, if that is the open one.
+    ///
+    /// The target's departure answers the question by itself, and a tally
+    /// still running against an empty seat is a tally that could "pass" and
+    /// remove nobody. Returns the closed shape for the `closed` frame the
+    /// members are owed; `None` when no tally was running or the running one
+    /// aimed elsewhere, in which case there is nothing to say.
+    async fn close_kick_vote_if_target(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+    ) -> Result<Option<ClosedKickVote>>;
 }
 
 /// The social graph.
@@ -1698,6 +1767,7 @@ pub trait Store:
     + KeyStore
     + MessagingStore
     + RoomStore
+    + KickVoteStore
     + SocialStore
     + EconomyStore
     + ProgressionStore

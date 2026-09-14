@@ -1,6 +1,6 @@
 //! The SOCIAL application opcodes: friendship, blocking, and the relationship list.
 //!
-//! Four opcodes, each one a thin translation from a wire frame onto one
+//! Five opcodes, each one a thin translation from a wire frame onto one
 //! [`Graph`](migo_social::traits::Graph) method. The service owns every rule — the
 //! symmetric block, the "a pending request is not a friendship" test, the rate charge —
 //! so these handlers only decode, call, and reply. The shape follows the other dispatch
@@ -15,6 +15,7 @@
 //! | `FRIEND_REQUEST`  | `FriendTarget`   | `Graph::request_friend`   | `Acknowledged`     |
 //! | `FRIEND_RESPOND`  | `FriendRespond`  | `Graph::respond_friend`   | `Acknowledged`     |
 //! | `BLOCK_SET`       | `FriendTarget`   | `Graph::block`            | `Acknowledged`     |
+//! | `MUTE_SET`        | `MuteSet`        | `Graph::mute`             | `Acknowledged`     |
 //! | `RELATIONSHIP_LIST` | `RelationshipListReq` | `Graph::list_relationships` | `RelationshipList` |
 //!
 //! `RELATIONSHIP_LIST` is one read of the whole graph the caller owns: the service
@@ -43,7 +44,10 @@
 //!   that performed the mutation (section 156: the fan-out skips the device of
 //!   origin, and the origin was already answered by the `Acknowledged`). Without
 //!   this half, accepting a request on the phone leaves the tablet's friends list
-//!   showing a stranger until somebody refreshes by hand.
+//!   showing a stranger until somebody refreshes by hand. The mute list is a page
+//!   of that same graph, so a mute flipped on one device echoes the same way —
+//!   while the muted account hears nothing, because a volume control is not a
+//!   verdict.
 //!
 //! A block publishes to the blocked account only when an edge they could observe was
 //! torn down — a friendship, a pending request, their follow — and with the same
@@ -91,6 +95,12 @@ const STATE_REMOVED: &str = "removed";
 /// The caller blocked somebody. Only ever published on the blocker's own topic, where
 /// nobody but the blocker's devices are listening.
 const STATE_BLOCKED: &str = "blocked";
+/// The caller muted somebody. Like `blocked`, only ever published on the caller's own
+/// topic — the muted account is not told, because a volume control is not a verdict.
+const STATE_MUTED: &str = "muted";
+/// The caller lifted a mute. Same audience as [`STATE_MUTED`]: the caller's other
+/// devices, and nobody else.
+const STATE_UNMUTED: &str = "unmuted";
 
 /// Publishes one `FRIEND_EVENT` hint on `audience`'s own topic: `other` is the far end
 /// of the edge that moved, `state` the hint for what moved.
@@ -346,12 +356,16 @@ pub(crate) async fn handle_block_set(
 /// The personal mute: the caller's clients stop rendering what the muted account
 /// says, in every room the two share. Unlike a block it tears nothing down — no
 /// friendship, no follow — and the muted account is not told, because a volume
-/// control is not a verdict. The handler is the forward and the reply; the wire
-/// carries the switch and the service owns the edge.
+/// control is not a verdict. But the mute list is a page of the caller's own
+/// graph all the same, and the echo is what keeps it honest on the caller's
+/// other devices: a mute tapped on the phone leaves the tablet rendering a
+/// stranger's messages until somebody refreshes by hand. The hint lands on the
+/// caller's own topic only, skipping the session that flipped the switch.
 pub(crate) async fn handle_mute_set(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedSocial,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = SocialCaller::new(
         ctx.identity().account_id(),
@@ -361,7 +375,20 @@ pub(crate) async fn handle_mute_set(
     );
     let request: MuteSet = from_frame(frame).map_err(fault::from_wire)?;
     svc.mute(&caller, request.user_id, request.on).await?;
-    ctx.reply(&Acknowledged { ok: true })
+    ctx.reply(&Acknowledged { ok: true })?;
+    echo_caller(
+        ctx,
+        relay,
+        request.user_id,
+        if request.on {
+            STATE_MUTED
+        } else {
+            STATE_UNMUTED
+        },
+        ctx.now(),
+    )
+    .await;
+    Ok(())
 }
 
 /// Lists the caller's relationships and replies with them.

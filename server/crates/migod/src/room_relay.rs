@@ -49,10 +49,12 @@
 //! receiving its events, and the receiving hub's fan-out to an empty topic is
 //! a cheap no-op. When the protocol gains the opcode, the entry can be
 //! dropped here and nothing else changes. The subscribe cache is also why a
-//! home node restart is survived in practice rather than by design: a room
-//! whose last local subscriber goes away and later returns is re-subscribed
-//! only after this process restarts, which re-sends the watch and re-anchors
-//! the home node's table.
+//! home node restart needs more than luck: the cache says every ask was
+//! answered, the home node's replacement holds an empty table, and no client
+//! `SUBSCRIBE` is coming to re-ask — so the composition root re-anchors the
+//! cache on a timer, re-sending the
+//! watches a fresh process would have sent and letting a restarted home node
+//! rebuild its table from them.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -199,6 +201,45 @@ impl RoomRelay {
             .or_default()
             .insert(peer);
         Ok(())
+    }
+
+    /// The re-anchor: re-send every ask this process owes a room's home node.
+    ///
+    /// The watch table is memory on the home node's side, so a home node that
+    /// restarts comes back holding an empty table while this node's
+    /// `subscribed` set still says every ask was answered — and the tier is
+    /// then down for every room whose members all sit here, silently, because
+    /// no client `SUBSCRIBE` is coming to re-ask: the sessions are already
+    /// granted. The composition root calls this on a timer
+    /// (`federation.reanchor_interval_ms`) for exactly that gap.
+    ///
+    /// Each id is unmarked before its ask so `subscribe_to` runs its skips
+    /// again rather than finding this cache in its own way — the same rules a
+    /// fresh process applies, which is the point: the re-anchor is a fresh
+    /// process's first second of life, repeated. A home node that never
+    /// restarted simply re-inserts what it already holds
+    /// ([`register_watcher`](Self::register_watcher) is idempotent, and its
+    /// epoch check admits the ask: a restarted home node's fresh epoch is
+    /// never ahead of this one's). An ask that fails outright re-marks the
+    /// id so the next interval tries again rather than retiring the anchor;
+    /// the skips that return `Ok` unmarked — no row, a home node not yet
+    /// admitted — stay unmarked, exactly as a client-driven ask leaves them.
+    pub(crate) async fn reanchor(&self, now: Timestamp) {
+        // Bound to a `let` so the guard the take borrows dies at the semicolon:
+        // a temporary in a `for` head would live for the whole loop, and a
+        // parking-lot guard held across the ask's await is a future tokio
+        // refuses to send between threads.
+        let owed = std::mem::take(&mut *self.subscribed.lock());
+        for room_id in owed {
+            if let Err(error) = self.subscribe_to(room_id, now).await {
+                tracing::warn!(
+                    room = %room_id.to_text(),
+                    %error,
+                    "the room re-anchor failed; the next interval tries again"
+                );
+                self.subscribed.lock().insert(room_id);
+            }
+        }
     }
 
     /// The forward half: one federated copy of a room event per watching node.

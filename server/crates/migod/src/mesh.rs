@@ -733,6 +733,15 @@ impl IngestRouter {
     /// would keep delivering a room the account can no longer ask for. The conversation
     /// id comes from the local row, because the member event names the room and the row
     /// is the one place that knows which conversation speaks for it.
+    ///
+    /// The membership is re-read at the last moment, because this path is exactly
+    /// where a leave→re-join race lands: the member left from one node, rejoined on
+    /// this one seconds later, and the federated copy of the departure arrives after
+    /// the fresh join granted a fresh subscription. Revoking on the stale event
+    /// would cut an active member off; one `is_member` read — which every room
+    /// membership write mirrors into the room conversation's member rows —
+    /// decides for both topics. A read that fails revokes anyway: the removal
+    /// is what the event says, and a store fault is not evidence of a re-join.
     async fn revoke_room_member(&self, room_id: Id, account_id: Id) {
         let Some(gateway) = &self.gateway else {
             return;
@@ -743,6 +752,13 @@ impl IngestRouter {
         }];
         if let Some(store) = &self.store {
             if let Ok(Some(room)) = store.room(room_id).await {
+                if store
+                    .is_member(room.conversation_id, account_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return;
+                }
                 topics.push(migo_protocol::Topic {
                     kind: migo_protocol::TopicKind::Conversation,
                     id: room.conversation_id,
@@ -1102,19 +1118,33 @@ impl IngestRouter {
         // publish first, revoke second, exactly as the room path and the origin's own
         // request path order it. The decode is the one the placement already performed
         // for a member event, so a failure here cannot happen for an event that placed.
+        // The membership is re-read first, because a federated departure can arrive
+        // after the account left *and came back* — re-invited, or back through this
+        // node — and the subscription the fresh join granted is not the stale event's
+        // to take away. A read that fails revokes anyway: a store fault is not
+        // evidence of a re-join.
         if inner_opcode == Opcode::ConversationMemberEvent {
             let removed = from_frame::<migo_protocol::ConversationMemberEvent>(&inner)
                 .ok()
                 .and_then(|event| Self::removed_conversation_member_of(&event));
             if let Some(account_id) = removed {
-                if let Some(gateway) = &self.gateway {
-                    gateway.revoke_subscriptions(
-                        account_id,
-                        &[migo_protocol::Topic {
-                            kind: migo_protocol::TopicKind::Conversation,
-                            id: conversation_id,
-                        }],
-                    );
+                let still_removed = match &self.store {
+                    Some(store) => !store
+                        .is_member(conversation_id, account_id)
+                        .await
+                        .unwrap_or(false),
+                    None => true,
+                };
+                if still_removed {
+                    if let Some(gateway) = &self.gateway {
+                        gateway.revoke_subscriptions(
+                            account_id,
+                            &[migo_protocol::Topic {
+                                kind: migo_protocol::TopicKind::Conversation,
+                                id: conversation_id,
+                            }],
+                        );
+                    }
                 }
             }
         }
@@ -2204,8 +2234,23 @@ impl MeshTransport {
     }
 
     /// Reschedules a batch that did not arrive, with the failure the next backoff grows from.
+    ///
+    /// A repeated delivery failure is a stall the operator must be able to see: the rows
+    /// stay queued with a next attempt pushed further out each time, so the drain names
+    /// the target and the reason once per settled batch. The meters alone cannot say
+    /// *which* peer or *why*, and a peer that never comes back would otherwise be a
+    /// counter climbing in silence.
     async fn settle_failure(&self, events: &[PendingEvent], now: Timestamp, why: &str) {
         self.meters.failed(events.len() as u64);
+        if let Some(first) = events.first() {
+            tracing::warn!(
+                node = %first.target_node,
+                events = events.len(),
+                attempts = first.attempts,
+                %why,
+                "a federated delivery attempt failed; the batch is rescheduled on its backoff"
+            );
+        }
         for event in events {
             if let Err(error) = self
                 .mesh

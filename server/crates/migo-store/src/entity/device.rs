@@ -69,6 +69,8 @@ pub struct Model {
     /// root, so a leaked root secret alone cannot impersonate a registered device.
     #[sea_orm(column_type = "VarBinary(StringLen::None)")]
     pub public_credential: Option<Vec<u8>>,
+    /// The `invisible` column.
+    pub invisible: bool,
 }
 
 /// Foreign keys leaving `device`.

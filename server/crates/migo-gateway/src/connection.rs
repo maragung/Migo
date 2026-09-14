@@ -243,6 +243,15 @@ impl<T: Transport> Connection<'_, T> {
             )
             .await
         {
+            // The WELCOME is the whole of a resume's first answer, and a connection that cannot
+            // take it is not the session's farewell. `plan_session` took the retained state out
+            // of the ring, and this is the one path where that take is followed by failure —
+            // leaving it un-stored turns one dead socket into a lost resume, and the client's
+            // next attempt starts from zero instead of the buffer it is owed. Hand everything
+            // back exactly as the OVERLOADED refusal does, so a later attempt still resumes.
+            if let Plan::Resume { retained, .. } = plan {
+                self.gateway.store_resume(session_id, retained);
+            }
             return None;
         }
 

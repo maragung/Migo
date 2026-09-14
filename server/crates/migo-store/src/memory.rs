@@ -28,7 +28,7 @@
 //! because then a test could pass here and fail in production. Nothing awaits
 //! while the guard is held.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
@@ -39,23 +39,25 @@ use parking_lot::RwLock;
 
 use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
-    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
-    ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor, Device,
-    DeviceStatus, Entitlement, EntitlementPosition, GameSession, GiftReceipt, GiftSent,
-    GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerPosition,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
-    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
-    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
+    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, ClosedKickVote,
+    Conversation, ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor,
+    Device, DeviceStatus, Entitlement, EntitlementPosition, GameSession, GiftReceipt, GiftSent,
+    GlobalAdmin, IdentityKeyStatus, KeyBundle, KickVoteCast, KickVoteResult, LedgerAccount,
+    LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot,
+    NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
+    NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition, OutboxRecord,
+    Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration,
+    PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan,
+    RoomPosition, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpCaps,
+    XpChange, KICK_VOTE_TTL_MS, MAX_GROUP_MEMBERS,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
     ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, GlobalAdminStore,
-    IdentityKeyRow, IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore,
-    NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore,
-    SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
+    IdentityKeyRow, IdentityStore, KeyStore, KickVoteStore, LoginChallengeRow, MediaStore,
+    MessagingStore, NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter,
+    RoomStore, SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore,
+    MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.
@@ -230,6 +232,22 @@ struct State {
     /// Network-wide room bans, keyed by the banned account. Mirrors the
     /// `room_network_ban` table; the row's presence is the ban.
     network_bans: HashMap<Id, RoomNetworkBan>,
+    /// Kick-vote tallies in progress, at most one per subject, keyed by the
+    /// room or group conversation the vote runs in. Mirrors the `kick_vote`
+    /// and `kick_vote_voter` tables; the child table's rows live inside the
+    /// tally because a voter set is never read except through it.
+    kick_votes: HashMap<Id, OpenKickVote>,
+}
+
+/// One tally in progress, the memory shape of a `kick_vote` row with its
+/// voters beside it.
+struct OpenKickVote {
+    /// Who the vote would remove.
+    target: Id,
+    /// The accounts that have spoken, once each.
+    voters: HashSet<Id>,
+    /// When the first voice landed, for the lazy expiry.
+    opened_at: Timestamp,
 }
 
 impl State {
@@ -631,6 +649,7 @@ impl DeviceStore for MemoryStore {
             created_at: new.created_at,
             last_seen_at: new.created_at,
             revoked_at: None,
+            invisible: false,
         };
         s.devices.insert(device.device_id, device.clone());
         Ok(device)
@@ -689,6 +708,15 @@ impl DeviceStore for MemoryStore {
             return Err(fault::not_found("device"));
         };
         device.public_credential = Some(public_key.to_vec());
+        Ok(())
+    }
+
+    async fn set_device_invisible(&self, device_id: Id, invisible: bool) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(device) = s.devices.get_mut(&device_id) else {
+            return Err(fault::not_found("device"));
+        };
+        device.invisible = invisible;
         Ok(())
     }
 
@@ -1125,13 +1153,37 @@ impl MessagingStore for MemoryStore {
 
     async fn add_member(&self, member: ConversationMember) -> Result<()> {
         let mut s = self.state.write();
-        if !s.conversations.contains_key(&member.conversation_id) {
-            return Err(fault::not_found("conversation"));
-        }
+        let kind = s
+            .conversations
+            .get(&member.conversation_id)
+            .map(|conversation| conversation.kind)
+            .ok_or_else(|| fault::not_found("conversation"))?;
         let rows = s
             .conversation_members
             .entry(member.conversation_id)
             .or_default();
+        // The capacity backstop, inside the same write the seat lands in: the
+        // messaging service's pre-check is friendly and racy — two invites that
+        // both read "one seat left" both pass it — so the store is where the
+        // count and the insert become one fact, the same posture `join_room`
+        // takes for a room's own ceiling. It runs whenever this call would
+        // raise the active count — a fresh row or a departed member coming
+        // back — and never when it would not, so an idempotent re-add is
+        // still quiet. Groups only: a room's conversation is seated by
+        // `join_room`'s critical section, and a direct conversation has two
+        // seats by construction.
+        let seated = rows
+            .iter()
+            .any(|m| m.account_id == member.account_id && m.left_at.is_none());
+        if !seated && kind == ConversationKind::Group {
+            let active = rows.iter().filter(|m| m.left_at.is_none()).count();
+            if active >= MAX_GROUP_MEMBERS {
+                return Err(fault::error(
+                    codes::GROUP_FULL,
+                    "the group already has as many members as it may have",
+                ));
+            }
+        }
         if let Some(existing) = rows.iter_mut().find(|m| m.account_id == member.account_id) {
             // Rejoining clears the departure but keeps the original join time, so
             // "member since" does not reset every time somebody leaves and comes
@@ -2208,6 +2260,97 @@ impl RoomStore for MemoryStore {
     async fn clear_network_ban(&self, account_id: Id) -> Result<bool> {
         let mut s = self.state.write();
         Ok(s.network_bans.remove(&account_id).is_some())
+    }
+}
+
+#[async_trait]
+impl KickVoteStore for MemoryStore {
+    async fn cast_kick_vote(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+        voter: Id,
+        needed: u32,
+        now: Timestamp,
+    ) -> Result<KickVoteCast> {
+        let mut s = self.state.write();
+        let mut expired = None;
+        // The lazy expiry, in the same breath as the cast: a vote nobody
+        // finished is dropped the moment its subject sees another one, so no
+        // timer exists and no vote ever costs a wakeup.
+        if let Some(open) = s.kick_votes.get(&subject_id) {
+            if now.as_millis().saturating_sub(open.opened_at.as_millis()) > KICK_VOTE_TTL_MS {
+                let closed = s
+                    .kick_votes
+                    .remove(&subject_id)
+                    .expect("just checked present");
+                expired = Some(ClosedKickVote {
+                    target_id: closed.target,
+                    votes: closed.voters.len() as u32,
+                });
+            }
+        }
+        let result = match s.kick_votes.get_mut(&subject_id) {
+            Some(open) if open.target == target_id => {
+                if !open.voters.insert(voter) {
+                    // The same voice twice. The tally did not move, and the
+                    // caller learns that from the variant rather than from an
+                    // error, because a retried voice is a success that
+                    // published nothing.
+                    KickVoteResult::Unchanged {
+                        votes: open.voters.len() as u32,
+                    }
+                } else {
+                    let votes = open.voters.len() as u32;
+                    if votes >= needed {
+                        // The tally is dropped here, inside the lock, so a
+                        // second vote starting while the caller performs the
+                        // removal cannot see a tally that has already decided.
+                        s.kick_votes.remove(&subject_id);
+                        KickVoteResult::Passed { votes }
+                    } else {
+                        KickVoteResult::Voice { votes }
+                    }
+                }
+            }
+            // One question at a time per subject, and the store is where that
+            // is true for every node over it, not just the one asked.
+            Some(_) => KickVoteResult::AlreadyOpen,
+            None => {
+                s.kick_votes.insert(
+                    subject_id,
+                    OpenKickVote {
+                        target: target_id,
+                        voters: HashSet::from([voter]),
+                        opened_at: now,
+                    },
+                );
+                KickVoteResult::Opened { votes: 1 }
+            }
+        };
+        Ok(KickVoteCast { expired, result })
+    }
+
+    async fn close_kick_vote_if_target(
+        &self,
+        subject_id: Id,
+        target_id: Id,
+    ) -> Result<Option<ClosedKickVote>> {
+        let mut s = self.state.write();
+        if s.kick_votes
+            .get(&subject_id)
+            .is_some_and(|open| open.target == target_id)
+        {
+            let closed = s
+                .kick_votes
+                .remove(&subject_id)
+                .expect("just checked present");
+            return Ok(Some(ClosedKickVote {
+                target_id: closed.target,
+                votes: closed.voters.len() as u32,
+            }));
+        }
+        Ok(None)
     }
 }
 
