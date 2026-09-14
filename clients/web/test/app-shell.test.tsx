@@ -12,16 +12,18 @@
  *      controls and resize handles; a phone window has none of it, because the strip's tab
  *      already names it and closes it; a minimized window renders nothing at all.
  *   3. **The taskbar.** One button per window, the focused one marked, a minimized window's
- *      button kept with the pale dot, the balance chip silent until the wallet answers, and the
- *      dock toggle that names the edge it will move to.
+ *      button kept with the pale dot, the connection chip stating the transport in the footer
+ *      band's own vocabulary, and the dock toggle that names the edge it will move to.
  *   4. **The phone's strip.** Friends, Rooms, Feed in the reference order with only Feed
  *      closable; the "+" that reopens a closed tab; one closable tab per window with its unread
- *      badge capped at "9+".
+ *      badge capped at "9+". No Main tab in either navigation mode — Chat List Mode's list is
+ *      the home screen, and the view header's back control (not a tab) returns to it.
  *   5. **The vocabulary.** Every window kind has a label and an icon, and a chat window's id is
  *      its conversation's, so a thread can never open twice.
  *   6. **The contacts window.** A titled, pill-navigated window whose close control asks to log
- *      out — with the contacts window gone there is no desk left to come back to — and whose
- *      footer band speaks the wallet's $MIG, never a credits economy.
+ *      out — with the contacts window gone there is no desk left to come back to — whose me bar
+ *      carries the wallet's $MIG above its chips, and whose footer band carries the connection
+ *      mark, never a credits economy.
  *   7. **The layout contract.** The stylesheet pins the two rules the windows stand on: the phone's
  *      window fills from below the strip to the viewport's foot (no height cap to stop it short),
  *      and the thread is a flex column whose composer cannot scroll away — plus the desk carries
@@ -44,6 +46,7 @@ import type { Id } from '@migo/sdk';
 
 import { AppShell } from '../src/components/app-shell.js';
 import { ContactsWindow } from '../src/components/contacts-window.js';
+import { MobileHome } from '../src/components/mobile-home.js';
 import {
   MobileTabBar,
   MOBILE_NAV_META,
@@ -272,7 +275,7 @@ test('a minimized window keeps its button, with the pale dot', () => {
   assert.ok(!markup.includes('task-btn-active'), 'a minimized window is not the active one');
 });
 
-test('an unanswered balance stays silent; the clock and the logout are always there', () => {
+test('the connection chip states the transport; the clock and the logout are always there', () => {
   const markup = desk(
     <Taskbar
       windows={[]}
@@ -286,9 +289,12 @@ test('an unanswered balance stays silent; the clock and the logout are always th
     />,
   );
 
-  // The balance is read once per mount; a wallet that has not answered says nothing — a
-  // silence the static render pins, because "0" would be a balance the wallet never reported.
-  assert.ok(!markup.includes('$MIG balance'), 'an unread balance must not render a chip');
+  // The chip that took the balance's seat states the transport in the footer band's own
+  // vocabulary, so the desk's two glances never disagree; the $MIG figure itself is the me
+  // bar's now, not the taskbar's.
+  assert.ok(markup.includes('conn-dot-up'), 'the connection chip must state the transport');
+  assert.ok(markup.includes('>Online</span>'), 'the connected word is missing from the chip');
+  assert.ok(!markup.includes('$MIG'), 'the balance is not the taskbar’s to state any more');
   assert.ok(markup.includes('aria-label="Clock"'), 'the clock is missing');
   assert.ok(markup.includes('Logout'), 'the logout control is missing');
   assert.ok(
@@ -328,7 +334,6 @@ function strip(fields?: {
   navTab?: MobileNavTab;
   hiddenNavs?: readonly MobileNavTab[];
   navUnread?: Readonly<Record<MobileNavTab, number>>;
-  chatListMode?: boolean;
 }): string {
   return renderToStaticMarkup(
     <MobileTabBar
@@ -338,7 +343,6 @@ function strip(fields?: {
       navTab={fields?.navTab ?? 'feed'}
       hiddenNavs={fields?.hiddenNavs ?? []}
       navUnread={fields?.navUnread ?? { main: 0, friends: 0, rooms: 0, feed: 0 }}
-      chatListMode={fields?.chatListMode ?? false}
       onSelectNav={NOOP}
       onCloseNav={NOOP}
       onReopenNav={NOOP}
@@ -377,39 +381,45 @@ test('a closed home tab comes back through the "+"', () => {
   );
 });
 
-test('the tabbed strip never offers a Main tab', () => {
+test('the strip never offers a Main tab — the chat list is the home screen, not a tab', () => {
   const markup = strip();
 
-  assert.ok(!markup.includes('>Main</button>'), 'the tabbed home is the three it has always been');
+  // Chat List Mode gives its conversation list no tab of its own: the list is the screen the
+  // strip's three tabs navigate away from, and the view header's back control returns to it, so
+  // the strip is exactly the three it has always been in either mode.
+  assert.ok(!markup.includes('>Main</button>'), 'the home strip is the three it has always been');
+  assert.ok(!markup.includes('Close Main'), 'no Main tab exists to be closable');
 });
 
-test('the chat-list strip leads with Main, and Main is the home itself', () => {
-  const markup = strip({
-    chatListMode: true,
-    navTab: 'main',
-    navUnread: { main: 3, friends: 0, rooms: 0, feed: 0 },
-  });
+test('Chat List Mode returns to the list through the view header’s back, not a tab', () => {
+  const home = (nav: MobileNavTab): string =>
+    sessionShell(
+      <MobileHome
+        nav={nav}
+        onOpenConversation={NOOP}
+        onOpenWindow={NOOP}
+        onOpenUserIntent={NOOP}
+        onOpenRoomIntent={NOOP}
+        onBackToChats={NOOP}
+        onRequestLogout={NOOP}
+      />,
+    );
 
-  // The order the mode promises: Main, then Friends, Rooms, Feed — Main first because the list
-  // is the mode's point, the other three exactly where the tabbed strip keeps them. The needle
-  // stops at the label's closing bracket, not the button's: Main carries this strip's badge, so
-  // its label is followed by the badge's span, not by the button's end.
-  let at = -1;
-  for (const label of ['Main', 'Friends', 'Rooms', 'Feed']) {
-    const found = markup.indexOf(`>${label}<`);
-    assert.ok(found !== -1, `the "${label}" home tab is missing from the chat-list strip`);
-    assert.ok(found > at, `the "${label}" tab is out of the chat-list order`);
-    at = found;
-  }
-  // Main is the home itself, like Friends and Rooms: it ships without an X, so the list cannot
-  // be closed out from under the mode.
-  assert.ok(!markup.includes('Close Main'), 'the Main tab must not be closable');
-  assert.ok(markup.includes('aria-label="Close Feed tab"'), 'the Feed tab stays closable');
-  assert.ok(markup.includes('>3</span>'), 'the Main tab carries the unread badge');
-  assert.equal(
-    (markup.match(/task-btn-active/g) ?? []).length,
-    1,
-    'exactly one tab may carry the active mark',
+  // The mode's way back: the three tabbed views carry a back control in the view header, and
+  // the list itself owes no way back to itself.
+  const friends = home('friends');
+  assert.ok(
+    friends.includes('aria-label="Back to chats"'),
+    'a tabbed view must offer the way back to the list',
+  );
+  const list = home('main');
+  assert.ok(
+    !list.includes('aria-label="Back to chats"'),
+    'the list itself is where the back control goes — it owes none',
+  );
+  assert.ok(
+    list.includes('Chats · 0 conversations'),
+    'the main view is the conversation list itself',
   );
 });
 
@@ -495,10 +505,16 @@ test('the contacts list is a window: titled, pill-navigated, and closing it asks
   assert.ok(markup.includes('hdr-orange'), 'the me bar is missing from the window');
   assert.ok(markup.includes('New here! Say hi :)'), 'the status line owes its placeholder');
   assert.ok(markup.includes('title="Menu"'), 'the gear menu button is missing');
-  // The footer band is the wallet's own vocabulary: the on-chain $MIG balance, never a credits
-  // economy. A wallet that has not answered owes the ticker, not a number it never reported.
+  // The wallet's figure rides above the me bar's chips, over the alerts and the account door —
+  // the seat the footer band used to give it. A wallet that has not answered owes the ticker,
+  // not a number it never reported.
+  assert.ok(markup.includes('me-balance'), 'the me bar must carry the balance above its chips');
+  assert.ok(markup.includes('$MIG'), 'the me bar must speak the wallet’s $MIG');
+  // The footer band took the connection mark in the balance's place: the transport's health in
+  // the taskbar chip's own vocabulary, never a credits economy.
   assert.ok(markup.includes('list-footer'), 'the footer band is missing from the window');
-  assert.ok(markup.includes('$MIG'), 'the footer band must speak the wallet’s $MIG');
+  assert.ok(markup.includes('conn-dot-up'), 'the footer band must state the connection');
+  assert.ok(markup.includes('>Online</span>'), 'the footer band’s mark must say its word');
   assert.ok(!markup.includes('Credits'), 'a credits economy has no place in the footer band');
 });
 

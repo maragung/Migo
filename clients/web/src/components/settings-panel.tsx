@@ -18,7 +18,8 @@
  *     and the one honest broom: clearing the saved chat logs, which names exactly what it keeps.
  *   * **Tampilan** — the theme.
  *   * **Navigation** — how conversations are presented: the tabbed windows the client has always
- *     had, or Chat List Mode's single list (the phone's Main tab, the desk's split view).
+ *     had, or Chat List Mode's single list (the home screen the thread opens from as its own
+ *     full-screen activity).
  *   * **Akun** — the door to the account panel (identity, email, passphrase, key file).
  *   * **Diagnostik** — the dev-build-only session wire counter (§171), so the bandwidth cost of
  *     a feature is visible while the feature is being written. It never appears in a production
@@ -772,9 +773,10 @@ function AppearanceSection(): ReactNode {
  *
  * Tabbed Navigation is the layout the client has always had and is offered first because it is
  * the default — the choice that changes nothing. Chat List Mode keeps every list and panel where
- * it is and reroutes only the conversations: the phone's home gains a Main tab holding the
- * conversation list, and the desk trades its per-conversation windows for one split view. The
- * choice persists (see lib/migo/nav-mode.ts), so it survives a restart.
+ * it is and reroutes only the conversations: the conversation list becomes the main screen (the
+ * phone's home, the desk's panel beside the contacts window), and a tap opens the thread as a
+ * full-screen chat activity whose back control returns to the list. The choice persists (see
+ * lib/migo/nav-mode.ts), so it survives a restart.
  *
  * Exported for the settings tests, like the other presentational halves above.
  */
@@ -803,8 +805,9 @@ export function NavigationSection(): ReactNode {
       </div>
       <p className="muted">
         Tabbed Navigation is the classic windows-and-strip layout. Chat List Mode opens your
-        conversations from one list — the phone&rsquo;s Main tab, the desk&rsquo;s split view.
-        Friends, Rooms, and Feed stay exactly as they are either way.
+        conversations from one list — the home screen itself — and each chat opens as its own
+        full-screen activity with a back button. Friends, Rooms, and Feed stay exactly as they are
+        either way.
       </p>
     </section>
   );

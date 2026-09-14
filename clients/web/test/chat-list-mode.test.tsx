@@ -2,16 +2,16 @@
  * What Chat List Mode is allowed to be.
  *
  * The mode is additive by contract: the tabbed layout it sits beside is the stable baseline, and
- * the mode's own surfaces — the settings control that picks it, the desk's split view, the
- * searchable conversation list — must each state exactly what they are and nothing more. These
- * tests pin that at the component layer:
+ * the mode's own surfaces — the settings control that picks it, the full-screen chat activity a
+ * tap opens, the searchable conversation list — must each state exactly what they are and
+ * nothing more. These tests pin that at the component layer:
  *
  *   1. **The settings control.** Settings → Navigation offers exactly the two named choices, and
  *      the pressed one is the stored one — tabbed when nothing is stored (the default an account
  *      that never opened Settings keeps seeing), Chat List Mode when the store says so.
- *   2. **The desk's split view.** A left pane labelled as the chat list, a right pane labelled as
- *      the chat window, and with no conversation open the pane says so rather than rendering an
- *      empty thread that reads as one.
+ *   2. **The chat activity.** The thread a tap opens is a full-screen activity of its own, with
+ *      the back control that returns to the list — not a pane sharing a window with it, and not
+ *      a small dialog over it.
  *   3. **The searchable list degrades honestly.** With no conversations and no client, the
  *      searchable wrap renders the same "no conversations yet" state the bare list does — a
  *      search field over nothing is noise, not a feature.
@@ -26,15 +26,17 @@ import type { ReactNode } from 'react';
 
 import type { Id } from '@migo/sdk';
 
-import { ChatSplitView } from '../src/components/chat-split-view.js';
+import { ChatActivity } from '../src/components/chat-activity.js';
 import { ConversationList } from '../src/components/conversation-list.js';
 import { NavigationSection } from '../src/components/settings-panel.js';
 import { CallManagerProvider } from '../src/lib/migo/call-manager.js';
 import { ConversationsProvider } from '../src/lib/migo/conversations-provider.js';
+import { GroupCallManagerProvider } from '../src/lib/migo/group-call-manager.js';
 import { MutedProvider } from '../src/lib/migo/muted-provider.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
 import type { MigoContextValue } from '../src/lib/migo/provider.js';
 import { RoomsProvider } from '../src/lib/migo/rooms-provider.js';
+import { SectionNavProvider } from '../src/lib/migo/section-nav.js';
 
 const ME = 'acct_self' as Id;
 
@@ -60,7 +62,11 @@ function sessionShell(node: ReactNode): string {
       <ConversationsProvider>
         <RoomsProvider>
           <MutedProvider>
-            <CallManagerProvider>{node}</CallManagerProvider>
+            <CallManagerProvider>
+              <GroupCallManagerProvider>
+                <SectionNavProvider navigate={() => {}}>{node}</SectionNavProvider>
+              </GroupCallManagerProvider>
+            </CallManagerProvider>
           </MutedProvider>
         </RoomsProvider>
       </ConversationsProvider>
@@ -143,21 +149,40 @@ test('with the choice stored, the pressed one is the stored one', () => {
   );
 });
 
-// --- the desk's split view ---
+// --- the chat activity ---
 
-test('the split view is a chat list beside a chat window, and says so when nothing is open', () => {
-  const markup = sessionShell(<ChatSplitView conversationId={null} />);
+test('the chat activity is a full-screen thread whose back returns to the list', () => {
+  const markup = sessionShell(
+    <ChatActivity conversationId={'c1' as Id} onBack={() => {}} deskTaskbar={null} />,
+  );
 
-  assert.ok(markup.includes('aria-label="Chat list"'), 'the left pane must be the chat list');
-  assert.ok(markup.includes('aria-label="Chat window"'), 'the right pane must be the chat window');
+  assert.ok(markup.includes('chat-activity'), 'the thread must wear the activity frame');
   assert.ok(
-    markup.includes('No conversation open'),
-    'an empty pane must say so rather than render an empty thread',
+    markup.includes('aria-label="Back to chats"'),
+    'the activity’s one way out is the back control',
   );
   assert.ok(
-    markup.includes('the list stays beside it'),
-    'the empty state must name the mode’s promise: the list stays visible',
+    markup.includes('thread-pane'),
+    'the activity holds the same thread every surface does',
   );
+});
+
+test('the activity leaves the desk’s taskbar its own edge', () => {
+  // The desk variants clear the taskbar's 34px on the edge it occupies; a phone activity (null)
+  // has no variant class at all, because it covers everything.
+  const bottom = sessionShell(
+    <ChatActivity conversationId={'c1' as Id} onBack={() => {}} deskTaskbar="bottom" />,
+  );
+  assert.ok(
+    bottom.includes('chat-activity-tb-bottom'),
+    'a bottom-docked taskbar must keep its edge',
+  );
+
+  const top = sessionShell(
+    <ChatActivity conversationId={'c1' as Id} onBack={() => {}} deskTaskbar="top" />,
+  );
+  assert.ok(top.includes('chat-activity-tb-top'), 'a top-docked taskbar must keep its edge');
+  assert.ok(!top.includes('chat-activity-tb-bottom'), 'the variants are mutually exclusive');
 });
 
 // --- the searchable list ---

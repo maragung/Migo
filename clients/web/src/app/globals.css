@@ -1335,51 +1335,48 @@ main {
   color: var(--text-faint);
 }
 
-/* The desk's split view: the conversation list on the left (a quarter, bounded so a wide screen
-   does not stretch a list row into a paragraph), the single thread pane on the right. The holder
-   is positioned by the shell — it knows where the contacts window is — and this is the split. */
-.chat-split {
-  display: flex;
-  height: 100%;
-  min-height: 0;
-}
-.chat-split-list {
+/* The desk's Chat List Mode main screen: the conversation list as a panel of its own. The
+   holder is positioned by the shell — it knows where the contacts window is — and this is the
+   panel the list fills; a tap on a row covers the desk with the mode's full-screen chat
+   activity, so there is no thread pane here to style. */
+.chat-list-holder {
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  width: 25%;
-  min-width: 220px;
-  max-width: 340px;
   min-height: 0;
-  border-right: 1px solid var(--border);
-  background: var(--panel-alt);
-}
-.chat-split-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-.chat-split-empty {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 24px;
-  color: var(--text-dim);
-  text-align: center;
-}
-.chat-split-empty-title {
-  font-weight: 700;
+  overflow: hidden;
+  border: 1px solid var(--migo-teal-line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  background: var(--panel);
   color: var(--text);
 }
-.chat-split-empty-text {
-  margin: 0;
-  max-width: 320px;
-  font-size: var(--fs-meta);
+
+/* --- the chat activity (Chat List Mode) --- */
+
+/* The thread as a screen of its own: fixed over the whole viewport, at the overlays' height —
+   above the desk and everything it shows, below the sheets and the confirm dialog that portal
+   to the body. On a phone it covers the strip too (the strip is the list's navigation, and the
+   list is not on screen); on the desk the two variants leave the taskbar its 34px, because the
+   taskbar is the desk's own chrome — the clock, the session timer, the connection mark — not
+   this conversation's. The shell places this element as a sibling of the desk for the same
+   reason the overlays portal: the desk's z fence must not be able to swallow it. */
+.chat-activity {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+}
+.chat-activity-tb-top {
+  top: 34px;
+}
+.chat-activity-tb-bottom {
+  bottom: 34px;
 }
 
 /* --- avatar --- */
@@ -1894,11 +1891,12 @@ main {
 
 /* The wrap stacks whatever sits above or below the input row: the reply bar, the upload line. */
 /* ── The list footer band ─────────────────────────────────────────────────────────────────────
-   Both windows in the reference close with the same pale band: the $MIG balance on the left, a
+   Both windows in the reference close with the same pale band: the realtime connection's mark
+   on the left (the seat the $MIG balance used to hold before it moved up into the me bar), a
    small lowercase hint on the right saying what the open list responds to. It is the composer's
    band on the other panel — same tint, same hairline — which is what makes the two columns read
-   as one window rather than two apps side by side. Micro type, because a status bar that competes
-   with the list above it has stopped being a status bar. */
+   as one window rather than two apps side by side. Micro type, because a status bar that
+   competes with the list above it has stopped being a status bar. */
 .list-footer {
   display: flex;
   align-items: center;
@@ -1910,21 +1908,15 @@ main {
   font-size: var(--fs-micro);
   flex-shrink: 0;
 }
-.list-footer-balance {
+.list-footer-conn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-weight: 700;
   color: var(--footer-ink);
   white-space: nowrap;
 }
-/* The coin is the design's gold, the one warm mark on a cool band. */
-.list-footer-balance .coin-mark {
-  color: var(--gold);
-  flex-shrink: 0;
-}
-/* The hint is an aside, so it yields first: it truncates rather than pushing the balance out of
-   the band on a narrow phone, because the number is the half worth keeping. */
+/* The hint is an aside, so it yields first: it truncates rather than pushing the mark out of
+   the band on a narrow phone, because the connection is the half worth keeping. */
 .list-footer-hint {
   color: var(--text-faint);
   min-width: 0;
@@ -2292,33 +2284,36 @@ main {
   place-items: center;
 }
 
-/* --- connection dot --- */
+/* --- connection mark --- */
 
-/* The one connection mark, worn in the corner whatever the transport is doing: green steady
-   while it works, yellow pulsing while it (re)connects, red once it has dropped and the
-   automatic retry owns the recovery. It sits above the taskbar whichever side the user docked
-   it, and never takes a pointer, so it cannot sit in the way of a click; what it means stays
-   one hover away through its title. Below the PC breakpoint the tab strip lives at the top of
-   the screen, so the corner is free and the dot drops to the very edge. */
-.conn-dot {
-  position: fixed;
-  right: 12px;
-  bottom: calc(44px + env(safe-area-inset-bottom, 0px));
-  z-index: var(--z-toast);
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  pointer-events: none;
-  box-shadow: 0 0 0 2px var(--bg-elevated);
+/* The one connection mark, worn inline whatever the transport is doing: green steady while it
+   works, yellow pulsing while it (re)connects, red once it has dropped and the automatic retry
+   owns the recovery. It used to float in the shell's corner, above whatever window was showing —
+   which put it over the chat window, where nobody asked for it; it now sits in the seats the
+   $MIG balance vacated when it moved up into the me bar: the list windows' footer band and the
+   desk taskbar's chip. The word beside the dot is the glance's half; the sentence behind the
+   hover (the component's label) is the rest. */
+.conn-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+  white-space: nowrap;
 }
-.conn-dot-up {
+.conn-mark-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.conn-dot-up .conn-mark-dot {
   background: var(--positive);
 }
-.conn-dot-wait {
+.conn-dot-wait .conn-mark-dot {
   background: var(--warning);
   animation: conn-dot-pulse 1.3s infinite;
 }
-.conn-dot-down {
+.conn-dot-down .conn-mark-dot {
   background: var(--danger);
 }
 @keyframes conn-dot-pulse {
@@ -2328,11 +2323,6 @@ main {
   }
   50% {
     opacity: 0.3;
-  }
-}
-@media (max-width: 1023px) {
-  .conn-dot {
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   }
 }
 
@@ -5574,12 +5564,37 @@ button.activity-row-btn:focus-visible {
 .me-status:hover {
   text-decoration-color: rgba(255, 255, 255, 0.7);
 }
+/* The chips stack: the wallet's $MIG figure rides above the row of controls, over the alerts
+   and the account door — the design's own seat for the figure the footer band and the taskbar
+   chip used to carry. */
 .me-chips {
   display: flex;
+  flex-direction: column;
   flex-shrink: 0;
+  align-items: flex-end;
+  gap: 4px;
+  margin-left: auto;
+}
+.me-chip-row {
+  display: flex;
   align-items: center;
   gap: 5px;
-  margin-left: auto;
+}
+/* The balance reads as a figure on the orange, the coin in the design's gold — the one warm
+   mark the bar already carries. */
+.me-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.me-balance .coin-mark {
+  color: var(--gold);
+  flex-shrink: 0;
 }
 .hdr-chip {
   position: relative;

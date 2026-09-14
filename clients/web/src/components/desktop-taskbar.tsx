@@ -5,21 +5,20 @@
  *
  * Thirty-four pixels of deep teal at the screen's edge (which edge is a stored choice — the
  * dock toggle beside the clock flips it and remembers): one button per open window with the
- * state of its dot (green for on-top, pale for minimized), the account's real $MIG balance, the
- * session's running time, and the clock. The window buttons restore, focus, or minimize their
+ * state of its dot (green for on-top, pale for minimized), the realtime connection's health,
+ * the session's running time, and the clock. The window buttons restore, focus, or minimize their
  * window in one click — the same toggle the reference's taskbar performs.
  *
- * The balance is live: it is read once per mount and re-read whenever the server says the
- * wallet moved — this is the glance, not the ledger — and a failed read leaves the chip empty
- * rather than showing a zero the wallet never reported.
+ * The connection chip took the seat the $MIG balance used to hold (the balance moved up into the
+ * contacts window's me bar, above the alerts and the account door): the transport's health is
+ * the fact a desk glance wants, in the same live vocabulary the list windows' footer band wears,
+ * so the two never disagree.
  */
 
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { useBalance } from '@/lib/migo/use-balance.js';
-
-import { CoinMark } from './icons.js';
+import { ConnectionStatusDot } from './connection-status-dot.js';
 import { Icon } from './icons.js';
 import { MigoDiamond } from './migo-brand.js';
 import { KIND_LABEL } from './window-types.js';
@@ -50,7 +49,6 @@ export function Taskbar({
   onTogglePos: () => void;
 }): ReactNode {
   const [now, setNow] = useState<Date | null>(null);
-  const balance = useBalance();
 
   // The clock starts on mount (never during a static render) and drifts no further than a
   // minute between ticks.
@@ -98,13 +96,10 @@ export function Taskbar({
         })}
       </div>
 
-      {/* The on-chain $MIG balance, in the Wallet window's own vocabulary. */}
-      {balance !== null ? (
-        <span className="task-chip" title="$MIG balance">
-          <CoinMark size={14} />
-          $MIG {balance.toLocaleString()}
-        </span>
-      ) : null}
+      {/* The realtime connection's health, in the footer band's own vocabulary. */}
+      <span className="task-chip" title="Connection">
+        <ConnectionStatusDot />
+      </span>
       <span className="task-chip" title="Session time">
         <Icon name="clock" size={12} />
         {mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`}

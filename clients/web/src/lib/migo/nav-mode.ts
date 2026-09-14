@@ -6,9 +6,10 @@
  * `tabbed` is the layout the client has always had — every conversation a window of its own on
  * the desk, a full-screen thread on the phone — and it is the default, so an account that never
  * opens Settings sees nothing change. `chatlist` keeps every list and panel exactly where it is
- * and changes only the conversation route: the phone's home gains a Main tab that holds the
- * conversation list, and the desk replaces the per-conversation windows with one split view —
- * the list on the left, a single thread pane on the right.
+ * and changes only the conversation route, WhatsApp-on-Android shaped: the conversation list is
+ * the main screen (the phone's home, the desk's panel beside the contacts window — no extra tab
+ * for it; the view header's back control returns to it), and a tap opens the thread as a
+ * full-screen chat activity of its own whose back control returns to the list.
  *
  * The choice persists in `localStorage` under {@link STORAGE_KEY} — a plain string, never key
  * material, so the audit rule that keeps secrets out of `localStorage` is not touched. Like the
