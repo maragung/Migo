@@ -3257,6 +3257,71 @@ main {
   gap: 8px 16px;
   color: var(--text-dim);
 }
+.profile-fact-id {
+  font-family: var(--mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.profile-copy-id {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.profile-copy-id:hover {
+  color: var(--accent);
+}
+.profile-verified {
+  color: var(--accent);
+  font-size: 13px;
+  vertical-align: 2px;
+  margin-left: 4px;
+}
+.profile-presence {
+  color: var(--accent);
+}
+.profile-status {
+  font-style: italic;
+}
+.profile-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.profile-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.profile-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.profile-progress-note {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.profile-rel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.profile-rel {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.profile-rel-friend {
+  color: var(--accent);
+  font-weight: 600;
+}
 .badge-row {
   display: flex;
   flex-wrap: wrap;

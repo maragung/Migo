@@ -754,7 +754,16 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       />
 
       {profileOpen && peerId !== null ? (
-        <UserProfileModal userId={peerId} onClose={() => setProfileOpen(false)} />
+        <UserProfileModal
+          userId={peerId}
+          onClose={() => setProfileOpen(false)}
+          onGift={() => {
+            setProfileOpen(false);
+            setGiftKey(newIntentKey());
+            setGiftRecipient(peerId);
+            setGiftOpen(true);
+          }}
+        />
       ) : null}
     </div>
   );

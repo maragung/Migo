@@ -21,7 +21,7 @@ import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { PresenceState } from '@migo/sdk';
+import { PresenceState, RelationshipKind } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
 import { UserProfileCard } from '../src/components/user-profile-modal.js';
@@ -111,4 +111,135 @@ test('missing standing facts degrade to their absence, not to a broken card', ()
   assert.ok(!plain.includes('badge-chip'), 'missing badges leaked a badge row');
   assert.ok(!plain.includes('Analyst of engines.'), 'an absent bio was invented');
   assert.ok(!plain.includes('🌍'), 'an absent country was invented');
+});
+
+test('the enriched card carries presence, status, language, rank, and the level bar', () => {
+  const markup = renderToStaticMarkup(
+    <UserProfileCard
+      profile={{
+        ...ADA,
+        language: 'en',
+        customStatus: 'Counting engines',
+        verified: true,
+      }}
+      progression={{
+        accountId: ADA.userId,
+        xp: 1200,
+        level: 3,
+        xpIntoLevel: 200,
+        xpForNextLevel: 400,
+      }}
+      rank={4}
+      relationship={RelationshipKind.Friend}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+    />,
+  );
+
+  assert.ok(markup.includes('Online'), 'the presence line is missing');
+  assert.ok(markup.includes('Counting engines'), 'the custom status is missing');
+  assert.ok(markup.includes('🗣 en'), 'the language fact is missing');
+  assert.ok(markup.includes('profile-verified'), 'the verified mark is missing');
+  assert.ok(markup.includes('🏆 #4 on the XP board'), 'the rank fact is missing');
+  assert.ok(markup.includes('200 / 400 XP to level 4'), 'the level bar note is missing');
+  assert.ok(markup.includes('profile-progress-fill'), 'the level bar track is missing');
+  assert.ok(markup.includes('✓ Friends'), 'the friend line is missing');
+  assert.ok(
+    markup.includes('aria-label="Copy MGO-ADA42"'),
+    'the copy-id control lost its accessible name',
+  );
+  assert.ok(!markup.includes('Add friend'), 'a friend was offered an add-friend control');
+});
+
+test('the social line offers the one act each relationship state admits', () => {
+  const incoming = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      relationship={RelationshipKind.PendingIncoming}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onFriendRespond={() => {}}
+    />,
+  );
+  assert.ok(incoming.includes('>Accept<'), 'a pending incoming request lost its accept control');
+  assert.ok(incoming.includes('>Decline<'), 'a pending incoming request lost its decline control');
+  assert.ok(!incoming.includes('Add friend'), 'a pending request was offered an add-friend');
+
+  const outgoing = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      relationship={RelationshipKind.PendingOutgoing}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+    />,
+  );
+  assert.ok(outgoing.includes('Request sent'), 'a pending outgoing request lost its line');
+  assert.ok(!outgoing.includes('Add friend'), 'a sent request was re-offered');
+
+  const stranger = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      relationship={RelationshipKind.Follow}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onFriendRequest={() => {}}
+    />,
+  );
+  assert.ok(stranger.includes('>Add friend<'), 'a no-relationship state lost its add control');
+  assert.ok(!stranger.includes('✓ Friends'), 'a non-friend was marked a friend');
+
+  // An unknown relationship renders no social line at all — honest, not presumptuous.
+  const unknown = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onFriendRequest={() => {}}
+    />,
+  );
+  assert.ok(!unknown.includes('Add friend'), 'an unknown relationship invented a social line');
+  assert.ok(!unknown.includes('✓ Friends'), 'an unknown relationship invented a friendship');
+});
+
+test('a rankless person carries no board line, and the gift act appears only when offered', () => {
+  const bare = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+    />,
+  );
+  assert.ok(!bare.includes('XP board'), 'an unread board leaked a rank line');
+
+  const giftable = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onGift={() => {}}
+    />,
+  );
+  assert.ok(giftable.includes('>Gift<'), 'the gift action is missing where it is offered');
+  assert.ok(!bare.includes('>Gift<'), 'a gift action appeared where none was offered');
 });
