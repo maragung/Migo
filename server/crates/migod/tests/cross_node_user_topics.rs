@@ -56,7 +56,7 @@ const MESH_BUDGET: Duration = Duration::from_secs(10);
 const SEED_ALPHA: &str = "user-topic-alpha-000000000000000";
 
 /// Node beta's mesh signing seed.
-const SEED_BETA: &str = "user-topic-beta-00000000000000000";
+const SEED_BETA: &str = "user-topic-beta-0000000000000000";
 
 fn valid_token_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])

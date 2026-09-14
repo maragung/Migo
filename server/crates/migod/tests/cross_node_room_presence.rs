@@ -59,10 +59,10 @@ const MESH_BUDGET: Duration = Duration::from_secs(10);
 
 /// Node alpha's mesh signing seed, exactly 32 bytes the way `NodeSecret` demands. The
 /// mesh node id is the first 16 bytes, so the two seeds differ there.
-const SEED_ALPHA: &str = "room-presence-alpha-0000000000";
+const SEED_ALPHA: &str = "room-presence-alpha-000000000000";
 
 /// Node beta's mesh signing seed.
-const SEED_BETA: &str = "room-presence-beta-00000000000";
+const SEED_BETA: &str = "room-presence-beta-0000000000000";
 
 fn valid_token_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])
