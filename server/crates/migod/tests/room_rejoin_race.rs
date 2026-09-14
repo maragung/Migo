@@ -474,6 +474,18 @@ async fn try_message_of(
 /// must not take the room away from the member who came back.
 #[tokio::test]
 async fn a_stale_departure_does_not_revoke_a_rejoined_member() {
+    // Diagnostics: the federated half's failures are warn-level logs on nodes
+    // whose sockets stay silent, so the suite captures what both nodes logged
+    // while it ran. A second `try_init` failure would mean something else
+    // already installed a global subscriber; nothing else in this binary does,
+    // so silence is fine here.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "migod=debug,migo_federation=info,migo_gateway=warn",
+        ))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
     // The fleet: two nodes over one store, the one-database shape of section
     // 170, joined by the mesh link dm_federation.rs builds.
     let store = migo_store::open(&StoreConfig::default())
@@ -528,6 +540,30 @@ async fn a_stale_departure_does_not_revoke_a_rejoined_member() {
     // subscription whose survival is the subject of the test.
     let _: RoomJoinResponse = member_beta.join_room(room_id).await;
     member_beta.subscribe(&room_topics).await;
+
+    // The deterministic barrier for the room's own tier: the warm-up below
+    // proves the conversation watch, but the departure the race waits on rides
+    // the ROOM tier, whose watch ask is a separate row on the outbox. The
+    // leave's federated half is a plain no-op against an empty watcher table —
+    // no error, no warn, nothing crossing — so the table is polled, not
+    // assumed, before the race starts: the ask is durable and lands on the
+    // outbox runner's half-second tick.
+    let beta_id = fed_identity(BETA_KEY).0;
+    let mut registered = false;
+    let deadline = tokio::time::Instant::now() + FED_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        if alpha.room_relay.watchers_of(room_id).contains(&beta_id) {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(125)).await;
+    }
+    assert!(
+        registered,
+        "node alpha must register node beta as a watcher of the room inside the \
+         mesh budget: {:?}",
+        alpha.room_relay.watchers_of(room_id)
+    );
 
     // The warm-up: the owner sends until the member hears one, which proves
     // the whole federated path — beta's watch registration on alpha, the mesh

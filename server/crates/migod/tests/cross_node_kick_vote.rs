@@ -59,12 +59,15 @@ fn valid_token_key() -> String {
 }
 
 /// One node of the two, built over the shared store the way a single-database
-/// deployment builds every node it runs. The limiter ceilings are raised the
-/// way the cross-node resume suite raises them: three scripted clients driving
-/// a burst of handshakes, joins, and votes from one peer address are a test,
-/// not a stranger, and the configuration keeps every charge inside the burst so
-/// refill never enters the picture. One token key for both nodes, because a
-/// grant minted by one must verify on the other or the scenario dies at the
+/// deployment builds every node it runs. The limiter ceilings are raised above
+/// their defaults because the vote family carries the protocol's most
+/// expensive endpoint charge — twenty tokens against a bucket the tier and
+/// scope factors shrink to a quarter then a half of the user burst — so the
+/// default two hundred would leave a fresh account's vote bucket at
+/// twenty-five, one charge wide with no margin for the retry a test's burst
+/// might need. Four hundred keeps every charge inside the burst so refill
+/// never enters the picture. One token key for both nodes, because a grant
+/// minted by one must verify on the other or the scenario dies at the
 /// handshake.
 async fn build_node(store: &migo_store::SharedStore, node_id: &str, region: &str) -> App {
     let config = Config::from_sources(
@@ -78,7 +81,7 @@ async fn build_node(store: &migo_store::SharedStore, node_id: &str, region: &str
                 "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
                 "100".to_string(),
             ),
-            ("MIGO_RATE_LIMIT__USER_BURST".to_string(), "100".to_string()),
+            ("MIGO_RATE_LIMIT__USER_BURST".to_string(), "400".to_string()),
         ],
     )
     .expect("configuration should parse");

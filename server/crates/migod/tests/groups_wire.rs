@@ -157,6 +157,28 @@ struct LiveSession {
 
 impl LiveSession {
     async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        // The test-open burst can trip the connection limiter — a founder, a
+        // witness, and a sender's second device are several handshakes from
+        // one IP inside the limiter's window — and the refusal names a time
+        // at which the answer changes, so the session waits exactly as long
+        // as it is told and tries again, the way a client with manners does.
+        let mut backoff = 0u64;
+        for _ in 0..5 {
+            if backoff > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
+            }
+            match Self::handshake(addr, grant).await {
+                Ok(session) => return session,
+                Err(retry_after_ms) => backoff = retry_after_ms,
+            }
+        }
+        panic!("the handshake never succeeds even after backing off as instructed");
+    }
+
+    /// One full connection attempt, returning the retry-after the server
+    /// asked for when it refuses the handshake — at the HELLO or at the
+    /// self-subscription — as rate-limited.
+    async fn handshake(addr: SocketAddr, grant: &Grant) -> Result<Self, u64> {
         let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
             .await
             .expect("connecting does not stall")
@@ -176,11 +198,15 @@ impl LiveSession {
             Some(Opcode::Hello),
             "the handshake is answered with a WELCOME"
         );
-        assert!(
-            !welcome_frame.header.is_error(),
-            "the handshake is not refused: {:?}",
-            from_frame::<migo_protocol::Error>(&welcome_frame)
-        );
+        if welcome_frame.header.is_error() {
+            let refusal: migo_protocol::Error =
+                from_frame(&welcome_frame).expect("the refusal decodes");
+            assert!(
+                refusal.code == migo_protocol::codes::RATE_LIMITED,
+                "the handshake is refused outright: {refusal:?}"
+            );
+            return Err(u64::from(refusal.retry_after_ms.unwrap_or(1000)));
+        }
         let welcome: Welcome = from_frame(&welcome_frame).expect("the WELCOME decodes");
         assert_eq!(welcome.authenticated_user, Some(grant.account_id));
 
@@ -199,11 +225,15 @@ impl LiveSession {
         loop {
             let frame = recv_within(&mut stream, STEP).await;
             if frame.header.correlation == 2 {
-                assert!(
-                    !frame.header.is_error(),
-                    "the self-subscription is accepted: {:?}",
-                    from_frame::<migo_protocol::Error>(&frame)
-                );
+                if frame.header.is_error() {
+                    let refusal: migo_protocol::Error =
+                        from_frame(&frame).expect("the refusal decodes");
+                    assert!(
+                        refusal.code == migo_protocol::codes::RATE_LIMITED,
+                        "the self-subscription is refused outright: {refusal:?}"
+                    );
+                    return Err(u64::from(refusal.retry_after_ms.unwrap_or(1000)));
+                }
                 let confirmation: SubscribeResponse =
                     from_frame(&frame).expect("the SUBSCRIBE reply decodes");
                 assert_eq!(
@@ -211,7 +241,7 @@ impl LiveSession {
                     1,
                     "the own user topic is accepted"
                 );
-                return Self { stream };
+                return Ok(Self { stream });
             }
         }
     }
