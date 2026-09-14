@@ -705,6 +705,28 @@ pub struct OwnProfile {
     pub presence: Presence,
 }
 
+/// Another member's profile card, as the member menu's profile view holds it.
+///
+/// The same wire shape the pane's own card reduces from, kept as its own type because the two
+/// surfaces ask different questions: the pane edits its card, the member view only reads one —
+/// a group is where you find out who somebody is, not where you change who you are. The
+/// birth year and custom status are the owner's own disclosures and never ride another
+/// account's card, so they are absent here by design.
+#[derive(Debug, Clone)]
+pub struct MemberCard {
+    /// The person the card names, as the commands that act on them need it: the view reads the
+    /// copyable id below for display, but a friend request or a gift answers to this one.
+    #[allow(dead_code)] // Read once the profile view grows its social line.
+    pub account_id: Id,
+    pub username: String,
+    pub display_name: String,
+    /// The shareable MGO-… form, drawn for copying rather than for parsing.
+    pub public_id: String,
+    pub bio: Option<String>,
+    /// The state the account stood in when the card was read.
+    pub presence: Presence,
+}
+
 /// One account found by search or offered as a suggestion.
 #[derive(Debug, Clone)]
 pub struct PersonRow {

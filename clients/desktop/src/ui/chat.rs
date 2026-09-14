@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use egui::{Align, Key, Layout, RichText, Ui};
+use egui::{Align, Align2, Key, Layout, RichText, Ui};
 use migo_core::Id;
 use migo_protocol::ConversationRole;
 
@@ -188,6 +188,52 @@ pub struct ChatState {
     /// per conversation because the row belongs to the thread's history, not to whichever
     /// window is showing it.
     pub earlier: HashMap<Id, EarlierState>,
+    /// The member whose options menu is open, per conversation: clicking a roster row opens
+    /// the options that row hides — view profile, gift, the vote, and the founder's levers —
+    /// rather than laying them out beside every name. One menu per conversation at a time,
+    /// because two open menus would be two members' levers on screen at once and a click
+    /// aimed at one could land in the other's.
+    pub member_menus: HashMap<Id, Id>,
+    /// The gift catalogue as the member menu's picker reads it — the same shelves the wallet's
+    /// shop shows, filed by the same event, so a gift sent from a group costs what the wallet
+    /// said it would. Empty until a read lands; the picker's first open is the ask.
+    pub gifts: Vec<crate::model::GiftRow>,
+    /// The gift picker the member menu opened, when it stands: who the gift is for, and the
+    /// one idempotency key the pick minted. One at a time on the whole screen, like the
+    /// new-group form — two pickers would be two gifts half-chosen.
+    pub gifting: Option<GiftPick>,
+    /// The member profile a roster menu opened, when the card has answered: the card itself,
+    /// and the conversation whose window asked for it — the window that draws it, so a view
+    /// never outlives the group it was opened from.
+    pub member_profile: Option<MemberProfileView>,
+}
+
+/// The member profile view's own state: the card the wire answered, and the conversation whose
+/// window asked for it.
+#[derive(Clone)]
+pub struct MemberProfileView {
+    /// The conversation whose roster menu opened the view. The window draws the card, so the
+    /// card files against the conversation — a profile view that outlived its window would be
+    /// a card with nowhere to belong.
+    pub conversation_id: Id,
+    /// The card itself, as the profile fetch answered it.
+    pub card: crate::model::MemberCard,
+}
+
+/// The gift picker's own state, as the member menu opens it.
+#[derive(Clone)]
+pub struct GiftPick {
+    /// The conversation whose roster menu opened the picker — the window that draws it, the
+    /// same ownership rule the profile view keeps.
+    pub conversation_id: Id,
+    /// The member the gift is for, resolved at open so the picker never has to re-ask which
+    /// row it came from.
+    pub member: Id,
+    /// The pick's idempotency key, minted when the picker opened: the same key on every send
+    /// this pick attempts, so a lost reply retried is the first send again, not a second
+    /// charge. The picker closes after a send — one pick is one gift — so the key is one
+    /// intent's whole life.
+    pub key: String,
 }
 
 /// The load-earlier row's state for one conversation.
@@ -802,9 +848,9 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         search_row(ui, context, state, conversation_id);
     }
 
-    // The roster's fold-out: the group's people, their roles, and the levers a member or a
-    // founder holds. Drawn only for a group and only while the header's people button left
-    // it open; the panel's own first draw is the roster read's ask.
+    // The roster's fold-out: the group's people, their roles, and — behind each row's click —
+    // the options a member and a founder hold. Drawn only for a group and only while the
+    // header's people button left it open; the panel's own first draw is the roster read's ask.
     let roster_open = state
         .roster_open
         .get(&conversation_id)
@@ -813,6 +859,13 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
     if roster_open {
         group_roster_panel(ui, context, state, conversation_id);
     }
+
+    // The member menu's two overlays, drawn after the panes they were opened from: the gift
+    // picker over everything, and the profile card the wire answered, over the window whose
+    // roster asked for it. Both are this window's only while their conversation matches — a
+    // picker asked for in one group is not another group's picker, and neither is a card.
+    gift_picker(ui, context, state, conversation_id);
+    member_profile_window(ui, context, state, conversation_id);
 
     // The search's needle, taken as an owned value before the scroll area borrows `state`:
     // the thread's loop asks it per row with no borrow of the panel map behind it. `None` is
@@ -1273,14 +1326,21 @@ fn group_notices_tail(ui: &mut Ui, context: &Context<'_>, state: &ChatState, con
     }
 }
 
-/// The group's roster panel: every member with role and mute, and the levers the signed-in
-/// member holds — invite for everyone, rename/mute/kick for founders, the vote for all.
+/// The group's roster panel: every member with role and mute, and — folded behind each row
+/// until the row is clicked — the options a member and a founder hold.
 ///
 /// The panel's facts are the roster the wire answered, not the conversation row's member
 /// preview: roles and mutes live only on the roster, and the founder gates read them, so the
 /// panel opens with an ask (the shell issues it the moment the toggle opens) and draws what
 /// the answer filed. Until the answer lands the panel says so, because a roster that guessed
 /// would be a list of names with wrong authority beside them.
+///
+/// A member row is the entry to that member's options: view profile, gift, the vote every
+/// member holds, and the founder's mute terms and kick — the same menu the web client's room
+/// and group rosters open on a row click, so the levers live behind one click instead of
+/// beside every name. The gates are the server's own, mirrored: the founder's levers never
+/// reach this account's own row, never a fellow founder's, and never the departed; the vote
+/// is every member's but never aims at self or a founder.
 fn group_roster_panel(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -1316,14 +1376,21 @@ fn group_roster_panel(
         .and_then(|rows| me.and_then(|me| rows.iter().find(|m| m.account_id == me)))
         .is_some_and(|m| m.role == ConversationRole::Founder);
 
-    // Deferred commands, past the borrows above: a click is intent, and intent is applied
-    // after the panel has finished drawing.
+    // Deferred intents, past the borrows above: a click is intent, and intent is applied
+    // after the panel has finished drawing — the same patience every lever in this file is
+    // given, extended to the menu's own state (the roster borrow the loop draws from would
+    // otherwise fight the write).
     let mut invite_send: Option<Vec<Id>> = None;
     let mut rename_send: Option<String> = None;
-    let mut mute_send: Option<(Id, bool)> = None;
+    let mut mute_send: Option<(Id, Option<u64>)> = None;
     let mut kick_send: Option<Id> = None;
     let mut vote_send: Option<Id> = None;
     let mut leave = false;
+    // The member menu's own intents: a row clicked (open or close its options), a profile
+    // asked for, and a gift picker asked for.
+    let mut menu_toggle: Option<Id> = None;
+    let mut profile_ask: Option<Id> = None;
+    let mut gift_ask: Option<Id> = None;
 
     ui.add_space(space::SM);
     egui::Frame::new()
@@ -1383,89 +1450,155 @@ fn group_roster_panel(
                     .cloned()
                     .unwrap_or_else(|| model::short_id(member.account_id));
                 let departed = member.left_at.is_some();
-                ui.horizontal(|ui| {
-                    widgets::avatar(ui, context.theme, &name, 22.0);
-                    ui.label(
-                        RichText::new(name)
-                            .font(egui::FontId::proportional(font::SMALL))
-                            .color(if departed {
-                                colors.text_muted
-                            } else {
-                                colors.text
-                            }),
+                // The gates, stated once and read by everything below: the server's own
+                // immunity rules, mirrored so the menu says what the wire would allow. A
+                // founder's levers reach only the active members below the founder — never
+                // this account's own row (the server refuses a self-mute and a self-kick),
+                // never a fellow founder's. The vote is every member's, with the same two
+                // exclusions the server holds. The menu itself is offered on any row but
+                // this account's own and the departed: a departed member is past every
+                // lever, and the person themselves needs no menu to view their own card.
+                let not_self = me != Some(member.account_id);
+                let below_founder = member.role != ConversationRole::Founder;
+                let votable = not_self && below_founder && !departed;
+                let targetable = i_am_founder && votable;
+                let has_menu = not_self && !departed;
+                let menu_open = state
+                    .member_menus
+                    .get(&conversation_id)
+                    .is_some_and(|open| *open == member.account_id);
+
+                // The row is the menu's entry, so the row itself is the click: an
+                // allocated strip with a hover fill, the way a room row in the directory
+                // is, rather than a label that happens to sit where a button should be.
+                let height = 30.0;
+                let width = ui.available_width();
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+                let background = if menu_open {
+                    colors.surface_selected
+                } else if response.hovered() && has_menu {
+                    colors.surface_hover
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                if background != egui::Color32::TRANSPARENT {
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::same(crate::theme::radius::MD),
+                        background,
                     );
-                    if member.role == ConversationRole::Founder {
-                        widgets::pill(ui, "founder", colors.text_muted, colors.surface);
-                    }
-                    if member.muted_until.is_some() && !departed {
-                        widgets::pill(ui, "muted", colors.warning, colors.surface);
-                    }
-                    if departed {
-                        widgets::pill(ui, "left", colors.text_muted, colors.surface);
-                    }
-                    // The founder's levers, on the active members that are not this account:
-                    // the server refuses a self-mute and a self-kick, and the other founder
-                    // is beyond both — the button is withheld rather than sent to fail,
-                    // because a refusal the person can see coming is kinder than one that
-                    // arrives.
-                    let targetable = i_am_founder
-                        && me != Some(member.account_id)
-                        && member.role != ConversationRole::Founder
-                        && !departed;
-                    if targetable {
-                        let muted = member.muted_until.is_some();
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(if muted { "Unmute" } else { "Mute" })
-                                        .font(egui::FontId::proportional(font::TINY))
-                                        .color(colors.text_muted),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .clicked()
-                        {
-                            mute_send = Some((member.account_id, !muted));
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Remove")
-                                        .font(egui::FontId::proportional(font::TINY))
-                                        .color(colors.text_muted),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .on_hover_text("Costs 1 Kick Point, or 1 $MIG when none are held")
-                            .clicked()
-                        {
-                            kick_send = Some(member.account_id);
-                        }
-                    }
-                    // The vote, every member's lever, never aimed at this account and never
-                    // at a founder: the same gates the server holds, mirrored so the button
-                    // says what the wire would allow. Departed members are past voting out.
-                    if me != Some(member.account_id)
-                        && member.role != ConversationRole::Founder
-                        && !departed
-                        && ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Vote remove")
-                                        .font(egui::FontId::proportional(font::TINY))
-                                        .color(colors.text_muted),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .on_hover_text("Free — the vote costs nothing")
-                            .clicked()
-                    {
-                        vote_send = Some(member.account_id);
-                    }
-                });
+                }
+                let mut inner = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect.shrink2(egui::vec2(space::XS, 0.0)))
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                widgets::avatar(&mut inner, context.theme, &name, 22.0);
+                inner.add_space(space::XS);
+                inner.label(
+                    RichText::new(name)
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(if departed {
+                            colors.text_muted
+                        } else {
+                            colors.text
+                        }),
+                );
+                if member.role == ConversationRole::Founder {
+                    widgets::pill(&mut inner, "founder", colors.text_muted, colors.surface);
+                }
+                if member.muted_until.is_some() && !departed {
+                    widgets::pill(&mut inner, "muted", colors.warning, colors.surface);
+                }
+                if departed {
+                    widgets::pill(&mut inner, "left", colors.text_muted, colors.surface);
+                }
+                if has_menu {
+                    inner.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // The cue: a closed corner-bracket that says the row opens. The
+                        // glyph is the row's own promise, so it travels with the row and
+                        // not with the menu it opens.
+                        ui.label(
+                            RichText::new(if menu_open { "\u{25BE}" } else { "\u{25B8}" })
+                                .font(egui::FontId::proportional(font::TINY))
+                                .color(colors.text_muted),
+                        );
+                    });
+                }
+                if response.clicked() && has_menu {
+                    menu_toggle = Some(member.account_id);
+                }
+
+                // The options themselves, folded out under the row while it is open: one
+                // click on the row opens them, and the row's own facts — the role, the
+                // mute — stay on the row where they were read.
+                if menu_open && has_menu {
+                    egui::Frame::new()
+                        .fill(colors.surface)
+                        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+                        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::XS as i8))
+                        .show(ui, |ui| {
+                            if quiet_action(ui, "View profile", colors.text).clicked() {
+                                profile_ask = Some(member.account_id);
+                            }
+                            if quiet_action(ui, "Gift", colors.text)
+                                .on_hover_text("Send this person a gift from the shop.")
+                                .clicked()
+                            {
+                                gift_ask = Some(member.account_id);
+                            }
+                            // The vote, every member's lever, never aimed at this account
+                            // and never at a founder: the same gates the server holds,
+                            // mirrored so the option says what the wire would allow.
+                            if votable
+                                && quiet_action(ui, "Vote kick", colors.text)
+                                    .on_hover_text(
+                                        "Call a vote to remove this person. When half the \
+                                         group agrees, they are kicked. Free — the vote costs \
+                                         nothing.",
+                                    )
+                                    .clicked()
+                            {
+                                vote_send = Some(member.account_id);
+                            }
+                            // The founder's levers, on the rows the founder may act on: the
+                            // mute as its three terms rather than one fixed hour — the same
+                            // vocabulary the web panel offers — and the kick, which costs a
+                            // Kick Point and says so before it is spent.
+                            if targetable {
+                                if member.muted_until.is_some() {
+                                    if quiet_action(ui, "Unmute", colors.text)
+                                        .on_hover_text("Lift this group mute now.")
+                                        .clicked()
+                                    {
+                                        mute_send = Some((member.account_id, None));
+                                    }
+                                } else {
+                                    for (label, term_ms) in GROUP_MUTE_TERMS_MS {
+                                        if quiet_action(ui, &format!("Mute {label}"), colors.text)
+                                            .on_hover_text(format!(
+                                                "Silence this person for the whole group for \
+                                             {label}. They keep every other right, including \
+                                             the vote."
+                                            ))
+                                            .clicked()
+                                        {
+                                            mute_send = Some((member.account_id, Some(term_ms)));
+                                        }
+                                    }
+                                }
+                                if quiet_action(ui, "Remove", colors.danger)
+                                    .on_hover_text(
+                                        "Costs 1 Kick Point, or 1 $MIG when none are held",
+                                    )
+                                    .clicked()
+                                {
+                                    kick_send = Some(member.account_id);
+                                }
+                            }
+                        });
+                }
                 ui.add_space(space::XS);
             }
 
@@ -1547,6 +1680,37 @@ fn group_roster_panel(
         });
     ui.add_space(space::SM);
 
+    // The menu's own state, applied now that the roster borrow has closed: a click opens
+    // the row's options, or closes them when the row was the one already open — one menu
+    // per conversation, so opening one member's options closes another's.
+    if let Some(member) = menu_toggle {
+        let already = state
+            .member_menus
+            .get(&conversation_id)
+            .is_some_and(|open| *open == member);
+        if already {
+            state.member_menus.remove(&conversation_id);
+        } else {
+            state.member_menus.insert(conversation_id, member);
+        }
+    }
+    // The gift picker opens with a fresh idempotency key and a fresh read of the shelves:
+    // a price is a fact worth re-asking before a charge, and the picker that sends the gift
+    // is the picker that quoted it.
+    if let Some(member) = gift_ask {
+        state.gifting = Some(GiftPick {
+            conversation_id,
+            member,
+            key: gift_intent_key(),
+        });
+        context.issue(Command::GiftCatalogue);
+    }
+    if let Some(user_id) = profile_ask {
+        context.issue(Command::MemberProfile {
+            conversation_id,
+            user_id,
+        });
+    }
     if let Some(members) = invite_send {
         context.issue(Command::InviteToGroup {
             conversation_id,
@@ -1562,13 +1726,12 @@ fn group_roster_panel(
             panel.open = false;
         }
     }
-    if let Some((target_id, mute)) = mute_send {
-        // A mute runs an hour — the web client's default — and an unmute is the request
-        // with no `until` at all, the wire's own word for "lift it".
-        let until = mute.then(|| {
-            migo_core::Timestamp::from_unix_ms(
-                migo_core::Timestamp::now().as_unix_ms() + 60 * 60 * 1000,
-            )
+    if let Some((target_id, term_ms)) = mute_send {
+        // A mute runs the term the menu named — the three terms the web panel offers too —
+        // and an unmute is the request with no `until` at all, the wire's own word for
+        // "lift it".
+        let until = term_ms.map(|ms| {
+            migo_core::Timestamp::from_unix_ms(migo_core::Timestamp::now().as_unix_ms() + ms as i64)
         });
         context.issue(Command::MuteGroupMember {
             conversation_id,
@@ -1593,12 +1756,224 @@ fn group_roster_panel(
     }
 }
 
-/// The compact header over the open conversation: title, encryption state, and the counts that
-/// are true of the whole thread rather than of any one message in it.
+/// The mute terms a founder may set, as the member menu offers them — the web panel's own
+/// three, so a group muted from either client keeps the same vocabulary and the same clock.
+const GROUP_MUTE_TERMS_MS: [(&str, u64); 3] = [
+    ("1 hour", 60 * 60 * 1000),
+    ("1 day", 24 * 60 * 60 * 1000),
+    ("7 days", 7 * 24 * 60 * 60 * 1000),
+];
+
+/// One quiet option inside a member's menu: words, not a boxed button, because a menu is a
+/// list of things that can happen and not a row of controls competing with the row that
+/// opened it. The one exception is stated at the call site, where the destructive option
+/// takes the danger ink.
+fn quiet_action(ui: &mut Ui, label: &str, ink: egui::Color32) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(ink),
+        )
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE),
+    )
+}
+
+/// A fresh idempotency key for one gift-picker intent, minted the moment the picker opens.
 ///
-/// Mutable state, unlike most headers, for two buttons: the floppy folds the transcript save
-/// row in and out, and the magnifier folds the thread search row in and out — both toggles
-/// are the conversation's own (kept the way drafts are), so the header writes them.
+/// The wallet's own key's rule, kept: wall-clock nanoseconds are unique per pick on one
+/// device, which is all the key needs to be — it separates a retry of one pick from a
+/// second, separate gift.
+fn gift_intent_key() -> String {
+    format!(
+        "gift-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+/// The member menu's gift picker: the shop's shelves, opened from a member's options.
+///
+/// The wallet's own picker is the pattern — a centred window, one gift per row, a Send
+/// beside each — but this one answers a different door: a group is where the ask starts,
+/// and the picker that quotes the price is the picker that sends the gift. One pick is one
+/// gift, so the window closes the moment it sends, and the key minted at open is the whole
+/// intent the wire de-duplicates on.
+fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+    // This window's pick only: another window's picker is that window's to draw.
+    let Some(pick) = state.gifting.clone() else {
+        return;
+    };
+    if pick.conversation_id != conversation_id {
+        return;
+    }
+    let colors = palette(context.theme);
+    let recipient = state
+        .names
+        .get(&pick.member)
+        .cloned()
+        .unwrap_or_else(|| model::short_id(pick.member));
+    // Deferred: the send closes the picker as it issues, because one pick is one gift.
+    let mut sent: Option<String> = None;
+    let mut open = true;
+    egui::Window::new(format!("Send a gift to {recipient}"))
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .resizable(false)
+        .collapsible(false)
+        .open(&mut open)
+        .min_width(300.0)
+        .show(ui.ctx(), |ui| {
+            if state.gifts.is_empty() {
+                ui.label(
+                    RichText::new("Reading the gift catalogue…")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+                return;
+            }
+            for gift in &state.gifts {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(&gift.name)
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Send").clicked() {
+                            sent = Some(gift.sku.clone());
+                        }
+                        ui.label(
+                            RichText::new(format!("{} $MIG", gift.price))
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text_muted),
+                        );
+                    });
+                });
+            }
+        });
+    if let Some(sku) = sent {
+        context.issue(Command::SendGift {
+            sku,
+            recipient: pick.member,
+            client_key: Some(pick.key),
+        });
+        state.gifting = None;
+    } else if !open {
+        state.gifting = None;
+    }
+}
+
+/// The member menu's profile view: the card the wire answered, drawn over the window whose
+/// roster asked for it.
+///
+/// The pane's own card is the pattern — who the person is, not what they can be changed
+/// into — but this one only reads: a group is where you find out who somebody is, not where
+/// you change who you are. The card's own disclosures (the birth year, the custom status)
+/// never ride another account's card, so they are absent here by design, exactly as the
+/// model that carries the card decided.
+fn member_profile_window(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
+    // This window's card only: the view files against the conversation whose window asked,
+    // so it never outlives the group it was opened from.
+    let Some(view) = state.member_profile.clone() else {
+        return;
+    };
+    if view.conversation_id != conversation_id {
+        return;
+    }
+    let colors = palette(context.theme);
+    let card = &view.card;
+    let mut open = true;
+    egui::Window::new("Profile")
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .resizable(false)
+        .collapsible(false)
+        .open(&mut open)
+        .min_width(280.0)
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                widgets::avatar(
+                    ui,
+                    context.theme,
+                    if card.display_name.is_empty() {
+                        &card.username
+                    } else {
+                        &card.display_name
+                    },
+                    48.0,
+                );
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(if card.display_name.is_empty() {
+                            card.username.clone()
+                        } else {
+                            card.display_name.clone()
+                        })
+                        .font(egui::FontId::proportional(font::SUBTITLE))
+                        .color(colors.text),
+                    );
+                    ui.label(
+                        RichText::new(format!("@{}", card.username))
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text_muted),
+                    );
+                });
+            });
+            ui.add_space(space::SM);
+            // The shareable id, drawn for copying rather than for parsing: the click puts it
+            // on the clipboard, the same trade the pane's own card makes.
+            let response = ui.add(
+                egui::Button::new(
+                    RichText::new(&card.public_id)
+                        .font(egui::FontId::proportional(font::TINY))
+                        .color(colors.text_muted),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE),
+            );
+            if response.on_hover_text("Click to copy").clicked() {
+                ui.ctx().copy_text(card.public_id.clone());
+            }
+            if let Some(bio) = card.bio.as_deref().filter(|bio| !bio.trim().is_empty()) {
+                ui.add_space(space::XS);
+                ui.label(
+                    RichText::new(bio)
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text),
+                );
+            }
+            let presence = card.presence.label();
+            if !presence.is_empty() {
+                ui.add_space(space::XS);
+                widgets::pill(ui, presence, colors.positive, colors.surface);
+            }
+        });
+    if !open {
+        state.member_profile = None;
+    }
+}
+
+/// The compact header over the open conversation: the avatar, and the thread's controls.
+///
+/// The header no longer restates what the window's own title bar already names — the title,
+/// the encryption state, and the member count are all said where they live, and a second copy
+/// here was a second thing to keep true (and a third place a reader had to check). What stays
+/// is the one fact no title bar carries — the face the conversation goes by, as its avatar —
+/// and the controls the thread needs beside it, every one of them drawn at the one control
+/// size the composer's send button also wears, so the window's two edges agree about the
+/// weight of a touch.
+///
+/// Mutable state, unlike most headers, for three toggles: the floppy folds the transcript
+/// save row in and out, the magnifier folds the thread search row in and out, and the people
+/// button folds the roster panel in and out — all three the conversation's own (kept the way
+/// drafts are), so the header writes them.
 fn thread_header(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -1635,35 +2010,6 @@ fn thread_header(
     ui.horizontal(|ui| {
         ui.add_space(space::LG);
         widgets::avatar(ui, context.theme, &title, 34.0);
-        ui.add_space(space::SM);
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(widelide(&title))
-                    .font(egui::FontId::proportional(font::SUBTITLE))
-                    .color(colors.text)
-                    .strong(),
-            );
-            // The lock travels with the words: a padlock floating alone is decoration, and the
-            // pair together is the one thing about a conversation a reader must be able to
-            // find without hunting for it.
-            let detail = if conversation.encrypted {
-                "\u{1F512} End-to-end encrypted"
-            } else {
-                // Said plainly rather than left blank. A user who cannot tell an encrypted
-                // conversation from an unencrypted one has no way to act on the difference, and
-                // the honest name for what remains is the transport's own encryption.
-                "Transport encryption only"
-            };
-            ui.label(
-                RichText::new(detail)
-                    .font(egui::FontId::proportional(font::SMALL))
-                    .color(if conversation.encrypted {
-                        colors.positive
-                    } else {
-                        colors.warning
-                    }),
-            );
-        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(space::LG);
             // The unread count comes from the server's read watermark, which can lag the thread
@@ -1680,17 +2026,7 @@ fn thread_header(
             if conversation.encrypted && conversation.members.len() == 2 {
                 if let Some(me) = context.account.map(|account| account.account_id) {
                     if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
-                        let colors = palette(context.theme);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("\u{1F4DE}")
-                                        .font(egui::FontId::proportional(font::BODY))
-                                        .color(colors.text),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                            )
+                        if header_control(ui, context.theme, "\u{1F4DE}")
                             .on_hover_text("Voice call")
                             .clicked()
                         {
@@ -1750,28 +2086,11 @@ fn thread_header(
                     }
                 }
             }
-            if conversation.members.len() > 2 {
-                widgets::pill(
-                    ui,
-                    &format!("{} members", conversation.members.len()),
-                    colors.text_muted,
-                    colors.surface_raised,
-                );
-            }
             // The floppy: this conversation's words as a file, on demand. The automatic copy
             // (Settings, "save on close") is a preference; this button is the one-off that
             // needs no preference — a person closing a contract negotiation wants the record
             // whether or not they ever turned anything on.
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("\u{1F4BE}")
-                            .font(egui::FontId::proportional(font::BODY))
-                            .color(colors.text),
-                    )
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::NONE),
-                )
+            if header_control(ui, context.theme, "\u{1F4BE}")
                 .on_hover_text("Save transcript")
                 .clicked()
             {
@@ -1781,16 +2100,7 @@ fn thread_header(
             // what this session already holds. The honesty rule is the web field's own — a
             // filter of the loaded messages, not a query the server answers — and the row
             // under the header says so in the field's own hint.
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("\u{1F50D}")
-                            .font(egui::FontId::proportional(font::BODY))
-                            .color(colors.text),
-                    )
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::NONE),
-                )
+            if header_control(ui, context.theme, "\u{1F50D}")
                 .on_hover_text("Search this conversation")
                 .clicked()
             {
@@ -1801,16 +2111,7 @@ fn thread_header(
             // Gated on the server's own kind and not the member count, because a group of
             // two (one member just left) is still a group with a roster and a rename.
             if conversation.is_group()
-                && ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("\u{1F465}")
-                                .font(egui::FontId::proportional(font::BODY))
-                                .color(colors.text),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::NONE),
-                    )
+                && header_control(ui, context.theme, "\u{1F465}")
                     .on_hover_text("Group members")
                     .clicked()
             {
@@ -3039,9 +3340,26 @@ fn composer(
         });
 }
 
-/// A wider elision for the header, which has more room than a list row.
-fn widelide(text: &str) -> String {
-    widgets::elide(text, 42)
+/// One header control: a glyph button at the one size every control in the window shares.
+///
+/// The search, the transcript, the members, and the call are a row of peers, and the composer's
+/// send is the action the whole window exists to reach — so all of them stand at
+/// [`widgets::CONTROL_SIDE`], and a row of same-sized squares is what a row of peers looks
+/// like. Quiet by design: the glyph is the label, the hover is the sentence, and the fill stays
+/// transparent so the thread's name (the window's own title bar) remains the loudest thing at
+/// this edge.
+fn header_control(ui: &mut Ui, theme: crate::theme::Theme, glyph: &str) -> egui::Response {
+    let colors = palette(theme);
+    ui.add(
+        egui::Button::new(
+            RichText::new(glyph)
+                .font(egui::FontId::proportional(font::BODY))
+                .color(colors.text),
+        )
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE)
+        .min_size(egui::Vec2::splat(widgets::CONTROL_SIDE)),
+    )
 }
 
 /// A day label for the thread separators.

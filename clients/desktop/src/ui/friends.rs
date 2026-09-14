@@ -160,17 +160,15 @@ pub fn show(
             ui.vertical_centered(|ui| {
                 ui.add_space(space::XL);
                 ui.allocate_ui(egui::vec2(column, 0.0), |ui| {
-                    widgets::header(
-                        ui,
-                        context.theme,
-                        "Friends",
-                        Some("Add someone by their account id, and talk when they accept."),
-                    );
-                    ui.add_space(space::LG);
+                    header_row(ui, context, state, chat);
+                    ui.add_space(space::MD);
+
+                    // The new-conversation fold-outs, under the doors that opened them: the
+                    // group form and the direct-chat field each stay only while they stand.
+                    new_conversation_folds(ui, context, state, chat);
+                    ui.add_space(space::SM);
 
                     add_row(ui, context, state);
-                    ui.add_space(space::SM);
-                    search_row(ui, context, state, chat);
                     ui.add_space(space::LG);
 
                     if state.entries.is_empty() {
@@ -254,35 +252,65 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
     });
 }
 
-/// The search field, with the new-chat toggle beside it.
+/// The pane's header row: the pane's name at the left edge, and its search field inline with
+/// the two conversation doors at the right — the search left of the new-conversation buttons.
 ///
-/// The reference has no Chats tab: a conversation opens from wherever a person is found, as a
-/// closable tab of its own. This field is the Main pane's door — the same "New chat" the web
-/// client's friends panel offers — and typing a username here opens the thread directly.
-fn search_row(
+/// The search used to be a field of its own below the header; it moved up into the row
+/// because searching the graph is a thing the pane's own title does, not a step the list
+/// makes room for — the field is inline and compact, the same width a hint like "Search"
+/// needs, and the filtering it drives is unchanged: every section below still answers the
+/// same needle, drawn from the same `state.search` the field writes.
+fn header_row(
     ui: &mut Ui,
     context: &mut Context<'_>,
     state: &mut FriendsState,
     chat: &mut crate::ui::chat::ChatState,
 ) {
+    let colors = palette(context.theme);
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .hint_text("Search")
-                .desired_width(ui.available_width() - 196.0),
+        ui.label(
+            RichText::new("Friends")
+                .font(egui::FontId::proportional(font::TITLE))
+                .color(colors.text),
         );
-        // The new-group door, beside the new-chat one: a group conversation is the other
-        // thing a friends list is for, and the web client's friends panel offers both.
-        if ui.button("+ Group").clicked() {
-            chat.new_group = Some(crate::ui::chat::NewGroupForm {
-                claim_focus: true,
-                ..Default::default()
-            });
-        }
-        if ui.button("+ Chat").clicked() {
-            state.composing_new = !state.composing_new;
-        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // The new-chat door, rightmost: the reference has no Chats tab, and a
+            // conversation opens from wherever a person is found, as a closable tab of its
+            // own — the same "New chat" the web client's friends panel offers.
+            if ui.button("+ Chat").clicked() {
+                state.composing_new = !state.composing_new;
+            }
+            // The new-group door, beside the new-chat one: a group conversation is the other
+            // thing a friends list is for, and the web client's friends panel offers both.
+            if ui.button("+ Group").clicked() {
+                chat.new_group = Some(crate::ui::chat::NewGroupForm {
+                    claim_focus: true,
+                    ..Default::default()
+                });
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .hint_text("Search")
+                    .desired_width(110.0),
+            );
+        });
     });
+    ui.add_space(space::XS);
+    ui.label(
+        RichText::new("Add someone by their account id, and talk when they accept.")
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+    );
+}
+
+/// The new-conversation fold-outs: the group form and the direct-chat field, each drawn only
+/// while its door left it open.
+fn new_conversation_folds(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut FriendsState,
+    chat: &mut crate::ui::chat::ChatState,
+) {
     // The form is taken out of the chat state for the draw, so the form's own submit and
     // cancel — which write that same Option — never fight the borrow the draw holds. A form
     // that survives the draw goes back; a submitted or cancelled one never comes back.

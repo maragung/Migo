@@ -16,6 +16,16 @@ use egui::{
 
 use crate::theme::{font, palette, radius, space, text_style, Theme};
 
+/// The one side every one-touch control in a chat window shares: the header's glyph controls
+/// and the composer's send button, drawn from a single constant so they cannot drift apart.
+///
+/// A chat window's header and its composer are the two edges everything else scrolls between,
+/// and controls of different sizes at the two edges read as two interfaces stapled together —
+/// the search, the transcript, the members, and the call beside them are one row of peers, and
+/// the send is the action the whole window exists to reach, so it stands at the same size the
+/// peers beside the thread's name do.
+pub const CONTROL_SIDE: f32 = 40.0;
+
 /// A heading with optional secondary text beneath it.
 pub fn header(ui: &mut Ui, theme: Theme, title: &str, subtitle: Option<&str>) {
     let colors = palette(theme);
@@ -643,7 +653,7 @@ pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> R
 /// button.
 pub fn send_button(ui: &mut Ui, theme: Theme, enabled: bool) -> Response {
     let colors = palette(theme);
-    let side = 40.0;
+    let side = CONTROL_SIDE;
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(side), Sense::click());
     // The three accent states the palette names, chosen by the interaction egui already tracked
     // for this response: idle, hovered, held.
