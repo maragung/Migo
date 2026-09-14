@@ -34,6 +34,7 @@ pub mod gateway;
 pub(crate) mod media;
 pub mod quic;
 pub mod rest;
+pub(crate) mod room_bridge;
 pub mod server_probe;
 pub mod tcp;
 pub(crate) mod voice_draft;
@@ -47,11 +48,11 @@ use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
-    features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, Frame, FriendRespond,
-    FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, KickPointsBuy, LeaderboardReq, LedgerReq,
-    MessageKind, NotificationAck, Opcode, ProgressionReq, RelationshipListReq, RoomCreate,
-    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SearchReq, SubscribeRequest, SuggestReq,
-    Topic, TopicKind, WalletReq,
+    codes, features, BadgesReq, ClientInfo, ConversationKind, DeliveryClass, EncryptionMode, Frame,
+    FriendRespond, FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, KickPointsBuy,
+    LeaderboardReq, LedgerReq, MessageKind, NotificationAck, Opcode, ProgressionReq,
+    RelationshipListReq, RoomCreate, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SearchReq,
+    SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
 };
 use tokio::sync::mpsc;
 
@@ -85,6 +86,21 @@ const ONE_TIME_PREKEY_LOW_WATER: usize = ONE_TIME_PREKEY_COUNT as usize / 5;
 /// enough that a sender whose distribution never comes costs a bounded amount of memory. Held
 /// messages drop oldest-first.
 const MAX_PENDING_PER_SENDER: usize = 64;
+
+/// One page of a catch-up walk, matching the web client's `CATCHUP_PAGE`.
+///
+/// The same number on every client so a thread that needs paging costs the same wire on each:
+/// one SYNC answer bounded in rows, trimmed by the server's own byte budget when a page of fat
+/// envelopes would otherwise cross the frame ceiling.
+const SYNC_PAGE: u32 = 200;
+
+/// How many pages a catch-up walk may ask for, matching the web client's `MAX_CATCHUP_PAGES`.
+///
+/// The budget keeps a very long conversation bounded: a walk that reaches it stops short of the
+/// live edge, the thread says so through [`Event::History`]'s `more`, and the load-earlier row
+/// walks the rest down from the newest — the same discipline every client in this batch keeps,
+/// so no one of them invents its own unbounded walk.
+const MAX_CATCHUP_PAGES: u32 = 5;
 
 /// The server's error symbols that mean "the captcha proof is dead, whatever else is true".
 ///
@@ -189,8 +205,24 @@ pub enum Command {
     SignOut,
     /// Refresh the conversation list.
     Conversations,
-    /// Load history for one conversation, from `have_seq` upwards.
-    History { conversation_id: Id, have_seq: u64 },
+    /// Load history for one conversation, from what the worker holds upwards.
+    ///
+    /// `held` is the thread's own word for whether it is holding anything at all: a thread that
+    /// holds nothing replays from the beginning (`have_seq` zero), while one that holds a
+    /// transcript resumes from the worker's contiguous watermark — §158's "sync only the gap,
+    /// never a full resync", with the floor chosen where the messages actually are rather than
+    /// where a first key exchange happened to land.
+    History { conversation_id: Id, held: bool },
+    /// Page older history into a thread that already holds some, downwards from `before_seq`.
+    ///
+    /// `before_seq` zero means "from the newest", the shape a budget-stopped walk leaves: the
+    /// newest page is what a short forward walk owes the reader, and the walk downwards dedups
+    /// against what the thread already holds. The answer arrives as
+    /// [`Event::HistoryEarlier`], matched by the correlation this ask minted.
+    HistoryEarlier {
+        conversation_id: Id,
+        before_seq: u64,
+    },
     /// Fetch one account's key bundles, so a private conversation's window can show their safety
     /// numbers before anything is sent.
     ///
@@ -699,10 +731,29 @@ pub enum Event {
     /// worker held under that conversation — the sender-key chain, the ratchets, the held
     /// messages — was dropped before this event crossed the channel.
     GroupLeft { conversation_id: Id },
-    /// A page of history, oldest first.
+    /// A page of history, oldest first, and whether the walk that fetched it stopped short.
+    ///
+    /// `more` is the walk's own honest edge: true when the page budget ran out with the server
+    /// still holding history above what arrived — the thread's cue to offer the load-earlier
+    /// row, which pages the rest down from the newest. False when the walk reached the live
+    /// edge, and deliberately absent-minded when it is false for other reasons (a truncated
+    /// hole the server can no longer fill): an established `more` is never cleared by a walk,
+    /// only by the load-earlier row's own downward walk reaching the bottom.
     History {
         conversation_id: Id,
         messages: Vec<Message>,
+        more: bool,
+    },
+    /// A page of older history, paged downwards by the load-earlier row's ask.
+    ///
+    /// Carries `from_seq` — the page's lowest sequence — because that is the next ask's cursor,
+    /// and `more` for the same reason [`Event::History`] does: false is the server saying the
+    /// walk downwards has reached the bottom, which is the row's cue to withdraw itself.
+    HistoryEarlier {
+        conversation_id: Id,
+        messages: Vec<Message>,
+        from_seq: u64,
+        more: bool,
     },
     /// One live message.
     Message(Message),
@@ -1218,6 +1269,12 @@ struct Signed {
     /// a session misses is the one whose attachment can never be fetched again. Keyed by
     /// media id, the one name the fetch wire knows.
     media_keys: HashMap<Id, MediaKeying>,
+    /// The sequencing account per conversation: the contiguous watermark, the furthest seq
+    /// seen, and where a stalled catch-up walk gave up. Held here rather than in the UI's
+    /// message store because every event consumes a seq — the key exchanges and the
+    /// tombstones included — and the watermark must count events the renderer never sees
+    /// (§152: the seq is a prefix of the event stream, not of the rendered one).
+    sequences: HashMap<Id, SeqAccount>,
 }
 
 /// What one media reference said about its object: the slots that open it, and how to serve
@@ -1468,6 +1525,156 @@ struct Retry {
 /// advertisement (a heartbeat of, say, 2s) from turning the desktop into a constant pinger,
 /// and a `0` advertisement from arming a spin.
 const MIN_HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// The gateway session this worker would resume: the session's id, and the count of sequenced
+/// frames this process has read off it.
+///
+/// The count is the client half of §150's sequencing contract, reconstructed exactly the way the
+/// SDK's transport reconstructs it: the server numbers a server-to-client frame iff it is
+/// Critical and left through the session mailbox, so the client counts every inbound frame the
+/// same rule would number — Critical by class, or by the ERROR flag an error reply always rides
+/// in on, minus the two Critical frames the server writes straight to the transport and never
+/// numbers (WELCOME, consumed by the handshake before counting starts, and RECONNECT_HINT,
+/// excluded by [`is_sequenced`] itself). An off-by-one here turns a clean resume into a refused
+/// one, so the classification lives beside this struct and is pinned by its own test.
+///
+/// Kept across a disconnect — that is its whole point: the next `connect` attaches it to the
+/// HELLO, and the server's retained ring answers with the frames the outage cost rather than a
+/// full resync (§158). Dropped when a fresh WELCOME names a new session, when the server
+/// refuses the resume, and at sign-out.
+#[derive(Debug, Clone, Copy)]
+struct GatewaySession {
+    /// The session id the WELCOME minted — the id a resume asks for by name.
+    id: Id,
+    /// How many sequenced frames this process has read off the session so far.
+    sequenced: u64,
+}
+
+impl GatewaySession {
+    /// The resume request this session state turns into, for the HELLO of a reconnect.
+    fn resume_request(&self) -> migo_protocol::ResumeRequest {
+        migo_protocol::ResumeRequest {
+            session_id: self.id,
+            last_frame_seq: self.sequenced,
+        }
+    }
+}
+
+/// Whether an inbound frame consumes a `frame_seq` on the client's counter.
+///
+/// Mirrors the server's mailbox sequencing and the SDK's `isSequenced`: Critical frames are
+/// sequenced, except RECONNECT_HINT, which the server writes directly to the transport at
+/// graceful shutdown and never numbers. WELCOME is the other unsequenced Critical frame, but it
+/// is consumed by the handshake before the receive loop starts counting, so it never reaches
+/// here. A frame this build has no opcode for is not counted: the server cannot have numbered
+/// an opcode it never sent, and a newer server's unknown frames follow their own class rules,
+/// not this build's guesses.
+fn is_sequenced(frame: &Frame) -> bool {
+    if frame.header.is_error() {
+        return true;
+    }
+    match Opcode::from_wire(frame.header.opcode) {
+        Some(Opcode::ReconnectHint) => false,
+        Some(opcode) => matches!(opcode.class(), DeliveryClass::Critical),
+        None => false,
+    }
+}
+
+/// One conversation's sequence account: the contiguous watermark, the highest seq ever seen,
+/// and the stall the last unproductive fill stopped at.
+///
+/// §152 makes a conversation's sequence numbers gapless by construction, so "what this client
+/// holds" is a *prefix*, and the watermark names its top: it advances only when the next brick
+/// lands on it (seq = watermark + 1), stands still through redeliveries, and holds when an
+/// arrival leaps past it — a hole, which is exactly what a catch-up walk exists to fill. The
+/// first event a conversation routes becomes the floor: history below it may be gone (the
+/// server's `Truncated`) or simply unfetched, which is the caller's floor to choose. Tombstones
+/// and key exchanges count like any message — the prefix is of *events*, not of content — which
+/// is why this account lives in the net layer, where every event passes, rather than in the UI's
+/// message store, which never sees the ones the crypto layer consumes.
+#[derive(Debug, Default, Clone, Copy)]
+struct SeqAccount {
+    /// The highest seq held contiguously; zero until the first event sets the floor.
+    watermark: u64,
+    /// The highest seq ever routed, gap or no gap — the top of the hole a fill must target.
+    highest_seen: u64,
+    /// The watermark an unproductive fill stopped at, if one did.
+    ///
+    /// While the watermark stands here the server has already been asked and has already
+    /// answered without moving it, so a later above-gap event re-asks nothing — the hot loop a
+    /// persistent (purged) hole must never become. The stall lifts the moment the watermark
+    /// moves.
+    stalled_at: Option<u64>,
+}
+
+impl SeqAccount {
+    /// Routes one seq through the account, returning the gap it opened, if any.
+    ///
+    /// The gap is named as its top — the account's `highest_seen` after this event — because a
+    /// fill asked for less would leave the hole's tail unfetched, and one asked for more would
+    /// tail live traffic instead of filling the hole.
+    fn track(&mut self, seq: u64) -> Option<u64> {
+        if seq > self.highest_seen {
+            self.highest_seen = seq;
+        }
+        let gap = if seq == self.watermark + 1 {
+            self.watermark = seq;
+            None
+        } else if seq <= self.watermark {
+            // A redelivery the UI's own id-keyed dedup handles, or history below the floor —
+            // the caller's floor to choose, not this account's to fill.
+            None
+        } else if self.watermark == 0 {
+            // The floor: the first event a conversation ever routes, whatever its seq.
+            self.watermark = seq;
+            None
+        } else {
+            Some(self.highest_seen)
+        };
+        if self
+            .stalled_at
+            .is_some_and(|stalled| stalled != self.watermark)
+        {
+            // The watermark moved since the stall was recorded, so the stall is over.
+            self.stalled_at = None;
+        }
+        gap
+    }
+}
+
+/// One catch-up walk in flight, keyed by the conversation it walks.
+///
+/// A walk is a fire-and-forget page loop: the worker sends a SYNC and the answer's arrival in
+/// [`Worker::on_history`] decides whether another page goes out. `to_seq` bounds a gap walk to
+/// the hole it exists to fill (`None` walks to the server's live edge), and the page budget
+/// keeps a very long conversation bounded the way the web client's `MAX_CATCHUP_PAGES` does.
+struct CatchUp {
+    /// The seq the walk is walking toward, or `None` for the live edge.
+    to_seq: Option<u64>,
+    /// Pages the walk may still ask for after this one.
+    pages_left: u32,
+}
+
+impl CatchUp {
+    /// Whether the walk continues after a page, given the watermark's move across it.
+    ///
+    /// `moved` is false when the page could not advance the watermark — every row a
+    /// redelivery, or a hole the server says is purged — and a walk that cannot move it must
+    /// stop rather than re-ask on a loop; the caller records the stall so a later above-gap
+    /// event does not restart it. `more` is the server's own word for whether history remains
+    /// above the page, which only an unbounded walk listens to: a gap walk compares the
+    /// watermark against its target instead, because `more` is true whenever the *conversation*
+    /// has history above the page, hole filled or not.
+    fn continues(&self, moved: bool, more: bool, watermark: u64) -> bool {
+        if self.pages_left == 0 || !moved {
+            return false;
+        }
+        match self.to_seq {
+            Some(to) => watermark < to,
+            None => more,
+        }
+    }
+}
 
 fn heartbeat_interval(advertised_ms: u32) -> Duration {
     let half = Duration::from_millis(u64::from(advertised_ms) / 2);
@@ -1722,6 +1929,21 @@ struct Worker {
     /// reply carries only the tally — neither the conversation nor the target — so the ask is
     /// the only place the answer's subject lives.
     pending_vote: Option<(Id, Id)>,
+    /// The gateway session this worker would resume on its next connect, if the socket drops.
+    /// `None` until a WELCOME mints one, and again after a fresh session replaces it or the
+    /// server refuses the resume.
+    session: Option<GatewaySession>,
+    /// Catch-up walks in flight, keyed by the conversation each is walking. One per
+    /// conversation by design: a second trigger while a walk runs is the running walk's
+    /// business, and a duplicate would race its pages.
+    catchups: HashMap<Id, CatchUp>,
+    /// Backwards history asks in flight, keyed by the correlation the reply will carry: the
+    /// SYNC answer names its conversation but not its direction, so the ask's own correlation
+    /// is the only thing that can say the page that arrived is a load-earlier page.
+    earlier_asks: HashMap<u32, Id>,
+    /// The persisted room bridge, beside the vault: what a join wrote, the next process reads
+    /// back, so the room topics a restart lost are re-subscribed without a re-join.
+    room_bridges: room_bridge::RoomBridgeStore,
 }
 
 impl Worker {
@@ -1729,6 +1951,7 @@ impl Worker {
         // The draft store stands beside the vault and borrows its path only here, before the
         // struct literal moves it.
         let drafts = voice_draft::VoiceDraftStore::beside(&vault_path);
+        let room_bridges = room_bridge::RoomBridgeStore::beside(&vault_path);
         Self {
             sink,
             commands,
@@ -1761,6 +1984,10 @@ impl Worker {
             group_rosters: HashMap::new(),
             group_leave: None,
             pending_vote: None,
+            session: None,
+            catchups: HashMap::new(),
+            earlier_asks: HashMap::new(),
+            room_bridges,
         }
     }
 
@@ -1917,9 +2144,24 @@ impl Worker {
             Command::Conversations => self.request_conversations().await,
             Command::History {
                 conversation_id,
-                have_seq,
+                held,
             } => {
-                self.request_history(conversation_id, have_seq).await;
+                // The window opening says which floor the walk climbs from: a thread that
+                // already holds rows continues from the watermark, and an empty one replays
+                // from zero — the same `messagesRef` test the web client's open makes. The
+                // watermark decides the continuation pages on its own.
+                let from = if held {
+                    self.watermark(conversation_id)
+                } else {
+                    0
+                };
+                self.catch_up(conversation_id, from, None).await;
+            }
+            Command::HistoryEarlier {
+                conversation_id,
+                before_seq,
+            } => {
+                self.request_earlier(conversation_id, before_seq).await;
             }
             Command::PeerKeys { user_id } => self.fetch_peer_keys(user_id).await,
             Command::SendText {
@@ -2467,6 +2709,17 @@ impl Worker {
             sessions.identity().expose_exchange_seed(),
         ));
 
+        // The room bridge read back before the first connect: the reconnect path re-subscribes
+        // room topics from `rooms_watched`, and a fresh sign-in would hold none — the join's
+        // answer, the one wire moment that names a room's conversation, belongs to the process
+        // that joined. Reading it here means the first connect of this process watches the same
+        // rooms the last one did, without a re-join's membership side effects (§156: a seated
+        // member's join is free of fan-out, but the desktop's own record of the join should not
+        // have to depend on repeating it).
+        let room_conversations: HashMap<Id, Id> =
+            self.room_bridges.load(account_id).into_iter().collect();
+        let rooms_watched: HashSet<Id> = room_conversations.keys().copied().collect();
+
         self.signed = Some(Signed {
             server,
             rest,
@@ -2479,12 +2732,19 @@ impl Worker {
             devices: HashMap::new(),
             members: HashMap::new(),
             conversations_watched: HashSet::new(),
-            rooms_watched: HashSet::new(),
-            room_conversations: HashMap::new(),
+            rooms_watched,
+            room_conversations,
             watched: HashSet::new(),
             e2e: HashSet::new(),
             media_keys: HashMap::new(),
+            sequences: HashMap::new(),
         });
+        // A sign-in is a session boundary at the worker's own door too: no gateway session to
+        // resume (the first connect mints one), and no walks in flight whose pages a previous
+        // session's conversations still owe.
+        self.session = None;
+        self.catchups.clear();
+        self.earlier_asks.clear();
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
         self.last_backup_at = Some((account_id, last_backup_at));
@@ -2560,7 +2820,12 @@ impl Worker {
             bandwidth_mode: migo_protocol::BandwidthMode::Auto,
             access_token: Some(signed.access_token.clone()),
             device_id: Some(signed.account.device_id),
-            resume: None,
+            // The resume ask of the session this process still holds, if it holds one: a
+            // disconnect costs the frames the outage dropped, and the server's retained ring
+            // answers with exactly those rather than making the client re-sync from scratch
+            // (§158). `None` on the first connect of a process, after a fresh WELCOME, after a
+            // refused resume, and at sign-out — the moments there is no session left to ask for.
+            resume: self.session.as_ref().map(GatewaySession::resume_request),
         };
 
         self.sink.send(Event::Connection(Connection::Connecting));
@@ -2627,6 +2892,7 @@ impl Worker {
             },
             Transport::WebSocket => self.connect_websocket(hello).await,
         };
+        let asked_to_resume = self.session.is_some();
         match connected {
             Ok((realtime, welcome)) => {
                 self.gateway = Some(realtime);
@@ -2647,6 +2913,31 @@ impl Worker {
                 } else {
                     self.sink.send(Event::Connection(Connection::Online));
                 }
+                if asked_to_resume && welcome.resumed == Some(true) {
+                    // The server took the resume: same session, retained topics re-applied,
+                    // ring tail on its way (§158). The frame counter above kept counting into
+                    // the same `GatewaySession`, so the next disconnect's ask is already
+                    // correct, and every correlation-keyed ask this session minted is answered
+                    // in the replay's own order — new requests could not have minted fresh ids
+                    // between the drop and the replay, because the worker was off the socket.
+                    // What a resumed session must *not* do is re-sync: subscriptions live, the
+                    // rosters live, and a re-read would only race the replay's own events.
+                    return;
+                }
+                // A fresh session, resume or not: the WELCOME minted a session id this process
+                // has never counted for, so the counter restarts at zero and the next drop's
+                // resume asks from this session's own first sequenced frame.
+                self.session = Some(GatewaySession {
+                    id: welcome.session_id,
+                    sequenced: 0,
+                });
+                // The in-flight walks belong to the session that minted their correlations: a
+                // page that never arrived cannot be continued by a reply this session will
+                // never send. The per-conversation watermarks survive — they are facts about
+                // the conversation, not the session — and the list read below re-arms the
+                // catch-ups they still need.
+                self.catchups.clear();
+                self.earlier_asks.clear();
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
                 // presence go back to "never subscribed" and the own-topic subscribe below is the
@@ -2681,6 +2972,25 @@ impl Worker {
                 self.request_wallet().await;
             }
             Err(error) => {
+                // A refused resume is the server saying the ring has moved on, not a failure to
+                // reach the server: drop the session state and connect once more, now asking
+                // for nothing. The re-connect's fresh WELCOME takes the full resync path above,
+                // which is exactly what RESUME_REQUIRED's message asks for — "re-sync by
+                // cursor". Every other error is a real one and takes the retry path below.
+                if asked_to_resume {
+                    if let GatewayError::Refused {
+                        code: codes::RESUME_REQUIRED,
+                        ..
+                    } = error
+                    {
+                        self.session = None;
+                        // Boxed because `connect` recurses here: the refused-resume re-connect
+                        // asks for nothing, so the recursion is one level deep, but the future
+                        // still cannot hold itself by value.
+                        Box::pin(self.connect()).await;
+                        return;
+                    }
+                }
                 self.sink
                     .send(Event::Connection(Connection::Failed(error.to_string())));
             }
@@ -2777,15 +3087,91 @@ impl Worker {
         self.request(Opcode::ConversationList, &message).await;
     }
 
-    async fn request_history(&mut self, conversation_id: Id, have_seq: u64) {
+    /// Starts a catch-up walk for one conversation, bounded or not.
+    ///
+    /// `from` is the "have" the walk's *first* page asks from — zero for a thread the UI holds
+    /// nothing of (a fresh open replays from the conversation's floor, the web client's own
+    /// rule), the watermark for everything else. Later pages ask from the watermark the pages
+    /// themselves have advanced, so the walk climbs one contiguous brick at a time.
+    ///
+    /// `to_seq` names the hole's top for a gap walk — the walk stops once the watermark reaches
+    /// it, so it never tails live traffic; `None` walks to the server's live edge, which is what
+    /// an open thread asks for and what a list-read refresh asks for when the server's
+    /// `last_seq` has moved past the watermark. One walk per conversation: a second trigger
+    /// while one runs is the running walk's business, and a duplicate would race its pages.
+    ///
+    /// The refusals are loop guards, not errors. A walk already in flight needs nothing. A
+    /// watermark stalled at its own value has already been asked and already answered without
+    /// moving — the hole below it is gone from the server's history, and re-asking is the hot
+    /// loop the stall exists to prevent. A `to_seq` at or below the watermark is a hole already
+    /// filled (the gap's own event moved the watermark past its top by the time the walk was
+    /// triggered, or the gap closed between the trigger and here).
+    async fn catch_up(&mut self, conversation_id: Id, from: u64, to_seq: Option<u64>) {
+        if self.catchups.contains_key(&conversation_id) {
+            return;
+        }
+        if let Some(signed) = self.signed.as_ref() {
+            if let Some(account) = signed.sequences.get(&conversation_id) {
+                if account.stalled_at == Some(account.watermark) {
+                    return;
+                }
+                if let Some(to) = to_seq {
+                    if to <= account.watermark {
+                        return;
+                    }
+                }
+            }
+        }
+        self.catchups.insert(
+            conversation_id,
+            CatchUp {
+                to_seq,
+                pages_left: MAX_CATCHUP_PAGES,
+            },
+        );
+        self.sync_page(conversation_id, from).await;
+    }
+
+    /// Sends one forward SYNC page for a walk already in `catchups`, from the "have" the caller
+    /// names — the walk's chosen floor for the first page, the watermark for every page after
+    /// it. The contiguous watermark is the only cursor that heals: a page asked from the maximum
+    /// would leave the hole below it unfilled for good (§152's gapless seqs are what make the
+    /// hole knowable at all).
+    async fn sync_page(&mut self, conversation_id: Id, have_seq: u64) {
+        let to_seq = self
+            .catchups
+            .get(&conversation_id)
+            .and_then(|walk| walk.to_seq);
         let message = migo_protocol::SyncRequest {
             conversation_id,
             have_seq,
-            limit: 100,
-            to_seq: None,
+            limit: SYNC_PAGE,
+            to_seq,
             backwards: None,
         };
         self.request(Opcode::Sync, &message).await;
+    }
+
+    /// Asks for one page of history *below* what the thread holds, for the "Load earlier" row.
+    ///
+    /// The ask is backwards (`history_before`): the server reads down from `before_seq`, or
+    /// from the conversation's newest when `before_seq` is zero — the first ask of a thread
+    /// whose catch-up stopped at the page budget, which wants the newest end first because
+    /// that is the end the open window shows. The correlation is remembered because the SYNC
+    /// answer names its conversation but not its direction: only the ask's own correlation can
+    /// say the page that arrived is an earlier page, to be prepended, rather than a catch-up
+    /// page, to be walked onward.
+    async fn request_earlier(&mut self, conversation_id: Id, before_seq: u64) {
+        let message = migo_protocol::SyncRequest {
+            conversation_id,
+            have_seq: before_seq,
+            limit: SYNC_PAGE,
+            to_seq: None,
+            backwards: Some(true),
+        };
+        if let Some(correlation) = self.send_and_remember(Opcode::Sync, &message).await {
+            self.earlier_asks.insert(correlation, conversation_id);
+        }
     }
 
     /// Fetches one account's key bundles, without sending anything.
@@ -6141,6 +6527,10 @@ impl Worker {
                 to_watch.push(joined.room.room_id);
             }
         }
+        // The bridge is written the moment the join names it: the join's answer is the one wire
+        // moment that states the pair, and the next process's restart rehydration reads this
+        // file for exactly these ids.
+        self.persist_room_bridges();
         self.sink.send(Event::RoomJoined {
             conversation_id: joined.conversation_id,
             room_id: joined.room.room_id,
@@ -6204,7 +6594,29 @@ impl Worker {
                 signed.pending.retain(|(id, _), _| *id != conversation);
             }
         }
+        // The bridge forgets with the room, on every path that ends one — the leave's ack,
+        // another device's departure, a kick, a ban — so a restart does not re-subscribe a
+        // topic the account can no longer authorize.
+        self.persist_room_bridges();
         conversation
+    }
+
+    /// Writes the account's room bridge to disk, best-effort, beside the vault.
+    ///
+    /// Called from the two moments the bridge moves — a join naming a new pair, and any path
+    /// that forgets a room — so the next process reads back exactly the rooms this one held.
+    /// The store's own contract covers the failure modes: a write that fails is skipped
+    /// quietly, and the next join or leave is the retry.
+    fn persist_room_bridges(&self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let bridges: Vec<(Id, Id)> = signed
+            .room_conversations
+            .iter()
+            .map(|(room, conversation)| (*room, *conversation))
+            .collect();
+        self.room_bridges.save(signed.account.account_id, &bridges);
     }
 
     /// The join-bell's membership probe answered: the roster read only succeeds for a member,
@@ -6810,6 +7222,12 @@ impl Worker {
         self.media_cache.clear();
         self.recording = None;
         self.playing = None;
+        // The gateway session and its walks go with the account that minted them: a sign-in
+        // over the same window must not resume a session it cannot speak for, nor continue a
+        // walk whose pages belong to a conversation list it has not read.
+        self.session = None;
+        self.catchups.clear();
+        self.earlier_asks.clear();
         self.sink.send(Event::Connection(Connection::Offline));
         self.sink.send(Event::SignedOut);
         self.sink.toast(
@@ -6858,6 +7276,15 @@ impl Worker {
 
     /// Dispatches one inbound frame.
     async fn on_frame(&mut self, frame: migo_protocol::Frame) {
+        // The resume counter first, before any branch can return early: every sequenced frame
+        // this process reads — errors included, since an error reply rides a Critical header —
+        // moves the count the next disconnect's resume asks from, and a frame counted twice or
+        // skipped by a dispatch arm would hand the server a cursor it cannot honour (§150).
+        if is_sequenced(&frame) {
+            if let Some(session) = self.session.as_mut() {
+                session.sequenced += 1;
+            }
+        }
         if gateway::is_error(&frame) {
             let error = gateway::refusal(&frame);
             self.sink.toast(error.to_string(), ToastKind::Error);
@@ -6870,7 +7297,11 @@ impl Worker {
         };
         match opcode {
             Opcode::Ping => self.on_ping(&frame).await,
-            Opcode::MessageEvent => self.on_message(&frame),
+            Opcode::MessageEvent => {
+                if let Ok(event) = gateway::decode::<migo_protocol::MessageEvent>(&frame) {
+                    self.route_event(&event).await;
+                }
+            }
             Opcode::MessageSend => self.on_accepted(&frame),
             // A delete's answer carries the tombstone's sequence — the same `MessageAccepted`
             // shape a send answers with — and an edit's answer is a bare acknowledgement. Both
@@ -6899,7 +7330,7 @@ impl Worker {
             Opcode::ConversationStateEvent => self.on_conversation_state(&frame),
             Opcode::ConversationVoteKick => self.on_group_vote_reply(&frame),
             Opcode::ConversationVoteEvent => self.on_group_vote_event(&frame),
-            Opcode::Sync => self.on_history(&frame),
+            Opcode::Sync => self.on_history(&frame).await,
             Opcode::KeyBundleFetch => self.on_bundles(&frame),
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
@@ -6999,23 +7430,57 @@ impl Worker {
         }
     }
 
-    fn on_message(&mut self, frame: &migo_protocol::Frame) {
-        let Ok(event) = gateway::decode::<migo_protocol::MessageEvent>(frame) else {
-            return;
-        };
+    /// Routes one message-shaped event — live off the fan-out or out of a history page —
+    /// through the sequencing account and on to its kind's own handler.
+    ///
+    /// The seq is tracked *first*, before any branch can drop the event: a KeyExchange sealed
+    /// for another device still consumes a conversation seq, and so does a content event this
+    /// build cannot decrypt — §152's numbers are a prefix of the event stream, not of the
+    /// rendered one, so a watermark that skipped what the UI never sees would misjudge every
+    /// later "have". A gap the event opens returns the hole's top, and the bounded walk that
+    /// follows is the one place a missed frame heals without waiting for a reconnect.
+    async fn route_event(&mut self, event: &migo_protocol::MessageEvent) {
+        let gap = self.track_seq(event.conversation_id, event.seq);
         // Route by kind, exactly the way the SDK's `#onMessageEvent` does. A KeyExchange is a
         // sender-key distribution riding the pairwise channel: it either opens (and is adopted)
         // or it was sealed for another device and is dropped silently — both normal. Anything
         // else is content and goes to the group layer. The reply-frame path `on_accepted` is not
         // involved: this arm is the *event* opcode, pushed by the server.
         if event.kind == MessageKind::KeyExchange {
-            self.on_key_exchange(&event);
+            self.on_key_exchange(event);
             return;
         }
-        let Some(message) = self.decrypt(&event) else {
+        let Some(message) = self.decrypt(event) else {
             return;
         };
         self.sink.send(Event::Message(message));
+        if let Some(to) = gap {
+            // The hole's fill starts from the watermark the event left standing, which is the
+            // seq below the hole — the only "have" a fill can ask from without leaving the
+            // hole's own tail unfetched.
+            let from = self.watermark(event.conversation_id);
+            self.catch_up(event.conversation_id, from, Some(to)).await;
+        }
+    }
+
+    /// Routes one conversation seq through its account, returning the top of the hole the seq
+    /// opened, if it opened one. See [`SeqAccount::track`] for the accounting itself.
+    fn track_seq(&mut self, conversation_id: Id, seq: u64) -> Option<u64> {
+        let signed = self.signed.as_mut()?;
+        signed
+            .sequences
+            .entry(conversation_id)
+            .or_default()
+            .track(seq)
+    }
+
+    /// The conversation's contiguous watermark — the "have" every continuation asks from.
+    fn watermark(&self, conversation_id: Id) -> u64 {
+        self.signed
+            .as_ref()
+            .and_then(|signed| signed.sequences.get(&conversation_id))
+            .map(|account| account.watermark)
+            .unwrap_or(0)
     }
 
     /// Handles one KeyExchange event: a sender-key distribution, or fan-out noise sealed for
@@ -7100,6 +7565,31 @@ impl Worker {
             return;
         };
         let me = self.signed.as_ref().map(|signed| signed.account.account_id);
+        // The room bridge, reversed: conversation → room, so a summary row can name the room
+        // behind it. The summary itself never does (the wire states a room's conversation id in
+        // the join's answer alone), so this bridge — held from the joins this account made on
+        // this device, persisted across restarts — is the only source. A Room-kind conversation
+        // the bridge does not know stays `None`: its notice tail and its rooms-pane membership
+        // wait for the next join, which is the same answer every client without a wire change
+        // can give.
+        let rooms_by_conversation: HashMap<Id, Id> = self
+            .signed
+            .as_ref()
+            .map(|signed| {
+                signed
+                    .room_conversations
+                    .iter()
+                    .map(|(room, conversation)| (*conversation, *room))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The conversations the list says moved past what this process contiguously holds: each
+        // one gets a catch-up walk, so a restart (or an outage the resume could not cover)
+        // recovers the missed events without anyone opening the thread. A conversation with no
+        // sequencing account yet is deliberately absent — nothing is held, so the walk would
+        // replay the whole history into windows nobody opened; the thread's own open asks for
+        // that replay when someone actually wants to read it.
+        let mut to_catch_up: Vec<Id> = Vec::new();
         let mut out = Vec::with_capacity(response.conversations.len());
         // The conversation ids to subscribe, gathered across the whole page the way the SDK's
         // `loadConversations` gathers them: one SUBSCRIBE frame for the list rather than one per
@@ -7154,6 +7644,11 @@ impl Worker {
                 if signed.conversations_watched.insert(summary.conversation_id) {
                     to_watch.push(summary.conversation_id);
                 }
+                if let Some(account) = signed.sequences.get(&summary.conversation_id) {
+                    if summary.last_seq > account.highest_seen {
+                        to_catch_up.push(summary.conversation_id);
+                    }
+                }
             }
             let preview = summary
                 .last_message
@@ -7171,17 +7666,24 @@ impl Worker {
                 unread: u32::try_from(summary.last_seq.saturating_sub(summary.read_seq))
                     .unwrap_or(u32::MAX),
                 kind: summary.kind,
-                // A Room-kind conversation has a room behind it — but the summary names no room
-                // id, so it stays `None` here. The join event (the one wire moment that names
-                // both) fills it; a room joined in an earlier session keeps `None`, and its
-                // notice tail is simply absent until the next join — the same room topic the
-                // notices need cannot be subscribed without the id either.
-                room_id: None,
+                // A Room-kind conversation has a room behind it, and the bridge read above is
+                // the one place this process can learn which: the summary names no room id, so
+                // the join (this session's, or the persisted one a restart read back) is the
+                // only wire moment that ever did. `None` for a room the bridge does not hold —
+                // joined on another device and never here, a gap only a wire change closes.
+                room_id: rooms_by_conversation.get(&summary.conversation_id).copied(),
             });
         }
         self.sink.send(Event::Conversations(out));
         self.fetch_profiles(peers).await;
         self.watch_conversations(to_watch).await;
+        // The catch-up walks go out after the subscriptions: a walk's pages and the live
+        // fan-out both land in the same accounting, and hearing the live tail first is exactly
+        // the above-gap event that would have started the walk anyway.
+        for conversation_id in to_catch_up {
+            let from = self.watermark(conversation_id);
+            self.catch_up(conversation_id, from, None).await;
+        }
     }
 
     /// Subscribes the session to a batch of conversation topics, the gate every live event passes
@@ -7239,18 +7741,65 @@ impl Worker {
         self.request_conversations().await;
     }
 
-    fn on_history(&mut self, frame: &migo_protocol::Frame) {
+    async fn on_history(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::SyncResponse>(frame) else {
             return;
         };
-        // History replays through the *live* routing, exactly the way the SDK's `catchUp` feeds
-        // every fetched event through `messaging.ingest`: a historical KeyExchange is a sender-key
-        // distribution the group layer must adopt, or every message sealed under it stays
-        // undecryptable — the buffering holds them, and the per-sender bound silently drops the
-        // oldest. Replaying in the server's order preserves the "distribution before content"
-        // ordering the buffering relies on.
+        // A load-earlier answer, matched by the correlation its ask minted. The SYNC answer
+        // names its conversation but not its direction, so this is the only way to tell a
+        // backwards page from a catch-up walk's forward one — and the two must not be confused:
+        // an earlier page is the thread's own prepend, while a forward page belongs to whatever
+        // walk is running in `catchups`.
+        if let Some(conversation_id) = self.earlier_asks.remove(&frame.header.correlation) {
+            // The page still routes through the sequencing account, exactly the way the SDK's
+            // `ingest` runs inside the web's `loadEarlier`: events above the watermark open a
+            // real hole (a budget-stopped walk's missing middle, met from the newest end), and
+            // a historical KeyExchange must be adopted or the content sealed under it stays
+            // undecryptable. What the page must NOT do is mint windows the way a live message
+            // does — it belongs to the thread that asked for it, opened or not.
+            let mut messages = Vec::with_capacity(response.messages.len());
+            let mut gap = None;
+            for event in response.messages {
+                if let Some(top) = self.track_seq(conversation_id, event.seq) {
+                    gap = Some(top);
+                }
+                if event.kind == MessageKind::KeyExchange {
+                    self.on_key_exchange(&event);
+                    continue;
+                }
+                if let Some(message) = self.decrypt(&event) {
+                    messages.push(message);
+                }
+            }
+            self.sink.send(Event::HistoryEarlier {
+                conversation_id,
+                messages,
+                from_seq: response.from_seq,
+                more: response.more,
+            });
+            if let Some(to) = gap {
+                // The hole the page's own top opened: filled forward from the watermark, the
+                // same walk a live above-gap event triggers — and refused by the same stall
+                // guard when the hole is one the server has already said it cannot fill.
+                let from = self.watermark(conversation_id);
+                self.catch_up(conversation_id, from, Some(to)).await;
+            }
+            return;
+        }
+        // A forward page. History replays through the *live* routing, exactly the way the SDK's
+        // `catchUp` feeds every fetched event through `messaging.ingest`: a historical
+        // KeyExchange is a sender-key distribution the group layer must adopt, or every message
+        // sealed under it stays undecryptable — the buffering holds them, and the per-sender
+        // bound silently drops the oldest. Replaying in the server's order preserves the
+        // "distribution before content" ordering the buffering relies on. The seqs are tracked
+        // first and whole, before any branch can drop an event, because the walk's own
+        // continuation question — did the watermark move? — is answered by the accounting, not
+        // by what decrypted.
+        let conversation_id = response.conversation_id;
+        let watermark_before = self.watermark(conversation_id);
         let mut messages = Vec::with_capacity(response.messages.len());
         for event in response.messages {
+            self.track_seq(conversation_id, event.seq);
             if event.kind == MessageKind::KeyExchange {
                 self.on_key_exchange(&event);
                 continue;
@@ -7259,9 +7808,61 @@ impl Worker {
                 messages.push(message);
             }
         }
+        let watermark_after = self.watermark(conversation_id);
+        // The walk this page belongs to, if one is running: a page that arrives for a
+        // conversation with no walk is a stray answer to an ask this process does not remember
+        // (a resumed session's replayed SYNC reply, say) — its events are already absorbed
+        // above, and there is no continuation to decide.
+        let walk = self.catchups.get_mut(&conversation_id).map(|walk| {
+            (
+                walk.to_seq,
+                walk.continues(
+                    watermark_after > watermark_before,
+                    response.more,
+                    watermark_after,
+                ),
+            )
+        });
+        let mut more = response.more;
+        if let Some((to_seq, continues)) = walk {
+            if continues {
+                if let Some(walk) = self.catchups.get_mut(&conversation_id) {
+                    walk.pages_left -= 1;
+                }
+                // The walk's next page asks from the watermark the page itself advanced — one
+                // contiguous brick at a time, never from the page's top, which may stand above
+                // a hole the next page must fill.
+                self.sync_page(conversation_id, watermark_after).await;
+                // An intermediate page's `more` is not the thread's verdict: the walk is still
+                // running, and the row the verdict arms belongs to the final page alone.
+                more = false;
+            } else {
+                self.catchups.remove(&conversation_id);
+                if watermark_after == watermark_before {
+                    // The page could not move the watermark: the hole below it is the server's
+                    // to answer (history gone, or a truncation to render), not ours to re-ask
+                    // in a loop. Recorded as the stall every later above-gap event checks
+                    // before asking again — the same guard the SDK's `#stalledAt` keeps.
+                    if let Some(signed) = self.signed.as_mut() {
+                        if let Some(account) = signed.sequences.get_mut(&conversation_id) {
+                            account.stalled_at = Some(watermark_after);
+                        }
+                    }
+                }
+            }
+            if to_seq.is_some() {
+                // A bounded walk is a gap repair, not a transcript replay: its final page's
+                // `more` speaks about the conversation's live edge, which the repair never
+                // reached and was never asked to. The load-earlier row belongs to the
+                // thread's own open and its unbounded walk — a repair that armed it would
+                // put a button on a thread that is, by the repair's own success, current.
+                more = false;
+            }
+        }
         self.sink.send(Event::History {
-            conversation_id: response.conversation_id,
+            conversation_id,
             messages,
+            more,
         });
     }
 
@@ -8040,6 +8641,180 @@ mod tests {
             heartbeat_interval(0),
             MIN_HEARTBEAT,
             "a zero advertisement arms the floor, not a spin"
+        );
+    }
+
+    /// A frame for the sequencing tests: one opcode, no flags, no body — the shape the
+    /// classifier reads, since flags and opcode are the only parts of a header it consults.
+    fn frame_of(opcode: Opcode) -> Frame {
+        Frame::new(
+            migo_wire::FrameHeader::new(opcode.to_wire(), 1),
+            bytes::Bytes::new(),
+        )
+    }
+
+    /// The resume counter's classification is §150's client half, and an off-by-one in it
+    /// turns a clean resume into a refused one: Critical frames are counted, Coalescable ones
+    /// are not (the server never numbers a frame it may drop), RECONNECT_HINT is not (the
+    /// server writes it straight to the transport at graceful shutdown, never through the
+    /// mailbox), an error reply is (the ERROR flag rides a Critical header whatever opcode it
+    /// answers), and an opcode this build does not know is not (a newer server's frames follow
+    /// their own class rules, not this build's guesses).
+    #[test]
+    fn the_counter_counts_exactly_what_the_server_numbers() {
+        assert!(
+            is_sequenced(&frame_of(Opcode::MessageEvent)),
+            "a Critical event is numbered"
+        );
+        assert!(
+            is_sequenced(&frame_of(Opcode::Sync)),
+            "a Critical reply is numbered"
+        );
+        assert!(
+            !is_sequenced(&frame_of(Opcode::Typing)),
+            "a Coalescable event is never numbered"
+        );
+        assert!(
+            !is_sequenced(&frame_of(Opcode::PresenceEvent)),
+            "presence is Coalescable and never numbered"
+        );
+        assert!(
+            !is_sequenced(&frame_of(Opcode::ReconnectHint)),
+            "the hint is written past the mailbox and never numbered"
+        );
+
+        let refused = Frame::new(
+            migo_wire::FrameHeader::new(Opcode::MessageSend.to_wire(), 1).error(),
+            bytes::Bytes::new(),
+        );
+        assert!(
+            is_sequenced(&refused),
+            "an error reply rides a Critical header and is numbered"
+        );
+
+        let unknown = Frame::new(migo_wire::FrameHeader::new(99_999, 1), bytes::Bytes::new());
+        assert!(
+            !is_sequenced(&unknown),
+            "an opcode this build cannot name is not guessed at"
+        );
+    }
+
+    /// The resume ask names the session and the count this process actually read — the two
+    /// facts the server's ring needs to answer with exactly the frames the outage cost.
+    #[test]
+    fn the_resume_ask_names_the_session_and_its_own_count() {
+        let session = GatewaySession {
+            id: id_of(7),
+            sequenced: 42,
+        };
+        let ask = session.resume_request();
+        assert_eq!(ask.session_id, id_of(7), "the ask names its session");
+        assert_eq!(ask.last_frame_seq, 42, "the ask asks from what was read");
+    }
+
+    /// The watermark is a *prefix's* top, not a maximum: it advances only over contiguous
+    /// ground (§152's gapless seqs are what make the next brick knowable), stands still
+    /// through redeliveries, holds at a hole, and names the hole's top when one opens — a
+    /// fill asked for less would leave the hole's tail unfetched.
+    #[test]
+    fn the_watermark_advances_only_over_contiguous_ground() {
+        let mut account = SeqAccount::default();
+
+        // The floor: the first event a conversation ever routes, whatever its seq — history
+        // below it may be gone (the server's own Truncated) or simply unfetched.
+        assert_eq!(account.track(5), None);
+        assert_eq!(account.watermark, 5);
+
+        assert_eq!(account.track(6), None, "the next brick advances the prefix");
+        assert_eq!(account.watermark, 6);
+
+        assert_eq!(account.track(4), None, "a redelivery moves nothing");
+        assert_eq!(account.watermark, 6);
+
+        assert_eq!(account.track(9), Some(9), "a hole is named as its own top");
+        assert_eq!(account.watermark, 6, "the watermark waits at the hole");
+        assert_eq!(account.highest_seen, 9);
+
+        // The fill's bricks close the hole without opening another.
+        assert_eq!(account.track(7), None);
+        assert_eq!(account.track(8), None);
+        assert_eq!(
+            account.watermark, 9,
+            "the hole closed, the prefix stands on its top"
+        );
+        assert_eq!(account.track(10), None);
+        assert_eq!(account.watermark, 10);
+    }
+
+    /// The stall is the loop guard: while the watermark stands where an unproductive fill left
+    /// it, the server has already been asked and has already answered, so nothing re-asks —
+    /// and the moment the watermark moves (the fill's own last brick, or a hole that closed
+    /// another way), the stall lifts and later holes may ask again.
+    #[test]
+    fn a_stall_lifts_only_when_the_watermark_moves() {
+        let mut account = SeqAccount::default();
+        account.track(10);
+        account.stalled_at = Some(10);
+
+        assert_eq!(account.track(12), Some(12), "the new hole is still named");
+        assert_eq!(
+            account.stalled_at,
+            Some(10),
+            "a stall survives events that do not close it"
+        );
+
+        assert_eq!(account.track(11), None, "the closing brick is no gap");
+        assert_eq!(
+            account.stalled_at, None,
+            "the watermark moving lifts the stall"
+        );
+        assert_eq!(account.watermark, 12);
+    }
+
+    /// A walk continues only while it moves within its bound: a bounded (gap) walk listens to
+    /// its own target rather than the conversation's live edge — `more` is the server's word
+    /// for history above the page, true whenever the conversation has any, hole filled or not
+    /// — an unbounded walk follows `more`, and no walk outlives a page that moved nothing or a
+    /// budget spent.
+    #[test]
+    fn a_walk_continues_only_while_it_moves_within_its_bound() {
+        let gap_walk = CatchUp {
+            to_seq: Some(20),
+            pages_left: 3,
+        };
+        assert!(
+            gap_walk.continues(true, false, 15),
+            "a bounded walk walks to its target, not the live edge"
+        );
+        assert!(
+            !gap_walk.continues(true, true, 20),
+            "the hole filled, the walk stops rather than tailing live traffic"
+        );
+        assert!(
+            !gap_walk.continues(false, true, 10),
+            "a page that moved nothing is the server's answer, not a re-ask"
+        );
+
+        let replay = CatchUp {
+            to_seq: None,
+            pages_left: 2,
+        };
+        assert!(
+            replay.continues(true, true, 400),
+            "an unbounded walk follows the server's own word for more"
+        );
+        assert!(
+            !replay.continues(true, false, 400),
+            "no history above: the walk reached the live edge"
+        );
+
+        let spent = CatchUp {
+            to_seq: None,
+            pages_left: 0,
+        };
+        assert!(
+            !spent.continues(true, true, 400),
+            "the page budget is the bound a long conversation is kept inside"
         );
     }
 
