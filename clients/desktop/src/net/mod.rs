@@ -364,6 +364,22 @@ pub enum Command {
     /// subject; the worker routes the self card to [`Event::OwnProfile`] so the pane gets its
     /// copy without the pane knowing the fetch is a batch.
     OwnProfile,
+    /// Read another member's profile card, for the member menu's "View profile".
+    ///
+    /// The conversation rides along because the worker's reply names only the card: the window
+    /// that asked is the one that draws it, and a floating profile view that outlived the
+    /// group window it was opened from would be a card with nowhere to belong. Like the own
+    /// card, this rides the batch `PROFILE_FETCH` the names map uses — the worker remembers
+    /// the ask and routes the answering card to [`Event::MemberProfile`] rather than to the
+    /// names map alone.
+    MemberProfile { conversation_id: Id, user_id: Id },
+    /// Read the gift catalogue alone, for the member menu's gift picker.
+    ///
+    /// The wallet's own read fires six requests at once, and a picker that only wants the
+    /// shop's shelves should not pay for the balance, the statement, and the leaderboard to
+    /// get them. The reply is the same [`Event::Gifts`] the wallet read lands as, so one
+    /// handler files it for every surface that reads it.
+    GiftCatalogue,
     /// Patch the caller's own profile. Absent fields keep their server-side values — the wire
     /// is a delta, not a replacement — so a save that changes a display name does not also have
     /// to know (and re-send) the privacy settings.
@@ -909,6 +925,17 @@ pub enum Event {
     /// The profile pane's save was accepted: the reply is the refreshed card, the same shape the
     /// fetch returns, so the pane replaces its copy from the reply instead of re-reading.
     ProfileSaved(crate::model::OwnProfile),
+    /// Another member's profile card, answering the member menu's "View profile".
+    ///
+    /// Carries the conversation whose window asked, because the card's own reply names only
+    /// the account: the view belongs to the window that opened it, and a second group's menu
+    /// must not steal a card the first group is still showing. The card arrives whole or not
+    /// at all — a profile the server would not disclose leaves the menu's ask unanswered, and
+    /// the view says nothing rather than half-naming somebody.
+    MemberProfile {
+        conversation_id: Id,
+        card: crate::model::MemberCard,
+    },
     /// An avatar upload was refused — the file would not read, the server declined the bytes,
     /// or the profile patch behind them was rejected.
     ///
@@ -1822,6 +1849,12 @@ struct Worker {
     /// its cached membership is incomplete, and the answer that stores completes that cache,
     /// so a second ask for the same conversation cannot arise before the first is answered.
     pending_roster: Option<Id>,
+    /// The member card a "View profile" ask is waiting on: the conversation whose window drew
+    /// the menu, and the account the card must name. The profile reply is a batch that names
+    /// its subjects but not its asker, so this is the only thing that can say which window a
+    /// card answers — the same one-at-a-time patience the roster ask keeps, for the same
+    /// reason: the reply that clears the ask is the reply that fills the view.
+    pending_member_profile: Option<(Id, Id)>,
     /// The founding keys a registration attempt minted but has not yet made stick (§12). A
     /// registration that fails after the server heard it must be retried with the *same* keys:
     /// a fresh root would be a different identity key, which the server can only answer with
@@ -1962,6 +1995,7 @@ impl Worker {
             pending_leave: None,
             pending_room_probe: None,
             pending_roster: None,
+            pending_member_profile: None,
             pending_registration: None,
             txs: None,
             peers: None,
@@ -2271,6 +2305,13 @@ impl Worker {
                 self.revoke_device(device_id).await;
             }
             Command::OwnProfile => self.fetch_own_profile().await,
+            Command::MemberProfile {
+                conversation_id,
+                user_id,
+            } => {
+                self.fetch_member_profile(conversation_id, user_id).await;
+            }
+            Command::GiftCatalogue => self.request_gift_catalogue().await,
             Command::SaveProfile(patch) => self.save_profile(patch).await,
             Command::ChangeAvatar { path } => self.change_avatar(path).await,
             Command::Admins => self.fetch_admins().await,
@@ -3488,6 +3529,44 @@ impl Worker {
         let me = signed.account.account_id;
         let message = migo_protocol::ProfileRequest { user_ids: vec![me] };
         self.request(Opcode::ProfileFetch, &message).await;
+    }
+
+    /// Reads another member's profile card for the member menu's "View profile".
+    ///
+    /// The ask is remembered before the fetch is fired, because the reply is a batch that
+    /// names its subjects but not its asker: without the memory, the card would land in the
+    /// names map and the window that asked would never hear the answer it asked for. The
+    /// conversation is remembered with the account so the answering event can name the window
+    /// the card belongs to.
+    async fn fetch_member_profile(&mut self, conversation_id: Id, user_id: Id) {
+        self.pending_member_profile = Some((conversation_id, user_id));
+        self.fetch_profiles(vec![user_id]).await;
+    }
+
+    /// Reads the gift catalogue alone — the wallet's whole-economy read without the other
+    /// five requests, for surfaces that want the shop's shelves and nothing else.
+    async fn request_gift_catalogue(&mut self) {
+        self.request(Opcode::GiftCatalogue, &GiftCatalogueReq {})
+            .await;
+    }
+
+    /// Reduces one wire card to the member view's row.
+    ///
+    /// The same reduction the own card takes, minus the owner's own disclosures: a birth year
+    /// and a custom status are things an account says about itself on its own pane, and
+    /// another account's card carries neither.
+    fn member_card_from_wire(profile: &migo_protocol::UserProfile) -> crate::model::MemberCard {
+        crate::model::MemberCard {
+            account_id: profile.user_id,
+            username: profile.username.clone(),
+            display_name: profile.display_name.clone(),
+            public_id: profile.public_id.clone(),
+            bio: profile.bio.clone(),
+            presence: profile
+                .presence
+                .map(|state| model::Presence::from_wire(state.to_wire()))
+                .unwrap_or(model::Presence::Unknown),
+        }
     }
 
     /// Reduces one wire card to the profile pane's row.
@@ -7988,9 +8067,27 @@ impl Worker {
                 let own = Self::own_profile_from_wire(profile);
                 self.sink.send(Event::OwnProfile(Ok(own)));
             }
+            // A card answering the member menu's ask is the profile view's copy. The same
+            // match-on-id rule the self card follows, and for the same reason: the batch is
+            // untrusted input, and only the account the menu named is the card the menu was
+            // asking for.
+            if let Some((conversation_id, asked)) = self.pending_member_profile {
+                if asked == profile.user_id {
+                    let card = Self::member_card_from_wire(profile);
+                    self.sink.send(Event::MemberProfile {
+                        conversation_id,
+                        card,
+                    });
+                }
+            }
             names.insert(profile.user_id, name);
         }
         self.sink.send(Event::Names(names));
+        // The ask is spent with the reply, matched or not: a reply that names every subject
+        // it was given and still not the asked-for account is the server's own word that the
+        // card is not coming, and a later unrelated batch must not answer a question nobody
+        // is asking anymore.
+        self.pending_member_profile = None;
     }
 
     /// The reply a PROFILE_UPDATE carries: the caller's own card, read back through the same

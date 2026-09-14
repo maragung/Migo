@@ -600,6 +600,19 @@ impl App {
                     // account bar picks the display name up on the same event.
                     self.profile_panel.file(profile, true);
                 }
+                Event::MemberProfile {
+                    conversation_id,
+                    card,
+                } => {
+                    // The member menu's "View profile" answered: the card files against the
+                    // conversation whose window asked, because the profile view draws inside
+                    // that window — a card filed without its window would outlive the group it
+                    // was opened from, and a group's member list is the only door to it.
+                    self.chat.member_profile = Some(crate::ui::chat::MemberProfileView {
+                        conversation_id,
+                        card,
+                    });
+                }
                 Event::AvatarChangeFailed { reason } => {
                     // The avatar button's own refusal: filed beside the form the person is
                     // looking at, the same sentence-shape a refused profile save takes.
@@ -912,7 +925,12 @@ impl App {
                     self.wallet.leaders = rows;
                 }
                 Event::Gifts(rows) => {
-                    self.wallet.gifts = rows;
+                    // The catalogue files for the wallet's shop and the member menu's gift
+                    // picker both: one read, every surface that prices a gift reading the
+                    // same shelves, so a gift sent from a group costs what the wallet said
+                    // it would.
+                    self.wallet.gifts = rows.clone();
+                    self.chat.gifts = rows;
                 }
                 Event::ChainBalance {
                     network,
