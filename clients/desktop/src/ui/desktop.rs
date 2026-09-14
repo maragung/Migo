@@ -4,8 +4,8 @@
 //!
 //! The reference's web client is a window manager wearing a web page: a teal desktop, a Contacts
 //! panel docked on the left, one floating window per conversation, and a taskbar along the
-//! bottom that owns the window list, the balance, the clock and the way out. This module is the
-//! honest egui translation of that model — [`egui::Window`] *is* a floating, draggable,
+//! bottom that owns the window list, the connection, the clock and the way out. This module is
+//! the honest egui translation of that model — [`egui::Window`] *is* a floating, draggable,
 //! resizable, collapsible window, so the shell's work is not inventing windowing but staying out
 //! of egui's way:
 //!
@@ -38,6 +38,7 @@ use egui::{
 };
 use migo_core::Id as ConversationId;
 
+use crate::model::Connection;
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::widgets;
 use crate::ui::Place;
@@ -391,47 +392,81 @@ pub enum TaskAction {
     Logout,
 }
 
+/// One chip's worth of the taskbar's right cluster: its laid-out text, the ink that text wears,
+/// the status dot it may carry before the word, and the hover a pointer owes it.
+struct BarChip {
+    /// The chip's text, already laid out in the bar's own type size.
+    galley: Arc<Galley>,
+    /// The text's ink.
+    ink: Color32,
+    /// The dot before the word, in the colour the fact is made of — the connection chip's green,
+    /// amber or red. `None` draws no dot.
+    dot: Option<Color32>,
+    /// What a hover says, when the chip has something to say beyond its word.
+    hover: Option<String>,
+}
+
 /// The taskbar: the fixed dark bar along the bottom of the desktop.
 ///
 /// Carries the reference's things in its order — the brand button (which is the Contacts
 /// window's button, the way the reference's logo is), the open-window buttons with their state
-/// dots, then the balance chip in gold, the session timer, the logout button and the clock at
-/// the right edge. Drawn as a panel before the desktop surface so the surface and the windows
-/// know where its edge is; each button's state is read from egui's memory at draw time, so a
-/// window egui raised a frame ago is already the active button.
+/// dots, then the connection chip, the session timer, the logout button and the clock at the
+/// right edge. The connection chip stands where the balance chip used to: the $MIG figure moved
+/// up to the account bar, above the alert bell and the account menu, and the one live fact
+/// about the link took its place at the bottom — a status bar in the oldest sense, the thing
+/// you want at a glance and never want to go looking for. Drawn as a panel before the desktop
+/// surface so the surface and the windows know where its edge is; each button's state is read
+/// from egui's memory at draw time, so a window egui raised a frame ago is already the active
+/// button.
 pub fn taskbar(
     ui: &mut Ui,
     theme: Theme,
     contacts_open: bool,
     entries: &[TaskEntry],
-    coins: Option<u64>,
+    connection: &Connection,
     session: Option<Duration>,
 ) -> Vec<TaskAction> {
     let colors = palette(theme);
     let mut actions = Vec::new();
 
     // The right cluster is measured before the row is laid out, because the window list scrolls
-    // in whatever width is left once the balance, the timer, the logout and the clock have had
-    // theirs — a bar whose right end moves with its buttons reads as broken.
-    let mut cluster: Vec<(Arc<Galley>, Color32)> = Vec::new();
-    if let Some(coins) = coins {
-        cluster.push((
-            chip_text(ui, &format!("{coins} $MIG"), colors.gold),
-            colors.gold,
-        ));
-    }
+    // in whatever width is left once the connection, the timer, the logout and the clock have
+    // had theirs — a bar whose right end moves with its buttons reads as broken.
+    let mut cluster: Vec<BarChip> = Vec::new();
+    // The connection chip, first in the cluster: the session's one live fact about the link,
+    // where the balance chip used to stand. The dot carries the state's colour and the word the
+    // person's own vocabulary for it; the detail waits for the hover.
+    let (dot, word, detail) = link_status(theme, connection);
+    cluster.push(BarChip {
+        galley: chip_text(ui, word, colors.banner_ink),
+        ink: colors.banner_ink,
+        dot: Some(dot),
+        hover: Some(detail),
+    });
     if let Some(elapsed) = session {
-        cluster.push((
-            chip_text(ui, &session_text(elapsed), colors.text_muted),
-            colors.text_muted,
-        ));
+        cluster.push(BarChip {
+            galley: chip_text(ui, &session_text(elapsed), colors.text_muted),
+            ink: colors.text_muted,
+            dot: None,
+            hover: None,
+        });
     }
-    let logout = chip_text(ui, "Logout", colors.banner_ink);
-    let clock = chip_text(
-        ui,
-        &crate::model::clock(migo_core::Timestamp::now()),
-        colors.banner_ink,
-    );
+    let logout_chip = BarChip {
+        galley: chip_text(ui, "Logout", colors.banner_ink),
+        ink: colors.banner_ink,
+        dot: None,
+        hover: None,
+    };
+    let clock_chip = BarChip {
+        galley: chip_text(
+            ui,
+            &crate::model::clock(migo_core::Timestamp::now()),
+            colors.banner_ink,
+        ),
+        ink: colors.banner_ink,
+        dot: None,
+        hover: None,
+    };
 
     // The bar's height follows its row of Small text, like every other chrome bar in the client.
     let row = ui.text_style_height(&TextStyle::Small);
@@ -447,12 +482,9 @@ pub fn taskbar(
                 // The window list: the leftover width between the brand and the right cluster,
                 // scrolling sideways rather than hiding anything, because a window that is
                 // off-screen is still a window.
-                let cluster_width: f32 = cluster
-                    .iter()
-                    .map(|(galley, _)| chip_width(galley))
-                    .sum::<f32>()
-                    + chip_width(&logout)
-                    + chip_width(&clock)
+                let cluster_width: f32 = cluster.iter().map(chip_width).sum::<f32>()
+                    + chip_width(&logout_chip)
+                    + chip_width(&clock_chip)
                     + ui.spacing().item_spacing.x;
                 let list_width = (ui.available_width() - cluster_width).max(0.0);
                 egui::ScrollArea::horizontal()
@@ -474,12 +506,14 @@ pub fn taskbar(
                 // The right cluster, right to left: the clock ends up outermost, then the way
                 // out, then the facts about the session.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    draw_chip(ui, clock, colors.banner_ink);
-                    if logout_button(ui, theme, logout) {
+                    draw_chip(ui, clock_chip);
+                    // The button answers plain bool, the same as every painted control on the
+                    // bar: `clicked` already happened inside it, where the response lives.
+                    if logout_button(ui, theme, logout_chip.galley.clone()) {
                         actions.push(TaskAction::Logout);
                     }
-                    for (galley, ink) in cluster {
-                        draw_chip(ui, galley, ink);
+                    for chip in cluster {
+                        draw_chip(ui, chip);
                     }
                 });
             });
@@ -687,26 +721,81 @@ fn chip_text(ui: &Ui, text: &str, ink: Color32) -> Arc<Galley> {
         .layout_no_wrap(text.to_owned(), FontId::proportional(font::SMALL), ink)
 }
 
-/// How much bar a chip's galley occupies, including its padding and the row's spacing.
-fn chip_width(galley: &Galley) -> f32 {
-    galley.size().x + 2.0 * space::SM + space::SM
+/// How much bar a chip occupies, including its padding, its dot's room, and the row's spacing.
+fn chip_width(chip: &BarChip) -> f32 {
+    let dot_room = if chip.dot.is_some() { 13.0 } else { 0.0 };
+    chip.galley.size().x + dot_room + 2.0 * space::SM + space::SM
 }
 
-/// A small fixed chip on the bar: the clock, the timer, the balance — a dark inset on the nav
-/// teal, the reference's own reading of "a fact, stated".
-fn draw_chip(ui: &mut Ui, galley: Arc<Galley>, ink: Color32) {
-    let size = galley.size() + Vec2::new(2.0 * space::SM, 2.0 * 3.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+/// A small fixed chip on the bar: the clock, the timer, the connection — a dark inset on the nav
+/// teal, the reference's own reading of "a fact, stated". The connection's chip carries a dot
+/// before its word, in the one colour the fact is made of.
+fn draw_chip(ui: &mut Ui, chip: BarChip) -> egui::Response {
+    let dot_room = if chip.dot.is_some() { 13.0 } else { 0.0 };
+    let text_size = chip.galley.size();
+    let size = text_size + Vec2::new(2.0 * space::SM + dot_room, 2.0 * 3.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(4), Color32::from_black_alpha(70));
+    if let Some(dot) = chip.dot {
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + space::SM + 3.5, rect.center().y),
+            3.5,
+            dot,
+        );
+    }
     ui.painter().galley(
         egui::pos2(
-            rect.left() + space::SM,
-            rect.center().y - galley.size().y / 2.0,
+            rect.left() + space::SM + dot_room,
+            rect.center().y - text_size.y / 2.0,
         ),
-        galley,
-        ink,
+        chip.galley,
+        chip.ink,
     );
+    match chip.hover {
+        Some(hover) => response.on_hover_text(hover),
+        None => response,
+    }
+}
+
+/// The taskbar's connection chip, resolved: the colour of its dot, the word beside it, and the
+/// detail a hover owes the person.
+///
+/// The words are the person's own vocabulary for a link — online, reconnecting, offline — in the
+/// three colours every client wears for them: green live, amber being re-established, red gone.
+/// The worker's finer facts (a fallback transport, the reason a link died) stay in the hover,
+/// because a bar chip that stated them would be a bar nobody could read at a glance.
+fn link_status(theme: Theme, connection: &Connection) -> (Color32, &'static str, String) {
+    let colors = palette(theme);
+    match connection {
+        Connection::Online => (
+            colors.positive,
+            "Online",
+            "Connected — the session is encrypted and live.".to_owned(),
+        ),
+        Connection::Fallback(_) => (
+            colors.positive,
+            "Online",
+            format!(
+                "{} — connected over the default transport.",
+                connection.label()
+            ),
+        ),
+        Connection::Connecting => (
+            colors.warning,
+            "Connecting",
+            "Opening the session's connection.".to_owned(),
+        ),
+        // The worker retries a dropped link on its own with backoff, so "failed" is a state on
+        // the way back up, not a verdict: the word says what is happening, the hover says why it
+        // started.
+        Connection::Failed(reason) => (
+            colors.warning,
+            "Reconnecting",
+            format!("Connection lost — retrying. {reason}"),
+        ),
+        Connection::Offline => (colors.danger, "Offline", "No connection.".to_owned()),
+    }
 }
 
 /// The session timer as the reference writes it: minutes until there is an hour to name.

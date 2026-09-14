@@ -147,20 +147,24 @@ impl Place {
 /// The two modes are two presentations of one chat state, not two chat systems: the
 /// conversations, messages, drafts, unread counts and the connection are shared, and only the
 /// shell's layout differs. [`NavigationMode::Tabbed`] is the desktop-OS model the reference's
-/// window manager draws — every conversation a floating, closable window of its own (see
-/// [`crate::ui::desktop`]) — and it is the default, because it is the behaviour every session
-/// before the choice existed was built around. [`NavigationMode::ChatList`] is the split view:
-/// the conversation list docked on the left of the window and one chat surface on the right
-/// whose contents follow the list's selection (see [`crate::ui::chat_list`]). No window is
-/// minted per conversation in the split view, and Friends, Rooms and Feed are exactly what
-/// they were in either mode, because the choice is about the chat area and nothing else.
+/// window manager draws — a plain teal desk with every conversation a floating, closable window
+/// of its own (see [`crate::ui::desktop`]) — and it is the default, because it is the behaviour
+/// every session before the choice existed was built around. [`NavigationMode::ChatList`] is
+/// the phone's home translated to a desktop ground (see [`crate::ui::chat_list`]): the
+/// conversation list is the main window's own content, and opening a conversation mints that
+/// thread's own floating, closable window — the same window, drawn by the same code, that
+/// tabbed navigation mints — so closing it leaves the person back on the list. Friends, Rooms
+/// and Feed are exactly what they were in either mode, because the choice is about the chat
+/// area's ground and nothing else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigationMode {
-    /// One floating, closable window per conversation — the existing desktop, unchanged.
+    /// A plain desk with one floating, closable window per conversation — the existing desktop,
+    /// unchanged.
     #[default]
     Tabbed,
-    /// The chat list docked left, one chat window right, and no window per conversation.
+    /// The chat list as the main window's content; each conversation opens in a window of its
+    /// own, and closing the window returns to the list.
     ChatList,
 }
 

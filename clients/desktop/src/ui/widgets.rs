@@ -165,24 +165,7 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
         }
         crate::ui::Place::Alerts => {
             // A bell: a dome, a lip, and a clapper.
-            painter.add(egui::Shape::line(
-                vec![
-                    p(0.2, 0.75),
-                    p(0.2, 0.5),
-                    p(0.3, 0.25),
-                    p(0.5, 0.15),
-                    p(0.7, 0.25),
-                    p(0.8, 0.5),
-                    p(0.8, 0.75),
-                ],
-                stroke,
-            ));
-            painter.line_segment([p(0.12, 0.75), p(0.88, 0.75)], stroke);
-            painter.add(egui::Shape::circle_stroke(
-                p(0.5, 0.88),
-                side * 0.07,
-                stroke,
-            ));
+            paint_bell(&painter, min, side, stroke);
         }
         crate::ui::Place::Search => {
             // A magnifier: a lens and a handle.
@@ -271,6 +254,60 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
             painter.line_segment([p(0.46, 0.6), p(0.68, 0.32)], stroke);
         }
     }
+}
+
+/// The bell's own geometry: a dome, a lip, and a clapper, in a unit box whose top-left corner is
+/// `min` and whose side is `side`.
+///
+/// Drawn apart from [`place_icon`] because the bell has a second home the strip's icons do not:
+/// the account bar's alert button, which wears the banner's own ink rather than the palette's
+/// chip ink. One geometry, two inks — the honest alternative is two bells that drift.
+fn paint_bell(painter: &egui::Painter, min: egui::Pos2, side: f32, stroke: Stroke) {
+    let p = |x: f32, y: f32| egui::pos2(min.x + x * side, min.y + y * side);
+    painter.add(egui::Shape::line(
+        vec![
+            p(0.2, 0.75),
+            p(0.2, 0.5),
+            p(0.3, 0.25),
+            p(0.5, 0.15),
+            p(0.7, 0.25),
+            p(0.8, 0.5),
+            p(0.8, 0.75),
+        ],
+        stroke,
+    ));
+    painter.line_segment([p(0.12, 0.75), p(0.88, 0.75)], stroke);
+    painter.add(egui::Shape::circle_stroke(
+        p(0.5, 0.88),
+        side * 0.07,
+        stroke,
+    ));
+}
+
+/// The account bar's alert bell: the place icon's own bell on a clickable box, in the ink the
+/// banner it stands on owns.
+///
+/// The banner is orange in both themes, so the palette's chip ink would sit on it as a colour
+/// chosen for somewhere else; the caller hands the ink the way every other banner control takes
+/// its own. The bell opens the Alerts window — the durable notification inbox, the one side
+/// surface the top bar owes a one-touch door to.
+pub fn bell_button(ui: &mut Ui, ink: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_black_alpha(60)
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    }
+    paint_bell(
+        ui.painter(),
+        egui::pos2(rect.center().x - 10.0, rect.center().y - 10.0),
+        20.0,
+        Stroke::new(1.75, ink),
+    );
+    response
 }
 
 /// What happened to one chip on the tab strip.

@@ -636,8 +636,8 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
                     "Every conversation opens as its own floating, closable window."
                 }
                 NavigationMode::ChatList => {
-                    "A searchable list of conversations stays on the left; the one you pick \
-                     fills the single chat window on the right."
+                    "The chat list fills the window; opening a conversation opens it in a \
+                     window of its own, and closing that window returns to the list."
                 }
             };
             if ui

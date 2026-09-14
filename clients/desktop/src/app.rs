@@ -340,8 +340,9 @@ impl App {
                     self.wallet = WalletState::default();
                     self.activity.clear();
                     self.screen = Screen::Chat;
-                    // The taskbar carries the balance, so the session's first reads include the
-                    // wallet the same way they include the conversation list.
+                    // The account bar carries the balance above the alert bell and the account
+                    // menu, so the session's first reads include the wallet the same way they
+                    // include the conversation list.
                     self.commands.push(Command::Wallet);
                     // The account bar shows the profile's display name once a card has been read,
                     // and a save later in the session re-reads nothing — the save's own reply is
@@ -466,17 +467,12 @@ impl App {
                     {
                         conversation.preview = Some(preview);
                         conversation.updated_at = Some(at);
-                        // Only count it unread when the conversation is not being read. In
-                        // tabbed navigation that is "has a window on the desktop" — a badge on
-                        // a window someone is reading is noise, and a window that is open but
-                        // buried under another still counts as being read, because the person
-                        // chose to keep it open. In Chat List Mode the one honest equivalent
-                        // is "is the conversation the split view is showing".
-                        let reading = if self.settings.navigation_mode == NavigationMode::ChatList {
-                            self.chat.selected == Some(conversation_id)
-                        } else {
-                            self.desktop.chats.contains(&conversation_id)
-                        };
+                        // Only count it unread when the conversation is not being read, and
+                        // being read is "has a window on the desktop" in either navigation
+                        // mode — a badge on a window someone is reading is noise, and a window
+                        // that is open but buried under another still counts as being read,
+                        // because the person chose to keep it open.
+                        let reading = self.desktop.chats.contains(&conversation_id);
                         if incoming && !reading {
                             conversation.unread = conversation.unread.saturating_add(1);
                         }
@@ -485,8 +481,9 @@ impl App {
                         // comes into being when a packet arrives for it, not only when someone
                         // clicks. The mint does not steal the top spot: the taskbar button's
                         // unread badge is the attention signal, and the person's click still
-                        // raises. Tabbed navigation only — Chat List Mode mints nothing, and
-                        // the row's own badge is the attention signal there.
+                        // raises. Tabbed navigation only — Chat List Mode's ground is the list
+                        // itself, and the row's own badge is the attention signal there; the
+                        // window arrives when the person taps the row.
                         if incoming && self.settings.navigation_mode == NavigationMode::Tabbed {
                             self.desktop.open_chat(conversation_id);
                         }
@@ -1276,40 +1273,39 @@ impl App {
                 unread: 0,
             });
         }
-        // Chat List Mode lists no conversation windows, because it has none: the list docked
-        // on the left is the surface, and a taskbar button that toggled a window that does not
-        // exist would be a button lying about what it does. Tabbed navigation lists them all.
-        if self.settings.navigation_mode == NavigationMode::Tabbed {
-            for conversation_id in &self.desktop.chats {
-                let (label, kind, unread) = self
-                    .chat
-                    .conversations
-                    .iter()
-                    .find(|c| c.conversation_id == *conversation_id)
-                    .map(|c| {
-                        let title = me
-                            .map(|me| c.display_title(me, &self.chat.names))
-                            .unwrap_or_else(|| crate::model::short_id(*conversation_id));
-                        // The kind word is the taskbar's own taxonomy: a room is what the server
-                        // names a room, a group is a conversation with more than two members, and
-                        // everything else is a private chat.
-                        let kind = if c.room_id.is_some() {
-                            "Room"
-                        } else if c.members.len() > 2 {
-                            "Group"
-                        } else {
-                            "Chat"
-                        };
-                        (title, kind, c.unread)
-                    })
-                    .unwrap_or_else(|| (crate::model::short_id(*conversation_id), "Chat", 0));
-                entries.push(TaskEntry {
-                    id: desktop::chat_id(*conversation_id),
-                    label,
-                    kind,
-                    unread,
-                });
-            }
+        // The conversation windows, in both navigation modes: Chat List Mode's windows are the
+        // same floating, closable windows tabbed navigation mints — the mode changes the ground
+        // the list stands on, not the windows a conversation opens as — so the taskbar lists
+        // them all either way.
+        for conversation_id in &self.desktop.chats {
+            let (label, kind, unread) = self
+                .chat
+                .conversations
+                .iter()
+                .find(|c| c.conversation_id == *conversation_id)
+                .map(|c| {
+                    let title = me
+                        .map(|me| c.display_title(me, &self.chat.names))
+                        .unwrap_or_else(|| crate::model::short_id(*conversation_id));
+                    // The kind word is the taskbar's own taxonomy: a room is what the server
+                    // names a room, a group is a conversation with more than two members, and
+                    // everything else is a private chat.
+                    let kind = if c.room_id.is_some() {
+                        "Room"
+                    } else if c.members.len() > 2 {
+                        "Group"
+                    } else {
+                        "Chat"
+                    };
+                    (title, kind, c.unread)
+                })
+                .unwrap_or_else(|| (crate::model::short_id(*conversation_id), "Chat", 0));
+            entries.push(TaskEntry {
+                id: desktop::chat_id(*conversation_id),
+                label,
+                kind,
+                unread,
+            });
         }
         for place in &self.desktop.sides {
             entries.push(TaskEntry {
@@ -1397,7 +1393,8 @@ impl App {
 
     /// The account bar the Contacts window carries where the old shell had its banner: the
     /// orange band that owns the account — avatar, name, the one live fact about the
-    /// connection, the balance, the theme toggle, and the menu that opens every side window.
+    /// connection, and, stacked at the right end, the $MIG balance above the theme toggle, the
+    /// account menu and the alert bell.
     fn account_bar(
         &mut self,
         ctx: &egui::Context,
@@ -1434,6 +1431,7 @@ impl App {
         let mut opened: Option<Place> = None;
         let mut logout = false;
         let mut flip_theme = false;
+        let mut bell = false;
 
         egui::Frame::new()
             .fill(colors.banner_b)
@@ -1466,107 +1464,146 @@ impl App {
                         });
                     });
 
+                    // The bar's right end is two rows, stacked: the balance on top, the
+                    // controls under it. The $MIG figure sits above the alert bell and the
+                    // account menu because it is the fact the person checks at a glance and the
+                    // controls are the doors they walk through — a figure wedged between doors
+                    // reads as neither, and the bottom bar's connection chip took the figure's
+                    // old stand at the other end of the screen.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Sun while dark, moon while light: the glyph names the theme one click
-                        // would arrive at, drawn as ink on the band.
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(if self.theme.is_dark() {
-                                        "\u{2600}"
-                                    } else {
-                                        "\u{1F319}"
-                                    })
-                                    .color(colors.banner_ink),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .on_hover_text(format!("Switch to {}", self.theme.flipped().label()))
-                            .clicked()
-                        {
-                            flip_theme = true;
-                        }
-                        // The account menu, opened from the chevron beside the avatar — the
-                        // reference's dropdown, carrying the side windows it offers.
-                        let mut menu = None;
-                        let mut out = false;
-                        ui.scope(|ui| {
-                            let w = &mut ui.style_mut().visuals.widgets;
-                            w.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                            w.inactive.bg_stroke = egui::Stroke::NONE;
-                            w.hovered.bg_fill = egui::Color32::from_black_alpha(60);
-                            w.hovered.bg_stroke = egui::Stroke::NONE;
-                            w.active.bg_fill = egui::Color32::from_black_alpha(90);
-                            w.active.bg_stroke = egui::Stroke::NONE;
-                            ui.menu_button(
-                                egui::RichText::new("\u{25BE}")
-                                    .color(colors.banner_ink)
-                                    .strong(),
+                        ui.vertical(|ui| {
+                            // The balance, the session's real $MIG. Gold on the dark inset, the
+                            // same coin colour the figure wore on the taskbar chip it left —
+                            // a number about money keeps its own colour wherever it is stated.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("My Profile").clicked() {
-                                        menu = Some(Place::Profile);
-                                        ui.close();
+                                    if let Some(coins) = coins {
+                                        widgets::pill(
+                                            ui,
+                                            &format!("{coins} $MIG"),
+                                            colors.gold,
+                                            egui::Color32::from_black_alpha(90),
+                                        );
                                     }
-                                    if ui.button("My Wallet ($MIG)").clicked() {
-                                        menu = Some(Place::Wallet);
-                                        ui.close();
-                                    }
-                                    if ui.button("Alerts").clicked() {
-                                        menu = Some(Place::Alerts);
-                                        ui.close();
-                                    }
-                                    if ui.button("Search").clicked() {
-                                        menu = Some(Place::Search);
-                                        ui.close();
-                                    }
-                                    if ui.button("Games").clicked() {
-                                        menu = Some(Place::Games);
-                                        ui.close();
-                                    }
-                                    // Settings keeps its own entry now that "My Profile" opens the
-                                    // profile window: server, theme, devices, and the way out.
-                                    if ui.button("Settings").clicked() {
-                                        menu = Some(Place::Settings);
-                                        ui.close();
-                                    }
-                                    // The owner's own management page. Offered only when the
-                                    // sign-in standing check said this account is the owner — the
-                                    // surface's existence is not public information, and the
-                                    // server refuses every read and write here for anybody
-                                    // else anyway. A non-owner never sees the word.
-                                    if matches!(
-                                        self.admins_panel.answer,
-                                        crate::net::AdminsAnswer::Owner(_)
-                                    ) && ui.button("Global Admins").clicked()
+                                },
+                            );
+                            ui.add_space(space::XS);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Sun while dark, moon while light: the glyph names the
+                                    // theme one click would arrive at, drawn as ink on the band.
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(if self.theme.is_dark() {
+                                                    "\u{2600}"
+                                                } else {
+                                                    "\u{1F319}"
+                                                })
+                                                .color(colors.banner_ink),
+                                            )
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .stroke(egui::Stroke::NONE),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Switch to {}",
+                                            self.theme.flipped().label()
+                                        ))
+                                        .clicked()
                                     {
-                                        menu = Some(Place::Admins);
-                                        ui.close();
+                                        flip_theme = true;
                                     }
-                                    if ui.button("Exit / Logout").clicked() {
-                                        out = true;
-                                        ui.close();
+                                    // The account menu, opened from the chevron beside the
+                                    // avatar — the reference's dropdown, carrying the side
+                                    // windows it offers.
+                                    let mut menu = None;
+                                    let mut out = false;
+                                    ui.scope(|ui| {
+                                        let w = &mut ui.style_mut().visuals.widgets;
+                                        w.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                        w.inactive.bg_stroke = egui::Stroke::NONE;
+                                        w.hovered.bg_fill = egui::Color32::from_black_alpha(60);
+                                        w.hovered.bg_stroke = egui::Stroke::NONE;
+                                        w.active.bg_fill = egui::Color32::from_black_alpha(90);
+                                        w.active.bg_stroke = egui::Stroke::NONE;
+                                        ui.menu_button(
+                                            egui::RichText::new("\u{25BE}")
+                                                .color(colors.banner_ink)
+                                                .strong(),
+                                            |ui| {
+                                                if ui.button("My Profile").clicked() {
+                                                    menu = Some(Place::Profile);
+                                                    ui.close();
+                                                }
+                                                if ui.button("My Wallet ($MIG)").clicked() {
+                                                    menu = Some(Place::Wallet);
+                                                    ui.close();
+                                                }
+                                                if ui.button("Alerts").clicked() {
+                                                    menu = Some(Place::Alerts);
+                                                    ui.close();
+                                                }
+                                                if ui.button("Search").clicked() {
+                                                    menu = Some(Place::Search);
+                                                    ui.close();
+                                                }
+                                                if ui.button("Games").clicked() {
+                                                    menu = Some(Place::Games);
+                                                    ui.close();
+                                                }
+                                                // Settings keeps its own entry now that "My
+                                                // Profile" opens the profile window: server,
+                                                // theme, devices, and the way out.
+                                                if ui.button("Settings").clicked() {
+                                                    menu = Some(Place::Settings);
+                                                    ui.close();
+                                                }
+                                                // The owner's own management page. Offered only
+                                                // when the sign-in standing check said this
+                                                // account is the owner — the surface's existence
+                                                // is not public information, and the server
+                                                // refuses every read and write here for anybody
+                                                // else anyway. A non-owner never sees the word.
+                                                if matches!(
+                                                    self.admins_panel.answer,
+                                                    crate::net::AdminsAnswer::Owner(_)
+                                                ) && ui.button("Global Admins").clicked()
+                                                {
+                                                    menu = Some(Place::Admins);
+                                                    ui.close();
+                                                }
+                                                if ui.button("Exit / Logout").clicked() {
+                                                    out = true;
+                                                    ui.close();
+                                                }
+                                            },
+                                        );
+                                    });
+                                    opened = menu;
+                                    logout = out;
+                                    // The alert bell, the one side surface the top bar owes a
+                                    // one-touch door to: the same bell the place icons paint,
+                                    // in the band's own ink, opening the Alerts window.
+                                    if widgets::bell_button(ui, colors.banner_ink)
+                                        .on_hover_text("Alerts — your notification inbox")
+                                        .clicked()
+                                    {
+                                        bell = true;
                                     }
                                 },
                             );
                         });
-                        opened = menu;
-                        logout = out;
-                        // The balance chip: the session's real $MIG, dark on the band.
-                        if let Some(coins) = coins {
-                            widgets::pill(
-                                ui,
-                                &format!("{coins} $MIG"),
-                                colors.banner_ink,
-                                egui::Color32::from_black_alpha(90),
-                            );
-                        }
                     });
                 });
             });
 
         if let Some(target) = opened {
             self.open_side(ctx, target);
+        }
+        if bell {
+            self.open_side(ctx, Place::Alerts);
         }
         if logout {
             self.desktop.logout_dialog = true;
@@ -1661,22 +1698,19 @@ impl App {
         }
     }
 
-    /// The Chat List Mode desktop: the conversation list docked on the left, the one chat
-    /// window on the right.
+    /// The Chat List Mode ground: the conversation list as the main window's own content.
     ///
-    /// This is the mode's whole presentation (see [`crate::ui::chat_list`]): no window is
-    /// minted per conversation — the right half is one surface whose contents follow the
-    /// list's selection — and everything else on the desktop (the Contacts window, the side
-    /// windows, the taskbar) is exactly what tabbed navigation draws, because the navigation
-    /// choice is about the chat area and nothing else. The chat itself is the same `thread`
-    /// the floating windows draw, driven by the same [`crate::ui::chat::open`] every other
-    /// door into a conversation uses.
-    ///
-    /// A selection change is the mode's "closing the window": the moment a click moves the
-    /// right half to another conversation is the moment the transcript of the one being left
-    /// is written, the same moment a window's close writes it in tabbed navigation (when
-    /// auto-save is on; [`Self::snapshot_chat_log`] holds the "when").
-    fn chat_list_split(
+    /// This is the mode's whole presentation (see [`crate::ui::chat_list`]): the phone's home,
+    /// translated to a desktop ground — the list is what the window *is*, not a pane docked
+    /// beside a chat, and everything else on the desktop (the Contacts window, the side windows,
+    /// the taskbar) is exactly what tabbed navigation draws, because the navigation choice is
+    /// about the chat area's ground and nothing else. Opening a conversation from the list mints
+    /// that thread's own floating, closable window — the same window, drawn by the same
+    /// [`Self::chat_window`], that tabbed navigation mints — so a conversation is read in a
+    /// window of its own and closing it (the button, the taskbar, or Escape) drops the window
+    /// and leaves the person back on the list, which never went away: "back" is not a
+    /// navigation this mode owes anyone.
+    fn chat_list_ground(
         &mut self,
         ui: &mut egui::Ui,
         navigate: &mut Option<Screen>,
@@ -1684,79 +1718,22 @@ impl App {
         zoom_choice: &mut Option<f32>,
         navigation_choice: &mut Option<NavigationMode>,
     ) {
-        let colors = palette(self.theme);
-        let leaving = self.chat.selected;
-
-        // The list: born at about a quarter of the window and resizable, because a list
-        // someone cannot widen is a list someone will fight; egui remembers whatever the
-        // person drags it to, keyed by the panel's id.
-        let width = ui.available_width();
-        egui::Panel::left(egui::Id::new("migo-chat-list"))
-            .resizable(true)
-            .min_size(220.0)
-            .max_size(480.0)
-            .default_size((width * 0.25).clamp(220.0, 480.0))
-            .frame(egui::Frame::new().fill(colors.surface))
-            .show(ui, |ui| {
-                let mut context = Context {
-                    theme: self.theme,
-                    connection: &self.connection,
-                    account: self.account.as_ref(),
-                    server: &self.auth.server,
-                    commands: &mut self.commands,
-                    rich_presence: self.rich_presence,
-                    chat_log_auto_save: self.settings.auto_save_chat_logs,
-                    chat_log: &mut self.chat_log_actions,
-                    navigation_mode: self.settings.navigation_mode,
-                    navigate: &mut *navigate,
-                    theme_choice: &mut *theme_choice,
-                    zoom_choice: &mut *zoom_choice,
-                    navigation_choice: &mut *navigation_choice,
-                };
-                crate::ui::chat_list::show(ui, &mut context, &mut self.chat_list, &mut self.chat);
-            });
-
-        // The one moment a transcript is written: leaving a conversation, whichever side of
-        // the split the leaving started from.
-        if self.chat.selected != leaving {
-            if let Some(conversation_id) = leaving {
-                self.snapshot_chat_log(conversation_id);
-            }
-        }
-
-        // The chat window: everything the list left. The ground is painted rather than framed
-        // so the surface covers the whole half however short the thread is — the floating
-        // chrome a conversation window wears in tabbed navigation belongs to the window
-        // manager, and this half is not a window.
-        let rect = ui.available_rect_before_wrap();
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, colors.surface);
-        let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(space::SM)));
-        if let Some(conversation_id) = self.chat.selected {
-            let mut context = Context {
-                theme: self.theme,
-                connection: &self.connection,
-                account: self.account.as_ref(),
-                server: &self.auth.server,
-                commands: &mut self.commands,
-                rich_presence: self.rich_presence,
-                chat_log_auto_save: self.settings.auto_save_chat_logs,
-                chat_log: &mut self.chat_log_actions,
-                navigation_mode: self.settings.navigation_mode,
-                navigate: &mut *navigate,
-                theme_choice: &mut *theme_choice,
-                zoom_choice: &mut *zoom_choice,
-                navigation_choice: &mut *navigation_choice,
-            };
-            crate::ui::chat::thread(&mut pane, &mut context, &mut self.chat, conversation_id);
-        } else {
-            widgets::empty_state(
-                &mut pane,
-                self.theme,
-                "No conversation open",
-                "Pick one from the list beside this window.",
-            );
-        }
+        let mut context = Context {
+            theme: self.theme,
+            connection: &self.connection,
+            account: self.account.as_ref(),
+            server: &self.auth.server,
+            commands: &mut self.commands,
+            rich_presence: self.rich_presence,
+            chat_log_auto_save: self.settings.auto_save_chat_logs,
+            chat_log: &mut self.chat_log_actions,
+            navigation_mode: self.settings.navigation_mode,
+            navigate: &mut *navigate,
+            theme_choice: &mut *theme_choice,
+            zoom_choice: &mut *zoom_choice,
+            navigation_choice: &mut *navigation_choice,
+        };
+        crate::ui::chat_list::show(ui, &mut context, &mut self.chat_list, &mut self.chat);
     }
 
     /// One side window: a small floating pane opened from the account menu — profile, wallet,
@@ -1885,10 +1862,10 @@ impl App {
     ///
     /// The same [`crate::ui::chat::open`] the conversation list uses, driven with a scratch
     /// command buffer because the event that calls this arrives outside the frame that owns the
-    /// real one. In tabbed navigation, opening a conversation is opening a window: it lands on
-    /// the desktop and, when the frame is running, is raised to the top. In Chat List Mode it
-    /// is a selection — the split view's right half is the one window there is, and the list
-    /// already carries the row.
+    /// real one. Opening a conversation is opening a window in either navigation mode: it lands
+    /// on the desktop and, when the frame is running, is raised to the top — Chat List Mode's
+    /// list is the ground the window opens over, and the row that asked for it is still under
+    /// it when the window closes.
     fn open_conversation(&mut self, conversation_id: migo_core::Id) {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
@@ -1918,9 +1895,7 @@ impl App {
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
         self.chat_log_actions = chat_log_actions;
-        if self.settings.navigation_mode == NavigationMode::Tabbed {
-            self.desktop.open_chat(conversation_id);
-        }
+        self.desktop.open_chat(conversation_id);
     }
 
     /// One conversation's title, resolved the way its window's title bar resolves it — the
@@ -2176,10 +2151,16 @@ impl eframe::App for App {
         if signed_in {
             // The taskbar first, so the desktop surface and every window know where its edge is.
             let entries = self.task_entries();
-            let coins = self.wallet.coins;
             let session = self.desktop.session_start.map(|start| start.elapsed());
             let contacts_open = self.desktop.contacts_open;
-            let actions = desktop::taskbar(ui, self.theme, contacts_open, &entries, coins, session);
+            let actions = desktop::taskbar(
+                ui,
+                self.theme,
+                contacts_open,
+                &entries,
+                &self.connection,
+                session,
+            );
             for action in actions {
                 match action {
                     TaskAction::Toggle(id) => desktop::toggle(&ctx, id),
@@ -2193,17 +2174,19 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(if signed_in {
-                colors.desktop
-            } else {
-                colors.surface
-            }))
+            .frame(egui::Frame::new().fill(
+                if signed_in && self.settings.navigation_mode == NavigationMode::Tabbed {
+                    colors.desktop
+                } else {
+                    colors.surface
+                },
+            ))
             .show(ui, |ui| {
                 // Signed in under tabbed navigation, the surface draws nothing: the desk is
                 // plain teal, only the ground the windows float on, and the windows own its
-                // whole height. Chat List Mode replaces the ground itself with the split view
-                // — the list docked left, the one chat window right — because the mode has no
-                // windows to float.
+                // whole height. Chat List Mode makes the list itself the ground — the window's
+                // own content, on the surface fill the list expects — because in that mode the
+                // list is what the window is, and the conversations float over it as windows.
                 if !signed_in {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
@@ -2227,7 +2210,7 @@ impl eframe::App for App {
                     };
                     crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
                 } else if self.settings.navigation_mode == NavigationMode::ChatList {
-                    self.chat_list_split(
+                    self.chat_list_ground(
                         ui,
                         &mut navigate,
                         &mut theme_choice,
@@ -2253,22 +2236,20 @@ impl eframe::App for App {
             );
             // The conversation windows are drawn in open order, which is the cascade: a window's
             // index is its birthplace, and the list is cloned because closing one rewrites it.
-            // Tabbed navigation only — Chat List Mode draws none, because a window per
-            // conversation is precisely what that mode does not do; its one chat window is the
-            // split view's right half, already drawn with the surface above.
-            if self.settings.navigation_mode == NavigationMode::Tabbed {
-                let chats = self.desktop.chats.clone();
-                for (index, conversation_id) in chats.iter().copied().enumerate() {
-                    self.chat_window(
-                        &ctx,
-                        index,
-                        conversation_id,
-                        &mut navigate,
-                        &mut theme_choice,
-                        &mut zoom_choice,
-                        &mut navigation_choice,
-                    );
-                }
+            // Both navigation modes: Chat List Mode's conversations are the same floating,
+            // closable windows — the mode's ground is the list, and the windows a person opens
+            // from it are the windows the window manager already knows how to draw.
+            let chats = self.desktop.chats.clone();
+            for (index, conversation_id) in chats.iter().copied().enumerate() {
+                self.chat_window(
+                    &ctx,
+                    index,
+                    conversation_id,
+                    &mut navigate,
+                    &mut theme_choice,
+                    &mut zoom_choice,
+                    &mut navigation_choice,
+                );
             }
             for (index, place) in self.desktop.sides.clone().iter().copied().enumerate() {
                 self.side_window(
@@ -2282,12 +2263,10 @@ impl eframe::App for App {
                 );
             }
 
-            // Whatever door opened a conversation this frame opens its window and raises it.
-            // Tabbed navigation only: Chat List Mode's open is a selection, and the selection
-            // is already what `chat::open` left behind.
-            if self.chat.open_seq != open_seq_before
-                && self.settings.navigation_mode == NavigationMode::Tabbed
-            {
+            // Whatever door opened a conversation this frame opens its window and raises it —
+            // in either mode, because a conversation opened from the Chat List Mode's list is
+            // opened as a window, which is the mode's own shape: tap a row, get a window.
+            if self.chat.open_seq != open_seq_before {
                 if let Some(conversation_id) = self.chat.selected {
                     self.desktop.open_chat(conversation_id);
                     desktop::focus(&ctx, desktop::chat_id(conversation_id));
@@ -2301,10 +2280,9 @@ impl eframe::App for App {
             // over the call overlay answers the call (declines, ends, or dismisses — the call
             // screen owns the key while it is up), and a side window or the Contacts window is
             // closed by its own button, not by a key that could take the lists away by accident.
-            // And only in tabbed navigation, where there is a conversation window to close —
-            // Chat List Mode's one chat window is not a window, and the key owes it nothing.
+            // In Chat List Mode the key is the mode's "back": closing the conversation window
+            // returns the person to the list, which is the ground and never went away.
             if ctx.input(|i| i.key_pressed(egui::Key::Escape))
-                && self.settings.navigation_mode == NavigationMode::Tabbed
                 && self.call.is_none()
                 && !self.desktop.logout_dialog
                 && self.desktop.backup_offer.is_none()
@@ -2395,21 +2373,14 @@ impl eframe::App for App {
         }
 
         // The settings panel's navigation mode. Same after-the-frame timing as the theme: the
-        // mode decides how the whole chat area is laid out, so it is applied once, between
-        // frames, and the choice is written back to the settings file so it outlives the
-        // window. Arriving at tabbed navigation also owes the selected conversation its
-        // window: the split view kept it on screen without one, and a switch that quietly
-        // dropped the thread the person was reading would be a mode change that closed their
-        // chat.
+        // mode decides what the chat area's ground is, so it is applied once, between frames,
+        // and the choice is written back to the settings file so it outlives the window. The
+        // mode is the ground and nothing else now — the conversation windows are the same
+        // floating windows in both modes, so a switch owes no thread its window: whatever was
+        // open stays open, over a teal desk in one mode and over the list in the other.
         if let Some(mode) = navigation_choice {
             self.settings.navigation_mode = mode;
             self.persist_settings();
-            if mode == NavigationMode::Tabbed {
-                if let Some(conversation_id) = self.chat.selected {
-                    self.desktop.open_chat(conversation_id);
-                    desktop::focus(&ctx, desktop::chat_id(conversation_id));
-                }
-            }
         }
 
         // The frame's chat-log intent, applied after the frame for the same reason the command
