@@ -1472,7 +1472,9 @@ impl App {
                     // old stand at the other end of the screen.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.vertical(|ui| {
-                            // The balance, the session's real $MIG, dark on the band.
+                            // The balance, the session's real $MIG. Gold on the dark inset, the
+                            // same coin colour the figure wore on the taskbar chip it left —
+                            // a number about money keeps its own colour wherever it is stated.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -1480,7 +1482,7 @@ impl App {
                                         widgets::pill(
                                             ui,
                                             &format!("{coins} $MIG"),
-                                            colors.banner_ink,
+                                            colors.gold,
                                             egui::Color32::from_black_alpha(90),
                                         );
                                     }

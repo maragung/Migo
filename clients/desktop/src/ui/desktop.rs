@@ -482,7 +482,7 @@ pub fn taskbar(
                 // The window list: the leftover width between the brand and the right cluster,
                 // scrolling sideways rather than hiding anything, because a window that is
                 // off-screen is still a window.
-                let cluster_width: f32 = cluster.iter().map(|chip| chip_width(chip)).sum::<f32>()
+                let cluster_width: f32 = cluster.iter().map(chip_width).sum::<f32>()
                     + chip_width(&logout_chip)
                     + chip_width(&clock_chip)
                     + ui.spacing().item_spacing.x;
