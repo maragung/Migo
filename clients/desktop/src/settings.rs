@@ -85,12 +85,13 @@ pub struct Settings {
     #[serde(default)]
     pub auto_save_chat_logs: bool,
     /// How the signed-in desktop presents its conversations: one floating window per
-    /// conversation (the default, and the behaviour of every file written before the field
-    /// existed), or the Chat List split view — the list docked left, one chat window right.
-    /// A presentation choice, not a chat-state one: both modes share the same conversations,
-    /// connection, and unread counts. `#[serde(default)]` for the same reason the log toggle
-    /// is — a session upgraded into the split view without being asked would have had its
-    /// windows moved out from under it.
+    /// conversation over a plain desk (the default, and the behaviour of every file written
+    /// before the field existed), or Chat List Mode — the list as the main window's content,
+    /// with each opened conversation in a window of its own. A presentation choice, not a
+    /// chat-state one: both modes share the same conversations, connection, and unread
+    /// counts. `#[serde(default)]` for the same reason the log toggle is — a session upgraded
+    /// into the other layout without being asked would have had its ground moved out from
+    /// under it.
     #[serde(default)]
     pub navigation_mode: NavigationMode,
 }
@@ -413,8 +414,8 @@ mod tests {
     }
 
     /// The navigation mode round-trips, and a file written before the field existed reads as
-    /// tabbed: the split view is an addition, and an upgrade that moved a long-standing
-    /// session's windows into a layout nobody asked for would be a settings file rewriting the
+    /// tabbed: the other layout is an addition, and an upgrade that moved a long-standing
+    /// session's ground into a layout nobody asked for would be a settings file rewriting the
     /// person's desktop behind their back.
     #[test]
     fn navigation_mode_round_trips_and_defaults_to_tabbed() {
