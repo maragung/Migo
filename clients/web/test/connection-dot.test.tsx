@@ -1,14 +1,18 @@
 /**
- * What the connection dot wears, and when it wears nothing.
+ * What the connection mark wears, and when it wears nothing.
  *
- * The dot is the shell's only connection mark, so its discipline is the whole UX of
- * reconnecting: a signed-in session wears it in the corner for *every* transport state — green
- * steady while connected (the one look a person can seek out to know things are fine, rather
- * than wondering whether an absent warning is health or a dead indicator), amber pulsing for
- * connecting and reconnecting alike, red for a transport that has dropped and whose recovery
- * the automatic retry owns — and the words behind each colour stay one hover away through the
- * title. A session that is not signed in sees nothing, because the auth screens carry their
- * own connecting states and a sign-in in flight is not a reconnect.
+ * The mark is the app's only connection signal, so its discipline is the whole UX of
+ * reconnecting: a signed-in session wears it inline — in the list windows' footer band and the
+ * desk taskbar's chip, the seats the $MIG balance vacated when it moved up into the me bar —
+ * for *every* transport state. Green steady while connected (the one look a person can seek out
+ * to know things are fine, rather than wondering whether an absent warning is health or a dead
+ * indicator), amber pulsing for connecting and reconnecting alike, red for a transport that has
+ * dropped and whose recovery the automatic retry owns. The word beside the dot is the glance's
+ * half and the label behind the hover is the sentence; both stay one pass away. A session that
+ * is not signed in sees nothing, because the auth screens carry their own connecting states
+ * and a sign-in in flight is not a reconnect. The mark no longer floats over the chat window
+ * the corner dot once did; it is a citizen of the status surfaces, never a passenger of the
+ * thread.
  */
 
 import assert from 'node:assert/strict';

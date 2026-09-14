@@ -14,9 +14,10 @@
  * is the account's group chats plus the public directory, and the feed is the activity stream
  * panel itself.
  *
- * Chat List Mode adds a fourth view, `main`, ahead of the three: the conversation list, from
- * which a tap opens the thread as the phone's full-screen window. The mode adds the tab; the
- * other three views and their behaviour are untouched by it.
+ * Chat List Mode makes its fourth view, `main`, the home screen itself: the conversation list,
+ * which a tap opens as the phone's full-screen chat activity. The mode adds no tab for it — the
+ * strip keeps the three it has always had, and the view header's back control returns from them
+ * to the list. The other three views and their behaviour are untouched by it.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -26,6 +27,7 @@ import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, RoomSummary } from '@migo/sdk';
 
 import { debounce } from '@/lib/debounce.js';
+import { useBalance } from '@/lib/migo/use-balance.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMePresence } from '@/lib/migo/use-me-presence.js';
@@ -36,7 +38,7 @@ import { useRooms } from '@/lib/migo/rooms-provider.js';
 
 import { Avatar } from './avatar.js';
 import { ConversationList } from './conversation-list.js';
-import { Icon } from './icons.js';
+import { CoinMark, Icon } from './icons.js';
 import { ListFooter } from './list-footer.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
 import { SpacePanel } from './space-panel.js';
@@ -71,6 +73,7 @@ export function MobileHome({
   onOpenWindow,
   onOpenUserIntent,
   onOpenRoomIntent,
+  onBackToChats,
   onRequestLogout,
 }: {
   nav: MobileNavTab;
@@ -81,12 +84,19 @@ export function MobileHome({
   onOpenUserIntent: (userId: Id) => void;
   /** A tap on a room: the parent opens the room intent sheet. */
   onOpenRoomIntent: (room: RoomSummary) => void;
+  /**
+   * Chat List Mode's way back: the view header shows it on the three tabbed views, and it
+   * returns the phone to the conversation list that is the mode's home screen. Undefined in the
+   * tabbed layout, whose home is the strip's own tabs.
+   */
+  onBackToChats?: () => void;
   onRequestLogout: () => void;
 }): ReactNode {
   const { client, accountId } = useMigo();
   const me = useMePresence();
   const { items, unread } = useConversations();
   const rooms = useRooms();
+  const balance = useBalance();
 
   const [meOpen, setMeOpen] = useState(false);
   const [statusEditing, setStatusEditing] = useState(false);
@@ -276,33 +286,62 @@ export function MobileHome({
             )}
           </div>
 
+          {/* The chips stack rather than sit in a row: the wallet's $MIG figure rides above the
+              alerts and account controls, where the design now puts it (it used to live in the
+              footer band below, which the connection mark has taken), and the icon buttons the
+              figure watches over are the me card's two doors — the alerts and the account menu. */}
           <div className="me-chips">
-            <button
-              type="button"
-              className="hdr-chip hdr-chip-icon"
-              onClick={() => onOpenWindow('notifications')}
-              aria-label="Messages"
-              title="Messages"
+            <span
+              className="me-balance"
+              title="$MIG balance"
+              aria-label="$MIG balance — open My Wallet from the account menu"
             >
-              <Icon name="bell" size={14} />
-              {unreadTotal > 0 ? (
-                <span className="hdr-chip-badge">{unreadTotal > 9 ? '9+' : unreadTotal}</span>
-              ) : null}
-            </button>
-            <button
-              type="button"
-              className="hdr-chip hdr-chip-icon"
-              onClick={() => setMeOpen(true)}
-              aria-label="Account menu"
-              title="Account & settings"
-            >
-              <Icon name="settings" size={15} />
-            </button>
+              <CoinMark size={14} />
+              {/* An unread balance says nothing rather than zero: a wallet that failed to load is
+                  not an empty one, and the difference matters to whoever is about to spend. */}
+              <span>{balance !== null ? `$MIG ${balance.toLocaleString()}` : '$MIG'}</span>
+            </span>
+            <div className="me-chip-row">
+              <button
+                type="button"
+                className="hdr-chip hdr-chip-icon"
+                onClick={() => onOpenWindow('notifications')}
+                aria-label="Messages"
+                title="Messages"
+              >
+                <Icon name="bell" size={14} />
+                {unreadTotal > 0 ? (
+                  <span className="hdr-chip-badge">{unreadTotal > 9 ? '9+' : unreadTotal}</span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                className="hdr-chip hdr-chip-icon"
+                onClick={() => setMeOpen(true)}
+                aria-label="Account menu"
+                title="Account & settings"
+              >
+                <Icon name="settings" size={15} />
+              </button>
+            </div>
           </div>
         </div>
 
         {/* ---- view header ---- */}
         <div className="gloss-panel mhome-viewhead">
+          {/* Chat List Mode's way home: the list is the screen the strip's tabs navigate away
+              from, and this is the way back to it — the mode has no Main tab to tap. */}
+          {onBackToChats !== undefined && nav !== 'main' ? (
+            <button
+              type="button"
+              className="tbtn tbtn-sm"
+              onClick={onBackToChats}
+              aria-label="Back to chats"
+              title="Back to chats"
+            >
+              <Icon name="chevron-left" size={17} />
+            </button>
+          ) : null}
           <span className="mhome-view-title">{viewTitle}</span>
           {nav === 'friends' ? (
             <>
@@ -346,8 +385,9 @@ export function MobileHome({
         <div className="win-body retro-scroll mhome-body">
           {/* ===== MAIN (Chat List Mode) ===== */}
           {/* The conversation list itself, unchanged from the surface every other client lists
-              chats on — the mode adds the tab, not a second list. A tap opens the thread as the
-              phone's full-screen window, and Back returns here. */}
+              chats on — the mode makes it the home screen, not a second list and not a tab. A
+              tap opens the thread as the phone's full-screen chat activity, and its back control
+              returns here. */}
           {nav === 'main' ? <ConversationList /> : null}
 
           {/* ===== FRIENDS ===== */}
@@ -514,8 +554,7 @@ export function MobileHome({
         </div>
 
         {/* ---- footer ---- */}
-        {/* Main is the chats list wearing the strip's name, so the footer's band says "chats";
-            the other tabs map straight through. */}
+        {/* The list view maps to the band's "chats" hint; the other tabs map straight through. */}
         <ListFooter tab={nav === 'main' ? 'chats' : nav} hint={footerHint} />
       </div>
 

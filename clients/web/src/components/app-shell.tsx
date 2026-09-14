@@ -25,12 +25,14 @@
  * which a mounted thread's mark-read clears) drive the badges.
  *
  * Chat List Mode (Settings → Navigation, see lib/migo/nav-mode.ts) reroutes only the
- * conversations: on the phone the home gains a Main tab holding the conversation list, and a tap
- * opens the thread as the same full-screen window it always was; on the desk the per-conversation
- * windows are replaced by one split view — the list on the left, a single thread pane on the
- * right — so no chat window is minted while the mode is on. Every list, panel, and window the
- * tabbed layout offers is untouched by the mode; turning it off restores the windows exactly as
- * they were.
+ * conversations, and it is WhatsApp-on-Android shaped: the conversation list is the main screen —
+ * on the phone the home the strip's three tabs navigate away from (there is no Main tab; the
+ * view header's back control returns to the list), on the desk the panel right of the contacts
+ * window — and a tap opens the thread as a full-screen chat activity of its own (see
+ * components/chat-activity.tsx) whose back control returns to the list, not a pane replacing
+ * content in place. No chat window is minted while the mode is on, on either breakpoint. Every
+ * list, panel, and window the tabbed layout offers is untouched by the mode; turning it off
+ * restores the windows exactly as they were.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,16 +43,17 @@ import type { ConversationSummary, Id, RoomSummary } from '@migo/sdk';
 
 import { AccountPanel } from './account-panel.js';
 import { AdminsPanel } from './admins-panel.js';
-import { ChatSplitView } from './chat-split-view.js';
+import { ChatActivity } from './chat-activity.js';
 import { ChatWindow } from './chat-window.js';
 import { ConfirmDialog } from './confirm-dialog.js';
 import { ContactsWindow } from './contacts-window.js';
+import { ConversationList } from './conversation-list.js';
 import { GamesPanel } from './games-panel.js';
 import { Icon } from './icons.js';
 import { MobileHome } from './mobile-home.js';
 import { MobileTabBar } from './mobile-tab-bar.js';
 import type { MobileNavTab } from './mobile-tab-bar.js';
-import { MOBILE_NAV_ORDER, MOBILE_NAV_ORDER_CHATLIST } from './mobile-tab-bar.js';
+import { MOBILE_NAV_ORDER } from './mobile-tab-bar.js';
 import { NotificationsPanel } from './notifications-panel.js';
 import { ProfilePanel } from './profile-panel.js';
 import { RetroWindow } from './retro-window.js';
@@ -120,7 +123,8 @@ export function AppShell(): ReactNode {
 
   // ---- the navigation mode ----
   // The stored choice (Settings → Navigation): `tabbed` is the layout below, unchanged; `chatlist`
-  // reroutes the conversations — the phone's Main tab, the desk's split view — and nothing else.
+  // reroutes the conversations — the list as the main screen, the thread as the full-screen chat
+  // activity — and nothing else.
   const [navMode] = useNavMode();
   const chatList = navMode === 'chatlist';
 
@@ -148,17 +152,19 @@ export function AppShell(): ReactNode {
   const [intentUser, setIntentUser] = useState<Id | null>(null);
   const [intentRoom, setIntentRoom] = useState<RoomSummary | null>(null);
 
-  // On the desk, Chat List Mode replaces the per-conversation windows with the split view; on the
-  // phone the full-screen thread window is the mode's "chat activity", so windows stay as they are.
-  const suppressChatWindows = !isMobile && chatList;
-  // The strip's tab order follows the mode: the tabbed order is the three it has always been;
-  // Chat List Mode leads with Main.
-  const navOrder = chatList ? MOBILE_NAV_ORDER_CHATLIST : MOBILE_NAV_ORDER;
+  // Chat List Mode opens a conversation as the full-screen chat activity rather than a window,
+  // on either breakpoint: no chat window is minted while the mode is on, the list rows carry the
+  // attention, and the activity (below) is the thread.
+  const suppressChatWindows = chatList;
+  // The home tabs the strip offers and the empty state can reopen — the same three in either
+  // mode: Chat List Mode's list is the home screen the tabs navigate away from, not a fourth tab.
+  const navOrder = MOBILE_NAV_ORDER;
 
-  // A mode switch must not strand the phone on a tab the new order does not hold: entering Chat
-  // List Mode lands on Main (the list is the mode's point), and leaving it returns a stranded
-  // Main to the Feed the tabbed home opens on. The desk needs no such correction — its home is
-  // the contacts window, which the mode does not touch.
+  // A mode switch must not strand the phone on a view the new home does not lead with: entering
+  // Chat List Mode lands on the conversation list (the list is the mode's main screen, and the
+  // strip offers no tab for it), and leaving it returns a stranded list view to the Feed the
+  // tabbed home opens on. The desk needs no such correction — its home is the contacts window,
+  // which the mode does not touch.
   useEffect(() => {
     if (!isMobile) {
       return;
@@ -326,8 +332,8 @@ export function AppShell(): ReactNode {
       return;
     }
     if (openId !== null) {
-      // In the desk's Chat List Mode the fragment drives the split view's right pane instead —
-      // the pane reads openId directly, so there is no window to mint.
+      // In Chat List Mode the fragment drives the full-screen chat activity instead — the
+      // activity reads openId directly, so there is no window to mint.
       if (!suppressChatWindows) {
         openWindow({ id: chatWinId(openId), kind: 'chat', conversationId: openId, title: '' });
       }
@@ -384,8 +390,8 @@ export function AppShell(): ReactNode {
       if (event.userId !== accountId || event.change !== MemberChange.Joined) {
         return;
       }
-      // In the desk's Chat List Mode the list itself is the arrival surface: the conversation
-      // appears in it with its unread mark, and the pane opens on the user's tap.
+      // In Chat List Mode the list itself is the arrival surface: the conversation appears in it
+      // with its unread mark, and the activity opens on the user's tap.
       if (suppressChatWindows) {
         return;
       }
@@ -429,8 +435,8 @@ export function AppShell(): ReactNode {
         // Echoes of this account's own sends: the sending device already opened its window.
         return;
       }
-      // In the desk's Chat List Mode the list rows carry the attention (their unread marks read
-      // the provider, which no unmounted pane clears), so no window is minted and no per-window
+      // In Chat List Mode the list rows carry the attention (their unread marks read the
+      // provider, which no unmounted activity clears), so no window is minted and no per-window
       // count is kept — there is no window to count for.
       if (suppressChatWindows) {
         return;
@@ -506,10 +512,15 @@ export function AppShell(): ReactNode {
         if (cur !== tab) {
           return cur;
         }
+        // Chat List Mode's home screen is the list, which no close can take away, so closing the
+        // view on screen falls back to it; the tabbed home falls back to the next open tab.
+        if (chatList) {
+          return 'main';
+        }
         return MOBILE_NAV_ORDER.find((x) => x !== tab && !hiddenNavs.includes(x)) ?? cur;
       });
     },
-    [hiddenNavs],
+    [chatList, hiddenNavs],
   );
 
   const reopenMobileNav = useCallback(
@@ -582,7 +593,7 @@ export function AppShell(): ReactNode {
       }
       if (tab === 'chats') {
         // The tabbed layout has no chats list — the friends list is where a person is. Chat List
-        // Mode has one: the phone's Main tab.
+        // Mode has one: the phone's home screen.
         setContactsTab('friends');
         if (isMobile) {
           selectMobileNav(chatList ? 'main' : 'friends');
@@ -633,10 +644,10 @@ export function AppShell(): ReactNode {
   );
 
   // The home tabs' unread badges: the shell's own attention counts, by where the conversation
-  // belongs. Feed is activity, not messages — its badge stays empty. Main is the chat list's own
-  // badge and reads the provider (not the per-window counts, which an unmounted pane never
-  // accrues): one mark per conversation with something unread, the same line the list rows and
-  // the me card's mail chip count.
+  // belongs. Feed is activity, not messages — its badge stays empty. The `main` count is the
+  // Chat List Mode home screen's own (no strip tab carries it any more, but the record keeps the
+  // key honest) and reads the provider: one mark per conversation with something unread, the
+  // same line the list rows and the me card's mail chip count.
   const navUnread = useMemo(() => {
     const counts: Record<MobileNavTab, number> = { main: 0, friends: 0, rooms: 0, feed: 0 };
     counts.main = items.filter(
@@ -755,7 +766,9 @@ export function AppShell(): ReactNode {
           it — the newest overlay always wins, whichever window was focused last. */}
       <div className="desk-bg desk-root">
         {/* ===== the phone's home ===== */}
-        {isMobile && visibleNavs.length > 0 ? (
+        {/* In Chat List Mode the home is always on: its main screen is the conversation list,
+            which closing the strip's tabs cannot take away. */}
+        {isMobile && (chatList || visibleNavs.length > 0) ? (
           <div className={activeId !== null ? 'desk-home-hidden' : 'desk-home'}>
             <MobileHome
               nav={mobileNav}
@@ -763,13 +776,15 @@ export function AppShell(): ReactNode {
               onOpenWindow={openPanelWindow}
               onOpenUserIntent={(userId) => setIntentUser(userId)}
               onOpenRoomIntent={(room) => setIntentRoom(room)}
+              onBackToChats={chatList ? () => selectMobileNav('main') : undefined}
               onRequestLogout={() => setConfirmLogout(true)}
             />
           </div>
         ) : null}
 
         {/* every home tab closed: the friendly empty state with one-tap reopens */}
-        {isMobile && visibleNavs.length === 0 && activeId === null ? (
+        {/* The tabbed home only — Chat List Mode's home survives its tabs being closed. */}
+        {isMobile && !chatList && visibleNavs.length === 0 && activeId === null ? (
           <div className="mhome mhome-empty-state">
             <div className="mhome-empty-card">
               <Icon name="chats" size={34} />
@@ -848,14 +863,16 @@ export function AppShell(): ReactNode {
           </button>
         ) : null}
 
-        {/* ===== the desk's Chat List Mode pane pair ===== */}
-        {/* The split view takes the desk right of the contacts window (or from the desk's own
-            left edge when the contacts window is minimized) and under a maximized contacts
-            window, which covers the desk as it always did. Its z sits below the contacts
-            window's own so the lists stay on top when the two overlap. */}
+        {/* ===== the desk's Chat List Mode main screen ===== */}
+        {/* The conversation list as a panel of its own, in the region right of the contacts
+            window (or from the desk's own left edge when the contacts window is minimized) and
+            under a maximized contacts window, which covers the desk as it always did. Its z sits
+            below the contacts window's own so the lists stay on top when the two overlap. A tap
+            on a row covers the desk with the mode's full-screen chat activity — the list is the
+            screen, and the thread is an activity, not a pane beside it. */}
         {!isMobile && chatList ? (
           <div
-            className="chat-split-holder"
+            className="chat-list-holder"
             style={{
               position: 'absolute',
               left: contactsMin ? 12 : contactsSize.w + 24,
@@ -865,7 +882,7 @@ export function AppShell(): ReactNode {
               zIndex: 5,
             }}
           >
-            <ChatSplitView conversationId={openId} />
+            <ConversationList searchable />
           </div>
         ) : null}
 
@@ -875,7 +892,8 @@ export function AppShell(): ReactNode {
             return null;
           }
           // The belt to the mode effects' braces: a chat window that slips past the dissolution
-          // (a race between the switch and a mint) renders nothing rather than beside the pane.
+          // (a race between the switch and a mint) renders nothing rather than under the
+          // activity, where the mode's thread is the one on screen.
           if (w.kind === 'chat' && suppressChatWindows) {
             return null;
           }
@@ -912,7 +930,6 @@ export function AppShell(): ReactNode {
             navTab={mobileNav}
             hiddenNavs={hiddenNavs}
             navUnread={navUnread}
-            chatListMode={chatList}
             onSelectNav={selectMobileNav}
             onCloseNav={closeMobileNav}
             onReopenNav={reopenMobileNav}
@@ -1007,6 +1024,22 @@ export function AppShell(): ReactNode {
           </>
         ) : null}
       </div>
+
+      {/* ===== the Chat List Mode's chat activity ===== */}
+      {/* A sibling of the desk, not a surface inside it: the desk is one stacking context whose
+          windows carry unbounded z counters, so an activity that lived inside it could be
+          overtaken by a long session's focus count. Out here it sits at the overlays' own height
+          — above everything the desk shows, below the sheets and the confirm dialog that portal
+          to the body. The activity is the thread as a screen of its own (see
+          components/chat-activity.tsx); its back control clears the fragment, which is the same
+          door the browser's Back opens. */}
+      {chatList && openId !== null ? (
+        <ChatActivity
+          conversationId={openId}
+          onBack={closeConversation}
+          deskTaskbar={isMobile ? null : taskbarPos}
+        />
+      ) : null}
     </SectionNavProvider>
   );
 }

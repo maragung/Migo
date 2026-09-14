@@ -102,7 +102,18 @@ export function callPeerFor(
   return summary.members?.find((member) => member !== accountId) ?? null;
 }
 
-export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNode {
+export function ChatWindow({
+  conversationId,
+  onBack,
+}: {
+  conversationId: Id;
+  /**
+   * The Chat List Mode activity's way back to the list. Present only when this thread is the
+   * full-screen activity: the tabbed layout's thread has no back of its own — the strip's tab
+   * names it and closes it.
+   */
+  onBack?: () => void;
+}): ReactNode {
   const { client, accountId } = useMigo();
   const navigate = useSectionNav();
   const { items, markRead, forgetConversation } = useConversations();
@@ -466,6 +477,19 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   return (
     <div className="thread-pane">
       <header className="thread-header">
+        {/* The activity's way out, first in the row where a thumb expects it: back to the list
+            the thread was opened from. Only the Chat List Mode activity passes it. */}
+        {onBack !== undefined ? (
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onBack}
+            aria-label="Back to chats"
+            title="Back to chats"
+          >
+            <Icon name="chevron-left" size={20} />
+          </button>
+        ) : null}
         {isDirect && peerId !== null ? (
           <button
             type="button"

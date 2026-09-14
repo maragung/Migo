@@ -14,7 +14,10 @@
  * The three bodies are the app's real panels, not restatements of them: the Friends panel (the
  * relationship graph, requests, suggestions, search, blocks), the Rooms panel (the directory), and
  * the Space panel (the activity stream). The me bar publishes real presence and status; the mail
- * chip is the Alerts window; the gear menu opens the real side windows.
+ * chip is the Alerts window; the gear menu opens the real side windows. Above the me bar's chips
+ * rides the wallet's $MIG balance — the figure the footer band and the taskbar chip used to carry,
+ * moved up over the alerts and the account controls where the design now puts it (the connection
+ * mark took the seats it left).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -24,13 +27,14 @@ import { createPortal } from 'react-dom';
 import { ConversationKind, PresenceState } from '@migo/sdk';
 import type { Id, PresenceState as PresenceStateValue } from '@migo/sdk';
 
+import { useBalance } from '@/lib/migo/use-balance.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMePresence } from '@/lib/migo/use-me-presence.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Avatar } from './avatar.js';
 import { FriendsPanel } from './friends-panel.js';
-import { Icon } from './icons.js';
+import { CoinMark, Icon } from './icons.js';
 import { ListFooter } from './list-footer.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
 import { RoomsPanel } from './rooms-panel.js';
@@ -101,6 +105,7 @@ export function ContactsWindow({
   const { client, accountId } = useMigo();
   const me = useMePresence();
   const { items } = useConversations();
+  const balance = useBalance();
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [presOpen, setPresOpen] = useState(false);
@@ -311,40 +316,56 @@ export function ContactsWindow({
             </button>
           )}
         </div>
+        {/* The chips stack rather than sit in a row: the wallet's $MIG figure rides above them,
+            over the alerts and the presence controls (the account door itself is the toolbar's
+            gear menu below) — the design's own seat for the figure the footer band used to
+            carry. */}
         <div className="me-chips">
-          <button
-            ref={presBtnRef}
-            type="button"
-            className="hdr-chip"
-            onClick={() => openPresence(!presOpen)}
-            aria-label="Presence"
-            title="Change your presence"
+          <span
+            className="me-balance"
+            title="$MIG balance"
+            aria-label="$MIG balance — open My Wallet from the menu"
           >
-            {presenceName(me.presence)}
-            <Icon name={presOpen ? 'chevron-up' : 'chevron-down'} size={13} />{' '}
-          </button>
-          <button
-            type="button"
-            className="hdr-chip hdr-chip-icon"
-            onClick={() => onOpenWindow('notifications')}
-            title="Messages"
-          >
-            <Icon name="bell" size={13} />
-          </button>
-          <button
-            type="button"
-            className={`hdr-moon${me.presence === PresenceState.Away ? ' hdr-moon-on' : ''}`}
-            onClick={() =>
-              me.publish(
-                me.presence === PresenceState.Away ? PresenceState.Online : PresenceState.Away,
-                me.status,
-              )
-            }
-            title={me.presence === PresenceState.Away ? 'Back to available' : 'Set away'}
-            aria-label="Toggle away"
-          >
-            <Icon name="moon" size={15} />
-          </button>
+            <CoinMark size={14} />
+            {/* An unread balance says nothing rather than zero: a wallet that failed to load is
+                not an empty one, and the difference matters to whoever is about to spend. */}
+            <span>{balance !== null ? `$MIG ${balance.toLocaleString()}` : '$MIG'}</span>
+          </span>
+          <div className="me-chip-row">
+            <button
+              ref={presBtnRef}
+              type="button"
+              className="hdr-chip"
+              onClick={() => openPresence(!presOpen)}
+              aria-label="Presence"
+              title="Change your presence"
+            >
+              {presenceName(me.presence)}
+              <Icon name={presOpen ? 'chevron-up' : 'chevron-down'} size={13} />{' '}
+            </button>
+            <button
+              type="button"
+              className="hdr-chip hdr-chip-icon"
+              onClick={() => onOpenWindow('notifications')}
+              title="Messages"
+            >
+              <Icon name="bell" size={13} />
+            </button>
+            <button
+              type="button"
+              className={`hdr-moon${me.presence === PresenceState.Away ? ' hdr-moon-on' : ''}`}
+              onClick={() =>
+                me.publish(
+                  me.presence === PresenceState.Away ? PresenceState.Online : PresenceState.Away,
+                  me.status,
+                )
+              }
+              title={me.presence === PresenceState.Away ? 'Back to available' : 'Set away'}
+              aria-label="Toggle away"
+            >
+              <Icon name="moon" size={15} />
+            </button>
+          </div>
         </div>
       </div>
 
