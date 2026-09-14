@@ -21,9 +21,11 @@
 //! `CALL_INVITE` publishes the invite event to bob's topic on alpha and
 //! forwards one copy per watching node inside the `FED_CALL_RELAY` envelope;
 //! beta ingests it and places the frame on bob's topic exactly as alpha's own
-//! hub would have. Then alice cancels, and the `Ended(ByCaller)` state event
-//! crosses the same way — the frame the old code never sent, because no node
-//! but the publisher's own ever saw a call event at all.
+//! hub would have. The invite's notification crosses the same way first — the
+//! bell is the tier's ungated half, so it is asserted before the ring it
+//! announces. Then alice cancels, and the `Ended(ByCaller)` state event crosses
+//! the same way — the frame the old code never sent, because no node but the
+//! publisher's own ever saw a call event at all.
 //!
 //! Determinism follows the client-seam house style: every exchange is bounded
 //! by a step budget, every expectation is asserted on frame contents, and the
@@ -44,8 +46,9 @@ use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, CallCancel, CallInvite, CallInviteEvent, CallInviteResult,
-    CallStateEvent, Decode, Encode, Frame, Hello, Opcode, RoomJoinRequest, RoomKind,
-    SubscribeRequest, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    CallStateEvent, Decode, Encode, Frame, FriendEvent, Hello, NotificationEvent, NotificationKind,
+    Opcode, RoomJoinRequest, RoomKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
+    Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -120,7 +123,6 @@ async fn build_node(
             ("MIGO_NODE__ID".to_string(), node_id.to_string()),
             ("MIGO_NODE__REGION".to_string(), region.to_string()),
             ("MIGO_NODE__SIGNING_KEY".to_string(), seed.to_string()),
-            ("MIGO_GATEWAY__HEARTBEAT_MS".to_string(), "6000".to_string()),
             (
                 "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
                 "100".to_string(),
@@ -267,6 +269,11 @@ async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Fra
 struct Client {
     stream: tokio::net::TcpStream,
     correlation: u32,
+    /// Frames read while waiting for another arrival, kept for the wait that wants
+    /// them. The far node sends the ring and its bell in its own order — the ingest
+    /// log shows the call frame crossing just before the notification — so a wait
+    /// that skips past a frame must not eat it.
+    held: Vec<Frame>,
 }
 
 impl Client {
@@ -307,16 +314,22 @@ impl Client {
             Some(grant.account_id),
             "the inline token authenticated the session"
         );
+        assert_ne!(
+            welcome.features & migo_protocol::features::CALLS,
+            0,
+            "the handshake negotiates the CALLS bit the ring's events are gated on (section 72)"
+        );
 
+        let wanted = Topic {
+            kind: TopicKind::User,
+            id: grant.account_id,
+        };
         send(
             &mut stream,
             Opcode::Subscribe,
             2,
             &SubscribeRequest {
-                topics: vec![Topic {
-                    kind: TopicKind::User,
-                    id: grant.account_id,
-                }],
+                topics: vec![wanted.clone()],
             },
         )
         .await;
@@ -328,9 +341,16 @@ impl Client {
                     "the self-subscription is accepted: {:?}",
                     from_frame::<migo_protocol::Error>(&frame)
                 );
+                let reply: SubscribeResponse = from_frame(&frame).expect("the reply decodes");
+                assert!(
+                    reply.accepted.contains(&wanted),
+                    "the self-subscription takes the user topic (rejected: {:?})",
+                    reply.rejected
+                );
                 return Self {
                     stream,
                     correlation: 2,
+                    held: Vec::new(),
                 };
             }
         }
@@ -356,16 +376,40 @@ impl Client {
         }
     }
 
-    /// Reads until this session's stream carries a frame of the wanted opcode,
-    /// skipping the unrelated events a subscribed session receives — the bell's
-    /// notification rides the same user topic the ring does, and presence may speak
-    /// too. The timeout is the assertion: a ring the far node never hears is the bug.
-    async fn next_event_of(&mut self, want: Opcode) -> Frame {
+    /// Reads until this session's stream carries a frame of the wanted opcode within
+    /// `limit`, keeping the frames it passes over so a later wait can take them — the
+    /// ring and its bell arrive in the far node's own order, so order-tolerance is a
+    /// requirement, not a courtesy. The frames seen on the way are carried into the
+    /// failure message, because a far node that ingested the event but delivered
+    /// nothing leaves no other trace: what the socket carried is the whole of the
+    /// evidence.
+    async fn next_event_of(&mut self, want: Opcode, limit: Duration) -> Frame {
+        if let Some(position) = self
+            .held
+            .iter()
+            .position(|frame| Opcode::from_wire(frame.header.opcode) == Some(want))
+        {
+            return self.held.remove(position);
+        }
+        let deadline = tokio::time::Instant::now() + limit;
+        let mut seen: Vec<Opcode> = Vec::new();
         loop {
-            let frame = recv_within(&mut self.stream, STEP).await;
-            if Opcode::from_wire(frame.header.opcode) == Some(want) {
-                return frame;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "the {:?} frame never arrived within {:?}; the socket carried {:?}",
+                want,
+                limit,
+                seen
+            );
+            let frame = recv_within(&mut self.stream, remaining).await;
+            if let Some(opcode) = Opcode::from_wire(frame.header.opcode) {
+                if opcode == want {
+                    return frame;
+                }
+                seen.push(opcode);
             }
+            self.held.push(frame);
         }
     }
 }
@@ -453,6 +497,29 @@ async fn a_ring_places_and_cancels_across_nodes() {
         app_a.presence_relay.watchers_of(bob_grant.account_id)
     );
 
+    // The local probe: a frame placed straight into beta's hub, on the very topic the
+    // federated tier puts the ring on, before any federated traffic exists to blame. A
+    // far phone that hears this but not the ring has an honest last hop and a broken
+    // crossing; one that hears neither has a session whose subscription never took.
+    app_b.gateway.broadcast_to_topic(
+        &Topic {
+            kind: TopicKind::User,
+            id: bob_grant.account_id,
+        },
+        Opcode::FriendEvent,
+        &FriendEvent {
+            user_id: alice_grant.account_id,
+            state: "probe".to_string(),
+        },
+        app_b.clock.now(),
+    );
+    let probe_frame = bob.next_event_of(Opcode::FriendEvent, STEP).await;
+    let probe: FriendEvent = from_frame(&probe_frame).expect("the probe decodes");
+    assert_eq!(
+        probe.state, "probe",
+        "the probe frame is the one the test placed on the topic"
+    );
+
     // The ring: alice's invite is accepted by the row-holding node, and the invite
     // event it publishes to bob's user topic must cross to the node holding bob's
     // socket — the frame the old code dropped, because no publisher fed the
@@ -475,7 +542,23 @@ async fn a_ring_places_and_cancels_across_nodes() {
     assert_eq!(result.status, 0, "the invite is accepted as a ring");
     assert_eq!(result.call_id, call_id);
 
-    let invite_frame = bob.next_event_of(Opcode::CallInviteEvent).await;
+    // The bell first: the invite's notification rides the same user-topic tier the ring
+    // does, but unlike the ring it carries no feature bit — section 72 gates the call
+    // opcodes and not the bell — so it is the tier's own delivery this asserts, one hop
+    // the feature negotiation cannot touch.
+    let bell_frame = bob
+        .next_event_of(Opcode::NotificationEvent, MESH_BUDGET)
+        .await;
+    let bell: NotificationEvent = from_frame(&bell_frame).expect("the bell event decodes");
+    assert_eq!(
+        bell.kind,
+        NotificationKind::IncomingCall,
+        "the notification is the incoming-call kind"
+    );
+
+    let invite_frame = bob
+        .next_event_of(Opcode::CallInviteEvent, MESH_BUDGET)
+        .await;
     let invite: CallInviteEvent = from_frame(&invite_frame).expect("the invite event decodes");
     assert_eq!(
         invite.call_id, call_id,
@@ -495,7 +578,7 @@ async fn a_ring_places_and_cancels_across_nodes() {
     let _: migo_protocol::Acknowledged =
         alice.ask(Opcode::CallCancel, &CallCancel { call_id }).await;
 
-    let ended_frame = bob.next_event_of(Opcode::CallStateEvent).await;
+    let ended_frame = bob.next_event_of(Opcode::CallStateEvent, MESH_BUDGET).await;
     let ended: CallStateEvent = from_frame(&ended_frame).expect("the end event decodes");
     assert_eq!(ended.call_id, call_id, "the cancellation names the ring");
     assert_eq!(ended.state, CallState::Ended.to_wire());
