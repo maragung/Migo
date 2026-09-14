@@ -403,6 +403,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val memberProfile: StateFlow<MemberProfileView?> = _memberProfile.asStateFlow()
 
+    /**
+     * The account's owned pack SKUs, as the composer's emoticon/sticker picker reads them; null
+     * while the read is in flight, which the picker renders as its own wait rather than a free-only
+     * set that would read as "you own nothing". One read per session, kept in the flow: every
+     * conversation mounts the same picker and the answer is per-account, not per-conversation.
+     */
+    private val _ownedPacks = MutableStateFlow<Set<String>?>(null)
+
+    val ownedPacks: StateFlow<Set<String>?> = _ownedPacks.asStateFlow()
+
     /** Which account ids have an avatar download in flight, so concurrent surfaces share one. */
     private val avatarsInFlight = HashSet<Id>()
 
@@ -4926,6 +4936,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _callState.value = CallUiState()
         _groupCallState.value = GroupCallUiState()
         _memberProfile.value = null
+        // The owned-packs read is per-session too: the next account's entitlements are its own.
+        _ownedPacks.value = null
         subscriptions.forEach { it.cancel() }
         subscriptions.clear()
     }
@@ -5790,6 +5802,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * [MemberProfileView.settled] says the read is no longer running. The update is guarded on
      * the id so a slow read for one member cannot land on the sheet of another the person opened
      * in the meantime.
+     *
+     * The standing facts ride beside the profile as their own degradation-tolerant reads, exactly
+     * as the web client's own profile card fetches them: progression and badges from the economy
+     * service, the social edge from the one graph walk, and the XP-board rank from the board's
+     * first page. A failure of any of them is a missing line, never a broken card — the profile
+     * has already landed by then, and a person who cannot see a level can still read a name.
      */
     fun openMemberProfile(userId: Id, name: String) {
         val live = session ?: return
@@ -5798,23 +5816,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val profile = live.client.profile.fetchOne(userId)
                 if (profile != null) rememberAvatar(profile)
-                _memberProfile.update { current ->
-                    if (current?.userId == userId) {
-                        current.copy(profile = profile, settled = true)
-                    } else {
-                        current
-                    }
-                }
+                editMember(userId) { it.copy(profile = profile, settled = true) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                _memberProfile.update { current ->
-                    if (current?.userId == userId) {
-                        current.copy(settled = true, failure = readable(failure))
-                    } else {
-                        current
-                    }
-                }
+                editMember(userId) { it.copy(settled = true, failure = readable(failure)) }
+            }
+            // Standing facts degrade quietly, each on its own try: the card's rule is that a
+            // missing line is honest and a failed card is not.
+            try {
+                val standing = live.client.economy.getProgression(userId)
+                editMember(userId) { it.copy(progression = standing) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Absent, not fatal: no level line, no bar.
+            }
+            try {
+                val earned = live.client.economy.getBadges(userId)
+                editMember(userId) { it.copy(badges = earned) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Absent, not fatal: no badge row.
+            }
+            // The edge is read before the edit, because readEdge suspends and editMember's
+            // lambda does not — the same shape every other standing fact above takes.
+            val edge = readEdge(live, userId)
+            editMember(userId) { it.copy(relationship = edge) }
+            try {
+                // Only the first page is read — a person off it simply has no rank line.
+                val board = live.client.economy.getLeaderboard("xp", 100)
+                val held = board.firstOrNull { row -> row.accountId == userId }?.position
+                editMember(userId) { it.copy(rank = held) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Off the board, not fatal: no rank line.
             }
         }
     }
@@ -5822,6 +5860,119 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Closes the member profile sheet; the state goes with it, so a reopen reads fresh. */
     fun closeMemberProfile() {
         _memberProfile.value = null
+    }
+
+    /**
+     * Reads the account's entitlements as the picker's owned-SKU set, once per session.
+     *
+     * A failure reads as "no purchases" rather than as an error, which is exactly what an account
+     * with no purchases renders — the picker's free set is always honest, and the store's own page
+     * is where a mismatch between owned and renderable would surface.
+     */
+    fun loadOwnedPacks() {
+        val live = session ?: return
+        if (_ownedPacks.value != null) return
+        viewModelScope.launch {
+            try {
+                val owned = live.client.economy.getEntitlements().map { it.sku }.toSet()
+                _ownedPacks.value = owned
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _ownedPacks.value = emptySet()
+            }
+        }
+    }
+
+    /**
+     * Applies a change to the open member profile, only when it is still the same account — the
+     * guard that keeps a slow read for one member from landing on the sheet of another the person
+     * opened in the meantime.
+     */
+    private fun editMember(userId: Id, change: (MemberProfileView) -> MemberProfileView) {
+        _memberProfile.update { current -> if (current?.userId == userId) change(current) else current }
+    }
+
+    /**
+     * The viewer's edge to one account, as the wire's plain kind number, or null when the graph
+     * walk named none — which is the honest unknown, rendered as no social line at all.
+     *
+     * A walk that fails reads the same as one that found nothing: the line's rule is that it
+     * states what the wire says, and a guess would be a third thing the wire never said.
+     */
+    private suspend fun readEdge(live: MigoSession, userId: Id): Long? =
+        try {
+            live.client.social.listAllRelationships().firstOrNull { it.userId == userId }?.kind
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+
+    /**
+     * Sends a friend request to the account the member profile sheet is about.
+     *
+     * The edge is re-read afterwards, so the sheet's social line says "Request sent" because the
+     * wire says so, not because the button was clicked. Never offered for one's own row — the
+     * caller gates that — and a failure lands on the sheet's own error line rather than the
+     * shell-wide banner, because the act that failed is this sheet's, not the screen's.
+     */
+    fun memberFriendRequest() {
+        val live = session ?: return
+        val view = _memberProfile.value ?: return
+        if (view.friendBusy || view.userId == signedInState?.accountId) return
+        editMember(view.userId) { it.copy(friendBusy = true) }
+        viewModelScope.launch {
+            try {
+                live.client.social.friendRequest(view.userId)
+                val edge = readEdge(live, view.userId)
+                editMember(view.userId) { it.copy(relationship = edge, friendBusy = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                editMember(view.userId) { it.copy(failure = readable(failure), friendBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Answers a pending incoming request from the account the member profile sheet is about,
+     * either way, then re-reads the edge exactly as the request does.
+     */
+    fun memberFriendRespond(accept: Boolean) {
+        val live = session ?: return
+        val view = _memberProfile.value ?: return
+        if (view.friendBusy || view.userId == signedInState?.accountId) return
+        editMember(view.userId) { it.copy(friendBusy = true) }
+        viewModelScope.launch {
+            try {
+                live.client.social.friendRespond(view.userId, accept)
+                val edge = readEdge(live, view.userId)
+                editMember(view.userId) { it.copy(relationship = edge, friendBusy = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                editMember(view.userId) { it.copy(failure = readable(failure), friendBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Reads the open chat's roster for the header gift's recipient list, without opening the
+     * member sheet.
+     *
+     * The same reads the sheet's own open makes, because the roster is the one list that names
+     * who a gift could go to; a direct chat needs no list (its one recipient is the peer), so
+     * this is a room's and a group's read. Skipped when a list is already held or already
+     * loading — the gift is a tap away, not a reason to read twice.
+     */
+    fun loadGiftRecipients() {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.roster != null || chat.groupRoster != null || chat.rosterLoading) return
+        when {
+            chat.kind == ConversationKind.Group && chat.roomId == null -> loadGroupRoster(chat.conversationId)
+            chat.roomId != null -> loadRoster(chat.conversationId, chat.roomId)
+        }
     }
 
     /**

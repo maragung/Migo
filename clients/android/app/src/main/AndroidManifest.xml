@@ -50,6 +50,22 @@
             </intent-filter>
         </activity>
 
+        <!-- The camera shot's door: TakePicture hands the camera app a content uri rather than a
+             file path, because the camera is another app and must not see this app's private
+             storage. The provider shares only what res/xml/file_paths.xml names (the camera
+             subfolder of the cache), read-and-write, and the grant the launch carries is the one
+             the camera gets (no other app can reach the uri). XML comments cannot contain a
+             double hyphen, so this comment uses parentheses where prose would reach for one. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.filepicker"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the FileProvider shares: the camera subfolder of the cache, and nothing else. The
+     composer's TakePicture writes its shot there through the provider's uri, the attachment
+     send reads it back the same way, and no other path in the app's private storage is ever
+     handed to another app. XML comments cannot contain a double hyphen, so this comment uses
+     parentheses where prose would reach for one. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="camera" path="camera/" />
+</paths>

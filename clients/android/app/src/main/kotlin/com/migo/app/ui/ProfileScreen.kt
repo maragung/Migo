@@ -1,6 +1,9 @@
 package com.migo.app.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
+import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
@@ -20,6 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -48,6 +54,7 @@ import com.migo.app.model.ProfileEditState
 import com.migo.app.model.SecurityCheckupState
 import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
+import com.migo.core.protocol.PresenceState
 import com.migo.core.security.BackupFreshness
 import com.migo.core.security.backupDateLabel
 import com.migo.core.security.backupFreshness
@@ -63,6 +70,13 @@ import com.migo.core.security.oldActiveDevices
  * recovery contact (the web Account panel's two account-level controls), the account's devices,
  * the `.migo` backup, and the sign-out. The custom status rides the presence wire rather than the
  * profile patch, exactly as on web, so saving a sentence never flips the presence state.
+ *
+ * The identity block reads the profile's public half as anyone else's card would (the verified
+ * name, the handle, the presence word, the custom status in quotes, the country and language, the
+ * shareable public id with its copy), and the standing section reads the wallet's own numbers
+ * (the level, the total XP, the level's progress, the badges with their dates, the XP-board rank
+ * when this account holds one on the page the wallet keeps) — the same facts the member profile's
+ * card draws for anyone, turned on oneself.
  *
  * The device list is the account-root security view (§16-§18), and removing a device is a control
  * that works — which is exactly why it asks for confirmation first. The backup is the other
@@ -116,17 +130,87 @@ fun ProfileScreen(
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Monogram(name = state.username, size = 56.dp)
             Spacer(modifier = Modifier.width(16.dp))
             Column {
-                Text(
-                    text = state.username,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
+                // The name as the profile's own words state it, with the verified mark the wire
+                // vouches for. The profile read is the edit form's (it loads on this screen's
+                // first composition), so the block starts as the sign-in's plainest fact and fills
+                // in as the read lands — every fact below is its own absence until then, the same
+                // rule the member profile's card holds its own facts to.
+                val profile = state.profileEdit.profile
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = profile?.displayName?.ifBlank { state.username } ?: state.username,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (profile?.verified == true) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "✔",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                if (profile != null && profile.username.isNotBlank()) {
+                    ListRowLine(text = "@" + profile.username)
+                }
+                // The presence word only when the wire named a state: an unknown is a line that is
+                // not there, never a dash a person would read as a state.
+                val presence = profile?.presence
+                if (presence != null && presence != PresenceState.Unknown) {
+                    ListRowLine(text = presenceLabel(presence))
+                }
+                profile?.customStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                    ListRowLine(text = "“$status”")
+                }
+                val facts = buildList {
+                    profile?.country?.let { add("🌍 $it") }
+                    profile?.language?.let { add("🗣 $it") }
+                }
+                if (facts.isNotEmpty()) {
+                    ListRowLine(text = facts.joinToString(" · "))
+                }
                 ConnectionBadge(state = state.connection)
                 Spacer(modifier = Modifier.padding(2.dp))
+                // The shareable public id, with the copy that makes sharing it a tap — the one
+                // identifier this account can hand out freely, stated beside the account id the
+                // toggle still guards (the account id is the one a person should think twice
+                // about pasting).
+                if (profile != null) {
+                    val clipboard = context.getSystemService(ClipboardManager::class.java)
+                    var idCopied by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ListRowLine(
+                            text = "🪪 " + profile.publicId,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard?.setPrimaryClip(
+                                    ClipData.newPlainText("public id", profile.publicId),
+                                )
+                                idCopied = true
+                            },
+                            modifier = Modifier.semantics {
+                                contentDescription = if (idCopied) {
+                                    "Copied"
+                                } else {
+                                    "Copy the shareable id"
+                                }
+                            },
+                        ) {
+                            Text(
+                                text = if (idCopied) "✓ Copied" else "📋 Copy",
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                }
                 TextButton(onClick = { showId = !showId }) {
                     Text(if (showId) "Hide account id" else "Show account id")
                 }
@@ -166,6 +250,64 @@ fun ProfileScreen(
             color = LocalMigoExtra.current.faint,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        // The account's standing, as the wallet's own reads hold it: the level, the total XP, the
+        // level's progress, the badges with the dates they were earned, and the XP-board rank when
+        // this account holds one on the page the wallet keeps (its top ten — a rank past that page
+        // is a fact this screen cannot see, and it says nothing rather than guessing). Everything
+        // degrades to a missing line: a wallet read that has not answered yet leaves the section's
+        // one sentence, not a level it cannot vouch for.
+        SectionLabel(text = "Standing")
+        val progression = state.wallet.progression
+        if (progression == null) {
+            Text(
+                text = "Standing loads with the wallet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = LocalMigoExtra.current.faint,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        } else {
+            val rank = state.wallet.leaders
+                .firstOrNull { it.accountId == state.accountId }
+                ?.position
+            val standing = buildList {
+                add("Level ${progression.level}")
+                add("⭐ ${progression.xp} XP")
+                rank?.let { held -> add("🏆 #$held on the XP board") }
+            }
+            ListRowLine(
+                text = standing.joinToString(" · "),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            if (progression.xpForNextLevel > 0) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                ) {
+                    LinearProgressIndicator(
+                        progress = {
+                            (progression.xpIntoLevel.toDouble() / progression.xpForNextLevel.toDouble())
+                                .toFloat()
+                                .coerceIn(0f, 1f)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    ListRowLine(
+                        text = "${progression.xpIntoLevel} / ${progression.xpForNextLevel} XP " +
+                            "to level ${progression.level + 1}",
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+            for (badge in state.wallet.badges) {
+                ListRowLine(
+                    text = "🏅 ${badge.badgeCode.replace('_', ' ')} · Earned " +
+                        DateUtils.getRelativeTimeSpanString(badge.awardedAt),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
+        }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 

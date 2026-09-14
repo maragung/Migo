@@ -1,8 +1,10 @@
 package com.migo.app
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -24,15 +26,20 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
+import com.migo.app.model.AttachSource
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.CallOverlay
@@ -58,6 +65,7 @@ import com.migo.core.protocol.RelationshipKind
 import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.ThemeChoice
 import com.migo.core.wire.Id
+import java.io.File
 
 /**
  * The only activity.
@@ -295,15 +303,39 @@ private fun ShellScreen(
     onRequestVoiceNote: () -> Unit,
 ) {
     val open = state.open
-    // The attachment picker and the document destination picker, both the system's own sheets: a
-    // GetContent for anything a person might attach (the image/document split is the model's, by
-    // the picked file's own MIME type), and a CreateDocument for the save a document row asks for
-    // -- no storage permission either way, because the person's own pick is the person's own
-    // grant. The staged document is what carries the Save press across the picker's answer.
-    val pickAttachment = rememberLauncherForActivityResult(
+    // The composer's four attachment doors and the document destination picker, all the system's
+    // own sheets: three GetContent reads (anything, a video, an image) and one TakePicture write
+    // for the camera, plus the CreateDocument for the save a document row asks for -- no storage
+    // permission either way, because the person's own pick is the person's own grant, and the
+    // camera's output is the app's own cache through a FileProvider the manifest names. The image
+    // or document split is still the model's, by the picked file's own MIME type; the staged
+    // document is what carries the Save press across the picker's answer.
+    val pickFile = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
         if (uri != null) model.sendAttachment(uri)
+    }
+    val pickVideo = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) model.sendAttachment(uri)
+    }
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) model.sendAttachment(uri)
+    }
+    // The camera's destination, remembered across the shot itself: TakePicture answers only
+    // whether the camera wrote the file, so the uri the launch was handed has to be the one the
+    // answer reads. Saved rather than remembered, because a rotation mid-shot must not orphan a
+    // photo the camera did take.
+    var cameraOutput by rememberSaveable { mutableStateOf<String?>(null) }
+    val takePhoto = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { saved ->
+        val path = cameraOutput
+        cameraOutput = null
+        if (saved && path != null) model.sendAttachment(Uri.parse(path))
     }
     val saveDocument = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
@@ -315,6 +347,9 @@ private fun ShellScreen(
     // The member profile sheet's state, collected here for the same reason the avatars are: the
     // read is the model's, while the surface belongs to whichever member sheet named the person.
     val memberProfile by model.memberProfile.collectAsState()
+    // The account's owned pack SKUs, for the composer's emoticon/sticker picker: null while the
+    // one-per-session read is in flight, which the picker renders as its own wait.
+    val ownedPacks by model.ownedPacks.collectAsState()
     // The media choice, answered as one fact for every bubble on screen: "Wi-Fi only" reads the
     // connection's own metered state, which is the network's word rather than the app's guess.
     // Read per composition rather than remembered — a settings change must reach the next
@@ -447,9 +482,22 @@ private fun ShellScreen(
                     onSearchQuery = model::setChatSearchQuery,
                     // Attachments are an end-to-end feature: the control is offered only where the
                     // conversation has a key channel to hand the recipients the object's key --
-                    // every direct chat and group, never a server-readable room.
-                    onAttach = if (open.kind != ConversationKind.Room) {
-                        { pickAttachment.launch("*/*") }
+                    // every direct chat and group, never a server-readable room. The four menu
+                    // picks all funnel into the model's one attachment send path; the choice only
+                    // decides which of the system's pickers opens.
+                    onPickAttachment = if (open.kind != ConversationKind.Room) {
+                        { source ->
+                            when (source) {
+                                AttachSource.File -> pickFile.launch("*/*")
+                                AttachSource.Photo -> {
+                                    val output = newCameraOutput(context)
+                                    cameraOutput = output.toString()
+                                    takePhoto.launch(output)
+                                }
+                                AttachSource.Video -> pickVideo.launch("video/*")
+                                AttachSource.Image -> pickImage.launch("image/*")
+                            }
+                        }
                     } else {
                         null
                     },
@@ -484,6 +532,16 @@ private fun ShellScreen(
                     onCloseMemberProfile = model::closeMemberProfile,
                     giftCatalogue = state.wallet.catalogue,
                     onSendGift = { sku, recipient, clientKey -> model.sendGift(sku, recipient, clientKey) },
+                    // The header gift's recipient list, the composer's emoticon picker's owned
+                    // read, and the profile card's two friend acts: all the model's round trips,
+                    // handed in because a sheet cannot make them for itself. The owned pack set is
+                    // collected here like the avatars are -- one read per session, kept by the
+                    // model, read by whichever surface needs it.
+                    onLoadGiftRecipients = model::loadGiftRecipients,
+                    ownedPacks = ownedPacks,
+                    onLoadOwnedPacks = model::loadOwnedPacks,
+                    onMemberFriendRequest = model::memberFriendRequest,
+                    onMemberFriendRespond = { accept -> model.memberFriendRespond(accept) },
                     modifier = Modifier.weight(1f),
                 )
             } else {
@@ -511,6 +569,23 @@ private fun ShellScreen(
             onDecline = model::declineAccountFile,
         )
     }
+}
+
+/**
+ * Mints the camera shot's destination: a fresh file in the app's own cache, handed to the camera
+ * through the FileProvider the manifest names.
+ *
+ * The app's cache rather than shared storage, because the shot is this app's own intermediate —
+ * the attachment send reads the bytes and the file's MIME straight from the provider's uri, and
+ * nothing outside the app ever needs the path. A fresh file per shot, because the camera's answer
+ * is only "written" or "not": reusing a name would leave a refused shot showing the photo before
+ * it, which is a lie a fresh temp file cannot tell.
+ */
+private fun newCameraOutput(context: Context): Uri {
+    val dir = File(context.cacheDir, "camera")
+    dir.mkdirs()
+    val file = File.createTempFile("shot", ".jpg", dir)
+    return FileProvider.getUriForFile(context, context.packageName + ".filepicker", file)
 }
 
 /**

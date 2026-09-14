@@ -645,7 +645,7 @@ private fun presenceColor(presence: PresenceState?): Color = when (presence) {
 }
 
 /** A presence state's word. */
-private fun presenceLabel(presence: PresenceState?): String = when (presence) {
+fun presenceLabel(presence: PresenceState?): String = when (presence) {
     PresenceState.Online -> "Online"
     PresenceState.Away -> "Away"
     PresenceState.Busy -> "Busy"
