@@ -626,12 +626,13 @@ private fun BlinkDot(color: Color) {
     )
 }
 
-/** The band's dot colour: the connection's own word, worn as a colour. */
+/** The band's dot colour: the connection's own word, worn as a colour — the same three hues
+ *  every client wears, green connected, amber connecting or reconnecting, red gone. */
 private fun connectionColor(connection: ConnectionState): Color = when (connection) {
     ConnectionState.Online -> Color(0xFF3FCE6B)
     ConnectionState.Connecting -> Color(0xFFF5B83D)
-    ConnectionState.Reconnecting -> Color(0xFFE5503C)
-    ConnectionState.Closed -> Color(0xFFB9C9D1)
+    ConnectionState.Reconnecting -> Color(0xFFF5B83D)
+    ConnectionState.Closed -> Color(0xFFE5503C)
 }
 
 /** A presence state's colour, the same marks the web client's pills wear. */
