@@ -507,7 +507,9 @@ pub fn taskbar(
                 // out, then the facts about the session.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     draw_chip(ui, clock_chip);
-                    if logout_button(ui, theme, logout_chip.galley.clone()).clicked() {
+                    // The button answers plain bool, the same as every painted control on the
+                    // bar: `clicked` already happened inside it, where the response lives.
+                    if logout_button(ui, theme, logout_chip.galley.clone()) {
                         actions.push(TaskAction::Logout);
                     }
                     for chip in cluster {
