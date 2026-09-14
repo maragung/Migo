@@ -66,7 +66,9 @@
 use migo_core::Timestamp;
 use migo_protocol::MessageEvent;
 use migo_store::model::ReplicaMessage;
-use migo_store::traits::MessagingStore;
+// No `MessagingStore` import here: `SharedStore` is a `dyn Store` trait object,
+// whose supertrait methods resolve on the object itself, so the trait named in
+// the doc link above never needs to be in this file's scope.
 use migo_store::SharedStore;
 
 /// Seats one message event's row in this node's store.
