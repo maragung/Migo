@@ -158,6 +158,24 @@ enum class MediaAutoDownload {
 }
 
 /**
+ * How the app's signed-in surface is navigated.
+ *
+ * [Tabbed] is the windowing shell the app has always drawn: a strip along the top carrying the home
+ * tabs and one tab per open conversation. [ChatList] is the chat-list mode: a bottom bar of
+ * Main, Friends, Rooms, Feed, where Main is the conversation list and a tapped conversation opens
+ * as its own screen. The two are presentations of the same session state -- which conversations
+ * exist, their unread counts, the one open chat -- so the choice changes no fact the wire sees,
+ * only which surface the person reads it through.
+ */
+enum class NavigationMode {
+    /** The top window strip: home tabs plus one tab per open conversation. */
+    Tabbed,
+
+    /** The bottom bar: Main's conversation list, and a screen per opened conversation. */
+    ChatList,
+}
+
+/**
  * A complete, immutable settings snapshot.
  *
  * Every field has a default that is correct for a fresh install, so the defaults are also what a caller
@@ -219,6 +237,15 @@ data class AppSettings(
 
     /** Light, dark, or follow the system. */
     val theme: ThemeChoice = ThemeChoice.System,
+
+    /**
+     * How the signed-in surface is navigated: the tabbed windowing shell, or the chat list.
+     *
+     * Defaults to [NavigationMode.Tabbed], which is the shell every existing user knows -- a
+     * preference that changed the layout on update would be a redesign smuggled in as a setting,
+     * and this field exists to offer the second layout, not to impose it.
+     */
+    val navigationMode: NavigationMode = NavigationMode.Tabbed,
 
     /** Whether to raise a notification at all. */
     val notificationsEnabled: Boolean = true,
@@ -297,6 +324,7 @@ private val KEY_SERVER_SELECTION_MODE = stringPreferencesKey("server_selection_m
 private val KEY_LOCALE = stringPreferencesKey("locale")
 private val KEY_BANDWIDTH_MODE = stringPreferencesKey("bandwidth_mode")
 private val KEY_THEME = stringPreferencesKey("theme")
+private val KEY_NAVIGATION_MODE = stringPreferencesKey("navigation_mode")
 private val KEY_NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
 private val KEY_NOTIFICATION_PREVIEW = booleanPreferencesKey("notification_preview")
 private val KEY_SEND_READ_RECEIPTS = booleanPreferencesKey("send_read_receipts")
@@ -328,6 +356,11 @@ private fun Preferences.toAppSettings(): AppSettings {
         locale = this[KEY_LOCALE] ?: defaults.locale,
         bandwidthMode = readBandwidthMode(this[KEY_BANDWIDTH_MODE], defaults.bandwidthMode),
         theme = readEnum(this[KEY_THEME], ThemeChoice.entries, defaults.theme),
+        navigationMode = readEnum(
+            this[KEY_NAVIGATION_MODE],
+            NavigationMode.entries,
+            defaults.navigationMode,
+        ),
         notificationsEnabled = this[KEY_NOTIFICATIONS_ENABLED] ?: defaults.notificationsEnabled,
         notificationPreview = this[KEY_NOTIFICATION_PREVIEW] ?: defaults.notificationPreview,
         sendReadReceipts = this[KEY_SEND_READ_RECEIPTS] ?: defaults.sendReadReceipts,
@@ -357,6 +390,7 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_LOCALE] = locale
     preferences[KEY_BANDWIDTH_MODE] = bandwidthMode.name
     preferences[KEY_THEME] = theme.name
+    preferences[KEY_NAVIGATION_MODE] = navigationMode.name
     preferences[KEY_NOTIFICATIONS_ENABLED] = notificationsEnabled
     preferences[KEY_NOTIFICATION_PREVIEW] = notificationPreview
     preferences[KEY_SEND_READ_RECEIPTS] = sendReadReceipts

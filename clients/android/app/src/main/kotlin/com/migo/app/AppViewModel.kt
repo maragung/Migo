@@ -125,6 +125,7 @@ import com.migo.core.protocol.TypingState
 import com.migo.core.protocol.UserProfile
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
+import com.migo.core.store.NavigationMode
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.ServerPicker
 import com.migo.core.store.ServerSelectionMode
@@ -2231,6 +2232,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Sets how the app follows the system's light and dark. */
     fun setTheme(theme: ThemeChoice) = setPreference { it.copy(theme = theme) }
+
+    /**
+     * Sets how the signed-in surface is navigated.
+     *
+     * Presentation only: both modes read this same state, the same session, and the same unread
+     * counts, so the write changes nothing the wire sees -- the next composition of the shell is
+     * the whole difference.
+     */
+    fun setNavigationMode(mode: NavigationMode) = setPreference { it.copy(navigationMode = mode) }
 
     /** Sets whether this device answers the messages it has read. */
     fun setSendReadReceipts(enabled: Boolean) = setPreference { it.copy(sendReadReceipts = enabled) }
