@@ -714,6 +714,9 @@ pub struct OwnProfile {
 /// account's card, so they are absent here by design.
 #[derive(Debug, Clone)]
 pub struct MemberCard {
+    /// The person the card names, as the commands that act on them need it: the view reads the
+    /// copyable id below for display, but a friend request or a gift answers to this one.
+    #[allow(dead_code)] // Read once the profile view grows its social line.
     pub account_id: Id,
     pub username: String,
     pub display_name: String,

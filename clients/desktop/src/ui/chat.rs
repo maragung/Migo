@@ -1539,12 +1539,10 @@ fn group_roster_panel(
                         .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
                         .inner_margin(egui::Margin::symmetric(space::MD as i8, space::XS as i8))
                         .show(ui, |ui| {
-                            if quiet_action(ui, context.theme, "View profile", colors.text)
-                                .clicked()
-                            {
+                            if quiet_action(ui, "View profile", colors.text).clicked() {
                                 profile_ask = Some(member.account_id);
                             }
-                            if quiet_action(ui, context.theme, "Gift", colors.text)
+                            if quiet_action(ui, "Gift", colors.text)
                                 .on_hover_text("Send this person a gift from the shop.")
                                 .clicked()
                             {
@@ -1554,7 +1552,7 @@ fn group_roster_panel(
                             // and never at a founder: the same gates the server holds,
                             // mirrored so the option says what the wire would allow.
                             if votable
-                                && quiet_action(ui, context.theme, "Vote kick", colors.text)
+                                && quiet_action(ui, "Vote kick", colors.text)
                                     .on_hover_text(
                                         "Call a vote to remove this person. When half the \
                                          group agrees, they are kicked. Free — the vote costs \
@@ -1570,7 +1568,7 @@ fn group_roster_panel(
                             // Kick Point and says so before it is spent.
                             if targetable {
                                 if member.muted_until.is_some() {
-                                    if quiet_action(ui, context.theme, "Unmute", colors.text)
+                                    if quiet_action(ui, "Unmute", colors.text)
                                         .on_hover_text("Lift this group mute now.")
                                         .clicked()
                                     {
@@ -1578,24 +1576,19 @@ fn group_roster_panel(
                                     }
                                 } else {
                                     for (label, term_ms) in GROUP_MUTE_TERMS_MS {
-                                        if quiet_action(
-                                            ui,
-                                            context.theme,
-                                            &format!("Mute {label}"),
-                                            colors.text,
-                                        )
-                                        .on_hover_text(format!(
-                                            "Silence this person for the whole group for \
+                                        if quiet_action(ui, &format!("Mute {label}"), colors.text)
+                                            .on_hover_text(format!(
+                                                "Silence this person for the whole group for \
                                              {label}. They keep every other right, including \
                                              the vote."
-                                        ))
-                                        .clicked()
+                                            ))
+                                            .clicked()
                                         {
                                             mute_send = Some((member.account_id, Some(term_ms)));
                                         }
                                     }
                                 }
-                                if quiet_action(ui, context.theme, "Remove", colors.danger)
+                                if quiet_action(ui, "Remove", colors.danger)
                                     .on_hover_text(
                                         "Costs 1 Kick Point, or 1 $MIG when none are held",
                                     )
@@ -1775,12 +1768,7 @@ const GROUP_MUTE_TERMS_MS: [(&str, u64); 3] = [
 /// list of things that can happen and not a row of controls competing with the row that
 /// opened it. The one exception is stated at the call site, where the destructive option
 /// takes the danger ink.
-fn quiet_action(
-    ui: &mut Ui,
-    theme: crate::theme::Theme,
-    label: &str,
-    ink: egui::Color32,
-) -> egui::Response {
+fn quiet_action(ui: &mut Ui, label: &str, ink: egui::Color32) -> egui::Response {
     ui.add(
         egui::Button::new(
             RichText::new(label)
