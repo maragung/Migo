@@ -15,8 +15,9 @@
  * The deltas only arrive on the room's own topic, which the gateway delivers to subscribers
  * alone, so knowing a room and watching it are one step here: {@link noteRoom} subscribes the
  * topic (the SDK re-subscribes it across a session reset), and a restored session re-watches
- * every remembered room. A room the account has since left refuses the watch; its record simply
- * stops updating.
+ * every remembered room — and rebuilds each one's bridge ({@link MigoClient.rehydrateRoom}), so
+ * the room's member events patch the membership cache the next send seals for. A room the
+ * account has since left refuses the watch; its record simply stops updating.
  *
  * The map is persisted (see `lib/storage/room-info-store.ts`): without persistence a reloaded
  * session would render every joined room as an anonymous "Room" row, because the conversation
@@ -162,6 +163,29 @@ export function capacityLabel(online: number | undefined, max: number | undefine
   return `${here}/${max}`;
 }
 
+/**
+ * Whether a room member event must cost the room's conversation its outbound sender-key chain.
+ *
+ * Pure, so a test can pin it. A departure — a leave, a kick, a ban, or a disconnect, whose grace
+ * period may yet return the member but whose chain key they already hold — is a crypto event
+ * before it is a UI one, the same rule the group path applies and the desktop reference
+ * enforces: §163 makes every membership change re-seal, because the one thing a chain must not
+ * do after a member leaves is keep sealing for an audience they still sit inside. The next send
+ * builds a fresh chain and distributes it to everyone remaining. A join or a reconnect needs no
+ * rotation — the chain key a joiner is handed starts at the current position, so history before
+ * their arrival stays sealed to them, and a returning member was never gone from the audience. A
+ * legacy frame with no change enum does not guess off the `joined` flag, the same restraint
+ * {@link departedRoomOf} applies: a modern server's departures always carry the change.
+ */
+export function rotationDue(event: RoomMemberEvent): boolean {
+  return (
+    event.change === MemberChange.Left ||
+    event.change === MemberChange.Disconnected ||
+    event.change === MemberChange.Kicked ||
+    event.change === MemberChange.Banned
+  );
+}
+
 export function RoomsProvider({ children }: { children: ReactNode }): ReactNode {
   const { client, accountId, resetNonce } = useMigo();
   const { forgetConversation } = useConversations();
@@ -185,6 +209,31 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
         return;
       }
       void client.watchRoom(roomId).catch(() => {});
+    },
+    [client],
+  );
+
+  /**
+   * Rebuilds a restored room's bridge, not just its watch.
+   *
+   * A reload wipes the SDK's room-to-conversation map — only a join ever writes it — so watching
+   * alone leaves the room's member events patching nothing and the membership cache going stale;
+   * the next send then seals for the group as it stood before any movement the session missed,
+   * and a joiner who arrived meanwhile receives messages they cannot decrypt (§163 makes the
+   * sender-key audience the sender's own choice, and the pending buffer only masks the silence).
+   * The doorbell cannot repair this: it fires only for a room the shell does not know, and a
+   * reloaded session knows its rooms. `rehydrateRoom` is the restore path: the roster is paged
+   * back into the cache and both topics watched, idempotently — a room whose bridge already
+   * stands is answered from the map with no wire work at all, and the join it learns the
+   * conversation id from tells the room nothing for a member already seated (§156). A refusal (a
+   * room the account can no longer enter) leaves the record as the shell's floor, merely static.
+   */
+  const rehydrate = useCallback(
+    (roomId: Id): void => {
+      if (!client) {
+        return;
+      }
+      void client.rehydrateRoom(roomId).catch(() => {});
     },
     [client],
   );
@@ -238,10 +287,13 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
   );
 
   // Restore the remembered rooms once per session: their names back on the rows, their topics
-  // back under watch, so the counters live again without a re-join. The stored copy is only a
-  // floor — a join in this session re-notes the room with fresher counters over it. A copy
-  // stored under another account is discarded outright: room names are a map of where an
-  // account spends its time, and the next account on this device inherits nothing of it.
+  // back under watch, and — the part a reload otherwise loses — their bridges rebuilt, so the
+  // room member events patch the membership cache the next send seals for and a joiner who
+  // arrived while this device was away is folded into the audience instead of receiving messages
+  // they cannot decrypt. The stored copy is only a floor — a join in this session re-notes the
+  // room with fresher counters over it. A copy stored under another account is discarded
+  // outright: room names are a map of where an account spends its time, and the next account on
+  // this device inherits nothing of it.
   useEffect(() => {
     if (accountId === null) {
       return;
@@ -266,7 +318,7 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
         roomsRef.current = next;
         setRooms(next);
         for (const info of next.values()) {
-          watch(info.roomId);
+          rehydrate(info.roomId);
         }
       })
       .catch(() => {
@@ -275,7 +327,7 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
     return () => {
       cancelled = true;
     };
-  }, [accountId, watch]);
+  }, [accountId, rehydrate]);
 
   // The live state deltas: counters and topic for rooms this shell knows. A delta for an
   // unknown room is dropped — without the join there is no conversation to attach it to.
@@ -301,11 +353,48 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
 
   // The removal this account cannot read past: a room member event naming this account with
   // Kicked, Banned, or Left is the last frame the server sends before it takes the room's
-  // topics away, so it must cost the room its whole surface here — the record and its watch
-  // (forgetRoom), the sidebar's row (forgetConversation, the same drop a leave's ack performs),
-  // and the open thread, which closes exactly the way a group's own removal closes it. Without
-  // this the row would keep offering a room whose sends can only fail server-side: audit area
-  // 4's rule that a kicked member loses the surface, not just the delivery.
+  // topics away, so it must cost the room its whole surface here — the SDK's whole room-life
+  // (`teardownRoom`: both topics unsubscribed, the crypto state forgotten so a re-join starts
+  // fresh chains rather than reusing keys the departed members may still hold, §163, and the
+  // bridge dropped), the record (forgetRoom), the sidebar's row (forgetConversation, the same
+  // drop a leave's ack performs), and the open thread, which closes exactly the way a group's
+  // own removal closes it. Without this the row would keep offering a room whose sends can only
+  // fail server-side: audit area 4's rule that a kicked member loses the surface, not just the
+  // delivery.
+  //
+  // A departure naming someone else is still a crypto event for a room this shell follows: the
+  // departing member may hold the room's sender key, and the one thing a chain must not do
+  // after a member leaves is keep sealing for an audience they still sit inside. The next send
+  // builds a fresh chain and distributes it to everyone remaining — the desktop client's rule
+  // (net/mod.rs's `on_room_member`), now parity here. A member joining needs no rotation: the
+  // chain key they are handed starts at the current position, so history stays sealed to them.
+  useEffect(() => {
+    if (!client || accountId === null) {
+      return;
+    }
+    const off = client.rooms.onMember((event: RoomMemberEvent) => {
+      const gone = departedRoomOf(event, accountId, byRoomId.current);
+      if (gone === null) {
+        if (rotationDue(event)) {
+          const conversationId = byRoomId.current.get(event.roomId);
+          if (conversationId !== undefined) {
+            client.messaging.rotateSenderKey(conversationId);
+          }
+        }
+        return;
+      }
+      // Fire-and-forget: the server has already revoked both topics, so this call is the
+      // client's own bookkeeping — the tracked set a later reset would re-ask (and be refused),
+      // the key state, and the bridge a later member event would misroute through.
+      void client.teardownRoom(gone.roomId, gone.conversationId).catch(() => {});
+      forgetRoom(gone.roomId);
+      forgetConversation(gone.conversationId);
+      if (openConversationId === gone.conversationId) {
+        closeConversation();
+      }
+    });
+    return off;
+  }, [client, accountId, resetNonce, forgetRoom, forgetConversation, openConversationId]);
 
   // The join's other half, and rooms owe conversations the same doorbell. A `Joined` naming
   // *this* account, for a room the shell does not know, arrives on our own user topic — the
@@ -318,24 +407,6 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
   // the room nothing, so no other member sees a phantom join), then the conversation start and
   // the records, so this device hears everything the room says next. Anything else — another
   // user's join, or a join for a room this shell already knows — is not ours to act on.
-  useEffect(() => {
-    if (!client || accountId === null) {
-      return;
-    }
-    const off = client.rooms.onMember((event: RoomMemberEvent) => {
-      const gone = departedRoomOf(event, accountId, byRoomId.current);
-      if (gone === null) {
-        return;
-      }
-      forgetRoom(gone.roomId);
-      forgetConversation(gone.conversationId);
-      if (openConversationId === gone.conversationId) {
-        closeConversation();
-      }
-    });
-    return off;
-  }, [client, accountId, resetNonce, forgetRoom, forgetConversation, openConversationId]);
-
   useEffect(() => {
     if (!client || accountId === null) {
       return;

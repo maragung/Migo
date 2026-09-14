@@ -119,6 +119,7 @@ export { MessagingDomain } from './domains/messaging.js';
 export type {
   DeviceAddress,
   DeviceDirectory,
+  GapFiller,
   IncomingMessage,
   MessageDeletion,
   SendOptions,

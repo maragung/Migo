@@ -237,6 +237,12 @@ class MessagingDomain(
     private val sessionCrypto: SessionCrypto,
     private val groupCrypto: GroupCrypto,
     private val directory: DeviceDirectory,
+    /**
+     * The contiguous-sequence ledger this domain advances. Shared across every connection the
+     * client builds, so a reconnect keeps the watermark the section 158 resync reads — the domain
+     * is per-connection, but the count of what is held is not.
+     */
+    private val watermarks: WatermarkTracker,
     private val onEventError: EventErrorHandler? = null,
 ) {
     private val messageListeners = ListenerSet<IncomingMessage>(Op.MESSAGE_EVENT, onEventError)
@@ -568,7 +574,18 @@ class MessagingDomain(
     }
 
     private suspend fun handleEvent(event: MessageEvent) {
-        eventLock.withLock { routeEvent(event) }
+        eventLock.withLock {
+            // The ledger first, so both the listeners below and a later watermark read see the
+            // same accounting. An event already dispatched as an above-the-hole live delivery is
+            // skipped: the fill's page that reached it has counted it, and dispatching it twice
+            // would show one line of text as two.
+            watermarks.track(event)
+            if (watermarks.alreadyDispatched(event)) {
+                return@withLock
+            }
+            watermarks.rememberDispatch(event)
+            routeEvent(event)
+        }
     }
 
     /**

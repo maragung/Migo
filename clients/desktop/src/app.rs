@@ -400,7 +400,23 @@ impl App {
                 Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
                 Event::CaptchaUnavailable { reason } => self.auth.captcha.unavailable(reason),
                 Event::CaptchaRefused => self.auth.captcha.refused(),
-                Event::Conversations(list) => self.chat.set_conversations(list),
+                Event::Conversations(list) => {
+                    self.chat.set_conversations(list.clone());
+                    // The rooms pane's joined set, folded from the rows the bridge could name:
+                    // after a restart this is the only place the pane learns its own rooms —
+                    // the join events that filled it last session are gone with that process.
+                    // Inserted only where absent, so a join's own event (which may carry a
+                    // fresher mapping than the list read that follows it) is never clobbered,
+                    // and a room the list no longer names is never resurrected.
+                    for conversation in &list {
+                        if let Some(room_id) = conversation.room_id {
+                            self.rooms
+                                .joined
+                                .entry(room_id)
+                                .or_insert(conversation.conversation_id);
+                        }
+                    }
+                }
                 // A conversation this client asked for: open it as a window, the one way there
                 // is. The list refresh that follows will fill its title in; the window does not
                 // wait for it.
@@ -410,8 +426,22 @@ impl App {
                 Event::History {
                     conversation_id,
                     messages,
+                    more,
                 } => {
                     self.chat.absorb_history(conversation_id, messages);
+                    self.chat.note_history(conversation_id, more);
+                }
+                Event::HistoryEarlier {
+                    conversation_id,
+                    messages,
+                    from_seq,
+                    more,
+                } => {
+                    // One method, not a merge followed by a note: the note's "everything
+                    // known" test has to see the thread as it stood before the page merged,
+                    // and only the merge's own door can guarantee that order.
+                    self.chat
+                        .absorb_earlier(conversation_id, from_seq, more, messages);
                 }
                 Event::Message(message) => {
                     let conversation_id = message.conversation_id;
