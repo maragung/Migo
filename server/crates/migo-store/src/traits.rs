@@ -713,8 +713,9 @@ pub trait KickVoteStore: Send + Sync {
     /// # Errors
     ///
     /// Store failures propagate. A tally against a different target being
-    /// open is not an error but [`KickVoteResult::AlreadyOpen`], so the caller
-    /// can tell the refusal it owes the member from a failure it owes itself.
+    /// open is not an error but the `KickVoteResult::AlreadyOpen` variant, so
+    /// the caller can tell the refusal it owes the member from a failure it
+    /// owes itself.
     async fn cast_kick_vote(
         &self,
         subject_id: Id,
