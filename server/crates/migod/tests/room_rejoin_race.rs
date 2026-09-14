@@ -38,6 +38,7 @@
 //! place timing genuinely races is retried with fresh message ids (section
 //! 156: a duplicate id produces no fanout), never by sleeping past it.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -262,6 +263,17 @@ async fn recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) -> Fra
 struct LiveSession {
     stream: tokio::net::TcpStream,
     correlation: u32,
+    /// Events read while an `ask` was waiting for its reply, in arrival order.
+    ///
+    /// The race this suite exists to catch is decided in exactly this window: the
+    /// federated echo of a leave lands on the outbox runner's half-second tick, which
+    /// is regularly *while* the re-join's own asks are in flight — and a frame read
+    /// off the socket is gone for good once read. An `ask` that dropped the frames it
+    /// did not ask for was eating the very event the assertions wait on, making a
+    /// healthy tier look like a dead one. Parking them and replaying them in arrival
+    /// order keeps every reader — reply waits and event waits alike — seeing every
+    /// frame exactly once.
+    parked: VecDeque<Frame>,
 }
 
 impl LiveSession {
@@ -297,6 +309,7 @@ impl LiveSession {
         let mut session = Self {
             stream,
             correlation: 1,
+            parked: VecDeque::new(),
         };
         session
             .subscribe(&[Topic {
@@ -307,14 +320,21 @@ impl LiveSession {
         session
     }
 
-    /// Reads one frame off the session.
+    /// Reads one frame off the session — a parked one first, in arrival order,
+    /// and only then the socket.
     async fn next_frame(&mut self) -> Frame {
+        if let Some(frame) = self.parked.pop_front() {
+            return frame;
+        }
         recv_within(&mut self.stream, STEP).await
     }
 
     /// Sends a request that must succeed, returning the decoded reply. Frames
     /// that are not the reply — the events a subscribed session receives — are
-    /// read and kept, never discarded silently. A rate-limited refusal is
+    /// parked and replayed to the next reader in arrival order, never
+    /// discarded: the race this suite stages is regularly decided while an
+    /// `ask` is in flight, and the echo a leave enqueues must survive the
+    /// re-join's own asks to be observable at all. A rate-limited refusal is
     /// waited out and retried, exactly as told: the scenario is a burst of
     /// joins and subscribes inside the limiter's window, and "retry in N ms"
     /// is the server talking, not the server broken.
@@ -330,6 +350,7 @@ impl LiveSession {
             loop {
                 let frame = self.next_frame().await;
                 if frame.header.correlation != correlation {
+                    self.parked.push_back(frame);
                     continue;
                 }
                 if !frame.header.is_error() {
@@ -428,20 +449,7 @@ async fn try_departure_of(
 ) -> Option<RoomMemberEvent> {
     let outcome = tokio::time::timeout(window, async {
         loop {
-            let mut head = [0u8; 4];
-            session
-                .stream
-                .read_exact(&mut head)
-                .await
-                .expect("the length of an arriving frame is readable");
-            let len = u32::from_be_bytes(head) as usize;
-            let mut body = vec![0u8; len];
-            session
-                .stream
-                .read_exact(&mut body)
-                .await
-                .expect("the body of an arriving frame is readable");
-            let frame = Frame::decode(Bytes::from(body)).expect("the frame decodes");
+            let frame = session.next_frame().await;
             if Opcode::from_wire(frame.header.opcode) == Some(Opcode::RoomMemberEvent) {
                 let event: RoomMemberEvent = from_frame(&frame).expect("the member event decodes");
                 if event.room_id == room_id
@@ -469,20 +477,7 @@ async fn try_message_of(
 ) -> Option<MessageEvent> {
     let outcome = tokio::time::timeout(window, async {
         loop {
-            let mut head = [0u8; 4];
-            session
-                .stream
-                .read_exact(&mut head)
-                .await
-                .expect("the length of an arriving frame is readable");
-            let len = u32::from_be_bytes(head) as usize;
-            let mut body = vec![0u8; len];
-            session
-                .stream
-                .read_exact(&mut body)
-                .await
-                .expect("the body of an arriving frame is readable");
-            let frame = Frame::decode(Bytes::from(body)).expect("the frame decodes");
+            let frame = session.next_frame().await;
             if Opcode::from_wire(frame.header.opcode) == Some(Opcode::MessageEvent) {
                 let event: MessageEvent = from_frame(&frame).expect("the message event decodes");
                 if event.message_id == message_id {
