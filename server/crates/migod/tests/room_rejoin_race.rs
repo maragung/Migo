@@ -370,7 +370,7 @@ impl LiveSession {
             for frame in held {
                 self.parked.push_back(frame);
             }
-            let reply = reply.unwrap_or_else(|| {
+            let reply = reply.unwrap_or_else(|_| {
                 panic!(
                     "the {:?} reply for correlation {correlation} never arrived inside \
                      the step budget; frames parked while waiting: {:?}",
