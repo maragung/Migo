@@ -47,7 +47,7 @@
 //! the room tier's member events are its window onto everyone else: a `Disconnected` or a
 //! `Reconnected` is published by the node whose socket moved, and the federated copy that
 //! crosses to this node is handed to
-//! [`note_remote_member`](RoomPresence::note_remote_member) as proof of where the member's
+//! `note_remote_member` as proof of where the member's
 //! aliveness now lives. That is what keeps two things honest multi-node: an online count served
 //! here includes members whose sessions live elsewhere, and a grace timer armed here is
 //! cancelled by a reconnect that happened on another node — the generation bump the remote

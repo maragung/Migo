@@ -66,13 +66,13 @@
 //! same envelope carries the other user-topic frames — the bell's
 //! `NOTIFICATION_EVENT`, the social graph's `FRIEND_EVENT` hints, and the
 //! sealed `GROUP_KEY_DISTRIBUTE` a group member's device hands a far member's
-//! device (section 163) — through [`PresenceRelay::forward_frame`], and the
+//! device (section 163) — through `PresenceRelay::forward_frame`, and the
 //! ingest side places them by the same envelope fact and with the same
 //! coalescing rule the origin's own publish used. None of them is presence;
 //! all of them are user-topic frames, which is the only question the tier
 //! asks. Call signaling does *not* ride this envelope: it has its own
 //! allocated opcode (`FED_CALL_RELAY`), reached through
-//! [`PresenceRelay::forward_call`] so the two streams stay separable in
+//! `PresenceRelay::forward_call` so the two streams stay separable in
 //! metrics and in an operator's allow-list thinking.
 //!
 //! # What does not ride this tier
