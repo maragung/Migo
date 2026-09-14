@@ -39,6 +39,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -209,8 +211,11 @@ fun MobileHome(
  *
  * The avatar opens the account sheet; the status line is edited in place — tap it, type, Save —
  * and publishes through presence.set with the current state held, so saving a sentence does not
- * silently mark an away account online. The mail chip carries the unread badge, the settings chip
- * opens the same sheet the avatar does, and the balance rides as a chip while one exists.
+ * silently mark an away account online. The balance sits above the mail and settings chips, stacked
+ * over the pair rather than riding beside them, so the wallet's number is read at a glance above
+ * the controls it is spent from. The slot the balance chip once occupied in the row is the
+ * connection indicator's now — the session's own word as a dot and a label — and the mail chip
+ * carries the unread badge while the settings chip opens the same sheet the avatar does.
  */
 @Composable
 private fun MeCard(
@@ -307,68 +312,106 @@ private fun MeCard(
                     )
                 }
             }
-            if (balance != null) {
-                Surface(
-                    color = Color.White.copy(alpha = 0.2f),
-                    contentColor = extra.bannerInk,
-                    shape = RoundedCornerShape(999.dp),
+            // The connection indicator, in the slot the balance chip once held: the session's own
+            // word as a dot and a label, because a colour alone says nothing to anybody who cannot
+            // tell this green from this amber. This is the one place the shell states the
+            // connection — the chat window does not repeat it, its business being the thread.
+            Surface(
+                color = Color.White.copy(alpha = 0.2f),
+                contentColor = extra.bannerInk,
+                shape = RoundedCornerShape(999.dp),
+                modifier = Modifier.semantics {
+                    contentDescription = "Connection: " + connectionLabel(connection)
+                },
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(connectionColor(connection), CircleShape),
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "$balance \$MIG",
+                        text = connectionLabel(connection),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        maxLines = 1,
                     )
                 }
-                Spacer(modifier = Modifier.width(8.dp))
             }
-            // The mail chip, with the unread badge over its corner when anything is unread.
-            Box {
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
-                        .clickable(onClick = onOpenMail),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "✉",
-                        fontSize = 14.sp,
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-                if (unread > 0) {
+            Spacer(modifier = Modifier.width(8.dp))
+            // The balance and the two chips it stands above: the wallet's number stacked over the
+            // mail and settings pair, so it is read at a glance above the controls it is spent
+            // from rather than squeezed between them and the name.
+            Column(horizontalAlignment = Alignment.End) {
+                if (balance != null) {
                     Surface(
-                        color = Color(0xFFE5503C),
-                        contentColor = Color.White,
+                        color = Color.White.copy(alpha = 0.2f),
+                        contentColor = extra.bannerInk,
                         shape = RoundedCornerShape(999.dp),
-                        modifier = Modifier.align(Alignment.TopEnd),
                     ) {
                         Text(
-                            text = if (unread > 9) "9+" else unread.toString(),
-                            fontSize = 8.5.sp,
+                            text = "$balance \$MIG",
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                Row {
+                    // The mail chip, with the unread badge over its corner when anything is unread.
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
+                                .clickable(onClick = onOpenMail),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "✉",
+                                fontSize = 14.sp,
+                                color = Color.White,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                        if (unread > 0) {
+                            Surface(
+                                color = Color(0xFFE5503C),
+                                contentColor = Color.White,
+                                shape = RoundedCornerShape(999.dp),
+                                modifier = Modifier.align(Alignment.TopEnd),
+                            ) {
+                                Text(
+                                    text = if (unread > 9) "9+" else unread.toString(),
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.dp),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    // The settings chip, opening the same account sheet the avatar does.
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
+                            .clickable(onClick = onOpenMe),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "⚙",
+                            fontSize = 14.sp,
+                            color = Color.White,
+                            textAlign = TextAlign.Center,
                         )
                     }
                 }
-            }
-            Spacer(modifier = Modifier.width(6.dp))
-            // The settings chip, opening the same account sheet the avatar does.
-            Box(
-                modifier = Modifier
-                    .size(30.dp)
-                    .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
-                    .clickable(onClick = onOpenMe),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "⚙",
-                    fontSize = 14.sp,
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                )
             }
         }
     }
@@ -633,6 +676,14 @@ private fun connectionColor(connection: ConnectionState): Color = when (connecti
     ConnectionState.Connecting -> Color(0xFFF5B83D)
     ConnectionState.Reconnecting -> Color(0xFFF5B83D)
     ConnectionState.Closed -> Color(0xFFE5503C)
+}
+
+/** The connection's word, the same labels the panels' [ConnectionBadge] wears. */
+private fun connectionLabel(connection: ConnectionState): String = when (connection) {
+    ConnectionState.Online -> "Online"
+    ConnectionState.Connecting -> "Connecting"
+    ConnectionState.Reconnecting -> "Reconnecting"
+    ConnectionState.Closed -> "Offline"
 }
 
 /** A presence state's colour, the same marks the web client's pills wear. */
