@@ -239,7 +239,12 @@ impl ConversationRelay {
     /// home node not yet admitted — stay unmarked, exactly as a
     /// client-driven ask leaves them.
     pub(crate) async fn reanchor(&self, now: Timestamp) {
-        for conversation_id in std::mem::take(&mut *self.subscribed.lock()) {
+        // Bound to a `let` so the guard the take borrows dies at the semicolon:
+        // a temporary in a `for` head would live for the whole loop, and a
+        // parking-lot guard held across the ask's await is a future tokio
+        // refuses to send between threads.
+        let owed = std::mem::take(&mut *self.subscribed.lock());
+        for conversation_id in owed {
             if let Err(error) = self.subscribe_to(conversation_id, now).await {
                 tracing::warn!(
                     conversation = %conversation_id.to_text(),

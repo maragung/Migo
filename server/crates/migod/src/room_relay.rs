@@ -225,7 +225,12 @@ impl RoomRelay {
     /// the skips that return `Ok` unmarked — no row, a home node not yet
     /// admitted — stay unmarked, exactly as a client-driven ask leaves them.
     pub(crate) async fn reanchor(&self, now: Timestamp) {
-        for room_id in std::mem::take(&mut *self.subscribed.lock()) {
+        // Bound to a `let` so the guard the take borrows dies at the semicolon:
+        // a temporary in a `for` head would live for the whole loop, and a
+        // parking-lot guard held across the ask's await is a future tokio
+        // refuses to send between threads.
+        let owed = std::mem::take(&mut *self.subscribed.lock());
+        for room_id in owed {
             if let Err(error) = self.subscribe_to(room_id, now).await {
                 tracing::warn!(
                     room = %room_id.to_text(),
