@@ -384,6 +384,7 @@ impl Gateway {
     /// arriving while its socket stays silent is told apart from one whose writer never
     /// wrote by this count, and by [`Gateway::dropped_frames_total`] when the loss was
     /// backpressure.
+    #[must_use]
     pub fn frames_out_total(&self) -> u64 {
         self.inner.meters.frames_out_total()
     }
@@ -394,6 +395,7 @@ impl Gateway {
     /// The same reader's other half: section 151's droppable-class drops are silent by
     /// design, counted only here, and a composition test that needs to name one finds
     /// the number in this list.
+    #[must_use]
     pub fn dropped_frames_total(&self) -> Vec<(&'static str, u64)> {
         self.inner.meters.dropped_frames_total()
     }

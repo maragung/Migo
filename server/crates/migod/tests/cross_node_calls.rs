@@ -286,7 +286,8 @@ async fn try_recv_within(stream: &mut tokio::net::TcpStream, limit: Duration) ->
             .expect("the body arrives");
         body
     })
-    .await?;
+    .await
+    .ok()?;
     Some(Frame::decode(body.into()).expect("the frame decodes"))
 }
 
