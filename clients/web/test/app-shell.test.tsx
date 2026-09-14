@@ -391,10 +391,12 @@ test('the chat-list strip leads with Main, and Main is the home itself', () => {
   });
 
   // The order the mode promises: Main, then Friends, Rooms, Feed — Main first because the list
-  // is the mode's point, the other three exactly where the tabbed strip keeps them.
+  // is the mode's point, the other three exactly where the tabbed strip keeps them. The needle
+  // stops at the label's closing bracket, not the button's: Main carries this strip's badge, so
+  // its label is followed by the badge's span, not by the button's end.
   let at = -1;
   for (const label of ['Main', 'Friends', 'Rooms', 'Feed']) {
-    const found = markup.indexOf(`>${label}</button>`);
+    const found = markup.indexOf(`>${label}<`);
     assert.ok(found !== -1, `the "${label}" home tab is missing from the chat-list strip`);
     assert.ok(found > at, `the "${label}" tab is out of the chat-list order`);
     at = found;
