@@ -365,6 +365,7 @@ pub(crate) async fn handle_mute_set(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedSocial,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = SocialCaller::new(
         ctx.identity().account_id(),
@@ -377,13 +378,16 @@ pub(crate) async fn handle_mute_set(
     ctx.reply(&Acknowledged { ok: true })?;
     echo_caller(
         ctx,
+        relay,
         request.user_id,
         if request.on {
             STATE_MUTED
         } else {
             STATE_UNMUTED
         },
-    );
+        ctx.now(),
+    )
+    .await;
     Ok(())
 }
 

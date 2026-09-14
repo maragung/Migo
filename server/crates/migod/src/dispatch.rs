@@ -1260,7 +1260,9 @@ impl Dispatcher for AppDispatcher {
             Opcode::BlockSet => {
                 social::handle_block_set(context, frame, &self.social, &self.presence_relay).await
             }
-            Opcode::MuteSet => social::handle_mute_set(context, frame, &self.social).await,
+            Opcode::MuteSet => {
+                social::handle_mute_set(context, frame, &self.social, &self.presence_relay).await
+            }
             Opcode::RelationshipList => {
                 social::handle_relationship_list(context, frame, &self.social).await
             }

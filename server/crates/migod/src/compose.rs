@@ -421,12 +421,6 @@ pub struct App {
     /// tier's watch table lives (section 170), and the relay has no listener of its own to
     /// name an address by.
     pub presence_relay: Arc<crate::presence_relay::PresenceRelay>,
-    /// The room half of the mesh: which rooms this node's sessions watch and — when this node
-    /// homes a room — the table of every peer that watches it (section 170). Held for the same
-    /// reason `presence_relay` is: a cross-node test needs the one place the room tier's watch
-    /// table lives to wait out the mesh hop deterministically, and the relay has no listener
-    /// of its own to name an address by.
-    pub room_relay: Arc<crate::room_relay::RoomRelay>,
     /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
     pub calls: SharedCallkeeper,
 }
@@ -1090,7 +1084,6 @@ impl App {
                 config.federation.reanchor_interval_ms,
             ),
             presence_relay,
-            room_relay,
             calls,
         })
     }
