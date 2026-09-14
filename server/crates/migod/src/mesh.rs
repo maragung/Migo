@@ -2065,6 +2065,20 @@ impl MeshTransport {
             }
         }
         for (target, events) in groups {
+            // The one target a node must never dial is itself. In the one-database
+            // shape of section 170 every node's runner reads the same outbox rows,
+            // so a row naming this node reaches this drain too — and a self-dial
+            // cannot succeed: the listener would charge the claim against the
+            // allow-list it shares with the very store this row sits in, and the
+            // handshake fails on a ratchet no session ever built for the self pair.
+            // Worse than the wasted dial is its settlement: mark_failed pushes the
+            // row's next attempt out on the same growing backoff the real sender
+            // reads, so a node that keeps failing against itself starves the peer
+            // that could have delivered it. Rows naming this node stay queued,
+            // exactly like a paused peer's — another node's drain carries them.
+            if target == self.mesh.node_id() {
+                continue;
+            }
             let peer = match self.mesh.peer(target).await {
                 Ok(peer) if peer.status.is_allowed() => peer,
                 Ok(_) => continue, // paused or blocked: the events stay queued, unsent

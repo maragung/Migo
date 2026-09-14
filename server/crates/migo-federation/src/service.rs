@@ -371,6 +371,10 @@ where
         &self.region
     }
 
+    fn node_id(&self) -> Id {
+        self.node_id
+    }
+
     fn hello(&self) -> NodeHello {
         let mut random = self.random.lock();
         NodeHello::new(self.node_id, &mut **random)
