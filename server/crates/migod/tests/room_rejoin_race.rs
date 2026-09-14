@@ -338,6 +338,15 @@ impl LiveSession {
     /// waited out and retried, exactly as told: the scenario is a burst of
     /// joins and subscribes inside the limiter's window, and "retry in N ms"
     /// is the server talking, not the server broken.
+    ///
+    /// The frames read past are held locally and re-parked only once the
+    /// reply lands. Parking them on the session queue mid-wait would spin
+    /// instead of wait: `next_frame` serves the queue before the socket, so a
+    /// frame pushed back while it is being drained comes around again and
+    /// again and the socket — where the reply sits, and where the step budget
+    /// lives — is never reached. The hold keeps every iteration draining
+    /// towards the socket, and the step budget around the whole wait turns a
+    /// reply that never comes into a failure naming it, not a hang.
     async fn ask<M: Encode, R: Decode>(&mut self, opcode: Opcode, message: &M) -> R {
         self.correlation += 1;
         let correlation = self.correlation;
@@ -347,24 +356,40 @@ impl LiveSession {
                 tokio::time::sleep(Duration::from_millis(backoff + 100)).await;
             }
             send(&mut self.stream, opcode, correlation, message).await;
-            loop {
-                let frame = self.next_frame().await;
-                if frame.header.correlation != correlation {
-                    self.parked.push_back(frame);
-                    continue;
+            let mut held: Vec<Frame> = Vec::new();
+            let reply = tokio::time::timeout(STEP, async {
+                loop {
+                    let frame = self.next_frame().await;
+                    if frame.header.correlation == correlation {
+                        return frame;
+                    }
+                    held.push(frame);
                 }
-                if !frame.header.is_error() {
-                    return from_frame(&frame).expect("the reply decodes");
-                }
-                let refusal: migo_protocol::Error =
-                    from_frame(&frame).expect("the refusal decodes");
-                assert!(
-                    refusal.code == migo_protocol::codes::RATE_LIMITED,
-                    "the request was refused outright: {refusal:?}"
-                );
-                backoff = u64::from(refusal.retry_after_ms.unwrap_or(1000));
-                break;
+            })
+            .await;
+            for frame in held {
+                self.parked.push_back(frame);
             }
+            let reply = reply.unwrap_or_else(|| {
+                panic!(
+                    "the {:?} reply for correlation {correlation} never arrived inside \
+                     the step budget; frames parked while waiting: {:?}",
+                    opcode,
+                    self.parked
+                        .iter()
+                        .map(|frame| Opcode::from_wire(frame.header.opcode))
+                        .collect::<Vec<_>>()
+                )
+            });
+            if !reply.header.is_error() {
+                return from_frame(&reply).expect("the reply decodes");
+            }
+            let refusal: migo_protocol::Error = from_frame(&reply).expect("the refusal decodes");
+            assert!(
+                refusal.code == migo_protocol::codes::RATE_LIMITED,
+                "the request was refused outright: {refusal:?}"
+            );
+            backoff = u64::from(refusal.retry_after_ms.unwrap_or(1000));
         }
         panic!("the request never succeeds even after backing off as instructed");
     }
@@ -424,17 +449,6 @@ impl LiveSession {
     }
 }
 
-/// Reads from a session until a frame of the wanted opcode arrives, skipping
-/// the unrelated events a subscribed session receives.
-async fn next_event_of(session: &mut LiveSession, want: Opcode) -> Frame {
-    loop {
-        let frame = session.next_frame().await;
-        if Opcode::from_wire(frame.header.opcode) == Some(want) {
-            return frame;
-        }
-    }
-}
-
 /// Reads from a session for `window`, looking for the stale departure of
 /// `member` from `room` — the federated `Left` the mesh carries home — skipping
 /// everything else a subscribed session hears. `None` means the window closed
@@ -466,10 +480,13 @@ async fn try_departure_of(
 }
 
 /// Reads from a session for `window`, looking for the message with the given
-/// id. `None` means the window closed without it — the poll inside the
-/// warm-up's retry loop, not the bug-catching budget, so silence is an answer
-/// rather than a panic. The window bounds the whole read, frame included, the
-/// same shape `assert_quiet` uses for its stray-frame watch.
+/// id, skipping everything else a subscribed session hears — other messages
+/// included, so a warm-up straggler is never mistaken for the probe that
+/// follows it. `None` means the window closed without it: the warm-up's retry
+/// loop treats that as an answer to retry past, while the probe treats it as
+/// the bug itself, and both read through the same bounded window rather than
+/// a hang. The window bounds the whole read, frame included, the same shape
+/// `assert_quiet` uses for its stray-frame watch.
 async fn try_message_of(
     session: &mut LiveSession,
     message_id: Id,
@@ -684,17 +701,23 @@ async fn a_stale_departure_does_not_revoke_a_rejoined_member() {
 
         // The probe: a fresh message from the owner must reach the re-joined
         // member on beta, on the very topics the stale departure would have
-        // taken away. Had the ingest honored the echo, this wait would be the
-        // silence the step budget turns into the failure it is.
+        // taken away. The wait matches the probe's own id — a warm-up
+        // straggler is skipped, not answered for — and stays honest the same
+        // way every other wait here does: had the ingest honored the echo, the
+        // step budget closes the window and the failure names the message
+        // that never came home.
         let probe_id = owner_session
             .send_room_message(conversation_id, nonce)
             .await;
         nonce += 1;
-        let frame = next_event_of(&mut member_beta, Opcode::MessageEvent).await;
-        let event: MessageEvent = from_frame(&frame).expect("the probe message decodes");
-        assert_eq!(
-            event.message_id, probe_id,
-            "round {round}: the re-joined member still hears the room they came back to"
+        assert!(
+            try_message_of(&mut member_beta, probe_id, STEP)
+                .await
+                .is_some(),
+            "round {round}: the probe message {} never reached the re-joined \
+             member inside the step budget — the stale departure took the room \
+             away from the member who came back to it",
+            probe_id.to_text()
         );
     }
 }
