@@ -4103,21 +4103,37 @@ async fn a_sanction_refuses_a_room_that_does_not_exist() {
 async fn a_transfer_demotes_the_outgoing_owner_to_manager() {
     let harness = Harness::new();
     let room = harness.founded().await;
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .transfer_ownership(&proven(ALICE, ALICE_PHONE, LATER), room, id(BOB))
         .await
         .expect("the owner may give the room away");
-    let (fanout, event) = expect_member(fanout);
+    assert_eq!(
+        fanouts.len(),
+        2,
+        "the room is told about the incoming owner and the outgoing owner's demotion"
+    );
+    let (fanout, event) = expect_member(Some(fanouts[0].clone()));
     assert_eq!(fanout.exclude_device, Some(id(ALICE_PHONE)));
     assert_eq!(
         event.user_id,
         id(BOB),
-        "one event, about the incoming owner: two would arrive in an order the gateway \
-         does not promise"
+        "the incoming owner is announced first, so no client ever renders a room \
+         nobody holds"
     );
     assert!(event.joined);
     assert_eq!(event.role, Some(RoomRole::Owner));
+
+    // The demotion follows the promotion, on the same revision — one write moved
+    // the room forward once — and reaches the outgoing owner's other devices,
+    // which until this frame kept rendering a crown the store had already taken
+    // back.
+    let (fanout, demotion) = expect_member(Some(fanouts[1].clone()));
+    assert_eq!(fanout.exclude_device, Some(id(ALICE_PHONE)));
+    assert_eq!(event.revision, demotion.revision, "one write, one revision");
+    assert_eq!(demotion.user_id, id(ALICE), "then the outgoing owner");
+    assert!(demotion.joined, "demoted, not removed");
+    assert_eq!(demotion.role, Some(RoomRole::Manager));
 
     assert_eq!(harness.room_row(room).await.owner_id, id(BOB));
     assert_eq!(harness.member_row(room, BOB).await.role, RoomRole::Owner);
@@ -4212,12 +4228,12 @@ async fn only_the_owner_may_transfer_and_only_to_an_active_member() {
 async fn transferring_to_yourself_changes_nothing() {
     let harness = Harness::new();
     let room = harness.founded().await;
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .transfer_ownership(&proven(ALICE, ALICE_PHONE, LATER), room, id(ALICE))
         .await
         .expect("already the owner");
-    assert!(fanout.is_none());
+    assert!(fanouts.is_empty());
     assert_eq!(
         harness.transfers(),
         0,

@@ -1452,8 +1452,12 @@ where
         // have all walked — but not a state where nobody can rename it or answer
         // a report, which is what an unpromoted remainder would be. The heir is
         // the longest-standing member, which is the closest thing a roster has to
-        // a memory of the group's own founding. No announcement: roles travel in
-        // the roster, and the next roster read is the truth.
+        // a memory of the group's own founding. No announcement, and not by
+        // choice: the frozen wire has no way to say it — `ConversationMemberEvent`
+        // carries no role and `MemberChange` has no promotion variant — so the
+        // heir and the other members hold a stale roster until their next read,
+        // and saying this on the wire is a recorded debt rather than a decision
+        // this crate can make.
         if me.role == ConversationRole::Founder
             && !remaining.is_empty()
             && !remaining

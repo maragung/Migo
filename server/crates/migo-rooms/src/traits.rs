@@ -285,12 +285,16 @@ pub trait Roomkeeper: Send + Sync {
     /// demotes the outgoing owner to Manager rather than removing them. A transfer
     /// that ejected the previous owner would make a mistaken transfer unrecoverable by
     /// the only person who could explain it.
-    async fn transfer_ownership(
-        &self,
-        caller: &Caller,
-        room_id: Id,
-        to: Id,
-    ) -> Result<Option<Fanout>>;
+    ///
+    /// A `Vec` and not an `Option` because one transfer tells the room two things
+    /// in one write: the incoming owner first, so no client ever renders a room
+    /// nobody holds, and the outgoing owner's demotion to Manager after it, so
+    /// their other devices stop rendering a rank that was given away. The order
+    /// is the room's to apply and the gateway's to keep — the same in-order
+    /// publish every multi-fanout action already relies on. Empty is the
+    /// transfer to yourself, which changed nothing (section 156).
+    async fn transfer_ownership(&self, caller: &Caller, room_id: Id, to: Id)
+        -> Result<Vec<Fanout>>;
 
     /// Whether this account may do `needed` in this room, and what it needs next.
     ///

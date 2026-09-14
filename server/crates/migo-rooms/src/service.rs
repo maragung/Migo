@@ -1955,29 +1955,50 @@ where
         if to == caller.account_id {
             // Already the owner. The store treats this as a no-op too; returning early
             // keeps the counter honest about how many transfers happened.
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let revision = self
             .store
             .transfer_room_ownership(room_id, caller.account_id, to, caller.now)
             .await?;
         self.meters.transfer();
-        // One event, about the incoming owner. The outgoing owner's demotion to
-        // Manager is deliberately not broadcast: two frames would arrive in an order
-        // the gateway does not promise, and a client that saw the demotion first would
-        // render a room with no owner.
-        Ok(Some(Fanout::member(
-            room_id,
-            caller.device_id,
-            member_event(
+        // Two events, in the order the room has to apply them: the incoming owner
+        // first, so no client ever renders a room nobody holds, and the outgoing
+        // owner's demotion second, so their other devices stop rendering a rank
+        // that was given away — until now the demotion was written to the row and
+        // never told, and the previous owner's clients kept drawing a crown the
+        // store had already taken back. Both frames name the same revision,
+        // because one write moved the room forward once, and each excludes the
+        // transferring device alone, whose reply is the acknowledgment of the
+        // whole transfer. The order is the gateway's to keep: fanouts publish
+        // in the order a service returns them, the same discipline a sanction's
+        // many rooms already rely on.
+        Ok(vec![
+            Fanout::member(
                 room_id,
-                to,
-                true,
-                Some(RoomRole::Owner),
-                None,
-                view::revision(revision),
+                caller.device_id,
+                member_event(
+                    room_id,
+                    to,
+                    true,
+                    Some(RoomRole::Owner),
+                    None,
+                    view::revision(revision),
+                ),
             ),
-        )))
+            Fanout::member(
+                room_id,
+                caller.device_id,
+                member_event(
+                    room_id,
+                    caller.account_id,
+                    true,
+                    Some(RoomRole::Manager),
+                    None,
+                    view::revision(revision),
+                ),
+            ),
+        ])
     }
 
     async fn authorize(&self, caller: &Caller, room_id: Id, needed: u64) -> Result<Authorized> {
