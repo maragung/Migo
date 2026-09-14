@@ -112,6 +112,15 @@ pub trait Mesh: Send + Sync {
     /// carries only a node id and a nonce (section 169).
     fn region(&self) -> &str;
 
+    /// This node's own id.
+    ///
+    /// The one identity a drain must never dial: an outbox row naming this node is
+    /// another node's to deliver, and a self-delivery attempt can only fail the
+    /// handshake and then charge its failure to the row's shared backoff. In the
+    /// one-database shape of section 170 every node's runner reads the same rows,
+    /// so the check lives on the trait where the drain can ask it.
+    fn node_id(&self) -> Id;
+
     /// Builds this node's opening hello: its node id and a fresh random nonce.
     ///
     /// The first message of a handshake, sent to the peer. A new nonce is drawn each time; it
