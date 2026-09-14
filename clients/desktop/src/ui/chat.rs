@@ -23,7 +23,8 @@ use migo_protocol::ConversationRole;
 
 use crate::model::{self, Body, Conversation, Delivery, Message};
 use crate::net::Command;
-use crate::theme::{font, palette, radius, space};
+use crate::theme::{font, palette, radius, space, Palette};
+use crate::ui::packs;
 use crate::ui::widgets::{self, BubbleTone};
 use crate::ui::{ChatLogAction, Context};
 
@@ -135,7 +136,8 @@ pub struct ChatState {
     /// Whether the held press has slid into its cancel zone: the release then cancels
     /// rather than sends, and the hint says so in the release's own colour.
     pub mic_cancel_slide: bool,
-    /// The attach panel's own state, per conversation: whether it is open and the path typed
+    /// The attach menu's own state, per conversation: whether the file control's menu is
+    /// open, whether one of its pick doors left the path row standing, and the path typed
     /// into it. egui offers no file dialog, so the path is typed — the same trade the avatar
     /// picker makes — and it is kept per conversation the way drafts are.
     pub attach: HashMap<Id, AttachPanel>,
@@ -198,18 +200,31 @@ pub struct ChatState {
     /// shop shows, filed by the same event, so a gift sent from a group costs what the wallet
     /// said it would. Empty until a read lands; the picker's first open is the ask.
     pub gifts: Vec<crate::model::GiftRow>,
-    /// The gift picker the member menu opened, when it stands: who the gift is for, and the
-    /// one idempotency key the pick minted. One at a time on the whole screen, like the
-    /// new-group form — two pickers would be two gifts half-chosen.
+    /// The gift picker that stands, when one stands: who the gift is for, and the one
+    /// idempotency key the pick minted. Opened by a roster row's member or by the header's gift
+    /// control, and one at a time on the whole screen like the new-group form — two pickers
+    /// would be two gifts half-chosen.
     pub gifting: Option<GiftPick>,
     /// The member profile a roster menu opened, when the card has answered: the card itself,
-    /// and the conversation whose window asked for it — the window that draws it, so a view
-    /// never outlives the group it was opened from.
+    /// the conversation whose window asked for it — the window that draws it, so a view
+    /// never outlives the group it was opened from — and the standing facts that arrive on
+    /// their own schedule beside it.
     pub member_profile: Option<MemberProfileView>,
+    /// The account's owned catalogue codes, as the composer's emoticon picker reads them.
+    /// `None` is "not asked yet" — the picker waits rather than showing a free-only set that
+    /// would read as "you own nothing"; the first open of a picker is the ask, and a pack
+    /// bought elsewhere lands on the next open.
+    pub owned_packs: Option<HashSet<String>>,
+    /// The emoticon/sticker picker's open state, per conversation: the composer's smile folds
+    /// the picker out above the row, the way the attach menu folds under it, and the tab it
+    /// was last left on stays with the conversation's own picker.
+    pub emoticon_pickers: HashMap<Id, EmoticonPanel>,
 }
 
-/// The member profile view's own state: the card the wire answered, and the conversation whose
-/// window asked for it.
+/// The member profile view's own state: the card the wire answered, the conversation whose
+/// window asked for it, and the standing facts that answer beside it — each on its own
+/// schedule, each degrading to absence, because a profile without its level lines is still a
+/// profile and a card must never break waiting on a fact.
 #[derive(Clone)]
 pub struct MemberProfileView {
     /// The conversation whose roster menu opened the view. The window draws the card, so the
@@ -218,17 +233,45 @@ pub struct MemberProfileView {
     pub conversation_id: Id,
     /// The card itself, as the profile fetch answered it.
     pub card: crate::model::MemberCard,
+    /// The person's XP standing, when the economy answered: level, totals, and the bar's two
+    /// ends. Absent draws no level lines at all — no guess, no zero, no silence pretending
+    /// to be a number.
+    pub progression: Option<crate::model::Progression>,
+    /// The badges the person holds, with the days they were earned. An empty row renders
+    /// nothing, the same absence the web card draws.
+    pub badges: Vec<crate::model::BadgeRow>,
+    /// The person's position on the XP board's first page. `None` is both "not answered yet"
+    /// and "off the board" — the view draws no rank line for either, which is the honest
+    /// sentence in both cases.
+    pub rank: Option<u32>,
+    /// The viewer's edge to this person, as the graph walk answered it. `None` is no edge the
+    /// graph names — drawn as the "Add friend" line the web card offers, never as a guess
+    /// about a stranger.
+    pub relationship: Option<crate::model::RelationshipKind>,
 }
 
-/// The gift picker's own state, as the member menu opens it.
+/// The emoticon/sticker picker's per-conversation state: whether it stands open above the
+/// composer, and which of its two tabs was last drawn.
+#[derive(Default)]
+pub struct EmoticonPanel {
+    /// Whether the picker is showing above the composer row.
+    pub open: bool,
+    /// Whether the Stickers tab is the one drawn — the Emoticons tab is the picker's default,
+    /// the way the web picker's is.
+    pub stickers_tab: bool,
+}
+
+/// The gift picker's own state, as the header's gift control or a member menu opens it.
 #[derive(Clone)]
 pub struct GiftPick {
-    /// The conversation whose roster menu opened the picker — the window that draws it, the
-    /// same ownership rule the profile view keeps.
+    /// The conversation whose window opened the picker — the window that draws it, the same
+    /// ownership rule the profile view keeps.
     pub conversation_id: Id,
-    /// The member the gift is for, resolved at open so the picker never has to re-ask which
-    /// row it came from.
-    pub member: Id,
+    /// The member the gift is for, when the opener already named one: a direct chat's peer or
+    /// a roster row's member, pre-chosen so the picker is just the cards. `None` is the
+    /// header's ask in a conversation with more than one candidate — the picker offers the
+    /// members as a choice first, because a gift sent from a thread names someone in it.
+    pub member: Option<Id>,
     /// The pick's idempotency key, minted when the picker opened: the same key on every send
     /// this pick attempts, so a lost reply retried is the first send again, not a second
     /// charge. The picker closes after a send — one pick is one gift — so the key is one
@@ -318,12 +361,16 @@ pub struct ImageBlob {
     pub rgba: Vec<u8>,
 }
 
-/// The attach panel's state for one conversation.
+/// The attach menu's state for one conversation.
 #[derive(Default)]
 pub struct AttachPanel {
-    /// Whether the panel is showing under the composer.
+    /// Whether the file control's menu is showing under the composer.
     pub open: bool,
-    /// The path typed into it, kept between frames so closing the panel on a mistake does
+    /// Whether the path row a menu pick opened is standing: the menu's doors all lead to the
+    /// one row, because on this client the platform's picker *is* a typed path and the worker
+    /// judges the bytes the way the server will anyway.
+    pub picking: bool,
+    /// The path typed into the row, kept between frames so closing it on a mistake does
     /// not cost the whole path.
     pub path: String,
 }
@@ -1696,17 +1743,34 @@ fn group_roster_panel(
     }
     // The gift picker opens with a fresh idempotency key and a fresh read of the shelves:
     // a price is a fact worth re-asking before a charge, and the picker that sends the gift
-    // is the picker that quoted it.
+    // is the picker that quoted it. The roster's row names the member, so the picker is just
+    // the cards.
     if let Some(member) = gift_ask {
         state.gifting = Some(GiftPick {
             conversation_id,
-            member,
+            member: Some(member),
             key: gift_intent_key(),
         });
         context.issue(Command::GiftCatalogue);
     }
+    // The profile view opens with its card ask and its standing asks together: the card is
+    // the face, and the progression, badges, board rank, and social edge are the facts that
+    // answer beside it — each on its own schedule, each degrading to absence if its answer
+    // never lands.
     if let Some(user_id) = profile_ask {
         context.issue(Command::MemberProfile {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberStanding {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberRank {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberEdge {
             conversation_id,
             user_id,
         });
@@ -1795,13 +1859,15 @@ fn gift_intent_key() -> String {
     )
 }
 
-/// The member menu's gift picker: the shop's shelves, opened from a member's options.
+/// The gift picker: the shop's shelves, opened from the header's gift control or a member
+/// menu's Gift.
 ///
 /// The wallet's own picker is the pattern — a centred window, one gift per row, a Send
-/// beside each — but this one answers a different door: a group is where the ask starts,
-/// and the picker that quotes the price is the picker that sends the gift. One pick is one
-/// gift, so the window closes the moment it sends, and the key minted at open is the whole
-/// intent the wire de-duplicates on.
+/// beside each — but this one answers the thread's doors: a gift sent from a conversation
+/// names someone in it, so a direct chat's picker arrives with its one recipient pre-chosen
+/// and a group's offers the members as a choice first. One pick is one gift, so the window
+/// closes the moment it sends, and the key minted at open is the whole intent the wire
+/// de-duplicates on.
 fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     // This window's pick only: another window's picker is that window's to draw.
     let Some(pick) = state.gifting.clone() else {
@@ -1811,53 +1877,144 @@ fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         return;
     }
     let colors = palette(context.theme);
-    let recipient = state
-        .names
-        .get(&pick.member)
-        .cloned()
-        .unwrap_or_else(|| model::short_id(pick.member));
-    // Deferred: the send closes the picker as it issues, because one pick is one gift.
-    let mut sent: Option<String> = None;
+    // The candidate recipients, for the opener that named none: the conversation's other
+    // members, named the way the thread itself names them. A conversation whose membership
+    // the summary never disclosed offers nobody, and the picker says so rather than guessing
+    // a recipient for a spend.
+    let recipients: Vec<(Id, String)> = context
+        .account
+        .zip(
+            state
+                .conversations
+                .iter()
+                .find(|c| c.conversation_id == conversation_id),
+        )
+        .map(|(account, conversation)| {
+            conversation
+                .members
+                .iter()
+                .filter(|id| **id != account.account_id)
+                .map(|id| {
+                    (
+                        *id,
+                        state
+                            .names
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| model::short_id(*id)),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let title = match pick.member {
+        Some(member) => format!(
+            "Send a gift to {}",
+            state
+                .names
+                .get(&member)
+                .cloned()
+                .unwrap_or_else(|| model::short_id(member))
+        ),
+        None => "Send a gift".to_owned(),
+    };
+    // Deferred: the send closes the picker as it issues (one pick is one gift), and a
+    // recipient chosen from the rows becomes the pick's own member for the next frame.
+    let mut sent: Option<(Id, String)> = None;
+    let mut chosen: Option<Id> = None;
     let mut open = true;
-    egui::Window::new(format!("Send a gift to {recipient}"))
+    egui::Window::new(title)
         .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .resizable(false)
         .collapsible(false)
         .open(&mut open)
         .min_width(300.0)
         .show(ui.ctx(), |ui| {
-            if state.gifts.is_empty() {
-                ui.label(
-                    RichText::new("Reading the gift catalogue…")
-                        .font(egui::FontId::proportional(font::SMALL))
-                        .color(colors.text_muted),
-                );
-                return;
-            }
-            for gift in &state.gifts {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(&gift.name)
-                            .font(egui::FontId::proportional(font::BODY))
-                            .color(colors.text),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Send").clicked() {
-                            sent = Some(gift.sku.clone());
-                        }
+            match pick.member {
+                // The opener named nobody: the members are the picker's first question, and
+                // the shelves wait behind the answer — a gift without a recipient is a
+                // transfer with the wrong name on it.
+                None => {
+                    if recipients.is_empty() {
                         ui.label(
-                            RichText::new(format!("{} $MIG", gift.price))
+                            RichText::new(
+                                "No one to gift here yet — a gift names someone in the \
+                                 conversation.",
+                            )
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text_muted),
+                        );
+                        return;
+                    }
+                    for (member, name) in &recipients {
+                        let height = 30.0;
+                        let width = ui.available_width();
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(crate::theme::radius::MD),
+                                colors.surface_hover,
+                            );
+                        }
+                        let mut inner = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect.shrink2(egui::vec2(space::XS, 0.0)))
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        widgets::avatar(&mut inner, context.theme, name, 22.0);
+                        inner.add_space(space::XS);
+                        inner.label(
+                            RichText::new(name.as_str())
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text),
+                        );
+                        if response.clicked() {
+                            chosen = Some(*member);
+                        }
+                    }
+                }
+                Some(member) => {
+                    if state.gifts.is_empty() {
+                        ui.label(
+                            RichText::new("Reading the gift catalogue…")
                                 .font(egui::FontId::proportional(font::SMALL))
                                 .color(colors.text_muted),
                         );
-                    });
-                });
+                        return;
+                    }
+                    for gift in &state.gifts {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&gift.name)
+                                    .font(egui::FontId::proportional(font::BODY))
+                                    .color(colors.text),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Send").clicked() {
+                                    sent = Some((member, gift.sku.clone()));
+                                }
+                                ui.label(
+                                    RichText::new(format!("{} $MIG", gift.price))
+                                        .font(egui::FontId::proportional(font::SMALL))
+                                        .color(colors.text_muted),
+                                );
+                            });
+                        });
+                    }
+                }
             }
         });
-    if let Some(sku) = sent {
+    if let Some(member) = chosen {
+        if let Some(pick) = state.gifting.as_mut() {
+            pick.member = Some(member);
+        }
+    }
+    if let Some((recipient, sku)) = sent {
         context.issue(Command::SendGift {
             sku,
-            recipient: pick.member,
+            recipient,
             client_key: Some(pick.key),
         });
         state.gifting = None;
@@ -1871,9 +2028,14 @@ fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
 ///
 /// The pane's own card is the pattern — who the person is, not what they can be changed
 /// into — but this one only reads: a group is where you find out who somebody is, not where
-/// you change who you are. The card's own disclosures (the birth year, the custom status)
-/// never ride another account's card, so they are absent here by design, exactly as the
-/// model that carries the card decided.
+/// you change who you are. The one thing the pane's card carries that this one never does is
+/// the birth year, the owner's own disclosure on their own pane.
+///
+/// Around the card stand the facts that answer on their own schedule — the economy's level,
+/// XP, and badge row, the board's rank, the graph's edge — and every one of them degrades to
+/// absence: a profile without its standing lines is still a profile, the same rule the web
+/// card draws by. The social line is the view's one lever: the friend acts it offers issue
+/// their command and re-read the edge, so the line always states what the wire says.
 fn member_profile_window(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -1890,14 +2052,22 @@ fn member_profile_window(
     }
     let colors = palette(context.theme);
     let card = &view.card;
+    let progression = view.progression;
+    // Deferred: the friend acts the social line offers, applied after the window's borrows
+    // close. Each act is a command plus the re-read that makes the next line honest.
+    let mut friend_request = false;
+    let mut friend_respond: Option<bool> = None;
     let mut open = true;
     egui::Window::new("Profile")
         .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .resizable(false)
         .collapsible(false)
         .open(&mut open)
-        .min_width(280.0)
+        .min_width(320.0)
         .show(ui.ctx(), |ui| {
+            // The head: the face, and under it the name with the server's own ✔ beside it,
+            // the @handle, the presence word, the level, and the status in the person's own
+            // words — the same stack the web card draws, each line absent when the fact is.
             ui.horizontal(|ui| {
                 widgets::avatar(
                     ui,
@@ -1910,28 +2080,96 @@ fn member_profile_window(
                     48.0,
                 );
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(if card.display_name.is_empty() {
-                            card.username.clone()
-                        } else {
-                            card.display_name.clone()
-                        })
-                        .font(egui::FontId::proportional(font::SUBTITLE))
-                        .color(colors.text),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(if card.display_name.is_empty() {
+                                card.username.clone()
+                            } else {
+                                card.display_name.clone()
+                            })
+                            .font(egui::FontId::proportional(font::SUBTITLE))
+                            .color(colors.text),
+                        );
+                        // The verified mark: the server's own word, not a judgement this
+                        // client makes, so it draws as the plain ✔ the web card draws and
+                        // says whose word it is on the hover.
+                        if card.verified.unwrap_or(false) {
+                            ui.label(
+                                RichText::new("\u{2714}")
+                                    .font(egui::FontId::proportional(font::SMALL))
+                                    .color(colors.accent),
+                            )
+                            .on_hover_text("Verified account");
+                        }
+                    });
                     ui.label(
                         RichText::new(format!("@{}", card.username))
                             .font(egui::FontId::proportional(font::SMALL))
                             .color(colors.text_muted),
                     );
+                    let presence = card.presence.label();
+                    if !presence.is_empty() {
+                        ui.label(
+                            RichText::new(presence)
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.positive),
+                        );
+                    }
+                    if let Some(progression) = progression {
+                        ui.label(
+                            RichText::new(format!("Level {}", progression.level))
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text_muted),
+                        );
+                    }
+                    if let Some(status) = card
+                        .custom_status
+                        .as_deref()
+                        .filter(|status| !status.trim().is_empty())
+                    {
+                        ui.label(
+                            RichText::new(format!("\u{201C}{status}\u{201D}"))
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text),
+                        );
+                    }
                 });
             });
             ui.add_space(space::SM);
+            if let Some(bio) = card.bio.as_deref().filter(|bio| !bio.trim().is_empty()) {
+                ui.label(
+                    RichText::new(bio)
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text),
+                );
+                ui.add_space(space::XS);
+            }
+
+            // The facts, one line each and each absent when the fact is: where the person
+            // says they are, the language they say they speak, the XP total the economy
+            // vouches for, and the board position only the community's first page can state.
+            if let Some(country) = card.country.as_deref().filter(|c| !c.is_empty()) {
+                ui.label(fact_line(colors, format!("\u{1F30D} {country}")));
+            }
+            if let Some(language) = card.language.as_deref().filter(|l| !l.is_empty()) {
+                ui.label(fact_line(colors, format!("\u{1F5E3} {language}")));
+            }
+            if let Some(progression) = progression {
+                ui.label(fact_line(colors, format!("\u{2B50} {} XP", progression.xp)));
+            }
+            if let Some(rank) = view.rank {
+                ui.label(fact_line(
+                    colors,
+                    format!("\u{1F3C6} #{rank} on the XP board"),
+                ))
+                .on_hover_text("Their position on the XP board");
+            }
+
             // The shareable id, drawn for copying rather than for parsing: the click puts it
             // on the clipboard, the same trade the pane's own card makes.
             let response = ui.add(
                 egui::Button::new(
-                    RichText::new(&card.public_id)
+                    RichText::new(format!("\u{1FAA4} {}", card.public_id))
                         .font(egui::FontId::proportional(font::TINY))
                         .color(colors.text_muted),
                 )
@@ -1941,23 +2179,135 @@ fn member_profile_window(
             if response.on_hover_text("Click to copy").clicked() {
                 ui.ctx().copy_text(card.public_id.clone());
             }
-            if let Some(bio) = card.bio.as_deref().filter(|bio| !bio.trim().is_empty()) {
-                ui.add_space(space::XS);
-                ui.label(
-                    RichText::new(bio)
-                        .font(egui::FontId::proportional(font::SMALL))
-                        .color(colors.text),
-                );
+
+            // The level bar: the run towards the next level, drawn only when the economy
+            // stated both ends of it — a span of zero is no promise, so no bar.
+            if let Some(progression) = progression {
+                if progression.xp_for_next_level > 0 {
+                    ui.add_space(space::XS);
+                    let width = ui.available_width();
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(width, 6.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, egui::CornerRadius::same(3), colors.surface);
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2(width * progression.fraction(), rect.height()),
+                        ),
+                        egui::CornerRadius::same(3),
+                        colors.accent,
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} / {} XP to level {}",
+                            progression.xp_into_level,
+                            progression.xp_for_next_level,
+                            progression.level + 1
+                        ))
+                        .font(egui::FontId::proportional(font::TINY))
+                        .color(colors.text_muted),
+                    );
+                }
             }
-            let presence = card.presence.label();
-            if !presence.is_empty() {
+
+            // The badges, each a chip that says on its hover the day it was earned.
+            if !view.badges.is_empty() {
                 ui.add_space(space::XS);
-                widgets::pill(ui, presence, colors.positive, colors.surface);
+                ui.horizontal_wrapped(|ui| {
+                    for badge in &view.badges {
+                        widgets::pill(
+                            ui,
+                            &format!("\u{1F3C5} {}", badge.code),
+                            colors.text_muted,
+                            colors.surface,
+                        )
+                        .on_hover_text(format!("Earned {}", day_label(badge.awarded_at)));
+                    }
+                });
+            }
+
+            // The social line: what the viewer is to this person, and the one act that state
+            // admits. A friend is stated, an outgoing request is stated, an incoming one is
+            // answered with Accept or Decline, and any other known edge offers the request —
+            // only a block (whose verdict the header's own controls state) and a graph that
+            // names no edge draw nothing at all.
+            if view.relationship != Some(model::RelationshipKind::Block) {
+                ui.add_space(space::XS);
+                match view.relationship {
+                    Some(model::RelationshipKind::Friend) => {
+                        ui.label(
+                            RichText::new("\u{2713} Friends")
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.positive),
+                        )
+                        .on_hover_text("You are friends");
+                    }
+                    Some(model::RelationshipKind::PendingOutgoing) => {
+                        ui.label(
+                            RichText::new("Request sent")
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text_muted),
+                        )
+                        .on_hover_text("Waiting on their answer");
+                    }
+                    Some(model::RelationshipKind::PendingIncoming) => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("wants to be your friend")
+                                    .font(egui::FontId::proportional(font::SMALL))
+                                    .color(colors.text),
+                            );
+                            if ui.button("Accept").clicked() {
+                                friend_respond = Some(true);
+                            }
+                            if ui.button("Decline").clicked() {
+                                friend_respond = Some(false);
+                            }
+                        });
+                    }
+                    Some(_) => {
+                        if ui.button("Add friend").clicked() {
+                            friend_request = true;
+                        }
+                    }
+                    None => {}
+                }
             }
         });
+    // The friend acts, applied now that the window's clone is spent: each issues its command
+    // and re-reads the edge, so the line next says what the wire says — never what the
+    // button's click wished for.
+    if friend_request {
+        context.issue(Command::AddFriend {
+            user_id: card.account_id.to_string(),
+        });
+        context.issue(Command::MemberEdge {
+            conversation_id,
+            user_id: card.account_id,
+        });
+    }
+    if let Some(accept) = friend_respond {
+        context.issue(Command::RespondFriend {
+            user_id: card.account_id,
+            accept,
+        });
+        context.issue(Command::MemberEdge {
+            conversation_id,
+            user_id: card.account_id,
+        });
+    }
     if !open {
         state.member_profile = None;
     }
+}
+
+/// One fact line for the member profile view: quiet, small, and muted — the facts are the
+/// card's supporting cast, not its headlines.
+fn fact_line(colors: Palette, text: String) -> RichText {
+    RichText::new(text)
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted)
 }
 
 /// The compact header over the open conversation: the avatar, and the thread's controls.
@@ -2005,6 +2355,10 @@ fn thread_header(
     // header's borrows close.
     let mut peer_mute_toggle: Option<(Id, bool)> = None;
     let mut peer_block: Option<Id> = None;
+    // The header's gift ask, deferred for the same reason — the patience, five times: opening
+    // the picker writes `state.gifting` and `state.emoticon_pickers` while `conversation` above
+    // still borrows `state`, so the write waits for the frame's borrows to close.
+    let mut want_gift = false;
 
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -2117,6 +2471,17 @@ fn thread_header(
             {
                 want_roster_panel = true;
             }
+            // The gift, last of the glyph controls before the avatar: gifting is a thread-level
+            // act — it picks a person and spends balance — so its control lives with the
+            // thread's other actions up here, not in the row the composer keeps exclusively
+            // for chat. The picker it opens is the same one a roster row opens, aimed at the
+            // one other member when the thread names exactly one.
+            if header_control(ui, context.theme, "\u{1F381}")
+                .on_hover_text("Send a gift")
+                .clicked()
+            {
+                want_gift = true;
+            }
         });
     });
     if want_log_panel {
@@ -2146,6 +2511,43 @@ fn thread_header(
         // first frame is the moment it starts waiting for one.
         if *open {
             context.issue(Command::GroupRoster { conversation_id });
+        }
+    }
+    if want_gift {
+        // The picker is one per screen, so the header's click is a toggle of its own picker: a
+        // second click while it stands closes it, the same courtesy the web header's gift pays.
+        if state
+            .gifting
+            .as_ref()
+            .is_some_and(|pick| pick.conversation_id == conversation_id)
+        {
+            state.gifting = None;
+        } else {
+            // A thread of exactly two names its own recipient — the one other member — so the
+            // picker is just the cards. Every other thread offers its members as the choice,
+            // because a gift sent from a thread names someone in it.
+            let member = if conversation.members.len() == 2 {
+                context
+                    .account
+                    .map(|account| account.account_id)
+                    .and_then(|me| conversation.members.iter().find(|id| **id != me).copied())
+            } else {
+                None
+            };
+            // The picker opens with a fresh idempotency key and a fresh read of the shelves: a
+            // price is a fact worth re-asking before a charge, and the picker that sends the
+            // gift is the picker that quoted it.
+            state.gifting = Some(GiftPick {
+                conversation_id,
+                member,
+                key: gift_intent_key(),
+            });
+            context.issue(Command::GiftCatalogue);
+        }
+        // The gift and the smile's fold-out share one composer between them: opening the gift
+        // closes the emoticon picker, so the row is never asked to carry two pickers at once.
+        if let Some(panel) = state.emoticon_pickers.get_mut(&conversation_id) {
+            panel.open = false;
         }
     }
     ui.add_space(space::MD);
@@ -2893,14 +3295,17 @@ const WAVE_STRIP_HEIGHT: f32 = 18.0;
 /// Enter sends, Shift+Enter inserts a newline. That is the convention every chat client uses, and
 /// reversing it means every third message is sent half-finished.
 ///
-/// A message can be three things — text, a voice note, a file — and all three start here: the
-/// field types the first, the microphone records the second, the paperclip folds out a panel for
-/// the third. While a note is being recorded the composer is replaced by the recording's own
-/// face — the hold's row under a finger, the two-step bar without one — because a field that
-/// still accepts typing invites a message that arrives after — and interrupts — the note it
-/// would replace. A finished note waits in the preview's face, and a discarded one leaves its
-/// undo chip standing above whichever face comes next, §179's rule that an accidental cancel
-/// is a recoverable mistake.
+/// The row is chat and only chat — the smile, the file control, the field, the microphone, and
+/// the send, in that order — because everything else a composer could carry (a gift, a
+/// disappearing clock) is a thread-level act that lives in the header or folds into the file
+/// menu below the row. A message can be three things — text, a voice note, a file — and all
+/// three start here: the field types the first, the microphone records the second, and the file
+/// control's menu folds out the doors to the third. While a note is being recorded the composer
+/// is replaced by the recording's own face — the hold's row under a finger, the two-step bar
+/// without one — because a field that still accepts typing invites a message that arrives
+/// after — and interrupts — the note it would replace. A finished note waits in the preview's
+/// face, and a discarded one leaves its undo chip standing above whichever face comes next,
+/// §179's rule that an accidental cancel is a recoverable mistake.
 fn composer(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -3133,10 +3538,94 @@ fn composer(
         .fill(colors.surface)
         .inner_margin(egui::Margin::symmetric(space::LG as i8, space::SM as i8))
         .show(ui, |ui| {
+            // The smile's fold-out, above the row it folds from: the two tabs and the glyphs
+            // they hold, inserting into the draft the row below is holding. Drawn before the
+            // row so the picker stands over it, the way the file menu stands under it.
+            let inserted = emoticon_picker(ui, context.theme, state, conversation_id);
+
             ui.horizontal(|ui| {
-                // Room for everything that shares the field's row: the send button and the
-                // two attachment affordances beside it.
-                let send_width = 56.0 + 2.0 * (32.0 + space::SM);
+                // Room for the row's right edge only: the microphone and the send button the
+                // field leaves standing beside it. The smile and the file control sit on the
+                // left, drawn before the field, so the field measures what remains after them
+                // itself.
+                let send_width = 56.0 + (32.0 + space::SM);
+                // The smile: the composer's one door to every glyph the account can send — the
+                // free emoticons every account has and the packs the wallet sold. The
+                // control's own ink says whether its fold-out stands above the row, so the
+                // open picker is visible on the control that opened it and not learned only
+                // by looking up.
+                {
+                    let open = state
+                        .emoticon_pickers
+                        .get(&conversation_id)
+                        .is_some_and(|panel| panel.open);
+                    let smile =
+                        RichText::new("\u{1F60A}").font(egui::FontId::proportional(font::BODY));
+                    let smile = if open {
+                        smile.color(colors.accent)
+                    } else {
+                        smile.color(colors.text_muted)
+                    };
+                    if ui
+                        .add(egui::Button::new(smile))
+                        .on_hover_text(if open {
+                            "Close the emoticon picker"
+                        } else {
+                            "Emoticons and stickers"
+                        })
+                        .clicked()
+                    {
+                        let panel = state.emoticon_pickers.entry(conversation_id).or_default();
+                        panel.open = !panel.open;
+                        if panel.open {
+                            // Opening is the ask, once: the owned-pack read is what the
+                            // Stickers tab is made of, and `None` is "not asked yet" rather
+                            // than "you own nothing", so the ask is never sent twice.
+                            if state.owned_packs.is_none() {
+                                context.issue(Command::Entitlements);
+                            }
+                            // One fold-out at a time: the picker above and the file menu
+                            // below share the row's attention.
+                            let attach = state.attach.entry(conversation_id).or_default();
+                            attach.open = false;
+                            attach.picking = false;
+                        }
+                    }
+                }
+                // The file control, the smile's row-neighbour and the row's other left-hand
+                // glyph: a message's everything-else, folded into a menu rather than laid out
+                // on the row, because the row is chat and only chat — two glyphs, a field, a
+                // microphone, and the send.
+                {
+                    let open = state
+                        .attach
+                        .get(&conversation_id)
+                        .is_some_and(|panel| panel.open);
+                    let clip =
+                        RichText::new("\u{1F4CE}").font(egui::FontId::proportional(font::BODY));
+                    let clip = if open {
+                        clip.color(colors.accent)
+                    } else {
+                        clip.color(colors.text_muted)
+                    };
+                    if ui
+                        .add(egui::Button::new(clip))
+                        .on_hover_text("Attach a file")
+                        .clicked()
+                    {
+                        let panel = state.attach.entry(conversation_id).or_default();
+                        panel.open = !panel.open;
+                        // Reopening the menu starts at the menu, never at a path row an
+                        // earlier pick left standing.
+                        if panel.open {
+                            panel.picking = false;
+                            // The same one-fold-out courtesy, paid back the other way.
+                            if let Some(smile) = state.emoticon_pickers.get_mut(&conversation_id) {
+                                smile.open = false;
+                            }
+                        }
+                    }
+                }
                 // This conversation's own draft, born empty the first time it is typed into and
                 // left exactly as it stands when the window closes.
                 let draft = state.drafts.entry(conversation_id).or_default();
@@ -3165,6 +3654,39 @@ fn composer(
 
                 let enter = ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
                 let send_by_key = response.has_focus() && enter;
+
+                // The microphone: the one thing a message can be besides text and a file, one
+                // press away from the field that types the third. The microphone begins on
+                // the press itself, not the click — the hold is the mode, §179's first
+                // interaction: the press starts the capture and the release decides among
+                // send, cancel, and the two-step handover, so a click that only began on
+                // release would have already thrown away the hold's own meaning.
+                let mic = ui
+                    .add_enabled(
+                        online,
+                        egui::Button::new(
+                            RichText::new("\u{1F3A4}").font(egui::FontId::proportional(font::BODY)),
+                        ),
+                    )
+                    .on_hover_text("Hold to record a voice note");
+                if mic.is_pointer_button_down_on() && !state.mic_held && state.recording.is_none() {
+                    state.mic_held = true;
+                    // The slides are measured from the press's own origin rather than the
+                    // button's frame, so the composer trading its field for the hold's row
+                    // mid-press — a layout shift under the very finger making it — cannot
+                    // move the goal.
+                    state.mic_press_origin = ui.input(|i| i.pointer.latest_pos());
+                    state.mic_hold_started = Some(std::time::Instant::now());
+                    state.mic_cancel_slide = false;
+                    context.issue(Command::StartRecording {
+                        conversation_id,
+                        expires_in_ms: state
+                            .disappearing
+                            .contains(&conversation_id)
+                            .then_some(DISAPPEARING_MS),
+                    });
+                }
+
                 let send_by_click = widgets::send_button(ui, context.theme, online).clicked();
 
                 // Every read of the draft from here on takes its own short borrow: the send and
@@ -3234,32 +3756,63 @@ fn composer(
                     });
                     state.typing_sent.insert(conversation_id, has_text);
                 }
+            });
 
-                // The disappearing arm: a clock the person can set on the thread's future.
-                // Excluded in rooms exactly the way the web excludes it — a room is
-                // server-readable, so a transcript the server keeps is not a promise a sender
-                // can make. The armed state colours the glyph so the promise is visible on the
-                // composer itself, not learned only when a row later vanishes.
+            // The glyph the picker handed down, applied now rather than at the click: the
+            // fold-out's closures read `state`'s shelves while the draft the glyph lands in is
+            // `state` too, and one frame's patience keeps the two apart. The picker stays
+            // open after a glyph — a wall of stickers is chosen from one pick at a time.
+            if let Some(glyph) = inserted {
+                state
+                    .drafts
+                    .entry(conversation_id)
+                    .or_default()
+                    .push_str(glyph);
+            }
+
+            // The file control's fold-out: the menu of what a file can be, then the path row
+            // one of its doors leaves standing. egui offers no file dialog, so every door
+            // leads to the one typed path — the same trade the avatar picker makes, and the
+            // worker judges the bytes the way the server will anyway, so a door's word
+            // ("photo", "video") is vocabulary, not a filter.
+            let panel = state.attach.entry(conversation_id).or_default();
+            if panel.open {
+                // The doors, in the reference's own order and words: any file at all, then
+                // the camera's two, then the gallery.
+                for door in [
+                    "Pick a file",
+                    "Take a photo",
+                    "Pick a video",
+                    "Pick an image",
+                ] {
+                    if quiet_action(ui, door, colors.text).clicked() {
+                        // A door closes the menu and leaves the path row standing: the choice
+                        // is made, the path is what remains to be named.
+                        panel.open = false;
+                        panel.picking = true;
+                    }
+                }
+                // The disappearing arm folds under the doors, below a separator: both are
+                // private-and-group-only vocabulary, so they pair naturally, and the row keeps
+                // its chat-only shape by carrying neither. Rooms exclude the arm exactly the
+                // way the web excludes it — a room is server-readable, so a transcript the
+                // server keeps is not a promise a sender can make. The armed state says its
+                // own name in the menu, so the promise is visible where it was set and not
+                // learned only when a row later vanishes.
                 if !is_room {
+                    ui.separator();
                     let armed = state.disappearing.contains(&conversation_id);
-                    let clock =
-                        RichText::new("\u{1F552}").font(egui::FontId::proportional(font::BODY));
-                    let clock = if armed {
-                        clock.color(colors.accent)
+                    let label = if armed {
+                        format!("Disappearing on — new messages vanish after {DISAPPEARING_LABEL}")
                     } else {
-                        clock.color(colors.text_muted)
+                        format!("New messages vanish after {DISAPPEARING_LABEL}")
                     };
-                    if ui
-                        .add(egui::Button::new(clock))
-                        .on_hover_text(if armed {
-                            format!(
-                                "Disappearing on — new messages vanish after {DISAPPEARING_LABEL}"
-                            )
-                        } else {
-                            format!("New messages vanish after {DISAPPEARING_LABEL}")
-                        })
-                        .clicked()
-                    {
+                    let ink = if armed {
+                        colors.accent
+                    } else {
+                        colors.text_muted
+                    };
+                    if quiet_action(ui, &label, ink).clicked() {
                         if armed {
                             state.disappearing.remove(&conversation_id);
                         } else {
@@ -3267,53 +3820,8 @@ fn composer(
                         }
                     }
                 }
-
-                // The microphone and the paperclip: the two things a message can be besides
-                // text, one press away from the field that types the third. The microphone
-                // begins on the press itself, not the click — the hold is the mode, §179's
-                // first interaction: the press starts the capture and the release decides
-                // among send, cancel, and the two-step handover, so a click that only began
-                // on release would have already thrown away the hold's own meaning.
-                let mic = ui
-                    .add_enabled(
-                        online,
-                        egui::Button::new(
-                            RichText::new("\u{1F3A4}").font(egui::FontId::proportional(font::BODY)),
-                        ),
-                    )
-                    .on_hover_text("Hold to record a voice note");
-                if mic.is_pointer_button_down_on() && !state.mic_held && state.recording.is_none() {
-                    state.mic_held = true;
-                    // The slides are measured from the press's own origin rather than the
-                    // button's frame, so the composer trading its field for the hold's row
-                    // mid-press — a layout shift under the very finger making it — cannot
-                    // move the goal.
-                    state.mic_press_origin = ui.input(|i| i.pointer.latest_pos());
-                    state.mic_hold_started = Some(std::time::Instant::now());
-                    state.mic_cancel_slide = false;
-                    context.issue(Command::StartRecording {
-                        conversation_id,
-                        expires_in_ms: state
-                            .disappearing
-                            .contains(&conversation_id)
-                            .then_some(DISAPPEARING_MS),
-                    });
-                }
-                if ui
-                    .button(RichText::new("\u{1F4CE}").font(egui::FontId::proportional(font::BODY)))
-                    .on_hover_text("Attach a file")
-                    .clicked()
-                {
-                    let panel = state.attach.entry(conversation_id).or_default();
-                    panel.open = !panel.open;
-                }
-            });
-
-            // The paperclip's fold-out. egui offers no file dialog, so the source of an
-            // attachment is typed — the same trade the avatar picker makes, and the same
-            // "/path" hint the document save row gives.
-            let panel = state.attach.entry(conversation_id).or_default();
-            if panel.open {
+            }
+            if panel.picking {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut panel.path)
@@ -3331,13 +3839,157 @@ fn composer(
                                     .contains(&conversation_id)
                                     .then_some(DISAPPEARING_MS),
                             });
-                            panel.open = false;
+                            panel.picking = false;
                             panel.path.clear();
                         }
                     }
                 });
             }
         });
+}
+
+/// The smile's fold-out: the composer's emoticon and sticker picker, two tabs over the
+/// account's own shelves.
+///
+/// The Emoticons tab is the free set every account has, plus the emoticon items of purchased
+/// packs; the Stickers tab is the sticker packs the account owns, grouped by pack with a
+/// header — a sticker is chosen from its set, not from a merged wall, because the pack is what
+/// was bought and the pack is what the eye scans. Everything in either tab inserts as text:
+/// the glyphs are Unicode, the conversation is end-to-end encrypted, and a sticker rides out
+/// as ordinary message text the way an emoticon does — the size it renders at downstream is
+/// the receiver's presentation choice. A pack owned but not carried in this client's table
+/// ([`crate::ui::packs`]) does not appear at all; the wallet's shop is where owned and
+/// renderable would disagree.
+///
+/// Returns the glyph chosen this frame, if one was: the composer applies it to the draft after
+/// the fold-out's borrows close, because the shelves the picker reads and the draft it writes
+/// are one state. The picker stays open after a glyph — a wall of stickers is picked from one
+/// cell at a time.
+fn emoticon_picker(
+    ui: &mut Ui,
+    theme: crate::theme::Theme,
+    state: &mut ChatState,
+    conversation_id: Id,
+) -> Option<&'static str> {
+    // Read the panel's flags into copies first: the fold-out below reads `state`'s shelves, and
+    // a live borrow of the panel would have the two fighting over one state.
+    let (open, stickers_tab) = {
+        let panel = state.emoticon_pickers.entry(conversation_id).or_default();
+        (panel.open, panel.stickers_tab)
+    };
+    if !open {
+        return None;
+    }
+    let colors = palette(theme);
+    // The tab clicks, deferred with the glyph they choose: the writes wait for the fold-out's
+    // borrows to close, the same patience every click in this file is given.
+    let mut chose_emoticons = false;
+    let mut chose_stickers = false;
+    let mut chosen: Option<&'static str> = None;
+    egui::Frame::new()
+        .fill(colors.surface)
+        .stroke(egui::Stroke::new(1.0, colors.border))
+        .corner_radius(egui::CornerRadius::same(radius::MD))
+        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if picker_tab(ui, colors, "Emoticons", !stickers_tab).clicked() {
+                    chose_emoticons = true;
+                }
+                if picker_tab(ui, colors, "Stickers", stickers_tab).clicked() {
+                    chose_stickers = true;
+                }
+            });
+            // The owned-pack read is what both tabs are made of, and `None` is "not asked
+            // yet" — the picker waits rather than showing a free-only set that would read
+            // as "you own nothing".
+            let Some(owned) = state.owned_packs.as_ref() else {
+                ui.label(
+                    RichText::new("Reading your packs\u{2026}")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+                return;
+            };
+            if stickers_tab {
+                let packs = packs::owned_sticker_packs(owned);
+                if packs.is_empty() {
+                    ui.label(
+                        RichText::new("You do not own any sticker packs yet.")
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text_muted),
+                    );
+                    ui.label(
+                        RichText::new("The wallet's shop sells them.")
+                            .font(egui::FontId::proportional(font::TINY))
+                            .color(colors.text_muted),
+                    );
+                } else {
+                    for pack in packs {
+                        ui.label(
+                            RichText::new(pack.name)
+                                .font(egui::FontId::proportional(font::TINY))
+                                .color(colors.text_muted),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for &glyph in pack.items {
+                                if picker_cell(ui, glyph, font::DISPLAY, 44.0).clicked() {
+                                    chosen = Some(glyph);
+                                }
+                            }
+                        });
+                    }
+                }
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for &glyph in packs::FREE_EMOTICONS {
+                        if picker_cell(ui, glyph, font::TITLE, 32.0).clicked() {
+                            chosen = Some(glyph);
+                        }
+                    }
+                    for glyph in packs::owned_emoticons(owned) {
+                        if picker_cell(ui, glyph, font::TITLE, 32.0).clicked() {
+                            chosen = Some(glyph);
+                        }
+                    }
+                });
+            }
+        });
+    if chose_emoticons || chose_stickers {
+        let panel = state.emoticon_pickers.entry(conversation_id).or_default();
+        panel.stickers_tab = chose_stickers;
+    }
+    chosen
+}
+
+/// One of the picker's two tabs: a quiet chip whose selected state is its fill, so the tab the
+/// picker is on is said by the row itself and not by position alone.
+fn picker_tab(ui: &mut Ui, colors: Palette, label: &str, selected: bool) -> egui::Response {
+    let text = RichText::new(label)
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(if selected {
+            colors.text
+        } else {
+            colors.text_muted
+        });
+    ui.add(
+        egui::Button::new(text)
+            .fill(if selected {
+                colors.surface_selected
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(egui::Stroke::NONE),
+    )
+}
+
+/// One glyph cell in the picker's grid: a button whose whole face is the glyph itself, sized by
+/// the shelf it sits on — an emoticon is read at a glance, a sticker at its own larger scale.
+fn picker_cell(ui: &mut Ui, glyph: &str, size: f32, side: f32) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(glyph).font(egui::FontId::proportional(size)))
+            .min_size(egui::Vec2::splat(side)),
+    )
 }
 
 /// One header control: a glyph button at the one size every control in the window shares.
