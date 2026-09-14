@@ -47,7 +47,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_core::config::{MeshPeer, StoreConfig};
-use migo_core::{Clock, Config, Id, Secret};
+use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, Acknowledged, Decode, Encode, Frame, Hello, MemberChange,
@@ -55,6 +55,7 @@ use migo_protocol::{
     RoomJoinRequest, RoomJoinResponse, RoomLeaveRequest, RoomMemberEvent, SubscribeRequest,
     SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
+use migo_store::traits::FederationStore;
 use migo_store::SharedStore;
 use migod::App;
 
@@ -414,21 +415,47 @@ async fn next_event_of(session: &mut LiveSession, want: Opcode) -> Frame {
     }
 }
 
-/// Reads from a session until the stale departure of `member` arrives — the
-/// federated `Left` the mesh carries home — skipping everything else a
-/// subscribed session hears. The wait makes the ingest a fact the assertions
-/// can stand on, not an assumption hidden inside a timeout.
-async fn next_departure_of(session: &mut LiveSession, room_id: Id, member: Id) -> RoomMemberEvent {
-    loop {
-        let frame = next_event_of(session, Opcode::RoomMemberEvent).await;
-        let event: RoomMemberEvent = from_frame(&frame).expect("the member event decodes");
-        if event.room_id == room_id
-            && event.user_id == member
-            && event.change == Some(MemberChange::Left)
-        {
-            return event;
+/// Reads from a session for `window`, looking for the stale departure of
+/// `member` from `room` — the federated `Left` the mesh carries home — skipping
+/// everything else a subscribed session hears. `None` means the window closed
+/// without it, which is the silence this suite exists to catch, so the frame
+/// read is bounded here the same way [`try_message_of`] bounds its own: the
+/// caller turns the silence into a report, not a hang.
+async fn try_departure_of(
+    session: &mut LiveSession,
+    room_id: Id,
+    member: Id,
+    window: Duration,
+) -> Option<RoomMemberEvent> {
+    let outcome = tokio::time::timeout(window, async {
+        loop {
+            let mut head = [0u8; 4];
+            session
+                .stream
+                .read_exact(&mut head)
+                .await
+                .expect("the length of an arriving frame is readable");
+            let len = u32::from_be_bytes(head) as usize;
+            let mut body = vec![0u8; len];
+            session
+                .stream
+                .read_exact(&mut body)
+                .await
+                .expect("the body of an arriving frame is readable");
+            let frame = Frame::decode(Bytes::from(body)).expect("the frame decodes");
+            if Opcode::from_wire(frame.header.opcode) == Some(Opcode::RoomMemberEvent) {
+                let event: RoomMemberEvent = from_frame(&frame).expect("the member event decodes");
+                if event.room_id == room_id
+                    && event.user_id == member
+                    && event.change == Some(MemberChange::Left)
+                {
+                    return Some(event);
+                }
+            }
         }
-    }
+    })
+    .await;
+    outcome.unwrap_or(None)
 }
 
 /// Reads from a session for `window`, looking for the message with the given
@@ -616,8 +643,45 @@ async fn a_stale_departure_does_not_revoke_a_rejoined_member() {
 
         // The stale departure comes home and is published to the room topic
         // the member holds. Its arrival is the race resolved: the member is
-        // already back, and the echo names them anyway.
-        let stale = next_departure_of(&mut member_beta, room_id, member.account_id).await;
+        // already back, and the echo names them anyway. The wait refuses to be
+        // a silent hang: on the step budget's expiry it reports the three
+        // facts a delivery fault and an ingest fault do NOT share — the leave
+        // row still sitting in the shared outbox means the delivery tier on
+        // the home node stalled (a settle that logs nothing, a drain that
+        // never dialed), while a delivered row with nothing written to the
+        // member's socket means the ingest or publish tier on the watching
+        // node dropped it — so the failure names its own side of the mesh.
+        let stale = match try_departure_of(&mut member_beta, room_id, member.account_id, STEP).await
+        {
+            Some(event) => event,
+            None => panic!(
+                "round {round}: the departure's federated echo never came home inside \
+                 the step budget. alpha watchers {:?}, beta watchers {:?}, \
+                 undelivered outbox [{}], beta frames_out {} dropped {:?}",
+                alpha.room_relay.watchers_of(room_id),
+                beta.room_relay.watchers_of(room_id),
+                store
+                    .due_events(Timestamp::from_millis(i64::MAX / 2), 200)
+                    .await
+                    .expect("the outbox is readable")
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            "target {} opcode {} attempts {} created {} next {} error {:?}",
+                            row.target_node,
+                            row.opcode,
+                            row.attempts,
+                            row.created_at.as_millis(),
+                            row.next_attempt_at.as_millis(),
+                            row.last_error
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                beta.gateway.frames_out_total(),
+                beta.gateway.dropped_frames_total()
+            ),
+        };
         assert_eq!(
             stale.change,
             Some(MemberChange::Left),

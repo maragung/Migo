@@ -2234,8 +2234,23 @@ impl MeshTransport {
     }
 
     /// Reschedules a batch that did not arrive, with the failure the next backoff grows from.
+    ///
+    /// A repeated delivery failure is a stall the operator must be able to see: the rows
+    /// stay queued with a next attempt pushed further out each time, so the drain names
+    /// the target and the reason once per settled batch. The meters alone cannot say
+    /// *which* peer or *why*, and a peer that never comes back would otherwise be a
+    /// counter climbing in silence.
     async fn settle_failure(&self, events: &[PendingEvent], now: Timestamp, why: &str) {
         self.meters.failed(events.len() as u64);
+        if let Some(first) = events.first() {
+            tracing::warn!(
+                node = %first.target_node,
+                events = events.len(),
+                attempts = first.attempts,
+                %why,
+                "a federated delivery attempt failed; the batch is rescheduled on its backoff"
+            );
+        }
         for event in events {
             if let Err(error) = self
                 .mesh
