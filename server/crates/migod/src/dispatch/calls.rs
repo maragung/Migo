@@ -69,6 +69,24 @@
 //! call `Connected` — so the copy on the answer frame is advisory, and
 //! forwarding it as well would deliver the same sealed bytes to the caller
 //! twice for one answer.
+//!
+//! # The federated half
+//!
+//! Every audience this module publishes to is an account, and an account's
+//! sessions may sit on another node: the user-topic tier's watch table
+//! (section 170) says which, and the same table that carries a presence
+//! change carries the call frame — inside the `FED_CALL_RELAY` envelope the
+//! registry allocated for call signaling, so the stream stays separately
+//! countable from presence's. The half is best-effort for the same reason
+//! the local one is: the reply already went out, and a retried invite would
+//! ring twice, exactly what the idempotency exists to prevent.
+//!
+//! What the far node can *do* with the frame is bounded by where the call
+//! row lives: 1:1 calls sit in the inviting node's in-process call store,
+//! so a callee on another node hears the ring and every state event the
+//! inviting side publishes, but their own `CALL_ANSWER` or `CALL_DECLINE`
+//! reaches the other node's store and finds no row — the completion paths
+//! are the flagged remainder, not a silence to paper over.
 
 use migo_calls::{roster_wire, Caller as CallCaller, SharedCallkeeper};
 use migo_core::Error;
@@ -79,6 +97,8 @@ use migo_protocol::{
     CallInvite, CallInviteResult, CallKeyUpdate, CallRenegotiate, CallSdp, CallStats,
     CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic, TopicKind,
 };
+
+use crate::presence_relay::PresenceRelay;
 
 /// Invites a callee and rings them.
 ///
@@ -101,6 +121,7 @@ pub(crate) async fn handle_invite(
     frame: &Frame,
     svc: &SharedCallkeeper,
     notify: &SharedNotifier,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallInvite = from_frame(frame).map_err(fault::from_wire)?;
@@ -113,15 +134,7 @@ pub(crate) async fn handle_invite(
         expires_at: outcome.expires_at,
     })?;
     if let Some(event) = event {
-        let topic = Topic {
-            kind: TopicKind::User,
-            id: callee_id,
-        };
-        if let Err(error) =
-            ctx.publish_excluding_self(&topic, Opcode::CallInviteEvent, &event, None)
-        {
-            tracing::warn!(%error, "call invite event publication failed");
-        }
+        publish_to_user(ctx, relay, callee_id, Opcode::CallInviteEvent, &event).await;
         // The wake-up half of the ring. The notification is a courtesy, not a
         // requirement — the call is already recorded and the realtime event
         // is already out, and failing the request over a bell that did not
@@ -156,6 +169,7 @@ pub(crate) async fn handle_answer(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallAnswer = from_frame(frame).map_err(fault::from_wire)?;
@@ -164,7 +178,7 @@ pub(crate) async fn handle_answer(
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
-        publish_to_both_parties(ctx, svc, &caller, request.call_id, &event).await;
+        publish_to_both_parties(ctx, svc, relay, &caller, request.call_id, &event).await;
     }
     Ok(())
 }
@@ -176,6 +190,7 @@ pub(crate) async fn handle_decline(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallDecline = from_frame(frame).map_err(fault::from_wire)?;
@@ -184,7 +199,7 @@ pub(crate) async fn handle_decline(
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
-        publish_to_caller_of(ctx, svc, &caller, request.call_id, &event).await;
+        publish_to_caller_of(ctx, svc, relay, &caller, request.call_id, &event).await;
     }
     Ok(())
 }
@@ -195,13 +210,14 @@ pub(crate) async fn handle_cancel(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallCancel = from_frame(frame).map_err(fault::from_wire)?;
     let event = svc.cancel(&caller, request.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
-        publish_to_callee_of(ctx, svc, &caller, request.call_id, &event).await;
+        publish_to_callee_of(ctx, svc, relay, &caller, request.call_id, &event).await;
     }
     Ok(())
 }
@@ -215,13 +231,14 @@ pub(crate) async fn handle_end(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallEnd = from_frame(frame).map_err(fault::from_wire)?;
     let event = svc.end(&caller, request.call_id, request.reason).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
-        publish_to_other_party(ctx, svc, &caller, request.call_id, &event).await;
+        publish_to_other_party(ctx, svc, relay, &caller, request.call_id, &event).await;
     }
     Ok(())
 }
@@ -238,10 +255,11 @@ pub(crate) async fn handle_sdp(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallSdp = from_frame(frame).map_err(fault::from_wire)?;
-    relay_sdp(ctx, svc, &caller, Opcode::CallSdp, request).await
+    relay_sdp(ctx, svc, relay, &caller, Opcode::CallSdp, request).await
 }
 
 /// Relays a mid-call renegotiation. `CallRenegotiate` and `CallSdp` are the
@@ -251,12 +269,14 @@ pub(crate) async fn handle_renegotiate(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallRenegotiate = from_frame(frame).map_err(fault::from_wire)?;
     relay_sdp(
         ctx,
         svc,
+        relay,
         &caller,
         Opcode::CallRenegotiate,
         CallSdp {
@@ -306,15 +326,16 @@ async fn try_group_relay(
 /// to nobody, which is why the miss is logged rather than invented into a
 /// target; within one frame it cannot happen, because the roster the relay
 /// validated is the roster this reads.
-fn publish_to_group_device<T: migo_protocol::Encode>(
+async fn publish_to_group_device<T: migo_protocol::Encode>(
     ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
     group: &migo_calls::GroupCall,
     to_device: migo_core::Id,
     opcode: Opcode,
     frame: &T,
 ) {
     match group.account_of_device(to_device) {
-        Some(account) => publish_to_user(ctx, account, opcode, frame),
+        Some(account) => publish_to_user(ctx, relay, account, opcode, frame).await,
         None => tracing::warn!(
             target_device = %to_device,
             "group relay target is not on the roster; the frame reached nobody"
@@ -339,6 +360,7 @@ fn publish_to_group_device<T: migo_protocol::Encode>(
 async fn relay_sdp(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
     caller: &CallCaller,
     opcode: Opcode,
     request: CallSdp,
@@ -359,21 +381,29 @@ async fn relay_sdp(
         // another name, and the 1:1 path already projects it to `CALL_SDP` for
         // the peer — the name the sender used is for the sender's own charge,
         // not for what the target's client has to decode.
-        publish_to_group_device(ctx, &group, request.to_device, Opcode::CallSdp, &request);
+        publish_to_group_device(
+            ctx,
+            relay,
+            &group,
+            request.to_device,
+            Opcode::CallSdp,
+            &request,
+        )
+        .await;
         return Ok(());
     }
     let (relayed, connected) = svc.relay_sdp(caller, request).await?;
     let call = svc.call(caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = connected {
-        publish_to_both_parties(ctx, svc, caller, relayed.call_id, &event).await;
+        publish_to_both_parties(ctx, svc, relay, caller, relayed.call_id, &event).await;
     }
     // The relay succeeded, so `to_device` is one of the call's two devices;
     // the row says which account's topic reaches it.
     let target = call
         .account_of_device(relayed.to_device)
         .unwrap_or(call.caller_id);
-    publish_to_user(ctx, target, Opcode::CallSdp, &relayed);
+    publish_to_user(ctx, relay, target, Opcode::CallSdp, &relayed).await;
     Ok(())
 }
 
@@ -385,6 +415,7 @@ pub(crate) async fn handle_ice(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallIce = from_frame(frame).map_err(fault::from_wire)?;
@@ -400,7 +431,15 @@ pub(crate) async fn handle_ice(
     .await?
     {
         ctx.reply(&Acknowledged { ok: true })?;
-        publish_to_group_device(ctx, &group, request.to_device, Opcode::CallIce, &request);
+        publish_to_group_device(
+            ctx,
+            relay,
+            &group,
+            request.to_device,
+            Opcode::CallIce,
+            &request,
+        )
+        .await;
         return Ok(());
     }
     let relayed = svc.relay_ice(&caller, request).await?;
@@ -409,7 +448,7 @@ pub(crate) async fn handle_ice(
     let target = call
         .account_of_device(relayed.to_device)
         .unwrap_or(call.caller_id);
-    publish_to_user(ctx, target, Opcode::CallIce, &relayed);
+    publish_to_user(ctx, relay, target, Opcode::CallIce, &relayed).await;
     Ok(())
 }
 
@@ -434,6 +473,7 @@ pub(crate) async fn handle_key_update(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallKeyUpdate = from_frame(frame).map_err(fault::from_wire)?;
@@ -446,7 +486,7 @@ pub(crate) async fn handle_key_update(
         Ok(audience) => {
             ctx.reply(&Acknowledged { ok: true })?;
             for account in audience {
-                publish_to_user(ctx, account, Opcode::CallKeyUpdate, &request);
+                publish_to_user(ctx, relay, account, Opcode::CallKeyUpdate, &request).await;
             }
             return Ok(());
         }
@@ -459,7 +499,7 @@ pub(crate) async fn handle_key_update(
     // sending it would imply the call is still live.
     if call.state.is_live() {
         if let Some(other) = call.other_party(caller.account_id) {
-            publish_to_user(ctx, other, Opcode::CallKeyUpdate, &request);
+            publish_to_user(ctx, relay, other, Opcode::CallKeyUpdate, &request).await;
         }
     }
     Ok(())
@@ -513,6 +553,7 @@ pub(crate) async fn handle_sfu_join(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallInvite = from_frame(frame).map_err(fault::from_wire)?;
@@ -553,6 +594,18 @@ pub(crate) async fn handle_sfu_join(
     };
     if let Err(error) = ctx.publish(&user_topic, Opcode::CallSfuEvent, &roster, None) {
         tracing::warn!(%error, "group-call roster publication failed");
+    }
+    // The roster's federated half: the joiner's *other* devices may sit on
+    // another node, and the roster is the one frame that builds their call
+    // screen — the same audience question every call frame here asks, over
+    // the same watch table. The conversation-topic announcements below are
+    // another matter: they ride the conversation tier or nothing, and today
+    // they ride nothing — the flag the spec-status carries.
+    if let Err(error) = relay
+        .forward_call(caller.account_id, Opcode::CallSfuEvent, &roster, caller.now)
+        .await
+    {
+        tracing::warn!(%error, "cannot enqueue the federated half of a group-call roster");
     }
     for event in announcements {
         // The roster hears each announcement on the conversation's topic, in
@@ -624,12 +677,13 @@ fn caller_of(ctx: &ClientContext<'_>) -> CallCaller {
 async fn publish_to_caller_of(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
     caller: &CallCaller,
     call_id: migo_core::Id,
     event: &migo_protocol::CallStateEvent,
 ) {
     match svc.call(caller, call_id).await {
-        Ok(call) => publish_state(ctx, call.caller_id, event),
+        Ok(call) => publish_state(ctx, relay, call.caller_id, event).await,
         Err(error) => {
             tracing::warn!(%error, "call state event dropped: routing read failed")
         }
@@ -641,12 +695,13 @@ async fn publish_to_caller_of(
 async fn publish_to_callee_of(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
     caller: &CallCaller,
     call_id: migo_core::Id,
     event: &migo_protocol::CallStateEvent,
 ) {
     match svc.call(caller, call_id).await {
-        Ok(call) => publish_state(ctx, call.callee_id, event),
+        Ok(call) => publish_state(ctx, relay, call.callee_id, event).await,
         Err(error) => {
             tracing::warn!(%error, "call state event dropped: routing read failed")
         }
@@ -662,14 +717,15 @@ async fn publish_to_callee_of(
 async fn publish_to_both_parties(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
     caller: &CallCaller,
     call_id: migo_core::Id,
     event: &migo_protocol::CallStateEvent,
 ) {
     match svc.call(caller, call_id).await {
         Ok(call) => {
-            publish_state(ctx, call.caller_id, event);
-            publish_state(ctx, call.callee_id, event);
+            publish_state(ctx, relay, call.caller_id, event).await;
+            publish_state(ctx, relay, call.callee_id, event).await;
         }
         Err(error) => {
             tracing::warn!(%error, "call state event dropped: routing read failed")
@@ -681,6 +737,7 @@ async fn publish_to_both_parties(
 async fn publish_to_other_party(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
+    relay: &PresenceRelay,
     caller: &CallCaller,
     call_id: migo_core::Id,
     event: &migo_protocol::CallStateEvent,
@@ -688,7 +745,7 @@ async fn publish_to_other_party(
     match svc.call(caller, call_id).await {
         Ok(call) => {
             if let Some(other) = call.other_party(caller.account_id) {
-                publish_state(ctx, other, event);
+                publish_state(ctx, relay, other, event).await;
             }
         }
         Err(error) => {
@@ -704,12 +761,13 @@ async fn publish_to_other_party(
 /// friends may be (presence), and an echo of their own hang-up is noise.
 /// Their *other* devices still receive it, which is the point — a call ended
 /// from the phone should stop the laptop's ring too.
-fn publish_state(
+async fn publish_state(
     ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
     audience: migo_core::Id,
     event: &migo_protocol::CallStateEvent,
 ) {
-    publish_to_user(ctx, audience, Opcode::CallStateEvent, event);
+    publish_to_user(ctx, relay, audience, Opcode::CallStateEvent, event).await;
 }
 
 /// Publishes one frame to an account's user topic, logging rather than
@@ -719,8 +777,14 @@ fn publish_state(
 /// publication failure must not turn a succeeded request into an error the
 /// client will retry — a retried invite would be a second ring, exactly what
 /// the idempotency exists to prevent.
-fn publish_to_user<T: migo_protocol::Encode>(
+///
+/// The federated half rides the same call: the audience's sessions may sit
+/// on another node, and the user-topic tier's watch table (section 170) says
+/// which — one copy per watching node, inside the `FED_CALL_RELAY` envelope,
+/// with the same warn-not-fail posture as the local half.
+async fn publish_to_user<T: migo_protocol::Encode>(
     ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
     audience: migo_core::Id,
     opcode: Opcode,
     frame: &T,
@@ -731,5 +795,8 @@ fn publish_to_user<T: migo_protocol::Encode>(
     };
     if let Err(error) = ctx.publish_excluding_self(&topic, opcode, frame, None) {
         tracing::warn!(%error, "call frame publication failed");
+    }
+    if let Err(error) = relay.forward_call(audience, opcode, frame, ctx.now()).await {
+        tracing::warn!(%error, "cannot enqueue the federated half of a call frame");
     }
 }

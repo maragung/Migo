@@ -62,7 +62,7 @@
 //! the request over a bell that did not ring would tell the caller their friend
 //! request failed when it did not.
 
-use migo_core::{Error, Id};
+use migo_core::{Error, Id, Result, Timestamp};
 use migo_gateway::ClientContext;
 use migo_notify::{Event, SharedNotifier};
 use migo_protocol::{
@@ -72,6 +72,10 @@ use migo_protocol::{
 use migo_social::model::{FriendOutcome, RespondOutcome, MAX_PAGE};
 use migo_social::notice::Notice;
 use migo_social::{BlockOutcome, Caller as SocialCaller, SharedSocial};
+
+use std::sync::Arc;
+
+use crate::presence_relay::PresenceRelay;
 
 /// The state strings `FRIEND_EVENT` carries. A closed vocabulary the client matches on;
 /// the graph's own standing is what the client fetches afterwards to draw the right
@@ -94,21 +98,36 @@ const STATE_BLOCKED: &str = "blocked";
 /// This is the whole of the realtime half for the moves that carry no bell. A failure is
 /// logged and swallowed: the graph is already written, and the hint is a convenience, not
 /// a contract — the client that misses one catches up on its next listing.
-fn graph_moved(ctx: &ClientContext<'_>, audience: Id, other: Id, state: &str) {
+///
+/// The hint also crosses nodes (section 170's user-topic tier): the audience's devices
+/// may hold their sessions elsewhere, and the frame reaches their user topic there
+/// through the same envelope a presence change rides, sealed as the local publish
+/// sealed it. A failure to enqueue is logged and swallowed for the same reason the
+/// local publication above is.
+async fn graph_moved(
+    ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
+    audience: Id,
+    other: Id,
+    state: &str,
+    now: Timestamp,
+) {
     let topic = Topic {
         kind: TopicKind::User,
         id: audience,
     };
-    if let Err(error) = ctx.publish(
-        &topic,
-        Opcode::FriendEvent,
-        &FriendEvent {
-            user_id: other,
-            state: state.to_string(),
-        },
-        None,
-    ) {
+    let event = FriendEvent {
+        user_id: other,
+        state: state.to_string(),
+    };
+    if let Err(error) = ctx.publish(&topic, Opcode::FriendEvent, &event, None) {
         tracing::warn!(%error, "friend event publication failed");
+    }
+    if let Err(error) = relay
+        .forward_frame(audience, Opcode::FriendEvent, &event, now)
+        .await
+    {
+        tracing::warn!(%error, "friend event federation failed");
     }
 }
 
@@ -119,22 +138,34 @@ fn graph_moved(ctx: &ClientContext<'_>, audience: Id, other: Id, state: &str) {
 /// applied to the caller's own topic: the acting connection was answered by the
 /// `Acknowledged` (and refreshed itself from it), while the caller's *other* devices
 /// learn the graph moved and re-read. Publishing without the exclusion would hand the
-/// acting device a second, redundant hint for a change it just made.
-fn echo_caller(ctx: &ClientContext<'_>, other: Id, state: &str) {
+/// acting device a second, redundant hint for a change it just made. The federated half
+/// needs no exclusion of its own — the acting session is on this node, so a far node's
+/// broadcast cannot reach it — but the caller's other devices may be there, and they
+/// hold the same stale friends list the local echo fixes.
+async fn echo_caller(
+    ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
+    other: Id,
+    state: &str,
+    now: Timestamp,
+) {
+    let caller = ctx.identity().account_id();
     let topic = Topic {
         kind: TopicKind::User,
-        id: ctx.identity().account_id(),
+        id: caller,
     };
-    if let Err(error) = ctx.publish_excluding_self(
-        &topic,
-        Opcode::FriendEvent,
-        &FriendEvent {
-            user_id: other,
-            state: state.to_string(),
-        },
-        None,
-    ) {
+    let event = FriendEvent {
+        user_id: other,
+        state: state.to_string(),
+    };
+    if let Err(error) = ctx.publish_excluding_self(&topic, Opcode::FriendEvent, &event, None) {
         tracing::warn!(%error, "friend event echo publication failed");
+    }
+    if let Err(error) = relay
+        .forward_frame(caller, Opcode::FriendEvent, &event, now)
+        .await
+    {
+        tracing::warn!(%error, "friend event echo federation failed");
     }
 }
 
@@ -148,6 +179,7 @@ fn echo_caller(ctx: &ClientContext<'_>, other: Id, state: &str) {
 /// friend event is worth one.
 async fn deliver_notice(
     ctx: &ClientContext<'_>,
+    relay: &PresenceRelay,
     notifier: &SharedNotifier,
     notice: &Notice,
     state: &'static str,
@@ -156,7 +188,7 @@ async fn deliver_notice(
     let actor = notice.event.actor_id.unwrap_or(audience);
     // The semantic event: who did what. The requester is not subscribed to the
     // recipient's topic, so there is no echo to exclude.
-    graph_moved(ctx, audience, actor, state);
+    graph_moved(ctx, relay, audience, actor, state, notice.event.at).await;
     // The bell and the row. The notifier rings the recipient's topic and stores the
     // inbox half; a failure there costs a buzz, not a friendship.
     let event = Event {
@@ -183,6 +215,7 @@ pub(crate) async fn handle_friend_request(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedSocial,
+    relay: &Arc<PresenceRelay>,
     notifier: &SharedNotifier,
 ) -> Result<(), Error> {
     let caller = SocialCaller::new(
@@ -203,12 +236,12 @@ pub(crate) async fn handle_friend_request(
         } else {
             STATE_REQUESTED
         };
-        deliver_notice(ctx, notifier, &notice, state).await;
+        deliver_notice(ctx, relay, notifier, &notice, state).await;
         // The asker's other devices: the request they just watched leave is an edge in
         // their own graph too, and a tablet that never hears about it shows no outgoing
         // request until somebody refreshes by hand. The acting session is excluded; it
         // was answered above.
-        echo_caller(ctx, request.user_id, state);
+        echo_caller(ctx, relay, request.user_id, state, ctx.now()).await;
     }
     Ok(())
 }
@@ -218,6 +251,7 @@ pub(crate) async fn handle_friend_respond(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedSocial,
+    relay: &Arc<PresenceRelay>,
     notifier: &SharedNotifier,
 ) -> Result<(), Error> {
     let caller = SocialCaller::new(
@@ -238,9 +272,9 @@ pub(crate) async fn handle_friend_respond(
         // session that answered was already told.
         RespondOutcome::Accepted => {
             if let Some(notice) = notice {
-                deliver_notice(ctx, notifier, &notice, STATE_ACCEPTED).await;
+                deliver_notice(ctx, relay, notifier, &notice, STATE_ACCEPTED).await;
             }
-            echo_caller(ctx, request.user_id, STATE_ACCEPTED);
+            echo_caller(ctx, relay, request.user_id, STATE_ACCEPTED, ctx.now()).await;
         }
         // A decline is the responder's own business, and no bell rings for it on either
         // side. But the graph moved for both parties all the same: the asker's outgoing
@@ -249,8 +283,16 @@ pub(crate) async fn handle_friend_respond(
         // they were watching is no longer there — which their own next listing would
         // have told them anyway.
         RespondOutcome::Declined => {
-            graph_moved(ctx, request.user_id, caller.account_id, STATE_REMOVED);
-            echo_caller(ctx, request.user_id, STATE_REMOVED);
+            graph_moved(
+                ctx,
+                relay,
+                request.user_id,
+                caller.account_id,
+                STATE_REMOVED,
+                ctx.now(),
+            )
+            .await;
+            echo_caller(ctx, relay, request.user_id, STATE_REMOVED, ctx.now()).await;
         }
     }
     Ok(())
@@ -271,6 +313,7 @@ pub(crate) async fn handle_block_set(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedSocial,
+    relay: &Arc<PresenceRelay>,
 ) -> Result<(), Error> {
     let caller = SocialCaller::new(
         ctx.identity().account_id(),
@@ -282,10 +325,18 @@ pub(crate) async fn handle_block_set(
     let outcome: BlockOutcome = svc.block(&caller, request.user_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if outcome.severed {
-        graph_moved(ctx, request.user_id, caller.account_id, STATE_REMOVED);
+        graph_moved(
+            ctx,
+            relay,
+            request.user_id,
+            caller.account_id,
+            STATE_REMOVED,
+            ctx.now(),
+        )
+        .await;
     }
     if outcome.moved {
-        echo_caller(ctx, request.user_id, STATE_BLOCKED);
+        echo_caller(ctx, relay, request.user_id, STATE_BLOCKED, ctx.now()).await;
     }
     Ok(())
 }

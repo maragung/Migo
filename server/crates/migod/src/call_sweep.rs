@@ -12,7 +12,10 @@
 //! `expires_at`, and each retired call's
 //! [`ended_event`](migo_calls::Call::ended_event) is published to *both* user
 //! topics — the caller's screen gives up, and the callee's ring stops without
-//! anyone having to decline a call that was never going to connect.
+//! anyone having to decline a call that was never going to connect. Both
+//! halves ride the user-topic tier across the mesh (section 170, in the
+//! `FED_CALL_RELAY` envelope): a ring that dies must die everywhere it rings,
+//! and the node holding the row is the one node that knows it died.
 //!
 //! # The group seats ride the same tick
 //!
@@ -52,6 +55,7 @@ use migo_gateway::Gateway;
 use migo_protocol::{Opcode, Topic, TopicKind};
 
 use crate::compose::App;
+use crate::presence_relay::PresenceRelay;
 
 /// How often the sweeper looks for expired rings.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
@@ -68,6 +72,7 @@ impl App {
         spawn(
             self.calls.clone(),
             self.gateway.clone(),
+            self.presence_relay.clone(),
             self.clock.clone(),
             self.shutdown.clone(),
         )
@@ -78,6 +83,7 @@ impl App {
 fn spawn(
     calls: SharedCallkeeper,
     gateway: Arc<Gateway>,
+    relay: Arc<PresenceRelay>,
     clock: Arc<dyn Clock>,
     shutdown: Shutdown,
 ) -> tokio::task::JoinHandle<()> {
@@ -86,7 +92,7 @@ fn spawn(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(SWEEP_INTERVAL) => {
-                    sweep_once(&calls, &gateway, clock.as_ref()).await;
+                    sweep_once(&calls, &gateway, &relay, clock.as_ref()).await;
                 }
             }
         }
@@ -95,7 +101,12 @@ fn spawn(
 
 /// One tick: retire what expired, tell both parties, log rather than die —
 /// a sweeper that crashed on one bad row would leave every later ring ringing.
-async fn sweep_once(calls: &SharedCallkeeper, gateway: &Gateway, clock: &dyn Clock) {
+async fn sweep_once(
+    calls: &SharedCallkeeper,
+    gateway: &Gateway,
+    relay: &PresenceRelay,
+    clock: &dyn Clock,
+) {
     let now = clock.now();
     match calls.sweep(now).await {
         Ok(retired) => {
@@ -115,6 +126,21 @@ async fn sweep_once(calls: &SharedCallkeeper, gateway: &Gateway, clock: &dyn Clo
                         &event,
                         now,
                     );
+                    // The federated half: either party's sessions may sit on
+                    // another node (section 170's user-topic watch table, in
+                    // the FED_CALL_RELAY envelope), and a ring that dies must
+                    // die everywhere it rings. Warn-not-fail, exactly as the
+                    // local half: a sweeper that died on one bad enqueue would
+                    // leave every later ring ringing.
+                    if let Err(error) = relay
+                        .forward_call(account, Opcode::CallStateEvent, &event, now)
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            "cannot enqueue the federated half of an expired ring"
+                        );
+                    }
                 }
                 tracing::info!(call_id = %call.call_id, "an unanswered ring expired; both parties told");
             }
