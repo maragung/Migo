@@ -312,6 +312,9 @@ private fun ShellScreen(
     }
     val mediaObjects by model.mediaObjects.collectAsState()
     val avatarBytes by model.avatarBytes.collectAsState()
+    // The member profile sheet's state, collected here for the same reason the avatars are: the
+    // read is the model's, while the surface belongs to whichever member sheet named the person.
+    val memberProfile by model.memberProfile.collectAsState()
     // The media choice, answered as one fact for every bubble on screen: "Wi-Fi only" reads the
     // connection's own metered state, which is the network's word rather than the app's guess.
     // Read per composition rather than remembered — a settings change must reach the next
@@ -472,6 +475,15 @@ private fun ShellScreen(
                     },
                     mediaObjects = mediaObjects,
                     avatarBytes = avatarBytes,
+                    // The member menu's two doors: the profile sheet's read and the gift picker's
+                    // send, both the model's because both are round trips the sheet cannot make
+                    // for itself. The gift catalogue is the wallet's own — the session loads it at
+                    // sign-in for the banner's balance — so the picker never has to wait on a read.
+                    onViewMember = { userId, name -> model.openMemberProfile(userId, name) },
+                    memberProfile = memberProfile,
+                    onCloseMemberProfile = model::closeMemberProfile,
+                    giftCatalogue = state.wallet.catalogue,
+                    onSendGift = { sku, recipient, clientKey -> model.sendGift(sku, recipient, clientKey) },
                     modifier = Modifier.weight(1f),
                 )
             } else {
