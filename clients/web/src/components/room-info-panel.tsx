@@ -691,7 +691,11 @@ export function RoomInfoPanel({
         </>
       )}
       {profileId !== null ? (
-        <UserProfileModal userId={profileId} onClose={() => setProfileId(null)} />
+        <UserProfileModal
+          userId={profileId}
+          onClose={() => setProfileId(null)}
+          onGift={onGift && profileId !== accountId ? () => onGift(profileId) : undefined}
+        />
       ) : null}
     </div>
   );
