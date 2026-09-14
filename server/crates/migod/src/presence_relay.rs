@@ -108,7 +108,12 @@ const PEER_SCAN_LIMIT: u16 = 256;
 /// fills for the same reason — bound empty here, filled the moment the relay
 /// exists, and until then every federated half it would carry is a no-op,
 /// which is correct for the startup window before any peer can be linked.
-pub(crate) struct RelayHandle {
+///
+/// Public the way `GatewayHandle` is public: the bell in `ports` holds it in
+/// a public constructor's signature, and a crate-private type there is a
+/// private-interface leak the linter rightly refuses. Nothing outside the
+/// crate can build one — the constructors stay crate-visible.
+pub struct RelayHandle {
     relay: OnceLock<Arc<PresenceRelay>>,
 }
 
@@ -125,11 +130,6 @@ impl RelayHandle {
     /// because a process has exactly one user-topic relay.
     pub(crate) fn set(&self, relay: Arc<PresenceRelay>) {
         let _ = self.relay.set(relay);
-    }
-
-    /// The relay, once bound; `None` during the startup window before it is.
-    pub(crate) fn get(&self) -> Option<&Arc<PresenceRelay>> {
-        self.relay.get()
     }
 
     /// Forwards one user-topic frame, once the relay is bound.
