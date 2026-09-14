@@ -44,8 +44,8 @@ use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, CallCancel, CallInvite, CallInviteEvent, CallInviteResult,
-    CallStateEvent, Decode, Encode, Frame, Hello, Opcode, RoomJoinRequest, SubscribeRequest,
-    SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    CallStateEvent, Decode, Encode, Frame, Hello, Opcode, RoomJoinRequest, RoomKind,
+    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -205,7 +205,7 @@ async fn a_room_between(app: &App, caller: &Grant, callee: &Grant, slug: &str) -
                 slug: slug.to_string(),
                 name: "The Ring Room".to_string(),
                 topic: None,
-                kind: migo_rooms::RoomKind::Public,
+                kind: RoomKind::Public,
                 max_members: None,
             },
         )

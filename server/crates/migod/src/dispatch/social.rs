@@ -73,6 +73,8 @@ use migo_social::model::{FriendOutcome, RespondOutcome, MAX_PAGE};
 use migo_social::notice::Notice;
 use migo_social::{BlockOutcome, Caller as SocialCaller, SharedSocial};
 
+use std::sync::Arc;
+
 use crate::presence_relay::PresenceRelay;
 
 /// The state strings `FRIEND_EVENT` carries. A closed vocabulary the client matches on;
