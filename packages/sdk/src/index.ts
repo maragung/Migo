@@ -156,6 +156,8 @@ export type {
   GroupCallJoinResult,
   CallSfuParticipant,
 } from './domains/group-calls.js';
+export { GroupCallKeysDomain, CALL_KEY_ASK_EVENT } from './domains/group-call-keys.js';
+export { CallKeyState, CALL_KEY_LEN, JOIN_DISTRIBUTION_LEN } from './call-crypto.js';
 export { ProfileDomain } from './domains/profile.js';
 export { MediaDomain, MediaKind } from './domains/media.js';
 export type { UploadOptions, UploadResult } from './domains/media.js';
@@ -262,6 +264,8 @@ export type {
   CallIce,
   CallInviteEvent,
   CallInviteResult,
+  CallKeyUpdate,
+  CallRenegotiate,
   CallSdp,
   CallStateEvent,
   CallStats,
@@ -281,6 +285,7 @@ export type {
   GameViewWire,
   GiftListing,
   GiftSendResult,
+  GroupKeyDistribution,
   InboxItem,
   KickPointsBuyResult,
   LedgerEntryWire,

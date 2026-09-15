@@ -44,6 +44,7 @@ import { resolveServerChoice } from '@/lib/auto-server.js';
 import { RESTORE_FAILED, containerFileName } from '@/lib/account-file.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
+import { wireKeyMaintenance } from '@/lib/migo/key-maintenance.js';
 import { saveAccountRecord } from '@/lib/storage/account-record-store.js';
 import { loadDeviceRecord, saveDeviceRecord } from '@/lib/storage/device-record-store.js';
 import { keyFileId, saveKeyFile } from '@/lib/storage/key-file-store.js';
@@ -186,21 +187,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   const wireInbound = useCallback(
     (target: MigoClient): void => {
       inboundOffRef.current?.();
-      // Receiving a first message from a new peer consumes one of our one-time prekeys, mutating the key
-      // store; persist the new snapshot and replenish the pool if it has run low (which republishes).
-      inboundOffRef.current = target.messaging.onMessage(() => {
-        scheduleKeyStorePersist();
-        void target
-          .replenishPrekeys()
-          .then((published) => {
-            if (published) {
-              scheduleKeyStorePersist();
-            }
-          })
-          .catch(() => {
-            // Replenishment is best-effort; a failure is retried on the next inbound message.
-          });
-      });
+      // Receiving a first message from a new peer spends one of our one-time prekeys, and an
+      // accepted inbound key distribution (a first sender-key hand-off, or one of section 163's
+      // redistributions arriving over GROUP_KEY_DISTRIBUTE) commits a pairwise session the same
+      // way — both mutate the key store, so both owe the same persist-and-replenish. The helper
+      // owns the details; this is the one place the client is handed to it.
+      inboundOffRef.current = wireKeyMaintenance(target, scheduleKeyStorePersist);
     },
     [scheduleKeyStorePersist],
   );

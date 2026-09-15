@@ -53,8 +53,11 @@ import {
   encodeMessageEdit,
   encodeReactionSet,
   decodeAcknowledged,
+  encodeGroupKeyDistribution,
+  decodeGroupKeyDistribution,
 } from '@migo/protocol';
 import type {
+  GroupKeyDistribution,
   MessageAccepted,
   MessageEvent,
   MessageReceipt,
@@ -68,8 +71,9 @@ import type {
 import { ContentType, encodeContent, decodeContent } from '../content.js';
 import type { ContentEncodeOptions, ControlEventContent, MessageContent } from '../content.js';
 import { newId } from '../ids.js';
+import { SdkError } from '../errors.js';
 import type { GroupCrypto } from '../group-crypto.js';
-import type { SessionCrypto } from '../session-crypto.js';
+import type { SessionCrypto, SealedEnvelope } from '../session-crypto.js';
 import type { EventErrorHandler, Rpc } from './rpc.js';
 
 /**
@@ -191,10 +195,17 @@ export class MessagingDomain {
   readonly #directory: DeviceDirectory;
   readonly #onEventError: EventErrorHandler | undefined;
   readonly #gapFiller: GapFiller | undefined;
+  readonly #deviceId: Id | undefined;
 
   readonly #messageListeners = new Set<Listener<IncomingMessage>>();
   readonly #deletionListeners = new Set<Listener<MessageDeletion>>();
   readonly #receiptListeners = new Set<Listener<MessageReceipt>>();
+  /**
+   * Notified whenever an inbound key exchange established or advanced pairwise or sender-key
+   * state — the moment this device's key store may have mutated (a responder handshake consumes
+   * one of our one-time prekeys), which is what a caller that persists the store needs to hear.
+   */
+  readonly #keyExchangeListeners = new Set<Listener<void>>();
 
   /** Messages we could not open yet, keyed by `${conversationId}|${senderDevice}`. */
   readonly #pending = new Map<string, MessageEvent[]>();
@@ -254,6 +265,7 @@ export class MessagingDomain {
     directory: DeviceDirectory,
     onEventError?: EventErrorHandler,
     gapFiller?: GapFiller,
+    deviceId?: Id,
   ) {
     this.#rpc = rpc;
     this.#sessionCrypto = sessionCrypto;
@@ -261,6 +273,7 @@ export class MessagingDomain {
     this.#directory = directory;
     this.#onEventError = onEventError;
     this.#gapFiller = gapFiller;
+    this.#deviceId = deviceId;
   }
 
   /** Begins delivering inbound messages and receipts. Idempotent. */
@@ -272,6 +285,15 @@ export class MessagingDomain {
       this.#rpc.on(OP.MESSAGE_EVENT, decodeMessageEvent, (event) => this.#onMessageEvent(event)),
       this.#rpc.on(OP.MESSAGE_RECEIPT, decodeMessageReceipt, (receipt) =>
         this.#deliver(this.#receiptListeners, receipt),
+      ),
+      // Section 163's redistribution channel: a membership change makes each member device send
+      // its fresh sender-key chain to every member device, one GROUP_KEY_DISTRIBUTE per device
+      // because each copy is sealed under its own pairwise session. The frame names this device
+      // in `toDevice`, but a copy sealed for this *account's* other device lands here too (the
+      // relay rides user topics, which are per account) — the pairwise open below refuses it as
+      // the same fan-out noise the MESSAGE_SEND path tolerates.
+      this.#rpc.on(OP.GROUP_KEY_DISTRIBUTE, decodeGroupKeyDistribution, (event) =>
+        this.#onGroupKeyDistribute(event),
       ),
     );
   }
@@ -300,6 +322,22 @@ export class MessagingDomain {
   onReceipt(handler: Listener<MessageReceipt>): () => void {
     this.#receiptListeners.add(handler);
     return () => this.#receiptListeners.delete(handler);
+  }
+
+  /**
+   * Registers a handler for inbound key exchanges: a sender-key distribution accepted over the
+   * pairwise channel, whether it rode a `MESSAGE_SEND` or a section 163 `GROUP_KEY_DISTRIBUTE`.
+   *
+   * The notification carries no payload on purpose — what the caller needs to know is *that* key
+   * material moved, because a responder handshake consumes one of this device's one-time prekeys
+   * and mutates the key store a caller persists. It fires whenever a distribution opened through
+   * the session layer, even one the group layer then refused as stale: the open itself advanced
+   * the ratchet (and may have spent a prekey), so the store moved either way. Fan-out noise — a
+   * copy sealed for another device — never fires it.
+   */
+  onKeyExchange(handler: () => void): () => void {
+    this.#keyExchangeListeners.add(handler);
+    return () => this.#keyExchangeListeners.delete(handler);
   }
 
   /**
@@ -427,6 +465,57 @@ export class MessagingDomain {
   }
 
   /**
+   * Rotates onto a membership change and redistributes the fresh chain: section 163's client-side
+   * obligation when a group's membership moves.
+   *
+   * The wire names the generation the change produced (`groupKeyEpoch` on the member event), so
+   * every member device rotates onto the *same* epoch without coordinating — and each device owns
+   * its own chain, which is why every member redistributing independently cannot collide the way
+   * a shared call key would. With `epoch` the rotation lands on exactly that generation (never
+   * below what the chain already holds, so a stale event is a no-op); without it the chain simply
+   * bumps. Then one `GROUP_KEY_DISTRIBUTE` leaves per member device that still lacks the chain —
+   * after a genuine rotation that is everyone; after a no-op it is whoever joined late — each
+   * sealed under the pairwise session with that device, exactly as the first-send path seals
+   * distributions, so the receiving side accepts it with the same logic. One device's failure
+   * (a member already removed, a fetch refused) must not strand the rest, so each send is caught
+   * and reported rather than thrown.
+   */
+  async redistributeSenderKey(conversationId: Id, epoch?: number): Promise<void> {
+    if (this.#deviceId === undefined) {
+      // The frame must honestly name the distributing device; the receiver's ratchet is keyed by
+      // it, so a nil stamp would make every distribution we send unopenable.
+      throw new SdkError('messaging: redistributeSenderKey requires the device id');
+    }
+    if (epoch === undefined) {
+      this.#groupCrypto.rotate(conversationId);
+    } else {
+      this.#groupCrypto.rotateTo(conversationId, epoch);
+    }
+    await this.#distributeChain(
+      conversationId,
+      OP.GROUP_KEY_DISTRIBUTE,
+      (sealed, device) => {
+        // Section 163's redistribution frame: addressed to the one device the copy is sealed
+        // for, because the receiving side keys its ratchet lookup by our device id.
+        const request: GroupKeyDistribution = {
+          conversationId,
+          fromDevice: this.#deviceId as Id,
+          toAccount: device.userId,
+          toDevice: device.deviceId,
+          sealedDistribution: sealed.envelope,
+        };
+        return this.#rpc.call(
+          OP.GROUP_KEY_DISTRIBUTE,
+          encodeGroupKeyDistribution,
+          decodeAcknowledged,
+          request,
+        );
+      },
+      true,
+    );
+  }
+
+  /**
    * Forgets crypto state for a conversation, or for one device within it.
    *
    * Use it when leaving a conversation, or when a peer's identity key changes and the sessions built
@@ -440,22 +529,7 @@ export class MessagingDomain {
 
   /** Sends the current sender key to every recipient device that does not already hold it. */
   async #distribute(conversationId: Id): Promise<void> {
-    const devices = await this.#directory.recipientDevices(conversationId);
-    for (const device of devices) {
-      if (!this.#groupCrypto.needsDistribution(conversationId, device.deviceId)) {
-        continue;
-      }
-      const control: ControlEventContent = {
-        type: ContentType.ControlEvent,
-        event: SENDER_KEY_EVENT,
-        data: this.#groupCrypto.distributionFor(conversationId),
-      };
-      const sealed = await this.#sessionCrypto.seal(
-        conversationId,
-        device.userId,
-        device.deviceId,
-        encodeContent(control),
-      );
+    await this.#distributeChain(conversationId, OP.MESSAGE_SEND, (sealed, _device) => {
       const send: MessageSend = {
         messageId: newId(),
         conversationId,
@@ -463,7 +537,52 @@ export class MessagingDomain {
         envelope: sealed.envelope,
         senderKeyId: sealed.senderKeyId,
       };
-      await this.#rpc.call(OP.MESSAGE_SEND, encodeMessageSend, decodeMessageAccepted, send);
+      return this.#rpc.call(OP.MESSAGE_SEND, encodeMessageSend, decodeMessageAccepted, send);
+    });
+  }
+
+  /**
+   * The distribution loop both channels share: seal the current chain for one device at a time,
+   * hand the sealed envelope to the channel's own frame builder, and mark. `tolerate` is the
+   * difference between the two callers — a send whose key exchange fails must fail (the content
+   * would be undecryptable for that device), while a redistribution triggered by a member event
+   * must reach every device it can and not strand the rest behind one refusal (the member was
+   * removed mid-flight, the bundle fetch failed).
+   */
+  async #distributeChain(
+    conversationId: Id,
+    opcode: number,
+    sendOne: (sealed: SealedEnvelope, device: DeviceAddress) => Promise<unknown>,
+    tolerate = false,
+  ): Promise<void> {
+    const devices = await this.#directory.recipientDevices(conversationId);
+    for (const device of devices) {
+      if (!this.#groupCrypto.needsDistribution(conversationId, device.deviceId)) {
+        continue;
+      }
+      try {
+        const control: ControlEventContent = {
+          type: ContentType.ControlEvent,
+          event: SENDER_KEY_EVENT,
+          data: this.#groupCrypto.distributionFor(conversationId),
+        };
+        const sealed = await this.#sessionCrypto.seal(
+          conversationId,
+          device.userId,
+          device.deviceId,
+          encodeContent(control),
+        );
+        await sendOne(sealed, device);
+      } catch (cause) {
+        if (!tolerate) {
+          throw cause;
+        }
+        // One device's refusal is reported, not thrown: the remaining member devices still need
+        // the fresh chain, and a member removed between the roster read and this send is the
+        // server's PERMISSION_DENIED working as designed.
+        this.#onEventError?.(opcode, cause);
+        continue;
+      }
       this.#groupCrypto.markDistributed(conversationId, device.deviceId);
     }
   }
@@ -639,14 +758,49 @@ export class MessagingDomain {
    * and the sender's pending messages are drained.
    */
   #onKeyExchange(event: MessageEvent): void {
+    this.#acceptKeyDistribution(
+      event.conversationId,
+      event.senderId,
+      event.senderDevice,
+      event.envelope,
+    );
+  }
+
+  /**
+   * Handles a section 163 `GROUP_KEY_DISTRIBUTE`: the redistribution a member device sends when
+   * membership changes. The accept logic is the KeyExchange path's own — the sealed body is the
+   * same control event over the same pairwise channel — so both channels stay interchangeable
+   * for a receiver, whichever one a sender chose.
+   */
+  #onGroupKeyDistribute(event: GroupKeyDistribution): void {
+    // `toAccount` rides the wire frame; the 1:1 layer takes the sender's identity from the
+    // envelope's own X3DH material, so the slot is unused here and passes through as the honest
+    // value the frame carries.
+    this.#acceptKeyDistribution(
+      event.conversationId,
+      event.toAccount,
+      event.fromDevice,
+      event.sealedDistribution,
+    );
+  }
+
+  /**
+   * Opens, adopts, and drains one sealed sender-key distribution, whichever channel it rode.
+   *
+   * A copy sealed for another device throws at the open and is dropped as expected fan-out noise;
+   * a body that is not a sender-key distribution is dropped the same way (the pairwise channel
+   * carries other control events). Only a genuine accept fires the key-exchange notification,
+   * because only a genuine accept is evidence the key store may have moved.
+   */
+  #acceptKeyDistribution(
+    conversationId: Id,
+    senderUserId: Id,
+    senderDeviceId: Id,
+    envelope: Uint8Array,
+  ): void {
     let plaintext: Uint8Array;
     try {
-      plaintext = this.#sessionCrypto.open(
-        event.conversationId,
-        event.senderId,
-        event.senderDevice,
-        event.envelope,
-      );
+      plaintext = this.#sessionCrypto.open(conversationId, senderUserId, senderDeviceId, envelope);
     } catch {
       // Broadcast to us but pairwise-sealed for another device; expected, not surfaced.
       return;
@@ -668,8 +822,15 @@ export class MessagingDomain {
       // A control event over the 1:1 channel that is not a sender-key distribution; nothing to do.
       return;
     }
-    this.#groupCrypto.acceptDistribution(event.conversationId, event.senderDevice, content.data);
-    this.#drainPending(event.conversationId, event.senderDevice);
+    this.#groupCrypto.acceptDistribution(conversationId, senderDeviceId, content.data);
+    this.#drainPending(conversationId, senderDeviceId);
+    for (const listener of this.#keyExchangeListeners) {
+      try {
+        listener();
+      } catch (cause) {
+        this.#onEventError?.(OP.GROUP_KEY_DISTRIBUTE, cause);
+      }
+    }
   }
 
   /** Handles a content message: open it under the sender key, or buffer it until the key arrives. */

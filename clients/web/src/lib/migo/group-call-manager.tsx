@@ -15,9 +15,11 @@
  *
  * No media. This build carries the roster, not the media plane: no `getUserMedia`, no peer
  * connections, no microphone to tear down. The join's sealed offer is the placeholder the roster
- * module seals, and the frame-key distribution between participants that a real media plane needs
- * (section 165's remaining client-side SPEC) is future work — this manager is shaped so that work
- * lands beside it, not inside it.
+ * module seals. The frame-key distribution between participants that a real media plane needs
+ * (section 163's client-side triggers) lives in the SDK now — `MigoClient.callKeys` rotates the
+ * call's key on roster movement, asks and answers for mid-call joins, and exposes the seal/open
+ * surface a future media plane seals its frames through — so when that plane lands, it calls this
+ * manager's call id into `callKeys` and nothing here has to change.
  *
  * One call at a time. A device holds one seat in one call in this build; the join guard is a
  * synchronous check of the tracked call, the same discipline the 1:1 manager keeps for its
