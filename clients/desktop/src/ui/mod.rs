@@ -72,10 +72,12 @@ pub enum Screen {
 /// rather than it simply being unreachable without an account.
 ///
 /// The desktop-OS shell splits the places in two, the way the reference's window manager does:
-/// the first three are the Contacts window's own tabs (the social graph, the room directory, the
-/// activity stream — one floating window, three tabs), and the rest are the small side windows
-/// that open on their own when the account menu or the taskbar asks for them. A conversation is
-/// not a place at all: each one opens as its own closable window (see [`crate::ui::desktop`]).
+/// the first three are the Contacts window's own tabs under Tabbed navigation — the social
+/// graph, the room directory, the activity stream — and the same three ride the main window's
+/// strip as place tabs beside Main under Chat List Mode (see [`MainTab`]). The rest are the
+/// small side windows that open on their own when the account menu or the taskbar asks for
+/// them, in either mode. A conversation is not a place at all: each one opens as its own
+/// closable window (see [`crate::ui::desktop`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Place {
     /// The social graph: friends, requests, adding by id.
@@ -123,9 +125,11 @@ impl Place {
         }
     }
 
-    /// The three tabs the Contacts window carries, in the reference's order. A conversation is
-    /// not one of them: it opens as its own closable window, which is the reference's whole
-    /// model. Games is not one of them either — it opens as a small side window of its own.
+    /// The three tabs the Contacts window carries under Tabbed navigation, in the reference's
+    /// order — and the three places that ride the main window's strip as tabs under Chat List
+    /// Mode, in the same order beside Main (see [`MainTab::TABS`]). A conversation is not one
+    /// of them: it opens as its own closable window, which is the reference's whole model.
+    /// Games is not one of them either — it opens as a small side window of its own.
     pub const CONTACTS_TABS: [Self; 3] = [Self::Friends, Self::Rooms, Self::Feed];
 
     /// Whether the place is one of the Contacts window's tabs.
@@ -151,12 +155,14 @@ impl Place {
 /// window manager draws — a plain teal desk with every conversation a floating, closable window
 /// of its own (see [`crate::ui::desktop`]) — and it is the default, because it is the behaviour
 /// every session before the choice existed was built around. [`NavigationMode::ChatList`] is
-/// the phone's home translated to a desktop ground (see [`crate::ui::chat_list`]): the
-/// conversation list is the main window's own content, and opening a conversation mints that
-/// thread's own floating, closable window — the same window, drawn by the same code, that
-/// tabbed navigation mints — so closing it leaves the person back on the list. Friends, Rooms
-/// and Feed are exactly what they were in either mode, because the choice is about the chat
-/// area's ground and nothing else.
+/// the phone's home translated to a desktop ground (see [`crate::ui::chat_list`]): the main
+/// window carries a four-tab strip — Main, the conversation list itself, then Friends, Rooms
+/// and Feed as [`MainTab`] — and opening a conversation mints that thread's own floating,
+/// closable window, the same window, drawn by the same code, that tabbed navigation mints, so
+/// closing it leaves the person back on the list. The three social tabs are the same surfaces
+/// either way — the mode changes where their strip lives, not what they show — and the Contacts
+/// window itself does not exist under Chat List Mode, because the main window's strip is its
+/// replacement.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigationMode {
@@ -164,7 +170,7 @@ pub enum NavigationMode {
     /// unchanged.
     #[default]
     Tabbed,
-    /// The chat list as the main window's content; each conversation opens in a window of its
+    /// The chat list as the main window's Main tab; each conversation opens in a window of its
     /// own, and closing the window returns to the list.
     ChatList,
 }
@@ -176,6 +182,57 @@ impl NavigationMode {
         match self {
             Self::Tabbed => "Tabbed Navigation",
             Self::ChatList => "Chat List Mode",
+        }
+    }
+}
+
+/// Which tab the Chat List Mode main window's strip is showing.
+///
+/// The strip always carries exactly these four: Main — the conversation list that gives the
+/// mode its name and its ground — plus the three places the Contacts window carries as tabs
+/// under Tabbed navigation (see [`Place::CONTACTS_TABS`]). `Main` is a member of this enum
+/// rather than a [`Place`] because it is not one: no menu offers it, no side window opens it,
+/// and nothing outside the main window's own strip routes to it — it is the main window's
+/// default content, what the strip shows when no place tab is picked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MainTab {
+    /// The conversation list: the mode's own ground, and the strip's default.
+    #[default]
+    Main,
+    /// The social graph: friends, requests, adding by id.
+    Friends,
+    /// The public room directory and the way in.
+    Rooms,
+    /// The activity stream.
+    Feed,
+}
+
+impl MainTab {
+    /// The tab's own word, on the strip.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Main => "Main",
+            Self::Friends => "Friends",
+            Self::Rooms => "Rooms",
+            Self::Feed => "Feed",
+        }
+    }
+
+    /// The strip's order, pinned the same way [`Place::CONTACTS_TABS`] pins its own: Main
+    /// first — it is the mode's ground and the strip's default — then the three places in the
+    /// Contacts window's order, so the two strips read as one idea carried by two windows.
+    pub const TABS: [Self; 4] = [Self::Main, Self::Friends, Self::Rooms, Self::Feed];
+
+    /// The place this tab shows, when it is one: Main is the chat list, which is not a place
+    /// but the ground the places are drawn onto.
+    #[must_use]
+    pub fn place(self) -> Option<Place> {
+        match self {
+            Self::Main => None,
+            Self::Friends => Some(Place::Friends),
+            Self::Rooms => Some(Place::Rooms),
+            Self::Feed => Some(Place::Feed),
         }
     }
 }
@@ -296,5 +353,31 @@ impl Context<'_> {
     /// Asks the shell to present conversations the other way once this frame is finished.
     pub fn want_navigation(&mut self, mode: NavigationMode) {
         *self.navigation_choice = Some(mode);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The main window's strip is Main plus the Contacts tabs, in that order, and only Main is
+    /// not a place: pinned so the two strips cannot drift apart as tabs are added, and so
+    /// nothing can quietly make the chat list a place — with a window, a menu entry and a
+    /// routing path — when its whole point is to be the ground.
+    #[test]
+    fn the_main_window_strip_is_main_then_the_contacts_tabs() {
+        assert_eq!(
+            MainTab::TABS,
+            [
+                MainTab::Main,
+                MainTab::Friends,
+                MainTab::Rooms,
+                MainTab::Feed
+            ]
+        );
+        assert_eq!(MainTab::Main.place(), None);
+        assert_eq!(MainTab::Friends.place(), Some(Place::Friends));
+        assert_eq!(MainTab::Rooms.place(), Some(Place::Rooms));
+        assert_eq!(MainTab::Feed.place(), Some(Place::Feed));
     }
 }

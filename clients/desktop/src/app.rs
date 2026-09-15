@@ -42,7 +42,7 @@ use crate::ui::server_form::AutoStatus;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
 use crate::ui::wallet::{TrackingTx, WalletState};
-use crate::ui::{widgets, ChatLogAction, Context, NavigationMode, Place, Screen};
+use crate::ui::{widgets, ChatLogAction, Context, MainTab, NavigationMode, Place, Screen};
 
 /// The whole application state.
 pub struct App {
@@ -50,8 +50,9 @@ pub struct App {
     net: Net,
     screen: Screen,
     /// The signed-in shell's own state: which windows are open, which tab the Contacts window is
-    /// on, and when the session started. Everything else a window manager remembers — position,
-    /// size, stacking — is egui's, keyed by the window ids [`crate::ui::desktop`] mints.
+    /// on, which tab the Chat List Mode main window's strip is on, and when the session started.
+    /// Everything else a window manager remembers — position, size, stacking — is egui's, keyed
+    /// by the window ids [`crate::ui::desktop`] mints.
     desktop: Desktop,
     connection: Connection,
     /// Whether this session negotiated RICH_PRESENCE, filed from the worker's connect event.
@@ -1322,11 +1323,15 @@ impl App {
     /// then the conversation windows, then the side windows.
     ///
     /// Read-only on purpose — the list is a view of [`Desktop`], and building it from anything
-    /// else would give the taskbar a second opinion about what is open.
+    /// else would give the taskbar a second opinion about what is open. The Contacts window
+    /// earns its entry only under Tabbed navigation: under Chat List Mode the window does not
+    /// exist, and the three tabs it would have carried are the main window's own strip, which
+    /// is the ground the taskbar's buttons float over — listing it would be a button for the
+    /// desktop itself.
     fn task_entries(&self) -> Vec<TaskEntry> {
         let me = self.account.as_ref().map(|a| a.account_id);
         let mut entries = Vec::new();
-        if self.desktop.contacts_open {
+        if self.desktop.contacts_open && self.settings.navigation_mode == NavigationMode::Tabbed {
             entries.push(TaskEntry {
                 id: desktop::contacts_id(),
                 label: "Contacts".to_owned(),
@@ -1382,7 +1387,10 @@ impl App {
     /// The Contacts window: the account bar, the three tabs, and the tab's content — the
     /// reference's left panel, promoted from a pane to a window of its own.
     ///
-    /// The window's close button is allowed to close it, because the taskbar's Migo button is
+    /// The window exists only under Tabbed navigation; under Chat List Mode the same three tabs
+    /// ride the main window's own strip beside Main (see [`Self::chat_list_ground`]), and a
+    /// second floating copy of the lists would be two windows claiming to be one truth. The
+    /// window's close button is allowed to close it, because the taskbar's Migo button is
     /// the way back; a contacts list that cannot be got out of the way is not a window, it is a
     /// wall.
     fn contacts_window(
@@ -1424,7 +1432,7 @@ impl App {
                                 ui,
                                 self.theme,
                                 candidate.label(),
-                                Some(candidate),
+                                Some(candidate.into()),
                                 tab == candidate,
                                 false,
                             );
@@ -1452,10 +1460,10 @@ impl App {
         }
     }
 
-    /// The account bar the Contacts window carries where the old shell had its banner: the
-    /// orange band that owns the account — avatar, name, the one live fact about the
-    /// connection, and, stacked at the right end, the $MIG balance above the theme toggle, the
-    /// account menu and the alert bell.
+    /// The account bar the Contacts window — and, under Chat List Mode, the main window —
+    /// carries where the old shell had its banner: the orange band that owns the account —
+    /// avatar, name, the one live fact about the connection, and, stacked at the right end, the
+    /// $MIG balance above the theme toggle, the account menu and the alert bell.
     fn account_bar(
         &mut self,
         ctx: &egui::Context,
@@ -1680,12 +1688,23 @@ impl App {
     /// so the facts it shows are the facts it asked for when it arrived, and what the menu click
     /// owes the user is the window itself, on top.
     ///
-    /// A Contacts tab has no window of its own to raise — it is a tab — so asking for one here is
-    /// routed to the Contacts window: the tab switches, the window comes up. Nothing in this shell
-    /// asks that way today, but the guard is what keeps the two window kinds from drifting into
-    /// one another as the menus grow.
+    /// A Contacts tab has no window of its own to raise — it is a tab — so asking for one here
+    /// is routed to wherever that mode carries the tabs: the Contacts window under Tabbed
+    /// navigation, the main window's own strip under Chat List Mode, where there is no window
+    /// to bring up and the ask just switches the tab. Nothing in this shell asks that way
+    /// today, but the guard is what keeps the two window kinds from drifting into one another
+    /// as the menus grow.
     fn open_side(&mut self, ctx: &egui::Context, place: Place) {
         if !place.is_side_window() {
+            if self.settings.navigation_mode == NavigationMode::ChatList {
+                self.desktop.main_tab = match place {
+                    Place::Rooms => MainTab::Rooms,
+                    Place::Feed => MainTab::Feed,
+                    _ => MainTab::Friends,
+                };
+                self.entered_place(place);
+                return;
+            }
             self.desktop.contacts_tab = place;
             self.desktop.contacts_open = true;
             self.entered_place(place);
@@ -1760,14 +1779,17 @@ impl App {
         }
     }
 
-    /// The Chat List Mode ground: the conversation list as the main window's own content.
+    /// The Chat List Mode ground: the main window as the phone's home, not a desk.
     ///
-    /// This is the mode's whole presentation (see [`crate::ui::chat_list`]): the phone's home,
-    /// translated to a desktop ground — the list is what the window *is*, not a pane docked
-    /// beside a chat, and everything else on the desktop (the Contacts window, the side windows,
-    /// the taskbar) is exactly what tabbed navigation draws, because the navigation choice is
-    /// about the chat area's ground and nothing else. Opening a conversation from the list mints
-    /// that thread's own floating, closable window — the same window, drawn by the same
+    /// This is the mode's whole presentation (see [`crate::ui::chat_list`]): the main window
+    /// carries the account bar, then a four-tab strip — Main (the conversation list, the mode's
+    /// own ground and its default tab), then Friends, Rooms and Feed in the Contacts window's
+    /// order — then the picked tab's content. The strip is drawn exactly the way the Contacts
+    /// window's is (the same chips, on the same nav teal), so the two modes read as one idea
+    /// carried by two windows, and the tab content is [`Self::place_content`] — the same show
+    /// functions, on the same states, that the Contacts window calls under Tabbed navigation,
+    /// where the Contacts window does not exist at all. Opening a conversation from the list
+    /// mints that thread's own floating, closable window — the same window, drawn by the same
     /// [`Self::chat_window`], that tabbed navigation mints — so a conversation is read in a
     /// window of its own and closing it (the button, the taskbar, or Escape) drops the window
     /// and leaves the person back on the list, which never went away: "back" is not a
@@ -1780,23 +1802,79 @@ impl App {
         zoom_choice: &mut Option<f32>,
         navigation_choice: &mut Option<NavigationMode>,
     ) {
-        let mut context = Context {
-            theme: self.theme,
-            connection: &self.connection,
-            account: self.account.as_ref(),
-            server: &self.auth.server,
-            commands: &mut self.commands,
-            rich_presence: self.rich_presence,
-            chat_log_auto_save: self.settings.auto_save_chat_logs,
-            chat_log: &mut self.chat_log_actions,
-            navigation_mode: self.settings.navigation_mode,
-            voice_speed: self.settings.voice_speed(),
-            navigate: &mut *navigate,
-            theme_choice: &mut *theme_choice,
-            zoom_choice: &mut *zoom_choice,
-            navigation_choice: &mut *navigation_choice,
-        };
-        crate::ui::chat_list::show(ui, &mut context, &mut self.chat_list, &mut self.chat);
+        // Cloned for the account bar, which wants the context the way the Contacts window's
+        // does — the menu and its popups live on the shared context, not on this ui.
+        let ctx = ui.ctx().clone();
+        let colors = palette(self.theme);
+        let tab = self.desktop.main_tab;
+        let mut picked: Option<MainTab> = None;
+
+        self.account_bar(&ctx, ui, theme_choice);
+        ui.add_space(space::XS);
+        // The strip on the window's own nav teal, the same chips the Contacts window's strip
+        // draws — one strip, one vocabulary — with Main first because it is the ground the
+        // other three are drawn onto.
+        egui::Frame::new()
+            .fill(colors.nav)
+            .corner_radius(egui::CornerRadius::same(radius::SM))
+            .inner_margin(egui::Margin::same(space::XS as i8))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    for candidate in MainTab::TABS {
+                        let outcome = widgets::tab_chip(
+                            ui,
+                            self.theme,
+                            candidate.label(),
+                            Some(candidate.into()),
+                            tab == candidate,
+                            false,
+                        );
+                        if outcome.clicked {
+                            picked = Some(candidate);
+                        }
+                    }
+                });
+            });
+        widgets::divider(ui, self.theme);
+
+        if let Some(place) = tab.place() {
+            self.place_content(
+                ui,
+                place,
+                navigate,
+                theme_choice,
+                zoom_choice,
+                navigation_choice,
+            );
+        } else {
+            let mut context = Context {
+                theme: self.theme,
+                connection: &self.connection,
+                account: self.account.as_ref(),
+                server: &self.auth.server,
+                commands: &mut self.commands,
+                rich_presence: self.rich_presence,
+                chat_log_auto_save: self.settings.auto_save_chat_logs,
+                chat_log: &mut self.chat_log_actions,
+                navigation_mode: self.settings.navigation_mode,
+                voice_speed: self.settings.voice_speed(),
+                navigate: &mut *navigate,
+                theme_choice: &mut *theme_choice,
+                zoom_choice: &mut *zoom_choice,
+                navigation_choice: &mut *navigation_choice,
+            };
+            crate::ui::chat_list::show(ui, &mut context, &mut self.chat_list, &mut self.chat);
+        }
+
+        if let Some(target) = picked {
+            self.desktop.main_tab = target;
+            // A place tab is entered the way the Contacts window enters one: the first reads
+            // happen on the switch. Main needs none — the list is local state the shell
+            // already holds.
+            if let Some(place) = target.place() {
+                self.entered_place(place);
+            }
+        }
     }
 
     /// One side window: a small floating pane opened from the account menu — profile, wallet,
@@ -2217,7 +2295,12 @@ impl eframe::App for App {
             // The taskbar first, so the desktop surface and every window know where its edge is.
             let entries = self.task_entries();
             let session = self.desktop.session_start.map(|start| start.elapsed());
-            let contacts_open = self.desktop.contacts_open;
+            // The Contacts window exists only under Tabbed navigation, so that is the only mode
+            // in which the brand button has a window to toggle: under Chat List Mode it is
+            // reported closed, every click takes the "bring the home surface back" path, and
+            // the handler below lands it on the main window's Main tab.
+            let contacts_open = self.desktop.contacts_open
+                && self.settings.navigation_mode == NavigationMode::Tabbed;
             let actions = desktop::taskbar(
                 ui,
                 self.theme,
@@ -2229,7 +2312,13 @@ impl eframe::App for App {
             for action in actions {
                 match action {
                     TaskAction::Toggle(id) => desktop::toggle(&ctx, id),
-                    TaskAction::ShowContacts => self.desktop.contacts_open = true,
+                    TaskAction::ShowContacts => {
+                        if self.settings.navigation_mode == NavigationMode::ChatList {
+                            self.desktop.main_tab = MainTab::Main;
+                        } else {
+                            self.desktop.contacts_open = true;
+                        }
+                    }
                     TaskAction::Logout => self.desktop.logout_dialog = true,
                 }
             }
@@ -2249,9 +2338,10 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 // Signed in under tabbed navigation, the surface draws nothing: the desk is
                 // plain teal, only the ground the windows float on, and the windows own its
-                // whole height. Chat List Mode makes the list itself the ground — the window's
-                // own content, on the surface fill the list expects — because in that mode the
-                // list is what the window is, and the conversations float over it as windows.
+                // whole height. Chat List Mode makes the main window the mode's whole home —
+                // the account bar, the four-tab strip, and the picked tab's content on the
+                // surface fill the list expects — because in that mode the main window is the
+                // home, and the conversations float over it as windows.
                 if !signed_in {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
@@ -2293,13 +2383,19 @@ impl eframe::App for App {
             // signal that a window wants to exist when this frame is done.
             let open_seq_before = self.chat.open_seq;
 
-            self.contacts_window(
-                &ctx,
-                &mut navigate,
-                &mut theme_choice,
-                &mut zoom_choice,
-                &mut navigation_choice,
-            );
+            // The Contacts window is the Tabbed Mode way of carrying Friends, Rooms and Feed;
+            // Chat List Mode carries them as the main window's own tabs instead, so the window
+            // is not drawn in that mode — a floating copy of the lists beside their tabbed
+            // selves would be two windows claiming to be one truth.
+            if self.settings.navigation_mode == NavigationMode::Tabbed {
+                self.contacts_window(
+                    &ctx,
+                    &mut navigate,
+                    &mut theme_choice,
+                    &mut zoom_choice,
+                    &mut navigation_choice,
+                );
+            }
             // The conversation windows are drawn in open order, which is the cascade: a window's
             // index is its birthplace, and the list is cloned because closing one rewrites it.
             // Both navigation modes: Chat List Mode's conversations are the same floating,

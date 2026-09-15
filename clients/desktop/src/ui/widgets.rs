@@ -256,6 +256,74 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
     }
 }
 
+/// What a tab chip's icon stands for: a place, or the chat list itself.
+///
+/// The Chat List Mode main window's strip carries a Main tab beside Friends, Rooms and Feed,
+/// and the chat list is not a [`crate::ui::Place`] — it is the ground the places are drawn
+/// onto, with no window, no menu entry and no routing of its own — so the chip's icon takes
+/// this small enum rather than a `Place`, and Main gets an icon of its own
+/// ([`main_icon`]) so it reads as a peer of the three beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipIcon {
+    /// One of the places, drawn by [`place_icon`].
+    Place(crate::ui::Place),
+    /// The chat list, drawn by [`main_icon`].
+    Main,
+}
+
+impl From<crate::ui::Place> for ChipIcon {
+    fn from(place: crate::ui::Place) -> Self {
+        Self::Place(place)
+    }
+}
+
+impl From<crate::ui::MainTab> for ChipIcon {
+    fn from(tab: crate::ui::MainTab) -> Self {
+        match tab {
+            crate::ui::MainTab::Main => Self::Main,
+            crate::ui::MainTab::Friends => Self::Place(crate::ui::Place::Friends),
+            crate::ui::MainTab::Rooms => Self::Place(crate::ui::Place::Rooms),
+            crate::ui::MainTab::Feed => Self::Place(crate::ui::Place::Feed),
+        }
+    }
+}
+
+/// The chat list's own icon for the Main tab: a speech bubble carrying the list's rows.
+///
+/// Painted in the strip's stroke style — the same 20px box, the same 1.75 stroke weight, the
+/// same accent-when-active ink every place icon takes — because a tab chip's icon is part of
+/// the strip's vocabulary, and the one tab that is not a place should not be the one tab that
+/// looks drawn by somebody else.
+pub fn main_icon(ui: &mut Ui, theme: Theme, active: bool) {
+    let colors = palette(theme);
+    let stroke = egui::Stroke::new(
+        1.75,
+        if active {
+            colors.accent
+        } else {
+            colors.text_muted
+        },
+    );
+    let side = 20.0;
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(side), Sense::hover());
+    let painter = ui.painter().clone();
+    let min = rect.min;
+    let p = |x: f32, y: f32| egui::pos2(min.x + x * side, min.y + y * side);
+    // The bubble: a rounded box with a tail, saying "conversation", and three rows inside it
+    // saying "a list of them" — the two facts the Main tab stands for.
+    painter.rect_stroke(
+        egui::Rect::from_min_max(p(0.08, 0.12), p(0.92, 0.7)),
+        4.0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment([p(0.3, 0.7), p(0.3, 0.9)], stroke);
+    painter.line_segment([p(0.3, 0.9), p(0.48, 0.7)], stroke);
+    for y in [0.3, 0.46, 0.62] {
+        painter.line_segment([p(0.2, y), p(0.8, y)], stroke);
+    }
+}
+
 /// The bell's own geometry: a dome, a lip, and a clapper, in a unit box whose top-left corner is
 /// `min` and whose side is `side`.
 ///
@@ -331,7 +399,7 @@ pub fn tab_chip(
     ui: &mut Ui,
     theme: Theme,
     label: &str,
-    icon: Option<crate::ui::Place>,
+    icon: Option<ChipIcon>,
     active: bool,
     closable: bool,
 ) -> ChipOutcome {
@@ -383,7 +451,7 @@ pub fn tab_chip(
     }
 
     let mut at = rect.left() + padding.x;
-    if let Some(place) = icon {
+    if let Some(icon) = icon {
         let icon_rect = egui::Rect::from_min_size(
             egui::pos2(at, rect.center().y - 10.0),
             egui::vec2(20.0, 20.0),
@@ -399,7 +467,10 @@ pub fn tab_chip(
             override_text_color: Some(ink),
             ..egui::Visuals::dark()
         });
-        place_icon(&mut inner, theme, place, active);
+        match icon {
+            ChipIcon::Place(place) => place_icon(&mut inner, theme, place, active),
+            ChipIcon::Main => main_icon(&mut inner, theme, active),
+        }
         at += icon_room;
     }
     ui.painter().galley(

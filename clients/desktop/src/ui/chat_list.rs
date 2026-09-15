@@ -4,13 +4,15 @@
 //!
 //! Navigation Mode (see [`crate::ui::NavigationMode`]) decides what the main window's ground
 //! is, and in Chat List Mode the ground is this list — the phone's home, translated to a
-//! desktop: the list is the window's own content, not a pane docked beside a chat. The list is
-//! presentation only — the rows are the conversation summaries the session already holds, the
-//! unread counts are the counts the rest of the client reads, and a click opens a conversation
-//! the one way there is, [`crate::ui::chat::open`], so there is no second chat system to keep
-//! true. The shell mints the opened conversation its own floating, closable window (the same
-//! window tabbed navigation mints), and closing that window is the mode's "back": the list
-//! never went away, so returning to it is not a navigation the list owes anyone.
+//! desktop: the list is the main window's Main tab (see [`crate::ui::MainTab`]), drawn under
+//! the account bar and the window's four-tab strip, beside Friends, Rooms and Feed — not a
+//! pane docked beside a chat and not a floating window. The list is presentation only — the
+//! rows are the conversation summaries the session already holds, the unread counts are the
+//! counts the rest of the client reads, and a click opens a conversation the one way there is,
+//! [`crate::ui::chat::open`], so there is no second chat system to keep true. The shell mints
+//! the opened conversation its own floating, closable window (the same window tabbed
+//! navigation mints), and closing that window is the mode's "back": the list never went away,
+//! so returning to it is not a navigation the list owes anyone.
 //!
 //! The search field is the list's own and filters locally, by title, because every title it
 //! needs is already on the device — a round trip for a prefix the eye can match faster than
