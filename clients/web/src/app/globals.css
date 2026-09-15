@@ -3505,7 +3505,8 @@ main {
   border: 1px solid var(--accent-border-soft);
 }
 
-/* The room details drawer, expanded under a room thread's header. */
+/* The room details drawer, expanded under a room thread's header. Only the 1:1 safety numbers
+   stay a drawer — a short, static panel that shares the column with the transcript it annotates. */
 .room-info {
   flex-shrink: 0;
   max-height: 42%;
@@ -3513,6 +3514,42 @@ main {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+}
+
+/* A members panel is the thread's body, not a drawer. While a room's or a group's details are
+   open, the chat window withholds the transcript and the composer entirely, so the panel stretches
+   to fill the whole column below the fixed header instead of capping at 42% and scrolling all of
+   itself in one region. The panel becomes a flex column that never scrolls as a whole; the roster
+   is its scrollable body, and the head, the founder's rename form, and the invite tools stay
+   pinned above the roster, always reachable without scrolling past members to find them. */
+.room-info-members {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+
+/* The invite tools yield before the roster does: a long friends list or a burst of username hits
+   scrolls inside its own section rather than crowding the members out of the panel, while the
+   members keep at least a quarter of the column for themselves. */
+.room-info-members .invite-section {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.room-info-members .members-section {
+  flex: 1 1 0;
+  min-height: 25%;
+}
+
+/* The roster itself is the scroll region in both panels: directly under the head in a room, and
+   inside the members section in a group (the section is a .panel-section, already a column). */
+.room-info-members .roster-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ── The 1:1 verification surface ─────────────────────────────────────────────────────────────

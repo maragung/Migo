@@ -659,7 +659,10 @@ export function GroupInfoPanel({
   const now = Date.now();
 
   return (
-    <div className="room-info" aria-label="Group details">
+    // The members variant of the details panel: the chat window stands the transcript and the
+    // composer down while this is open, and the panel fills the whole column below the header —
+    // the roster scrolls inside it, the invite tools above it stay pinned and reachable.
+    <div className="room-info room-info-members" aria-label="Group details">
       {error ? <p className="form-error">{error}</p> : null}
 
       <div className="panel-head">
@@ -699,7 +702,10 @@ export function GroupInfoPanel({
         </form>
       ) : null}
 
-      <div className="panel-section" aria-label="Invite to group">
+      {/* The invite tools are pinned above the roster but bound themselves: the members section
+          below owns the panel's leftover height, so this section scrolls inside its own bounds
+          when a friends list or a result burst outgrows its share. */}
+      <div className="panel-section invite-section" aria-label="Invite to group">
         <h3 className="panel-heading">Invite</h3>
         <label className="field-label">
           Search by username
@@ -767,7 +773,7 @@ export function GroupInfoPanel({
           <Spinner />
         </div>
       ) : (
-        <div className="panel-section" aria-label="Members">
+        <div className="panel-section members-section" aria-label="Members">
           <h3 className="panel-heading">
             Members ({roster.filter((entry) => entry.leftAt === undefined).length})
           </h3>
