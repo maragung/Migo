@@ -140,6 +140,35 @@ enum class ThemeChoice {
 }
 
 /**
+ * How fast a received voice note plays back.
+ *
+ * The choice is the receiver's own, made on the player itself, and it is a client-side fact by
+ * brief section 167's rule: the three rates are applied to the audio this device already holds,
+ * never a reason to ask the server for the media again. Stored here rather than in any
+ * session-scoped place because it is a preference about listening, not a fact about any one
+ * conversation -- the rate a person chose on one note is the rate the next note starts at.
+ */
+enum class VoiceNoteSpeed(val rate: Float, val label: String) {
+    /** Ordinary speed, and the default a fresh install plays at. */
+    Speed1x(1.0f, "1x"),
+
+    /** Half again as fast. */
+    Speed15x(1.5f, "1.5x"),
+
+    /** Twice as fast. */
+    Speed2x(2.0f, "2x"),
+
+    ;
+
+    /**
+     * The next rate in the player's cycle: 1x, 1.5x, 2x, back to 1x. The control on the bubble is
+     * one tap that steps through the three, because a speed menu on a 280dp-wide row is chrome a
+     * cycle replaces.
+     */
+    fun next(): VoiceNoteSpeed = entries[(ordinal + 1) % entries.size]
+}
+
+/**
  * When an attachment is fetched without being asked for.
  *
  * A choice with a cost either way: automatic download spends the user's data plan, and manual download
@@ -273,6 +302,16 @@ data class AppSettings(
     val mediaAutoDownload: MediaAutoDownload = MediaAutoDownload.Unmetered,
 
     /**
+     * The rate a received voice note plays at, from the player's own speed control.
+     *
+     * A preference and not a conversation fact, so it lives beside [mediaAutoDownload] rather than
+     * in any per-message state: the person chose how fast they listen, and the next bubble to open
+     * starts at the same rate. The sender is never told — the rate is applied to the bytes this
+     * device already decrypted, and no receipt carries it.
+     */
+    val voiceNoteSpeed: VoiceNoteSpeed = VoiceNoteSpeed.Speed1x,
+
+    /**
      * Whether closing a conversation window writes that conversation's transcript to app-private
      * storage as a plain-text log.
      *
@@ -331,6 +370,7 @@ private val KEY_SEND_READ_RECEIPTS = booleanPreferencesKey("send_read_receipts")
 private val KEY_SEND_TYPING = booleanPreferencesKey("send_typing_indicators")
 private val KEY_SHARE_PRESENCE = booleanPreferencesKey("share_presence")
 private val KEY_MEDIA_AUTO_DOWNLOAD = stringPreferencesKey("media_auto_download")
+private val KEY_VOICE_NOTE_SPEED = stringPreferencesKey("voice_note_speed")
 private val KEY_AUTO_SAVE_CHAT_LOGS = booleanPreferencesKey("auto_save_chat_logs")
 private val KEY_ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
 private val KEY_LAST_BACKUP_EXPORT_MS = longPreferencesKey("last_backup_export_ms")
@@ -371,6 +411,11 @@ private fun Preferences.toAppSettings(): AppSettings {
             MediaAutoDownload.entries,
             defaults.mediaAutoDownload,
         ),
+        voiceNoteSpeed = readEnum(
+            this[KEY_VOICE_NOTE_SPEED],
+            VoiceNoteSpeed.entries,
+            defaults.voiceNoteSpeed,
+        ),
         autoSaveChatLogs = this[KEY_AUTO_SAVE_CHAT_LOGS] ?: defaults.autoSaveChatLogs,
         onboardingComplete = this[KEY_ONBOARDING_COMPLETE] ?: defaults.onboardingComplete,
         lastBackupExportMs = this[KEY_LAST_BACKUP_EXPORT_MS] ?: defaults.lastBackupExportMs,
@@ -397,6 +442,7 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_SEND_TYPING] = sendTypingIndicators
     preferences[KEY_SHARE_PRESENCE] = sharePresence
     preferences[KEY_MEDIA_AUTO_DOWNLOAD] = mediaAutoDownload.name
+    preferences[KEY_VOICE_NOTE_SPEED] = voiceNoteSpeed.name
     preferences[KEY_AUTO_SAVE_CHAT_LOGS] = autoSaveChatLogs
     preferences[KEY_ONBOARDING_COMPLETE] = onboardingComplete
     preferences[KEY_LAST_BACKUP_EXPORT_MS] = lastBackupExportMs
