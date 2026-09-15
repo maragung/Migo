@@ -15,6 +15,7 @@ import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.MemberChange
+import com.migo.core.protocol.NotificationKind
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.ProgressionWire
 import com.migo.core.protocol.RankWire
@@ -235,6 +236,64 @@ data class ActivityRow(
 
 /** The stream's categories, each a filter over the merged rows. */
 enum class ActivityCategory { SOCIAL, ROOMS, GAMES, ECONOMY }
+
+/**
+ * The sentence an inbox row's kind renders as, when the row carries no title of its own.
+ *
+ * The wire hands the kind over as its number's text (`"15"` is a group invitation), so the number
+ * is read back through the protocol's own enum and answered with the same fixed sentence the
+ * server's wake-up composes for a lock screen — the two surfaces agree because there is one list
+ * of words, not two. A kind the enum does not know keeps the spaced-form rendering the list always
+ * had, so a future server's new number reads as itself rather than as nothing.
+ */
+fun notificationLabel(item: InboxItem): String {
+    val sentence = item.kind.toLongOrNull()
+        ?.let(NotificationKind::fromWire)
+        ?.let(::kindSentence)
+    return sentence ?: item.kind.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
+/**
+ * The stream category an inbox row files under: the same kind-to-category reading the view model
+ * once spelled with string matches, on the decoded enum instead — the number the wire carries
+ * never contained the words those matches listened for.
+ */
+fun notificationCategory(item: InboxItem): ActivityCategory = when (
+    item.kind.toLongOrNull()?.let(NotificationKind::fromWire)
+) {
+    NotificationKind.Gift,
+    NotificationKind.LevelUp,
+    NotificationKind.Achievement,
+    -> ActivityCategory.ECONOMY
+
+    NotificationKind.GameChallenge -> ActivityCategory.GAMES
+
+    NotificationKind.RoomInvite,
+    NotificationKind.RoomAnnouncement,
+    -> ActivityCategory.ROOMS
+
+    else -> ActivityCategory.SOCIAL
+}
+
+/** The kind's own sentence, or null for the kinds that never reach an inbox row. */
+private fun kindSentence(kind: NotificationKind): String? = when (kind) {
+    NotificationKind.Message -> "New message"
+    NotificationKind.Mention -> "You were mentioned"
+    NotificationKind.Reply -> "New reply"
+    NotificationKind.FriendRequest -> "New friend request"
+    NotificationKind.Gift -> "You received a gift"
+    NotificationKind.LevelUp -> "You levelled up"
+    NotificationKind.Achievement -> "Achievement unlocked"
+    NotificationKind.RoomInvite -> "Room invitation"
+    NotificationKind.RoomAnnouncement -> "Room announcement"
+    NotificationKind.Event -> "Upcoming event"
+    NotificationKind.GameChallenge -> "Game challenge"
+    NotificationKind.VoiceNote -> "New voice message"
+    NotificationKind.MissedCall -> "Missed call"
+    NotificationKind.IncomingCall -> "Incoming call"
+    NotificationKind.GroupInvite -> "Group invitation"
+    NotificationKind.Unknown -> null
+}
 
 /** The Friends section: the relationship graph, the suggestions, and the acting state. */
 data class FriendsState(

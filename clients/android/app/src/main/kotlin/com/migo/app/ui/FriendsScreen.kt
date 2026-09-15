@@ -52,12 +52,14 @@ import com.migo.core.protocol.SuggestedUser
 import kotlinx.coroutines.delay
 
 /**
- * The Friends home view: the relationship graph, its pending requests, and the suggestions.
+ * The Friends home view: the relationship graph, its pending requests, its blocks, and the
+ * suggestions.
  *
  * The graph is server-owned — every action here asks the server and the view model re-reads the
  * result, so this screen never holds a local mirror. A friend row is tapped along its whole length
- * to open the friend intent sheet, whose primary act is the message; a request row carries its two
- * answers; a suggestion carries its one.
+ * to open the friend intent sheet, whose primary act is the message and whose other doors end the
+ * friendship, quietly or with a block; a request row carries its two answers; a blocked row carries
+ * its one; a suggestion carries its one.
  */
 @Composable
 fun FriendsScreen(
@@ -81,6 +83,8 @@ fun FriendsScreen(
     onToggleGroupPick: (com.migo.core.wire.Id) -> Unit = {},
     /** Creates the group from the picked members and opens its thread. */
     onCreateGroup: () -> Unit = {},
+    /** Lifts the caller's own block on one account, from the Blocked section's row. */
+    onUnblock: (com.migo.core.wire.Id) -> Unit = {},
     /**
      * The session's avatars, by account id — the friends list's pictures, absent keys rendering
      * as the monogram the row already drew.
@@ -120,10 +124,12 @@ fun FriendsScreen(
     val kindFriend: Long = RelationshipKind.Friend.wire.toLong()
     val kindIncoming: Long = RelationshipKind.PendingIncoming.wire.toLong()
     val kindOutgoing: Long = RelationshipKind.PendingOutgoing.wire.toLong()
+    val kindBlocked: Long = RelationshipKind.Block.wire.toLong()
     val entries = state.friends.entries
     val friends = entries.filter { it.kind == kindFriend }
     val incoming = entries.filter { it.kind == kindIncoming }
     val outgoing = entries.filter { it.kind == kindOutgoing }
+    val blocked = entries.filter { it.kind == kindBlocked }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
         // The header carries the search behind its own icon, to the left of the new-group
@@ -252,6 +258,23 @@ fun FriendsScreen(
                     }
                 }
 
+                // The blocks, when there are any: the graph's own Block rows, the one surface the
+                // block list gets, because a block that could not be seen could not be lifted. The
+                // section stands between the friends and the strangers so the list reads people
+                // first and edges-last, and shows nothing at all when nothing is blocked — a
+                // heading over an empty set is a heading nobody asked for.
+                if (blocked.isNotEmpty()) {
+                    item { SectionLabel(text = "Blocked") }
+                    items(blocked, key = { "blk-" + it.userId.value }) { entry ->
+                        BlockedRow(
+                            name = nameOf(entry.userId) ?: shortId(entry.userId),
+                            busy = state.friends.busy.contains(entry.userId),
+                            onUnblock = { onUnblock(entry.userId) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    }
+                }
+
                 // The search's people answers, when a query is held.
                 val found = state.search.people
                 if (found != null && found.isNotEmpty()) {
@@ -365,6 +388,37 @@ private fun RequestRow(
         }
         TextButton(onClick = onDecline, enabled = !busy) { Text("Decline") }
         Button(onClick = onAccept, enabled = !busy) { Text("Accept") }
+    }
+}
+
+/**
+ * One blocked account: the person, the fact, and the one way out.
+ *
+ * The row says what a block is rather than what it might undo — unblocking restores nothing the
+ * block tore down, so the row does not offer to. The Unblock button acts on the tap: unlike the
+ * friendship's end, a block lifted is reversible by blocking again, and it is the blocker's own
+ * edge being returned, so there is nothing here that needs confirming past the press.
+ */
+@Composable
+private fun BlockedRow(
+    name: String,
+    busy: Boolean,
+    onUnblock: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ListRowAvatar(name = name)
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            ListRowName(text = name)
+            ListRowLine(text = "Blocked — they cannot reach you")
+        }
+        TextButton(onClick = onUnblock, enabled = !busy) { Text("Unblock") }
     }
 }
 

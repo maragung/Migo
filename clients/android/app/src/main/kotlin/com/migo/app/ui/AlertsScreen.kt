@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
+import com.migo.app.model.notificationLabel
 
 /**
  * The Alerts section: the durable inbox and its read state.
@@ -47,7 +48,10 @@ fun AlertsScreen(
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(state.alerts.items, key = { it.id.value }) { item ->
                     ActivityLine(
-                        title = (item.title ?: item.kind.replace('_', ' ').replaceFirstChar { it.uppercase() }),
+                        // The row's own title when the wire sent one; otherwise the kind's fixed
+                        // sentence, the same words a lock screen's wake-up carries — the number the
+                        // wire uses for a kind is never a thing a person reads.
+                        title = item.title ?: notificationLabel(item),
                         at = item.at,
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
