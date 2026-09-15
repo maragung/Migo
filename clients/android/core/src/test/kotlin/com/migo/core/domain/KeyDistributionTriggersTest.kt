@@ -282,18 +282,7 @@ class KeyDistributionTriggersTest {
 
         // The roster as the joiner received it: the joiner's own account seated on another device
         // first, the holder second — the ask must skip the sibling and name the holder.
-        val roster = GroupCallRoster(
-            callId = CALL,
-            conversationId = CONVERSATION,
-            userId = ME,
-            deviceId = ME_DEVICE,
-            participantCount = 3L,
-            participants = listOf(
-                CallSfuParticipant(ME, ME_LAPTOP, NOW - 60_000, byteArrayOf(1)),
-                CallSfuParticipant(ADA, ADA_LAPTOP, NOW - 30_000, byteArrayOf(2)),
-                CallSfuParticipant(ME, ME_DEVICE, NOW, byteArrayOf(3)),
-            ),
-        )
+        val roster = joinerRoster()
         runBlocking {
             f.me.groupCallKeys.requestJoinKey(roster)
             // A second ask while the first stands: the joiner mints no second secret.
@@ -309,9 +298,9 @@ class KeyDistributionTriggersTest {
             ADA_LAPTOP,
             ask.toDevice,
         )
-        // The ask's payload opens at the holder and is exactly a fresh 32-byte secret.
-        val secret = runBlocking { f.ada.sessionCrypto.open(CONVERSATION, ME, ME_DEVICE, ask.sealedSdp) }
-        assertEquals("the ask carries the wrapper secret and nothing else", CALL_KEY_LEN, secret.size)
+        // The ask's payload is *not* opened here: the pairwise ratchet spends a message key on
+        // decrypt, so a test-side open would leave the holder's own open a replay it must refuse.
+        // The payload's shape is pinned by the test below; here the holder opens it for real.
 
         // The relay projects the renegotiation to a CALL_SDP for the asked seat.
         deliver(f.ada, Op.CALL_SDP to asks[0])
@@ -341,6 +330,40 @@ class KeyDistributionTriggersTest {
         runBlocking { f.me.groupCallKeys.requestJoinKey(roster) }
         assertEquals("a seated device does not ask for a key it holds", 1, framesOf(f.me, Op.CALL_RENEGOTIATE).size)
     }
+
+    @Test
+    fun `the ask carries the wrapper secret and nothing else`() {
+        // Its own fixture, because an envelope opens exactly once: the ratchet deletes the message
+        // key on use, so the open that pins the ask's shape cannot also be the open the holder's
+        // answer path performs. Here the test *is* the holder's one open.
+        val f = Fixture()
+        f.ada.groupCallKeys.seated(CALL, CONVERSATION, ByteArray(CALL_KEY_LEN) { 0x22 })
+        f.ada.groupCallKeys.start()
+        f.me.groupCallKeys.start()
+
+        runBlocking { f.me.groupCallKeys.requestJoinKey(joinerRoster()) }
+        val ask = CallRenegotiate.decode(Reader(framesOf(f.me, Op.CALL_RENEGOTIATE).single()))
+        val secret = runBlocking { f.ada.sessionCrypto.open(CONVERSATION, ME, ME_DEVICE, ask.sealedSdp) }
+        assertEquals("the ask carries the wrapper secret and nothing else", CALL_KEY_LEN, secret.size)
+        assertTrue("the holder's open drew no error", f.ada.sink.isEmpty())
+    }
+
+    /**
+     * The roster as the mid-call joiner received it: the joiner's own account seated on another
+     * device first, the holder second — the ask must skip the sibling and name the holder.
+     */
+    private fun joinerRoster(): GroupCallRoster = GroupCallRoster(
+        callId = CALL,
+        conversationId = CONVERSATION,
+        userId = ME,
+        deviceId = ME_DEVICE,
+        participantCount = 3L,
+        participants = listOf(
+            CallSfuParticipant(ME, ME_LAPTOP, NOW - 60_000, byteArrayOf(1)),
+            CallSfuParticipant(ADA, ADA_LAPTOP, NOW - 30_000, byteArrayOf(2)),
+            CallSfuParticipant(ME, ME_DEVICE, NOW, byteArrayOf(3)),
+        ),
+    )
 }
 
 // The same fixture names GroupCallTest uses, so the files read side by side.
