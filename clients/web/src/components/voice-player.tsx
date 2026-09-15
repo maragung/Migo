@@ -370,6 +370,11 @@ export function VoiceNoteBubble({
  * module doc): marking a note unlistened hides nothing the sender was told — it only restores the
  * receiver's own "not heard yet" reminder. Rendered only for received notes, so it can never be
  * mistaken for the sender-side read ticks our own messages carry.
+ *
+ * The glyph is the `🎤` text the voice-note placeholder already uses — not the Icon family's svg —
+ * because this action renders on the placeholder path too (a context with no client), and the
+ * section 122 contract pinned in `media-render.test.tsx` keeps that whole path free of live
+ * `<svg>` elements: the only markup a sender-controlled note may produce there is escaped text.
  */
 export function VoiceListenToggle({ messageId }: { messageId: Id }): ReactNode {
   const listen = useVoiceNoteListened(messageId);
@@ -385,7 +390,7 @@ export function VoiceListenToggle({ messageId }: { messageId: Id }): ReactNode {
       aria-label={listened ? 'Mark voice note as unlistened' : 'Mark voice note as listened'}
       title={listened ? 'Mark as unlistened' : 'Mark as listened'}
     >
-      <Icon name="mic" size={14} />
+      🎤
     </button>
   );
 }
