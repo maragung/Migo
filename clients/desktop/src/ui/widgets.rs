@@ -923,6 +923,36 @@ pub fn fitting_label(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> R
     ui.add(egui::Label::new(galley))
 }
 
+/// A field layouter that wraps the way [`fitting_label`] does: `egui::TextEdit` breaks rows on
+/// whitespace only, so a token no space can break — a URL, a pasted hash — overruns the field's
+/// width and the window clips it. This mirrors the default layouter in every other respect (same
+/// body font and colour, trailing whitespace kept for the same "typing feels weird without it"
+/// reason egui gives, the same row height) so the field reads exactly as a field, except that a
+/// too-long token breaks mid-token instead of running past the edge.
+///
+/// `TextEdit` hands the layouter the wrap width it already resolved — desired width minus the
+/// field's margins — so the token here is the same width the default layouter would have wrapped
+/// at. The colour is a parameter because the caller owns the palette; the theme installs the same
+/// colour as egui's default field text, so passing `colors.text` changes nothing on a plain field.
+pub fn fitting_layouter(
+    ui: &egui::Ui,
+    text: &dyn egui::TextBuffer,
+    wrap_width: f32,
+    color: Color32,
+) -> std::sync::Arc<egui::text::Galley> {
+    let font_id = FontId::proportional(font::BODY);
+    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+    let mut job =
+        egui::text::LayoutJob::simple(text.as_str().to_owned(), font_id, color, wrap_width);
+    job.wrap.break_anywhere = true;
+    job.keep_trailing_whitespace = true;
+    let line_height = row_height + ui.spacing().extra_text_line_spacing;
+    for section in &mut job.sections {
+        section.format.line_height = Some(line_height);
+    }
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
 /// The widest a message bubble may grow: 68% of the pane it sits in, floored at 140px.
 ///
 /// A pure function because two bubbles ask the same question — the text bubble below, and
@@ -1109,5 +1139,47 @@ mod tests {
         assert!((bubble_width_cap(500.0) - 340.0).abs() < f32::EPSILON);
         assert!((bubble_width_cap(100.0) - 140.0).abs() < f32::EPSILON);
         assert!((bubble_width_cap(0.0) - 140.0).abs() < f32::EPSILON);
+    }
+
+    /// The fitting layouter keeps every row inside the width it is handed, even when the
+    /// text is one token no space can break — the composer and the inline editor both hand
+    /// it a field's width and expect a pasted URL to break mid-token rather than run past
+    /// the field's edge. Run against a real egui context because the answer comes from the
+    /// font: a test that guessed widths in pure code would only be testing itself.
+    #[test]
+    fn the_fitting_layouter_breaks_a_long_token_inside_the_wrap_width() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let token = "a".repeat(400);
+            let galley = fitting_layouter(ui, &token, 120.0, Color32::WHITE);
+            // A hair of slack for epaint's pixel rounding of row positions.
+            assert!(
+                galley.size().x <= 121.0,
+                "a too-long token must break mid-token, not overrun the wrap width: {}",
+                galley.size().x
+            );
+            assert!(
+                galley.rows.len() > 1,
+                "a 400-character token in a 120px field must occupy more than one row"
+            );
+
+            // Ordinary prose still wraps at its spaces: the mid-token break is only ever
+            // the row's last resort, so short words land whole on their rows.
+            let prose = "word ".repeat(40);
+            let galley = fitting_layouter(ui, &prose, 120.0, Color32::WHITE);
+            assert!(galley.size().x <= 121.0);
+            assert!(galley.rows.len() > 1);
+            for (index, row) in galley.rows.iter().enumerate() {
+                // Every row but the last ends in the space it broke on — kept, because
+                // the layouter asks egui to keep trailing whitespace — never mid-word.
+                let last = index + 1 == galley.rows.len();
+                let text = row.text();
+                assert!(
+                    last || text.chars().last().is_none_or(|c| c.is_whitespace()),
+                    "a row of ordinary prose must break at a space, not mid-word: {text:?}"
+                );
+            }
+        });
+        output.drop_without_applying_deltas();
     }
 }

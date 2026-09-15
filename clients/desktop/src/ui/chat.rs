@@ -2866,30 +2866,12 @@ fn edit_in_place(
     message: &Message,
     draft: &mut EditDraft,
 ) -> bool {
-    // The field wraps the way the bubble it replaces does. egui's own field layout breaks rows
-    // on whitespace only, so a correction carrying a token no space can break — a URL, a pasted
-    // key — overruns the field's width and the window clips it. The job below mirrors the
-    // default layouter in every other respect (same font and colour, trailing whitespace kept
-    // for the same "typing feels weird without it" reason egui gives, the same row height) so
-    // the editor reads exactly as a field, except that a too-long token breaks mid-token
-    // instead of running past the edge.
-    let colors = palette(context.theme);
+    // The field wraps the way the bubble it replaces does, via the shared fitting layouter: a
+    // correction carrying a token no space can break — a URL, a pasted key — breaks mid-token
+    // instead of running past the edge and out of the window.
+    let ink = palette(context.theme).text;
     let mut fitting = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-        let font_id = egui::FontId::proportional(font::BODY);
-        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
-        let mut job = egui::text::LayoutJob::simple(
-            text.as_str().to_owned(),
-            font_id,
-            colors.text,
-            wrap_width,
-        );
-        job.wrap.break_anywhere = true;
-        job.keep_trailing_whitespace = true;
-        let line_height = row_height + ui.spacing().extra_text_line_spacing;
-        for section in &mut job.sections {
-            section.format.line_height = Some(line_height);
-        }
-        ui.fonts_mut(|fonts| fonts.layout_job(job))
+        widgets::fitting_layouter(ui, text, wrap_width, ink)
     };
     let field = egui::TextEdit::multiline(&mut draft.text)
         .hint_text("the corrected message")
@@ -3886,8 +3868,17 @@ fn composer(
                     }
                 }
                 // This conversation's own draft, born empty the first time it is typed into and
-                // left exactly as it stands when the window closes.
+                // left exactly as it stands when the window closes. The field lays its text out
+                // through the shared fitting layouter, so a token no space can break — a URL, a
+                // pasted hash — wraps inside the capsule instead of running past its edge. The
+                // layouter changes nothing about the widget's identity: no widget is added or
+                // removed ahead of it on this row, so the auto id — and with it the cursor and
+                // the undo history — is the same id the field always had.
                 let draft = state.drafts.entry(conversation_id).or_default();
+                let ink = colors.text;
+                let mut fitting = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                    widgets::fitting_layouter(ui, text, wrap_width, ink)
+                };
                 let response = ui.add_enabled(
                     online,
                     egui::TextEdit::multiline(draft)
@@ -3898,7 +3889,8 @@ fn composer(
                         })
                         .desired_rows(1)
                         .desired_width(ui.available_width() - send_width - space::SM)
-                        .margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8)),
+                        .margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8))
+                        .layouter(&mut fitting),
                 );
                 // The pill: the input's own frame is rounded to the composer's capsule shape.
                 let pill =

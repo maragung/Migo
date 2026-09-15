@@ -1510,36 +1510,21 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     widgets::banner_avatar(ui, self.theme, &shown_name, 32.0);
                     ui.add_space(space::SM);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(widgets::elide(&shown_name, 20))
-                                .font(egui::FontId::proportional(font::SUBTITLE))
-                                .color(colors.banner_ink)
-                                .strong(),
-                        )
-                        .on_hover_text(format!("@{username}"));
-                        // The connection dot travels with the name: the one live fact about the
-                        // session, stated where the account is.
-                        ui.horizontal(|ui| {
-                            let (dot, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(dot.center(), 3.5, dot_color);
-                            ui.label(
-                                egui::RichText::new(dot_label)
-                                    .font(egui::FontId::proportional(font::TINY))
-                                    .color(colors.banner_ink),
-                            )
-                            .on_hover_text(&connection_detail);
-                        });
-                    });
-
-                    // The bar's right end is two rows, stacked: the balance on top, the
-                    // controls under it. The $MIG figure sits above the alert bell and the
-                    // account menu because it is the fact the person checks at a glance and the
-                    // controls are the doors they walk through — a figure wedged between doors
-                    // reads as neither, and the bottom bar's connection chip took the figure's
-                    // old stand at the other end of the screen.
+                    // The rest of the row runs right to left, so the bar's right end is laid
+                    // out first and the name column below is drawn into whatever width is
+                    // left between it and the avatar. The bar is laid out at whatever width
+                    // its parent gives it — the Contacts window's 360px birthplace, whatever
+                    // the person resized that window to, and the main window's whole breadth
+                    // under Chat List Mode — so the name truncates at the row's real width
+                    // (the conversation rows' own rule) rather than at a character count
+                    // tuned to one width.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // The bar's right end is two rows, stacked: the balance on top, the
+                        // controls under it. The $MIG figure sits above the alert bell and the
+                        // account menu because it is the fact the person checks at a glance and the
+                        // controls are the doors they walk through — a figure wedged between doors
+                        // reads as neither, and the bottom bar's connection chip took the figure's
+                        // old stand at the other end of the screen.
                         ui.vertical(|ui| {
                             // The balance, the session's real $MIG. Gold on the dark inset, the
                             // same coin colour the figure wore on the taskbar chip it left —
@@ -1663,6 +1648,38 @@ impl App {
                                     }
                                 },
                             );
+                        });
+                        // The name column, drawn second so it fits the leftover: anchored at
+                        // the left of what remains, beside the avatar, and truncated at the
+                        // stacked end's own left edge. The elision tooltip stays off because
+                        // the hover is the account's handle, the way it has always been.
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(shown_name.as_str())
+                                        .font(egui::FontId::proportional(font::SUBTITLE))
+                                        .color(colors.banner_ink)
+                                        .strong(),
+                                )
+                                .truncate()
+                                .show_tooltip_when_elided(false),
+                            )
+                            .on_hover_text(format!("@{username}"));
+                            // The connection dot travels with the name: the one live fact about the
+                            // session, stated where the account is.
+                            ui.horizontal(|ui| {
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(dot.center(), 3.5, dot_color);
+                                ui.label(
+                                    egui::RichText::new(dot_label)
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.banner_ink),
+                                )
+                                .on_hover_text(&connection_detail);
+                            });
                         });
                     });
                 });
