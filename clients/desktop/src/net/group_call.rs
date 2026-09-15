@@ -1037,7 +1037,9 @@ mod tests {
         // The retirement: the last seat left, the call no longer exists server-side.
         assert_eq!(
             calls.spectate(&spectator_event(conversation, call, Some(0))),
-            Some(Spectated::Retired { conversation_id })
+            Some(Spectated::Retired {
+                conversation_id: conversation
+            })
         );
         assert!(calls.in_progress.get(&conversation).is_none());
 
