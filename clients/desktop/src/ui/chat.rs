@@ -170,8 +170,9 @@ pub struct ChatState {
     /// one group's members picked into another's.
     pub new_group: Option<NewGroupForm>,
     /// The roster panel's open flag, per conversation, kept the way the attach and search
-    /// panels are kept: the header's people button folds the roster out under it, and the
-    /// flag is the conversation's own so switching windows closes nothing.
+    /// panels are kept: the header's people button folds the roster out beside the thread,
+    /// as the window's full-height side panel, and the flag is the conversation's own so
+    /// switching windows closes nothing.
     pub roster_open: HashMap<Id, bool>,
     /// The rename row's state, per conversation: the founder's rename affordance in the roster
     /// panel folds a typed field out under it, and the draft is kept the way every other
@@ -911,16 +912,26 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         search_row(ui, context, state, conversation_id);
     }
 
-    // The roster's fold-out: the group's people, their roles, and — behind each row's click —
-    // the options a member and a founder hold. Drawn only for a group and only while the
-    // header's people button left it open; the panel's own first draw is the roster read's ask.
+    // The roster's fold-out, as the window's one side panel: the group's people, their roles,
+    // and — behind each row's click — the options a member and a founder hold. Claimed from
+    // the right edge *before* the composer claims the bottom, so the roster runs the window's
+    // full remaining height beside the thread and a long list scrolls inside it instead of
+    // squeezing the messages. Drawn only for a group and only while the header's people
+    // button left it open; the panel's own first draw is the roster read's ask.
     let roster_open = state
         .roster_open
         .get(&conversation_id)
         .copied()
         .unwrap_or(false);
     if roster_open {
-        group_roster_panel(ui, context, state, conversation_id);
+        let width = roster_panel_width(ui.available_width());
+        egui::Panel::right(egui::Id::new("chat-roster").with(conversation_id))
+            .exact_size(width)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                group_roster_panel(ui, context, state, conversation_id);
+            });
     }
 
     // The member menu's two overlays, drawn after the panes they were opened from: the gift
@@ -1389,6 +1400,14 @@ fn group_notices_tail(ui: &mut Ui, context: &Context<'_>, state: &ChatState, con
     }
 }
 
+/// The roster side panel's width: a little under half of what the thread pane offers, clamped
+/// so the roster stays readable on a narrow window and the thread beside it keeps a thread's
+/// width on a wide one.
+#[must_use]
+fn roster_panel_width(available: f32) -> f32 {
+    (available * 0.42).clamp(160.0, 240.0)
+}
+
 /// The group's roster panel: every member with role and mute, and — folded behind each row
 /// until the row is clicked — the options a member and a founder hold.
 ///
@@ -1397,6 +1416,11 @@ fn group_notices_tail(ui: &mut Ui, context: &Context<'_>, state: &ChatState, con
 /// panel opens with an ask (the shell issues it the moment the toggle opens) and draws what
 /// the answer filed. Until the answer lands the panel says so, because a roster that guessed
 /// would be a list of names with wrong authority beside them.
+///
+/// The panel runs the chat window's full remaining height — `thread_pane` claims it as a
+/// right panel beside the thread — so the member rows live in their own scroll: a long
+/// roster scrolls inside the panel instead of squeezing the thread, while the members
+/// header and the tally, invite, rename, and leave rows stay pinned around the scroll.
 ///
 /// A member row is the entry to that member's options: view profile, gift, the vote every
 /// member holds, and the founder's mute terms and kick — the same menu the web client's room
@@ -1455,7 +1479,6 @@ fn group_roster_panel(
     let mut profile_ask: Option<Id> = None;
     let mut gift_ask: Option<Id> = None;
 
-    ui.add_space(space::SM);
     egui::Frame::new()
         .fill(colors.surface_raised)
         .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
@@ -1498,250 +1521,277 @@ fn group_roster_panel(
             });
             ui.add_space(space::XS);
 
-            let Some(rows) = state.rosters.get(&conversation_id) else {
+            if !state.rosters.contains_key(&conversation_id) {
                 ui.label(
                     RichText::new("Reading the group's roster…")
                         .font(egui::FontId::proportional(font::SMALL))
                         .color(colors.text_muted),
                 );
                 return;
-            };
-            for member in rows {
-                let name = state
-                    .names
-                    .get(&member.account_id)
-                    .cloned()
-                    .unwrap_or_else(|| model::short_id(member.account_id));
-                let departed = member.left_at.is_some();
-                // The gates, stated once and read by everything below: the server's own
-                // immunity rules, mirrored so the menu says what the wire would allow. A
-                // founder's levers reach only the active members below the founder — never
-                // this account's own row (the server refuses a self-mute and a self-kick),
-                // never a fellow founder's. The vote is every member's, with the same two
-                // exclusions the server holds. The menu itself is offered on any row but
-                // this account's own and the departed: a departed member is past every
-                // lever, and the person themselves needs no menu to view their own card.
-                let not_self = me != Some(member.account_id);
-                let below_founder = member.role != ConversationRole::Founder;
-                let votable = not_self && below_founder && !departed;
-                let targetable = i_am_founder && votable;
-                let has_menu = not_self && !departed;
-                let menu_open = state
-                    .member_menus
-                    .get(&conversation_id)
-                    .is_some_and(|open| *open == member.account_id);
-
-                // The row is the menu's entry, so the row itself is the click: an
-                // allocated strip with a hover fill, the way a room row in the directory
-                // is, rather than a label that happens to sit where a button should be.
-                let height = 30.0;
-                let width = ui.available_width();
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-                let background = if menu_open {
-                    colors.surface_selected
-                } else if response.hovered() && has_menu {
-                    colors.surface_hover
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                if background != egui::Color32::TRANSPARENT {
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::CornerRadius::same(crate::theme::radius::MD),
-                        background,
-                    );
-                }
-                let mut inner = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(rect.shrink2(egui::vec2(space::XS, 0.0)))
-                        .layout(Layout::left_to_right(Align::Center)),
-                );
-                widgets::avatar(&mut inner, context.theme, &name, 22.0);
-                inner.add_space(space::XS);
-                inner.label(
-                    RichText::new(name)
-                        .font(egui::FontId::proportional(font::SMALL))
-                        .color(if departed {
-                            colors.text_muted
-                        } else {
-                            colors.text
-                        }),
-                );
-                if member.role == ConversationRole::Founder {
-                    widgets::pill(&mut inner, "founder", colors.text_muted, colors.surface);
-                }
-                if member.muted_until.is_some() && !departed {
-                    widgets::pill(&mut inner, "muted", colors.warning, colors.surface);
-                }
-                if departed {
-                    widgets::pill(&mut inner, "left", colors.text_muted, colors.surface);
-                }
-                if has_menu {
-                    inner.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        // The cue: a closed corner-bracket that says the row opens. The
-                        // glyph is the row's own promise, so it travels with the row and
-                        // not with the menu it opens.
+            }
+            // The pinned foot, claimed from the frame's bottom edge before the rows take
+            // the rest, the way the composer is pinned to the window's bottom: the vote
+            // tally, the invite, the founder's rename, and the leave stay in reach while
+            // a long roster scrolls above them.
+            egui::Panel::bottom(egui::Id::new("chat-roster-foot").with(conversation_id))
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    // A running vote's tally, if the wire has one open: "2 of 4 needed" reads as a
+                    // question the group is still answering, and the newest tally per conversation
+                    // is the one that matters.
+                    if let Some(tally) = state.votes.get(&conversation_id) {
                         ui.label(
-                            RichText::new(if menu_open { "\u{25BE}" } else { "\u{25B8}" })
-                                .font(egui::FontId::proportional(font::TINY))
-                                .color(colors.text_muted),
+                            RichText::new(format!(
+                                "Vote to remove {}: {} of {} needed",
+                                state
+                                    .names
+                                    .get(&tally.target_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| model::short_id(tally.target_id)),
+                                tally.votes,
+                                tally.needed,
+                            ))
+                            .font(egui::FontId::proportional(font::TINY))
+                            .color(colors.warning),
                         );
-                    });
-                }
-                if response.clicked() && has_menu {
-                    menu_toggle = Some(member.account_id);
-                }
+                    }
 
-                // The options themselves, folded out under the row while it is open: one
-                // click on the row opens them, and the row's own facts — the role, the
-                // mute — stay on the row where they were read.
-                if menu_open && has_menu {
-                    egui::Frame::new()
-                        .fill(colors.surface)
-                        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
-                        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::XS as i8))
-                        .show(ui, |ui| {
-                            if quiet_action(ui, "View profile", colors.text).clicked() {
-                                profile_ask = Some(member.account_id);
+                    // The invite row, every member's right: an account id typed by hand. The friends
+                    // the panel could offer are the friends pane's rows, not this pane's, and a
+                    // one-at-a-time field keeps the wire's "any current member may invite" honest.
+                    let invite_open = state
+                        .invites
+                        .get(&conversation_id)
+                        .is_some_and(|panel| panel.open);
+                    if invite_open {
+                        let panel = state.invites.entry(conversation_id).or_default();
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut panel.account_id)
+                                .hint_text("account id")
+                                .desired_width(ui.available_width() - 96.0),
+                        );
+                        let submitted =
+                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (ui.button("Invite").clicked() || submitted)
+                            && !panel.account_id.trim().is_empty()
+                        {
+                            if let Ok(id) = Id::parse(panel.account_id.trim()) {
+                                invite_send = Some(vec![id]);
+                                panel.account_id.clear();
                             }
-                            if quiet_action(ui, "Gift", colors.text)
-                                .on_hover_text("Send this person a gift from the shop.")
-                                .clicked()
-                            {
-                                gift_ask = Some(member.account_id);
-                            }
-                            // The vote, every member's lever, never aimed at this account
-                            // and never at a founder: the same gates the server holds,
-                            // mirrored so the option says what the wire would allow.
-                            if votable
-                                && quiet_action(ui, "Vote kick", colors.text)
-                                    .on_hover_text(
-                                        "Call a vote to remove this person. When half the \
-                                         group agrees, they are kicked. Free — the vote costs \
-                                         nothing.",
-                                    )
-                                    .clicked()
-                            {
-                                vote_send = Some(member.account_id);
-                            }
-                            // The founder's levers, on the rows the founder may act on: the
-                            // mute as its three terms rather than one fixed hour — the same
-                            // vocabulary the web panel offers — and the kick, which costs a
-                            // Kick Point and says so before it is spent.
-                            if targetable {
-                                if member.muted_until.is_some() {
-                                    if quiet_action(ui, "Unmute", colors.text)
-                                        .on_hover_text("Lift this group mute now.")
-                                        .clicked()
-                                    {
-                                        mute_send = Some((member.account_id, None));
-                                    }
-                                } else {
-                                    for (label, term_ms) in GROUP_MUTE_TERMS_MS {
-                                        if quiet_action(ui, &format!("Mute {label}"), colors.text)
-                                            .on_hover_text(format!(
-                                                "Silence this person for the whole group for \
-                                             {label}. They keep every other right, including \
-                                             the vote."
-                                            ))
-                                            .clicked()
-                                        {
-                                            mute_send = Some((member.account_id, Some(term_ms)));
-                                        }
-                                    }
-                                }
-                                if quiet_action(ui, "Remove", colors.danger)
-                                    .on_hover_text(
-                                        "Costs 1 Kick Point, or 1 $MIG when none are held",
-                                    )
-                                    .clicked()
-                                {
-                                    kick_send = Some(member.account_id);
-                                }
-                            }
-                        });
-                }
-                ui.add_space(space::XS);
-            }
-
-            // A running vote's tally, if the wire has one open: "2 of 4 needed" reads as a
-            // question the group is still answering, and the newest tally per conversation
-            // is the one that matters.
-            if let Some(tally) = state.votes.get(&conversation_id) {
-                ui.label(
-                    RichText::new(format!(
-                        "Vote to remove {}: {} of {} needed",
-                        state
-                            .names
-                            .get(&tally.target_id)
-                            .cloned()
-                            .unwrap_or_else(|| model::short_id(tally.target_id)),
-                        tally.votes,
-                        tally.needed,
-                    ))
-                    .font(egui::FontId::proportional(font::TINY))
-                    .color(colors.warning),
-                );
-            }
-
-            // The invite row, every member's right: an account id typed by hand. The friends
-            // the panel could offer are the friends pane's rows, not this pane's, and a
-            // one-at-a-time field keeps the wire's "any current member may invite" honest.
-            let invite_open = state
-                .invites
-                .get(&conversation_id)
-                .is_some_and(|panel| panel.open);
-            if invite_open {
-                let panel = state.invites.entry(conversation_id).or_default();
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut panel.account_id)
-                        .hint_text("account id")
-                        .desired_width(ui.available_width() - 96.0),
-                );
-                let submitted =
-                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Invite").clicked() || submitted)
-                    && !panel.account_id.trim().is_empty()
-                {
-                    if let Ok(id) = Id::parse(panel.account_id.trim()) {
-                        invite_send = Some(vec![id]);
+                        }
+                    } else if ui.button("+ Invite").clicked() {
+                        let panel = state.invites.entry(conversation_id).or_default();
+                        panel.open = true;
                         panel.account_id.clear();
                     }
-                }
-            } else if ui.button("+ Invite").clicked() {
-                let panel = state.invites.entry(conversation_id).or_default();
-                panel.open = true;
-                panel.account_id.clear();
-            }
 
-            // The founder's rename row, seeded from the current title when it opened.
-            let rename_open = state
-                .renames
-                .get(&conversation_id)
-                .is_some_and(|panel| panel.open);
-            if rename_open && i_am_founder {
-                let panel = state.renames.entry(conversation_id).or_default();
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut panel.title)
-                        .hint_text("group name")
-                        .desired_width(ui.available_width() - 96.0),
-                );
-                let submitted =
-                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Rename").clicked() || submitted) && !panel.title.trim().is_empty() {
-                    rename_send = Some(panel.title.trim().to_owned());
-                }
-            }
+                    // The founder's rename row, seeded from the current title when it opened.
+                    let rename_open = state
+                        .renames
+                        .get(&conversation_id)
+                        .is_some_and(|panel| panel.open);
+                    if rename_open && i_am_founder {
+                        let panel = state.renames.entry(conversation_id).or_default();
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut panel.title)
+                                .hint_text("group name")
+                                .desired_width(ui.available_width() - 96.0),
+                        );
+                        let submitted =
+                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (ui.button("Rename").clicked() || submitted)
+                            && !panel.title.trim().is_empty()
+                        {
+                            rename_send = Some(panel.title.trim().to_owned());
+                        }
+                    }
 
-            // Leaving, the lever every member holds. The window's copy of the thread goes
-            // when the ack arrives, so no confirmation is spent here — the click is the
-            // confirmation, the same as the web client's leave.
-            if ui.button("Leave group").clicked() {
-                leave = true;
-            }
+                    // Leaving, the lever every member holds. The window's copy of the thread goes
+                    // when the ack arrives, so no confirmation is spent here — the click is the
+                    // confirmation, the same as the web client's leave.
+                    if ui.button("Leave group").clicked() {
+                        leave = true;
+                    }
+                });
+
+            // The member rows themselves, in the scroll that fills the frame's remaining
+            // height: a roster longer than the panel scrolls here, inside the panel,
+            // instead of squeezing the thread that runs beside it. Each row keeps its
+            // folded options menu, so every member's levers stay reachable by scroll.
+            let empty = Vec::new();
+            egui::ScrollArea::vertical()
+                .id_salt(("roster", conversation_id.to_string()))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for member in state.rosters.get(&conversation_id).unwrap_or(&empty) {
+                        let name = state
+                            .names
+                            .get(&member.account_id)
+                            .cloned()
+                            .unwrap_or_else(|| model::short_id(member.account_id));
+                        let departed = member.left_at.is_some();
+                        // The gates, stated once and read by everything below: the server's own
+                        // immunity rules, mirrored so the menu says what the wire would allow. A
+                        // founder's levers reach only the active members below the founder — never
+                        // this account's own row (the server refuses a self-mute and a self-kick),
+                        // never a fellow founder's. The vote is every member's, with the same two
+                        // exclusions the server holds. The menu itself is offered on any row but
+                        // this account's own and the departed: a departed member is past every
+                        // lever, and the person themselves needs no menu to view their own card.
+                        let not_self = me != Some(member.account_id);
+                        let below_founder = member.role != ConversationRole::Founder;
+                        let votable = not_self && below_founder && !departed;
+                        let targetable = i_am_founder && votable;
+                        let has_menu = not_self && !departed;
+                        let menu_open = state
+                            .member_menus
+                            .get(&conversation_id)
+                            .is_some_and(|open| *open == member.account_id);
+
+                        // The row is the menu's entry, so the row itself is the click: an
+                        // allocated strip with a hover fill, the way a room row in the directory
+                        // is, rather than a label that happens to sit where a button should be.
+                        let height = 30.0;
+                        let width = ui.available_width();
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+                        let background = if menu_open {
+                            colors.surface_selected
+                        } else if response.hovered() && has_menu {
+                            colors.surface_hover
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        if background != egui::Color32::TRANSPARENT {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(crate::theme::radius::MD),
+                                background,
+                            );
+                        }
+                        let mut inner = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect.shrink2(egui::vec2(space::XS, 0.0)))
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        widgets::avatar(&mut inner, context.theme, &name, 22.0);
+                        inner.add_space(space::XS);
+                        inner.label(
+                            RichText::new(name)
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(if departed {
+                                    colors.text_muted
+                                } else {
+                                    colors.text
+                                }),
+                        );
+                        if member.role == ConversationRole::Founder {
+                            widgets::pill(&mut inner, "founder", colors.text_muted, colors.surface);
+                        }
+                        if member.muted_until.is_some() && !departed {
+                            widgets::pill(&mut inner, "muted", colors.warning, colors.surface);
+                        }
+                        if departed {
+                            widgets::pill(&mut inner, "left", colors.text_muted, colors.surface);
+                        }
+                        if has_menu {
+                            inner.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                // The cue: a closed corner-bracket that says the row opens. The
+                                // glyph is the row's own promise, so it travels with the row and
+                                // not with the menu it opens.
+                                ui.label(
+                                    RichText::new(if menu_open { "\u{25BE}" } else { "\u{25B8}" })
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                );
+                            });
+                        }
+                        if response.clicked() && has_menu {
+                            menu_toggle = Some(member.account_id);
+                        }
+
+                        // The options themselves, folded out under the row while it is open: one
+                        // click on the row opens them, and the row's own facts — the role, the
+                        // mute — stay on the row where they were read.
+                        if menu_open && has_menu {
+                            egui::Frame::new()
+                                .fill(colors.surface)
+                                .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+                                .inner_margin(egui::Margin::symmetric(
+                                    space::MD as i8,
+                                    space::XS as i8,
+                                ))
+                                .show(ui, |ui| {
+                                    if quiet_action(ui, "View profile", colors.text).clicked() {
+                                        profile_ask = Some(member.account_id);
+                                    }
+                                    if quiet_action(ui, "Gift", colors.text)
+                                        .on_hover_text("Send this person a gift from the shop.")
+                                        .clicked()
+                                    {
+                                        gift_ask = Some(member.account_id);
+                                    }
+                                    // The vote, every member's lever, never aimed at this account
+                                    // and never at a founder: the same gates the server holds,
+                                    // mirrored so the option says what the wire would allow.
+                                    if votable
+                                        && quiet_action(ui, "Vote kick", colors.text)
+                                            .on_hover_text(
+                                                "Call a vote to remove this person. When half the \
+                                             group agrees, they are kicked. Free — the vote costs \
+                                             nothing.",
+                                            )
+                                            .clicked()
+                                    {
+                                        vote_send = Some(member.account_id);
+                                    }
+                                    // The founder's levers, on the rows the founder may act on: the
+                                    // mute as its three terms rather than one fixed hour — the same
+                                    // vocabulary the web panel offers — and the kick, which costs a
+                                    // Kick Point and says so before it is spent.
+                                    if targetable {
+                                        if member.muted_until.is_some() {
+                                            if quiet_action(ui, "Unmute", colors.text)
+                                                .on_hover_text("Lift this group mute now.")
+                                                .clicked()
+                                            {
+                                                mute_send = Some((member.account_id, None));
+                                            }
+                                        } else {
+                                            for (label, term_ms) in GROUP_MUTE_TERMS_MS {
+                                                if quiet_action(
+                                                    ui,
+                                                    &format!("Mute {label}"),
+                                                    colors.text,
+                                                )
+                                                .on_hover_text(format!(
+                                                    "Silence this person for the whole group for \
+                                                 {label}. They keep every other right, including \
+                                                 the vote."
+                                                ))
+                                                .clicked()
+                                                {
+                                                    mute_send =
+                                                        Some((member.account_id, Some(term_ms)));
+                                                }
+                                            }
+                                        }
+                                        if quiet_action(ui, "Remove", colors.danger)
+                                            .on_hover_text(
+                                                "Costs 1 Kick Point, or 1 $MIG when none are held",
+                                            )
+                                            .clicked()
+                                        {
+                                            kick_send = Some(member.account_id);
+                                        }
+                                    }
+                                });
+                        }
+                        ui.add_space(space::XS);
+                    }
+                });
         });
-    ui.add_space(space::SM);
 
     // The menu's own state, applied now that the roster borrow has closed: a click opens
     // the row's options, or closes them when the row was the one already open — one menu
@@ -2816,9 +2866,35 @@ fn edit_in_place(
     message: &Message,
     draft: &mut EditDraft,
 ) -> bool {
+    // The field wraps the way the bubble it replaces does. egui's own field layout breaks rows
+    // on whitespace only, so a correction carrying a token no space can break — a URL, a pasted
+    // key — overruns the field's width and the window clips it. The job below mirrors the
+    // default layouter in every other respect (same font and colour, trailing whitespace kept
+    // for the same "typing feels weird without it" reason egui gives, the same row height) so
+    // the editor reads exactly as a field, except that a too-long token breaks mid-token
+    // instead of running past the edge.
+    let colors = palette(context.theme);
+    let mut fitting = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let font_id = egui::FontId::proportional(font::BODY);
+        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+        let mut job = egui::text::LayoutJob::simple(
+            text.as_str().to_owned(),
+            font_id,
+            colors.text,
+            wrap_width,
+        );
+        job.wrap.break_anywhere = true;
+        job.keep_trailing_whitespace = true;
+        let line_height = row_height + ui.spacing().extra_text_line_spacing;
+        for section in &mut job.sections {
+            section.format.line_height = Some(line_height);
+        }
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
     let field = egui::TextEdit::multiline(&mut draft.text)
         .hint_text("the corrected message")
-        .desired_width((ui.available_width() - space::LG * 2.0).max(120.0));
+        .desired_width((ui.available_width() - space::LG * 2.0).max(120.0))
+        .layouter(&mut fitting);
     let response = ui.add(field);
     if draft.claim_focus {
         response.request_focus();
@@ -3078,17 +3154,23 @@ fn image_bubble(
         let scale = (available / w as f32).min(cap / h as f32).min(1.0);
         let size = egui::vec2(w as f32 * scale, h as f32 * scale);
         ui.image((texture.id(), size));
+        // The caption and the stamp wrap like every other text in the window: a plain label
+        // breaks rows on whitespace only, so a caption carrying a token no space can break —
+        // a URL pasted under a screenshot — overruns the column and the window clips it.
+        // [`widgets::fitting_label`] keeps both inside the width the row already set.
         if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
-            ui.label(
-                RichText::new(caption)
-                    .font(egui::FontId::proportional(font::SMALL))
-                    .color(colors.text),
+            widgets::fitting_label(
+                ui,
+                caption,
+                egui::FontId::proportional(font::SMALL),
+                colors.text,
             );
         }
-        ui.label(
-            RichText::new(meta)
-                .font(egui::FontId::proportional(font::TINY))
-                .color(colors.text_muted),
+        widgets::fitting_label(
+            ui,
+            meta,
+            egui::FontId::proportional(font::TINY),
+            colors.text_muted,
         );
         return;
     }
@@ -3270,7 +3352,9 @@ fn voice_bubble(
             .corner_radius(egui::CornerRadius::same(radius::MD))
             .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
             .show(ui, |ui| {
-                ui.set_max_width((ui.available_width() * 0.68).max(140.0));
+                // The same cap a text bubble takes — 68% of the pane, floored — so the two
+                // bubbles beside each other in a thread agree on what a bubble is.
+                ui.set_max_width(widgets::bubble_width_cap(ui.available_width()));
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         let bars = note.waveform.as_deref().unwrap_or(&[]);
@@ -4281,6 +4365,18 @@ fn waveform_bars(ui: &mut Ui, bars: &[u8], color: egui::Color32, width: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The roster panel's width share in one test: a chat window's own width lands
+    /// mid-range (a little under half the window for the roster), a wide window tops out at
+    /// the ceiling, and a narrow one never starves the thread beside the roster below the
+    /// floor.
+    #[test]
+    fn the_roster_panel_width_is_a_share_of_the_window_clamped_to_stay_a_panel() {
+        assert!((roster_panel_width(560.0) - 235.2).abs() < 0.01);
+        assert!((roster_panel_width(1000.0) - 240.0).abs() < 0.01);
+        assert!((roster_panel_width(200.0) - 160.0).abs() < 0.01);
+        assert!((roster_panel_width(0.0) - 160.0).abs() < 0.01);
+    }
 
     /// The verification block's own filing rules in one test: a peer's devices file by device,
     /// the rows stay ordered by device id so the block never reorders itself while someone is

@@ -20,12 +20,12 @@
 
 use std::collections::HashMap;
 
-use egui::{Align, Color32, Layout, RichText, Ui};
+use egui::{Align, Color32, CornerRadius, Layout, Response, RichText, Sense, Ui};
 use migo_core::Id;
 
 use crate::model::{Presence, Relationship, RelationshipKind};
 use crate::net::Command;
-use crate::theme::{font, palette, space, text_style, Palette};
+use crate::theme::{font, palette, space, text_style, Palette, Theme};
 use crate::ui::widgets;
 use crate::ui::Context;
 
@@ -41,6 +41,18 @@ pub struct FriendsState {
     pub presence: HashMap<Id, Presence>,
     /// The search field's contents.
     pub search: String,
+    /// Whether the search field is showing. The field lives behind the search icon in the
+    /// header row until the icon is asked for — the header's room belongs to the two
+    /// conversation doors, and the graph is searched rarely enough that a standing field
+    /// spends most of its life as an empty box — and what is revealed is revealed focused,
+    /// because the click that asked for the field asked to type in it. Survives frames, like
+    /// every field state here, so a repaint never folds a search in progress; folding is the
+    /// field's own doing (see [`search_done`]).
+    pub search_open: bool,
+    /// Whether the revealed search field should claim the keyboard focus this frame. Set by
+    /// the reveal click, spent by the field the next time it draws — the same one-shot
+    /// claim the new-group form's `claim_focus` is.
+    pub search_focus: bool,
     /// The add-friend field's contents.
     pub add_input: String,
     /// The username typed into the new-chat field.
@@ -252,13 +264,16 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
     });
 }
 
-/// The pane's header row: the pane's name at the left edge, and its search field inline with
-/// the two conversation doors at the right — the search left of the new-conversation buttons.
+/// The pane's header row: the pane's name at the left edge, and its search behind the search
+/// icon inline with the two conversation doors at the right — the icon left of the new-chat
+/// buttons, the field where the icon stood once it is asked for.
 ///
-/// The search used to be a field of its own below the header; it moved up into the row
-/// because searching the graph is a thing the pane's own title does, not a step the list
-/// makes room for — the field is inline and compact, the same width a hint like "Search"
-/// needs, and the filtering it drives is unchanged: every section below still answers the
+/// The search used to be a field of its own below the header, then a field always inline;
+/// both spent the header's room on a box that is asked for rarely, so now the field appears
+/// only when the icon is clicked — focused, because the click asked to type — and folds away
+/// when the search is *finished*: the × beside the field clears a query that stands and folds
+/// a field that has nothing left to clear, and losing focus with nothing asked folds it too
+/// (see [`search_done`]). The filtering is unchanged: every section below still answers the
 /// same needle, drawn from the same `state.search` the field writes.
 fn header_row(
     ui: &mut Ui,
@@ -288,11 +303,52 @@ fn header_row(
                     ..Default::default()
                 });
             }
-            ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .hint_text("Search")
-                    .desired_width(110.0),
-            );
+            // The search, leftmost of the three: the magnifier until it is asked for, then
+            // the field with the fold beside it. The × is one press per half of "finished" —
+            // first the query, then the field — so a standing search is never thrown away by
+            // a single click, and losing focus with nothing asked is the same finished state
+            // the empty × reports.
+            if state.search_open {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.search)
+                        .hint_text("Search")
+                        .desired_width(110.0),
+                );
+                if state.search_focus {
+                    response.request_focus();
+                    state.search_focus = false;
+                }
+                // Whether the field folds for losing focus is decided before the × below
+                // runs: the × clears the query, and a query that was standing when the focus
+                // left is not a finished search — the fold rule must not read the field the
+                // × just emptied.
+                let fold_on_blur = search_done(&state.search, response.lost_focus());
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("\u{2715}")
+                                .font(egui::FontId::proportional(font::TINY))
+                                .color(colors.text_muted),
+                        )
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .on_hover_text("Clear the search, then fold the field away")
+                    .clicked()
+                {
+                    if search_done(&state.search, true) {
+                        state.search_open = false;
+                    } else {
+                        state.search.clear();
+                    }
+                }
+                if fold_on_blur {
+                    state.search_open = false;
+                }
+            } else if search_button(ui, context.theme).clicked() {
+                state.search_open = true;
+                state.search_focus = true;
+            }
         });
     });
     ui.add_space(space::XS);
@@ -301,6 +357,45 @@ fn header_row(
             .font(egui::FontId::proportional(font::SMALL))
             .color(colors.text_muted),
     );
+}
+
+/// The collapsed search: the magnifier on a quiet clickable box, standing where the field
+/// will.
+///
+/// Drawn the way the account bar's bell button is — the same 26px box, the same hover wash —
+/// and painted with the strip's own magnifier ([`widgets::place_icon`]'s Search), so the
+/// reveal reads as one of the header's quiet controls rather than as a new thing.
+fn search_button(ui: &mut Ui, theme: Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_black_alpha(60)
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    }
+    let mut inner = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                rect.center() - egui::vec2(10.0, 10.0),
+                egui::vec2(20.0, 20.0),
+            ))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    widgets::place_icon(&mut inner, theme, crate::ui::Place::Search, false);
+    response
+}
+
+/// Whether the search is finished: nothing asked, and the field dismissed.
+///
+/// Pure, because "only a dismissed empty field folds" is the whole contract and two callers
+/// ask it — the × beside the field, and the field losing focus — and a rule that lives in two
+/// places is a rule that drifts. A query that stands keeps the field open however the
+/// dismissal arrives; the × clears the words first and folds on the next press, so one click
+/// never throws away a search.
+fn search_done(query: &str, dismissed: bool) -> bool {
+    dismissed && query.trim().is_empty()
 }
 
 /// The new-conversation fold-outs: the group form and the direct-chat field, each drawn only
@@ -684,6 +779,19 @@ mod tests {
             .iter()
             .map(|(n, name)| (id(*n), (*name).to_owned()))
             .collect()
+    }
+
+    /// The field folds only on a dismissed empty query: words standing keep it open however
+    /// the dismissal arrives, and only whitespace counts as nothing. Pinned so the × and the
+    /// lost-focus rule — two callers of one rule — cannot drift into two different ideas of
+    /// "finished".
+    #[test]
+    fn the_search_folds_only_on_a_dismissed_empty_query() {
+        assert!(search_done("", true));
+        assert!(search_done("   ", true));
+        assert!(!search_done("rina", true));
+        assert!(!search_done("", false));
+        assert!(!search_done("rina", false));
     }
 
     #[test]

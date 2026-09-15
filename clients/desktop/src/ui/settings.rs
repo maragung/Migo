@@ -636,8 +636,9 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
                     "Every conversation opens as its own floating, closable window."
                 }
                 NavigationMode::ChatList => {
-                    "The chat list fills the window; opening a conversation opens it in a \
-                     window of its own, and closing that window returns to the list."
+                    "The chat list fills the window under a four-tab strip — Main, Friends, \
+                     Rooms, Feed; opening a conversation opens it in a window of its own, and \
+                     closing that window returns to the list."
                 }
             };
             if ui
@@ -651,8 +652,9 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
     });
     ui.label(
         RichText::new(
-            "How chats are laid out, nothing else: Friends, Rooms and Feed are the same in \
-             both, and the choice applies the next frame and survives a restart.",
+            "How chats are laid out, nothing else: Friends, Rooms and Feed show the same \
+             things in both — as the Contacts window's tabs here, as the main window's tabs \
+             beside Main there — and the choice applies the next frame and survives a restart.",
         )
         .font(egui::FontId::proportional(font::TINY))
         .color(colors.text_muted),

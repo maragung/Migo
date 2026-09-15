@@ -20,10 +20,11 @@
 //!   frame to drop the window from its open list.
 //!
 //! What the shell *does* own is membership: which conversation windows are open, which side
-//! windows are open, whether the Contacts window is on the desktop, and where a new window is
-//! born. That is [`Desktop`], the one struct the app holds between frames. Everything else a
-//! window manager remembers — position, size, collapsed-ness, stacking — lives in egui's
-//! memory, keyed by the stable ids this module mints, and survives as long as the process does.
+//! windows are open, whether the Contacts window is on the desktop, which tab the Chat List
+//! Mode main window's strip is on, and where a new window is born. That is [`Desktop`], the
+//! one struct the app holds between frames. Everything else a window manager remembers —
+//! position, size, collapsed-ness, stacking — lives in egui's memory, keyed by the stable ids
+//! this module mints, and survives as long as the process does.
 //!
 //! Nothing here touches the network or a feature module. The windows are chrome; the app fills
 //! them with the existing screens, the same `show` functions the old two-pane shell called.
@@ -41,7 +42,7 @@ use migo_core::Id as ConversationId;
 use crate::model::Connection;
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::widgets;
-use crate::ui::Place;
+use crate::ui::{MainTab, Place};
 
 /// Whether a window is minimized (collapsed to its title bar), reading the same state the
 /// window's own collapse button writes.
@@ -205,12 +206,20 @@ fn default_backup_path(username: &str) -> String {
 /// *what is open* is a fact about the session, not about the frame: a sign-out closes every
 /// window by dropping this struct's lists, not by asking egui to forget its layer cache.
 pub struct Desktop {
-    /// Whether the Contacts window is on the desktop. It starts open — it is the shell's home
-    /// surface and the way into everything else — and its own close button is allowed to close
-    /// it, because the taskbar's Migo button is the way back.
+    /// Whether the Contacts window is on the desktop. It starts open — under Tabbed navigation
+    /// it is the shell's home surface and the way into everything else — and its own close
+    /// button is allowed to close it, because the taskbar's Migo button is the way back. Under
+    /// Chat List Mode the window does not exist: the flag still remembers, so a mode switch
+    /// back to tabbed finds the window where it was left, but nothing draws or lists it while
+    /// the main window's own strip is carrying the three tabs instead.
     pub contacts_open: bool,
-    /// Which of the Contacts window's tabs is showing.
+    /// Which of the Contacts window's tabs is showing, under Tabbed navigation.
     pub contacts_tab: Place,
+    /// Which tab the Chat List Mode main window's strip is showing (see [`MainTab`]): Main —
+    /// the chat list that gives the mode its name — or one of the three places the Contacts
+    /// window carries as tabs under Tabbed navigation. Unread under Tabbed navigation, where
+    /// the main window is the desk and the strip does not exist.
+    pub main_tab: MainTab,
     /// The open conversation windows, in open order. The order is the cascade: a window's
     /// birthplace is derived from its index, so no separate position ledger is needed.
     pub chats: Vec<ConversationId>,
@@ -233,6 +242,7 @@ impl Default for Desktop {
         Self {
             contacts_open: true,
             contacts_tab: Place::Friends,
+            main_tab: MainTab::Main,
             chats: Vec::new(),
             sides: Vec::new(),
             logout_dialog: false,
@@ -243,8 +253,9 @@ impl Default for Desktop {
 }
 
 impl Desktop {
-    /// The state a fresh session starts from: the Contacts window open on Friends, no
-    /// conversations, no side windows, no dialog, and the clock running from now.
+    /// The state a fresh session starts from: the Contacts window open on Friends, the Chat
+    /// List Mode main window's strip on Main, no conversations, no side windows, no dialog,
+    /// and the clock running from now.
     pub fn new_session() -> Self {
         Self {
             session_start: Some(Instant::now()),
@@ -386,7 +397,9 @@ pub struct TaskEntry {
 pub enum TaskAction {
     /// Raise, minimize or restore a window.
     Toggle(Id),
-    /// Bring the Contacts window back — the Migo button with the window closed.
+    /// Bring the shell's home surface back — the Migo button with nothing to raise: the
+    /// Contacts window under Tabbed navigation, the chat list's Main tab under Chat List
+    /// Mode.
     ShowContacts,
     /// Open the logout confirmation.
     Logout,
@@ -408,11 +421,12 @@ struct BarChip {
 
 /// The taskbar: the fixed dark bar along the bottom of the desktop.
 ///
-/// Carries the reference's things in its order — the brand button (which is the Contacts
-/// window's button, the way the reference's logo is), the open-window buttons with their state
-/// dots, then the connection chip, the session timer, the logout button and the clock at the
-/// right edge. The connection chip stands where the balance chip used to: the $MIG figure moved
-/// up to the account bar, above the alert bell and the account menu, and the one live fact
+/// Carries the reference's things in its order — the brand button (the way home: under Tabbed
+/// navigation it is the Contacts window's button, the way the reference's logo is; under Chat
+/// List Mode it returns the main window to its Main tab), the open-window buttons with their
+/// state dots, then the connection chip, the session timer, the logout button and the clock at
+/// the right edge. The connection chip stands where the balance chip used to: the $MIG figure
+/// moved up to the account bar, above the alert bell and the account menu, and the one live fact
 /// about the link took its place at the bottom — a status bar in the oldest sense, the thing
 /// you want at a glance and never want to go looking for. Drawn as a panel before the desktop
 /// surface so the surface and the windows know where its edge is; each button's state is read
@@ -523,8 +537,11 @@ pub fn taskbar(
 }
 
 /// The Migo brand as the taskbar's own button: the painted diamond and the word, in ink on the
-/// bar. It doubles as the Contacts window's home button — one click brings the lists back,
-/// whatever else is open, and the window's own task button is beside it when it already is.
+/// bar. It doubles as the shell's home button — under Tabbed navigation one click brings the
+/// Contacts window back or to the front, whatever else is open, and the window's own task
+/// button is beside it when it already is. Under Chat List Mode the shell reports the Contacts
+/// window as never open, so the click always takes the "bring the home surface back" path and
+/// the app lands it on the main window's Main tab.
 fn brand_button(ui: &mut Ui, theme: Theme, contacts_open: bool, actions: &mut Vec<TaskAction>) {
     let colors = palette(theme);
     let word = ui.painter().layout_no_wrap(
