@@ -196,7 +196,7 @@ pub fn rebuild(alerts: &[AlertRow], ledger: &[LedgerRow]) -> Vec<ActivityRow> {
             key,
             category: ActivityCategory::Economy,
             title: format!(
-                "{} {}{} MIG",
+                "{} {}{} $MIG",
                 crate::model::spaced_words(&entry.reason),
                 sign,
                 entry.amount

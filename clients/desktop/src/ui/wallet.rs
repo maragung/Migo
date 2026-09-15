@@ -111,17 +111,20 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // The balance: the two facts, $MIG first, side by side.
+            // The balance: the coin figure and the two point ledgers, side by side, every
+            // card naming its fact above the figure. The coin amount reads number-first —
+            // "5,000 $MIG" — the way every other $MIG amount in the client reads, with the
+            // card's own label left to name the fact rather than carry the ticker.
             ui.add_space(space::SM);
             ui.horizontal(|ui| {
                 ui.add_space(space::MD);
                 fact_card(
                     ui,
                     context.theme,
-                    "$MIG",
+                    "BALANCE",
                     &state
                         .coins
-                        .map(|v| v.to_string())
+                        .map(|v| format!("{v} $MIG"))
                         .unwrap_or_else(|| "…".into()),
                     true,
                 );
