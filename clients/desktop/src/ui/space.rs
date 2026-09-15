@@ -182,7 +182,7 @@ pub fn rebuild(alerts: &[AlertRow], ledger: &[LedgerRow]) -> Vec<ActivityRow> {
             title: alert
                 .title
                 .clone()
-                .unwrap_or_else(|| crate::model::spaced_words(&alert.kind)),
+                .unwrap_or_else(|| crate::model::alert_label(&alert.kind)),
             at: alert.at,
         });
     }
@@ -210,16 +210,22 @@ pub fn rebuild(alerts: &[AlertRow], ledger: &[LedgerRow]) -> Vec<ActivityRow> {
 }
 
 /// The category an inbox kind belongs to, from the closed server vocabulary.
+///
+/// The kind arrives as its number word, so the categories read the parsed kind rather than
+/// substring-matching words that no longer arrive: the economy's own three (a gift, a level, an
+/// achievement), the game challenge, and the two room words file where they always did, and
+/// everything else — the messages, the calls, the friend and group invitations — is social,
+/// which was the fallback before the numbers and stays it.
 fn alert_category(kind: &str) -> ActivityCategory {
-    if kind.contains("friend") {
-        ActivityCategory::Social
-    } else if kind.contains("gift") || kind.contains("coin") || kind.contains("ledger") {
-        ActivityCategory::Economy
-    } else if kind.contains("game") {
-        ActivityCategory::Games
-    } else if kind.contains("room") {
-        ActivityCategory::Rooms
-    } else {
-        ActivityCategory::Social
+    use migo_protocol::NotificationKind;
+    match crate::model::alert_kind(kind) {
+        Some(
+            NotificationKind::Gift | NotificationKind::LevelUp | NotificationKind::Achievement,
+        ) => ActivityCategory::Economy,
+        Some(NotificationKind::GameChallenge) => ActivityCategory::Games,
+        Some(NotificationKind::RoomInvite | NotificationKind::RoomAnnouncement) => {
+            ActivityCategory::Rooms
+        }
+        _ => ActivityCategory::Social,
     }
 }
