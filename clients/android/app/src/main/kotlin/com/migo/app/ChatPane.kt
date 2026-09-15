@@ -97,6 +97,10 @@ internal fun ChatPane(
     // The member profile sheet's state, collected here for the same reason the avatars are: the
     // read is the model's, while the surface belongs to whichever member sheet named the person.
     val memberProfile by model.memberProfile.collectAsState()
+    // The group-call affordance's own facts, beside the overlays' state it shares a flow with:
+    // which conversations have a call running that this device holds no seat in. The header's call
+    // button is the reader, and the entry it names must be as live as the chat it sits in.
+    val groupCallState by model.groupCallState.collectAsState()
     // The account's owned pack SKUs, for the composer's emoticon/sticker picker: null while the
     // one-per-session read is in flight, which the picker renders as its own wait.
     val ownedPacks by model.ownedPacks.collectAsState()
@@ -174,12 +178,19 @@ internal fun ChatPane(
         onAcknowledgeSafety = model::acknowledgeSafetyChange,
         onStartCall = { peerId, video -> controls.requestCall(open.conversationId, peerId, video) },
         // The group-call join rides the same header: offered only for a group, the web client's
-        // own gate — a direct chat has the 1:1 buttons and a room has no group call to join.
+        // own gate — a direct chat has the 1:1 buttons and a room has no group call to join. The
+        // running call's id is read at tap time rather than composed in, because the affordance
+        // may have appeared or retired since the header was last drawn: the join must name the
+        // call that is running now, and fall through to starting one only when none is.
         onJoinGroupCall = if (open.kind == ConversationKind.Group) {
-            { model.joinGroupCall(open.conversationId) }
+            {
+                val running = groupCallState.inProgress[open.conversationId]
+                model.joinGroupCall(open.conversationId, running?.callId)
+            }
         } else {
             null
         },
+        groupCallInProgress = groupCallState.inProgress[open.conversationId],
         onExportLog = { model.shareChatLog(open.conversationId) },
         onToggleSearch = model::toggleChatSearch,
         onSearchQuery = model::setChatSearchQuery,

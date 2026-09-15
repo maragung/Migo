@@ -3,9 +3,11 @@ package com.migo.app.call
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.domain.CallMediaKind
+import com.migo.core.domain.GroupCallInProgress
 import com.migo.core.domain.GroupCallJoinedEvent
 import com.migo.core.domain.GroupCallLeftEvent
 import com.migo.core.domain.GroupCallNote
+import com.migo.core.domain.GroupCallProgressTracker
 import com.migo.core.domain.GroupCallRoster
 import com.migo.core.domain.GroupCallSeat
 import com.migo.core.domain.Subscription
@@ -46,9 +48,12 @@ const val GROUP_CALL_JOIN_FAILED: String = "Could not join the group call."
  * join's offer is the sealed placeholder the protocol defines for exactly that state: a genuine
  * sealed envelope (an empty-sdp offer, sealed under a per-call key with the call id as associated
  * data), so the join is end-to-end opaque to the server from the first frame. The key is minted
- * here and kept for the call's life. The frame-key agreement between participants is the core's
- * own domain now (section 163): the key minted here becomes the call's epoch-0 frame key, and the
- * manager below fires the domain's triggers on roster movement -- every join, departure and
+ * here and kept for the call's life -- a call this device *starts*; a call it *joins* keeps no
+ * minted key, because its running key arrives by the ask-and-answer below. The frame-key
+ * agreement between participants is the core's
+ * own domain now (section 163): a started call's minted key becomes its epoch-0 frame key, a
+ * joined call's first key is the running one a seated participant hands over, and the manager
+ * below fires the domain's triggers on roster movement -- every join, departure and
  * mid-call ask re-keys the call exactly as the section requires -- which is also why the roster
  * has no media to attach to it yet: the keys are agreed before the plane that would use them.
  *
@@ -94,8 +99,22 @@ class GroupCallManager(
     /** The one thing the group-call overlay is a function of. */
     val state: StateFlow<GroupCallUiState> = _state.asStateFlow()
 
+    /**
+     * The join affordance's fold of the announcements this device is not seated in: which
+     * conversations have a call running, keyed by conversation, published through the same state
+     * the overlay reads. The manager routes each announcement to exactly one of the two folds --
+     * the roster's, for the call this screen holds, or this one, for every other -- so the two
+     * never disagree about the same call.
+     */
+    private val progress = GroupCallProgressTracker()
+
     /** The tracked call, written only through [setActive] so the state and the ref never disagree. */
     @Volatile private var active: ActiveGroupCall? = null
+
+    /** Publishes the tracker's snapshot beside the tracked call, the header affordance's own state. */
+    private fun publishProgress() {
+        _state.update { it.copy(inProgress = progress.snapshot()) }
+    }
 
     /**
      * Writes the tracked call and its state together. A local read of the old call first, the same
@@ -194,19 +213,25 @@ class GroupCallManager(
      * Joins the group call of a conversation, minting the call's key and publishing the sealed
      * placeholder offer.
      *
-     * The key is minted before the join so the offer can be sealed under it in the same breath;
-     * the call id is minted here so a retried join re-seats the same call (the id is the server's
-     * dedupe key). A tap while a call is tracked does nothing -- one seat per account is the
-     * server's rule, and this screen already holds this account's.
+     * The key is minted before the join so the offer can be sealed under it in the same breath; the
+     * call id is minted here *unless the join names one* -- a call the tracker has watched running
+     * is joined under its own id, because the id is the server's dedupe key and a fresh one would
+     * seat a second call beside the running one rather than in it -- and a minted id is what makes
+     * a retried join re-seat the same call. Either way, the conversation's affordance entry is
+     * dropped here: a device holding a seat is shown the call, not an invitation to it. A tap
+     * while a call is tracked does nothing -- one seat per account is the server's rule, and this
+     * screen already holds this account's.
      */
-    fun joinGroupCall(conversationId: Id) {
+    fun joinGroupCall(conversationId: Id, callId: Id? = null) {
         if (active != null) return
         scope.launch {
-            val callId = newId()
+            val joinedCallId = callId ?: newId()
+            progress.forget(conversationId)
+            publishProgress()
             val callKey = generateCallKey()
             setActive(
                 ActiveGroupCall(
-                    callId = callId,
+                    callId = joinedCallId,
                     conversationId = conversationId,
                     mediaKind = CallMediaKind.Audio,
                     phase = GroupCallPhase.Joining,
@@ -215,20 +240,28 @@ class GroupCallManager(
                 ),
             )
             try {
-                // The minted key is seated as the call's epoch-0 frame key before the join frame
-                // can leave: the roster it answers with may already carry other seats, and the
-                // triggers below need the state standing by the time it lands.
-                client.groupCallKeys.seated(callId, conversationId, callKey)
+                // A fresh call's key is seated as its epoch-0 frame key before the join frame can
+                // leave: the roster it answers with may already carry other seats, and the triggers
+                // below need the state standing by the time it lands. A join of a call already
+                // running seats nothing -- the running key is not this device's to mint, and a
+                // state standing here would both silence the ask the roster trigger owes (the
+                // store's "am I a potential holder" test would pass) and refuse the answer's
+                // install, which only lands where no state stands. The offer is a genuine sealed
+                // envelope either way; the mid-call joiner's key seals it and is discarded, the
+                // web build's own discipline for every join.
+                if (callId == null) {
+                    client.groupCallKeys.seated(joinedCallId, conversationId, callKey)
+                }
                 client.groupCalls.join(
                     conversationId,
                     CallMediaKind.Audio,
-                    placeholderSealedOffer(callKey, callId),
-                    callId,
+                    placeholderSealedOffer(callKey, joinedCallId),
+                    joinedCallId,
                 )
                 // The snapshot may already have marked the seat accepted (it is published, not
                 // replied); this only fills in the timestamp for a reply that won the race.
                 val call = active
-                if (call != null && call.callId == callId && call.phase == GroupCallPhase.Joining) {
+                if (call != null && call.callId == joinedCallId && call.phase == GroupCallPhase.Joining) {
                     setActive(call.copy(phase = GroupCallPhase.Seated, joinedAt = call.joinedAt ?: now()))
                 }
             } catch (cancelled: CancellationException) {
@@ -238,7 +271,7 @@ class GroupCallManager(
                 // arrived despite the failure means it did land -- only fail a call still waiting
                 // for its seat.
                 val call = active
-                if (call != null && call.callId == callId && call.phase == GroupCallPhase.Joining) {
+                if (call != null && call.callId == joinedCallId && call.phase == GroupCallPhase.Joining) {
                     setActive(null)
                     _state.update { it.copy(error = GROUP_CALL_JOIN_FAILED) }
                 }
@@ -317,12 +350,18 @@ class GroupCallManager(
      * tally; the fold itself decides whether this appends or replaces -- a seat replacement (this
      * account, new device) arrives here right after the departure that emptied the old line, and
      * ends with the account's seat at the end of the join order on its new device. An announcement
-     * for any other call is another member's client hearing its own facts; the call-id match keeps
-     * this manager to this device's call.
+     * for any other call is another member's client hearing its own facts, and the call-id match
+     * keeps this manager's *roster* to this device's call -- but a call this screen holds no seat
+     * in is still a fact worth keeping: it goes to the tracker instead, and becomes the header's
+     * "join the running call" affordance. That includes the seated call once a note has ended its
+     * screen -- this device hung up or the seat moved, and the call that continues without it is
+     * exactly the call the header may offer to rejoin.
      */
     private fun handleParticipantJoined(event: GroupCallJoinedEvent) {
-        val call = active ?: return
-        if (event.callId != call.callId || call.note != null) {
+        val call = active
+        if (call == null || event.callId != call.callId || call.note != null) {
+            progress.onJoined(event)
+            publishProgress()
             return
         }
         setActive(
@@ -350,14 +389,26 @@ class GroupCallManager(
      *
      * The own-seat test compares both halves exactly: a departure naming this account on a
      * *different* device is somebody else's seat replacement being observed, not ours.
+     *
+     * A departure for a call this screen holds no seat in -- none at all, another conversation's,
+     * or the seated call once its note has ended the screen -- goes to the tracker rather than the
+     * roster: the moved seat's own departure is fed there too, because the call it names continues
+     * without this device, and a retirement (count zero) retires the tracker's entry exactly as it
+     * ends the screen's call.
      */
     private fun handleParticipantLeft(event: GroupCallLeftEvent) {
-        val call = active ?: return
-        if (event.callId != call.callId || call.note != null) {
+        val call = active
+        if (call == null || event.callId != call.callId || call.note != null) {
+            progress.onLeft(event)
+            publishProgress()
             return
         }
         if (namesOwnSeat(event.userId, event.deviceId, accountId, ownDeviceId)) {
             setActive(call.copy(note = GroupCallNote.Moved))
+            // The call continues on the account's other device; the rejoin is the header's to
+            // offer once this screen is dismissed.
+            progress.onLeft(event)
+            publishProgress()
             return
         }
         setActive(
@@ -412,4 +463,9 @@ data class GroupCallUiState(
     val call: ActiveGroupCall? = null,
     /** Why a join could not even be placed, when nothing else is showing. */
     val error: String? = null,
+    /**
+     * The group calls running that this device holds no seat in, keyed by conversation -- the
+     * header's join affordance, one entry per conversation with a live call to join.
+     */
+    val inProgress: Map<Id, GroupCallInProgress> = emptyMap(),
 )
