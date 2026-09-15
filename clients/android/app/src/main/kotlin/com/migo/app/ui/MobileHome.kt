@@ -74,6 +74,10 @@ fun MobileHome(
     var intentUser by remember { mutableStateOf<UserTarget?>(null) }
     var intentRoom by remember { mutableStateOf<RoomSummary?>(null) }
     var confirmLogout by remember { mutableStateOf(false) }
+    // The friend the remove-friend confirmation is about: the sheet's Remove row hands the person
+    // here rather than acting on the tap itself, the same confirm-first shape the log-out and the
+    // identity rotation keep — a friendship is ended on purpose or not at all.
+    var confirmRemoveFriend by remember { mutableStateOf<UserTarget?>(null) }
     // The session's avatars, for the Friends view's rows. Collected here because the home screen
     // owns the view that draws the most people; the map is the same one every other surface reads.
     val avatarBytes by model.avatarBytes.collectAsState()
@@ -105,6 +109,7 @@ fun MobileHome(
                     onGroupTitle = model::setGroupTitle,
                     onToggleGroupPick = model::toggleGroupPick,
                     onCreateGroup = model::createGroup,
+                    onUnblock = model::unblockUser,
                     avatarBytes = avatarBytes,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -159,6 +164,11 @@ fun MobileHome(
             intentUser = null
             model.friendRequest(it.userId)
         },
+        onRemove = {
+            // The sheet folds; the confirmation stands on its own, aimed at the friend it names.
+            intentUser = null
+            confirmRemoveFriend = it
+        },
         onBlock = {
             intentUser = null
             model.blockUser(it.userId)
@@ -186,6 +196,31 @@ fun MobileHome(
             }
         },
     )
+
+    // The remove-friend confirmation: the one confirmation the Friends view owes, because the
+    // other acts it offers (a request, an answer, an unblock) are all reversible or mere
+    // invitations, where a friendship ends whole and silently.
+    confirmRemoveFriend?.let { target ->
+        AlertDialog(
+            onDismissRequest = { confirmRemoveFriend = null },
+            title = { Text("Remove ${target.name} from friends?") },
+            text = {
+                Text(
+                    "The friendship ends on both sides. Nothing is announced — they are not " +
+                        "told — and either of you can send a friend request to rebuild it later.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemoveFriend = null
+                    model.removeFriend(target.userId)
+                }) { Text("Remove friend", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveFriend = null }) { Text("Cancel") }
+            },
+        )
+    }
 
     if (confirmLogout) {
         AlertDialog(

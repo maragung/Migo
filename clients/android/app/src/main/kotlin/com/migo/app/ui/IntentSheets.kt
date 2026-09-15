@@ -209,11 +209,11 @@ fun SheetPrimaryAction(
 
 /**
  * The friend intent sheet: what tapping a friend anywhere opens. Send message is the act, primary
- * and orange; the row beneath is the relationship's other door.
+ * and orange; the rows beneath are the relationship's other doors — the quiet exit and the heavy
+ * one, in that order, because the lighter end of a friendship is the one a person reaches for.
  *
- * The reference's second row is "Remove from friends", but the wire has no unfriend: blocking is
- * the one call that ends a friendship, and it ends it the heavy way — no messages either way,
- * either direction. The row says what it does rather than wearing the lighter label.
+ * The two exits say exactly what each does: removing a friend ends the friendship and nothing else,
+ * while blocking ends it the heavy way — no messages either way, either direction.
  */
 @Composable
 fun UserIntentSheet(
@@ -223,6 +223,7 @@ fun UserIntentSheet(
     onDismiss: () -> Unit,
     onSend: (UserTarget) -> Unit,
     onAdd: (UserTarget) -> Unit,
+    onRemove: (UserTarget) -> Unit,
     onBlock: (UserTarget) -> Unit,
 ) {
     if (target == null) return
@@ -260,9 +261,17 @@ fun UserIntentSheet(
         )
         if (target.friend) {
             SheetAction(
+                glyph = "−",
+                label = "Remove friend",
+                sub = "Ends the friendship quietly — nothing is announced on their side",
+                danger = true,
+                enabled = !busy,
+                onClick = { onRemove(target) },
+            )
+            SheetAction(
                 glyph = "⊘",
                 label = "Remove & block",
-                sub = "Blocking also ends the friendship — there is no lighter unfriend",
+                sub = "Blocking also stops their messages, both ways",
                 danger = true,
                 enabled = !busy,
                 onClick = { onBlock(target) },
