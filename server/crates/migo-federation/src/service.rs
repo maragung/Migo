@@ -450,18 +450,18 @@ where
         })
     }
 
-    fn check_sequence(&self, node: Id, seq: u64) -> SequenceVerdict {
-        let verdict = self.links.observe(node, seq);
+    fn check_sequence(&self, node: Id, link_seq: u64) -> SequenceVerdict {
+        let verdict = self.links.observe(node, link_seq);
         match verdict {
             SequenceVerdict::Accept => {}
             SequenceVerdict::Replay => {
                 self.meters.replay_rejected(ReplayReason::SequenceReplay);
-                tracing::warn!(node = %node, seq, "federation packet with a non-advancing sequence");
+                tracing::warn!(node = %node, link_seq, "federation packet with a non-advancing sequence");
             }
             SequenceVerdict::Gap => {
                 self.meters.replay_rejected(ReplayReason::SequenceGap);
                 self.meters.link_reset();
-                tracing::warn!(node = %node, seq, "sequence gap on a federation link; link reset (section 152)");
+                tracing::warn!(node = %node, link_seq, "sequence gap on a federation link; link reset (section 152)");
             }
         }
         verdict

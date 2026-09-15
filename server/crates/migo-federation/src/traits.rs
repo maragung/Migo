@@ -151,13 +151,14 @@ pub trait Mesh: Send + Sync {
         now: Timestamp,
     ) -> Result<PeerIdentity>;
 
-    /// Judges a packet's sequence number on `node`'s link and advances the link if it fits.
+    /// Judges a packet's federation link sequence on `node`'s link and advances the link if it
+    /// fits.
     ///
     /// The transport layer calls this for every packet after the handshake. An
     /// [`Accept`](SequenceVerdict::Accept) is safe to process; a [`Replay`](SequenceVerdict::Replay)
     /// must be dropped; a [`Gap`](SequenceVerdict::Gap) means the caller must tear the link
     /// down and re-handshake (section 152). Rejections are counted and logged.
-    fn check_sequence(&self, node: Id, seq: u64) -> SequenceVerdict;
+    fn check_sequence(&self, node: Id, link_seq: u64) -> SequenceVerdict;
 
     /// Clears a link's sequence state, so its next packet must be sequence 1.
     ///

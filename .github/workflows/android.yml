@@ -67,7 +67,18 @@ jobs:
       # ships an SDK already, but pinning the components we need here rather than trusting
       # whatever the image happens to carry is what stops "works this week, fails next
       # week when the image rolls" — see the explicit sdkmanager step below.
+      #
+      # The packages list has to name what the action installs itself, and it cannot
+      # include the legacy `tools` package: Google removed it from the SDK repository
+      # (it is absent from repository2-3.xml, while platform-tools and the cmdline-tools
+      # remain), so the action's default list of `tools platform-tools` now dies with
+      # "Failed to find package 'tools'" before a single Gradle task runs. platform-tools
+      # alone is kept so the action still has something to install from the surviving
+      # catalog; the rest of the floor arrives in the explicit step below, which is where
+      # the build's real requirements live anyway.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install the SDK packages the build needs
         # compileSdk = 35 across both modules, so platform 35 and a matching build-tools

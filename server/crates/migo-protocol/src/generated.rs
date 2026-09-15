@@ -6079,7 +6079,7 @@ impl Decode for FedEpoch {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FedLinkState {
     pub node_id: String,
-    pub sequence: u64,
+    pub link_seq: u64,
     pub healthy: bool,
 }
 
@@ -6087,7 +6087,7 @@ impl Encode for FedLinkState {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
         w.write_str(&self.node_id)?;
-        w.write_u64(self.sequence);
+        w.write_u64(self.link_seq);
         w.write_bool(self.healthy);
         w.write_u32(0);
         w.leave();
@@ -6100,7 +6100,7 @@ impl Decode for FedLinkState {
         r.enter()?;
         let mut out = Self::default();
         out.node_id = r.read_string()?;
-        out.sequence = r.read_u64()?;
+        out.link_seq = r.read_u64()?;
         out.healthy = r.read_bool()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
@@ -6701,14 +6701,14 @@ impl Decode for FedPong {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FedAck {
     pub node_id: String,
-    pub seq: u64,
+    pub link_seq: u64,
 }
 
 impl Encode for FedAck {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
         w.write_str(&self.node_id)?;
-        w.write_u64(self.seq);
+        w.write_u64(self.link_seq);
         w.write_u32(0);
         w.leave();
         Ok(())
@@ -6720,7 +6720,7 @@ impl Decode for FedAck {
         r.enter()?;
         let mut out = Self::default();
         out.node_id = r.read_string()?;
-        out.seq = r.read_u64()?;
+        out.link_seq = r.read_u64()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this

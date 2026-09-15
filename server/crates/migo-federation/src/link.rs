@@ -38,7 +38,8 @@ impl LinkSequences {
         }
     }
 
-    /// Judges `seq` against `node`'s last accepted number and advances the link if it fits.
+    /// Judges `link_seq` against `node`'s last accepted number and advances the link if it
+    /// fits.
     ///
     /// Exactly one greater than the last is [`Accept`](SequenceVerdict::Accept), and the link
     /// moves to it. Not greater is a [`Replay`](SequenceVerdict::Replay) and the link is left
@@ -46,16 +47,16 @@ impl LinkSequences {
     /// is cleared so the caller's reset-and-re-handshake starts the next session cleanly from
     /// sequence 1 (section 152).
     #[must_use]
-    pub(crate) fn observe(&self, node: Id, seq: u64) -> SequenceVerdict {
+    pub(crate) fn observe(&self, node: Id, link_seq: u64) -> SequenceVerdict {
         let mut last = self.last.lock();
         let previous = last.get(&node).copied().unwrap_or(0);
-        if seq <= previous {
+        if link_seq <= previous {
             return SequenceVerdict::Replay;
         }
-        // Reaching here guarantees `seq > previous`, so `previous + 1` cannot overflow:
-        // `previous < seq <= u64::MAX`.
-        if seq == previous + 1 {
-            last.insert(node, seq);
+        // Reaching here guarantees `link_seq > previous`, so `previous + 1` cannot overflow:
+        // `previous < link_seq <= u64::MAX`.
+        if link_seq == previous + 1 {
+            last.insert(node, link_seq);
             return SequenceVerdict::Accept;
         }
         last.remove(&node);

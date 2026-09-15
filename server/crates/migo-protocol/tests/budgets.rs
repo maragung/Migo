@@ -51,8 +51,9 @@ const HEARTBEAT_MS: u64 = 30_000;
 /// Any 174-character string measures identically; this one just reads like one.
 const TOKEN_LEN: usize = 174;
 
-/// A voice-note waveform is 64 buckets (brief section 179) — one byte per
-/// bucket, so the waveform is 64 bytes inside the sealed envelope.
+/// A voice-note waveform is 64 buckets (brief section 167, "misalnya 64
+/// bucket") — one byte per bucket, so the waveform is 64 bytes inside the
+/// sealed envelope.
 const WAVEFORM_BUCKETS: usize = 64;
 
 // Sample media sizes for the call-signaling budget. These are the honest
@@ -753,7 +754,7 @@ fn federation_frames_fit_their_budgets() {
         2,
         &FedAck {
             node_id: f.device.to_text(),
-            seq: 5000,
+            link_seq: 5000,
         },
     );
     assert!(ack <= 48, "FED_ACK is {ack} bytes, budget 48 (section 171)");
