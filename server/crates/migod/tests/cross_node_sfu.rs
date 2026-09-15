@@ -71,10 +71,10 @@ const QUIET: Duration = Duration::from_millis(1500);
 
 /// Node alpha's mesh signing seed, exactly 32 bytes the way `NodeSecret` demands. The
 /// mesh node id is the first 16 bytes, so the two seeds differ there.
-const SEED_ALPHA: &str = "cross-sfu-alpha-00000000000000";
+const SEED_ALPHA: &str = "cross-sfu-alpha-0000000000000000";
 
 /// Node beta's mesh signing seed.
-const SEED_BETA: &str = "cross-sfu-beta-000000000000000";
+const SEED_BETA: &str = "cross-sfu-beta-00000000000000000";
 
 /// The joiner's sealed media description, the blob the whole tier must carry
 /// unread. Distinctive bytes, so a frame that arrived altered would fail the
