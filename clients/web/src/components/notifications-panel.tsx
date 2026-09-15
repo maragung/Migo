@@ -29,6 +29,21 @@ const PAGE_SIZE = 50;
  */
 const FRIEND_REQUEST_KIND = String(NotificationKind.FriendRequest);
 
+/**
+ * The kind the wire uses for a group invitation, as the inbox row carries it — the same
+ * stringified-enum bargain the friend request kind above makes.
+ */
+const GROUP_INVITE_KIND = String(NotificationKind.GroupInvite);
+
+/**
+ * Kinds whose enum name is not the sentence a person reads, mapped to the sentence it is. The
+ * generic rule in {@link kindLabel} turns `GroupInvite` into "Group invite"; the invitation a
+ * person was sent reads as the noun the wire's own prose uses.
+ */
+const KIND_SENTENCES: Readonly<Record<number, string>> = {
+  [NotificationKind.GroupInvite]: 'Group invitation',
+};
+
 /** The relationship kind that says a request is waiting on this account, as a plain number. */
 const KIND_PENDING_INCOMING: number = RelationshipKind.PendingIncoming;
 
@@ -53,10 +68,16 @@ const FRIEND_EVENT_DEBOUNCE_MS = 300;
  * request already answered must stop offering its buttons) and the inbox. Whether the buttons may
  * be drawn at all is a graph question, asked the way the server's own notice design asks the
  * client to ask it: the same kind covers a request and its acceptance, and only the standing
- * (pending-incoming, or not) tells them apart. Every other kind stays inert — the wire carries no
- * action for them here.
+ * (pending-incoming, or not) tells them apart. A group invitation row is the one kind that names
+ * a destination: its Open conversation button hands the conversation to the host shell, when the
+ * host supplied a door. Every other kind stays inert — the wire carries no action for them here.
  */
-export function NotificationsPanel(): ReactNode {
+export function NotificationsPanel({
+  onOpenConversation,
+}: {
+  /** Opens a conversation a row names, when the host shell can navigate; absent keeps every row inert. */
+  onOpenConversation?: (conversationId: Id) => void;
+}): ReactNode {
   const { client } = useMigo();
 
   const [items, setItems] = useState<InboxItem[] | null>(null);
@@ -229,6 +250,7 @@ export function NotificationsPanel(): ReactNode {
                   ? (profiles.get(item.actorId)?.displayName ?? null)
                   : null
               }
+              onOpenConversation={onOpenConversation}
               actions={
                 item.kind === FRIEND_REQUEST_KIND &&
                 item.actorId !== undefined &&
@@ -252,22 +274,36 @@ export function NotificationsPanel(): ReactNode {
  * wire carries one.
  *
  * Exported presentational over plain props, so what a row offers — the sentence for every kind,
- * action buttons only when the caller (who has read the graph) says the request is still pending —
- * is testable without a live client. */
+ * action buttons only when the caller (who has read the graph) says the request is still pending,
+ * the Open conversation door only for a group invitation that names its destination and a host
+ * that can navigate — is testable without a live client. */
 export function NotificationRow({
   item,
   actorName,
   actions,
+  onOpenConversation,
 }: {
   item: InboxItem;
   actorName: string | null;
   /** The row's answer, when its kind and standing allow one; every other kind renders none. */
   actions?: ReactNode;
+  /** Opens the row's conversation, offered where the host shell can navigate to it. */
+  onOpenConversation?: (conversationId: Id) => void;
 }): ReactNode {
   const title =
     actorName !== null && actorName.length > 0
       ? `${actorName} — ${kindLabel(item.kind)}`
       : kindLabel(item.kind);
+  // A group invitation names the conversation it is about, so its row is the one that can go
+  // there; the button appears only when the row carries the conversation and the host offered a
+  // door to it. Every other kind names no destination, so it stays inert.
+  const conversationId = item.conversationId;
+  const openConversation =
+    onOpenConversation !== undefined &&
+    item.kind === GROUP_INVITE_KIND &&
+    conversationId !== undefined
+      ? () => onOpenConversation(conversationId)
+      : undefined;
   return (
     <li className="notification-row">
       <Avatar name={actorName ?? kindLabel(item.kind)} id={item.actorId ?? item.id} size={36} />
@@ -275,7 +311,16 @@ export function NotificationRow({
         <span className="person-name">{title}</span>
         {item.title ? <span className="person-note">{item.title}</span> : null}
       </div>
-      {actions ? <div className="person-actions">{actions}</div> : null}
+      {openConversation !== undefined || actions !== undefined ? (
+        <div className="person-actions">
+          {openConversation !== undefined ? (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={openConversation}>
+              Open conversation
+            </button>
+          ) : null}
+          {actions}
+        </div>
+      ) : null}
       <time className="person-note" dateTime={new Date(item.at).toISOString()}>
         {formatRelative(item.at)}
       </time>
@@ -315,14 +360,21 @@ export function FriendRequestActions({
  * The inbox `kind` is the wire's own word: the {@link NotificationKind} enum's number in a string
  * ("4"), or a snake_case word should a newer server say one. Name the number through the enum the
  * client already carries, then render it as a sentence — spaced words, a leading capital, the rest
- * lowercase — so a row reads "Friend request" rather than the wire's arithmetic. Anything unknown
- * keeps the wire's own word, so a kind this build has no name for still reads sanely.
+ * lowercase — so a row reads "Friend request" rather than the wire's arithmetic. A kind whose enum
+ * name is not the sentence a person reads says the sentence from {@link KIND_SENTENCES} instead;
+ * anything unknown keeps the wire's own word, so a kind this build has no name for still reads
+ * sanely.
  */
 function kindLabel(kind: string): string {
   const numeric = Number(kind);
-  const named =
-    Number.isInteger(numeric) && numeric > 0 ? (NotificationKind[numeric] ?? null) : null;
-  const source = named ?? kind;
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return sentenceCase(kind);
+  }
+  return KIND_SENTENCES[numeric] ?? sentenceCase(NotificationKind[numeric] ?? kind);
+}
+
+/** Turns a wire word into a sentence: spaced, lowercased, a single leading capital. */
+function sentenceCase(source: string): string {
   const spaced = source
     .replaceAll('_', ' ')
     .replace(/([a-z])([A-Z])/g, '$1 $2')

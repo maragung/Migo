@@ -100,7 +100,7 @@ fn alert_row(ui: &mut Ui, theme: Theme, alert: &AlertRow) {
             &alert
                 .title
                 .clone()
-                .unwrap_or_else(|| crate::model::spaced_words(&alert.kind)),
+                .unwrap_or_else(|| crate::model::alert_label(&alert.kind)),
             60,
         ))
         .font(FontId::proportional(font::BODY))

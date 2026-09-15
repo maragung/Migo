@@ -430,6 +430,22 @@ test-load: ## One-node load run: build migod (release), run tools/load/run.sh
 	$(CARGO) build $(MANIFEST) --release --bin migod
 	tools/load/run.sh
 
+.PHONY: test-load-full
+test-load-full: ## Full-scale load run: build migod (release), run tools/load/run-full.sh
+	# Brief section 172's full-scale list, nightly shape: ten thousand idle
+	# sessions, a thousand messages a second, one 256-member conversation (the
+	# product's member ceiling), five hundred concurrent call pairs, a thousand
+	# voice-note upload lifecycles, and mass sync after a mid-run node restart.
+	# Everything the quick test-load run is not, on purpose: it needs a
+	# PostgreSQL database (the outage step restarts the node, and in-memory
+	# backends would come back with amnesia), its steps take tens of minutes
+	# together, and its VU counts assume a machine with nothing else running —
+	# the nightly runner, never a developer's laptop. The script owns the
+	# topology, the step shapes, and the error budgets; this target guarantees
+	# the binary at the path its default points at, exactly like test-load.
+	$(CARGO) build $(MANIFEST) --release --bin migod
+	tools/load/run-full.sh
+
 # ---------------------------------------------------------------- end-to-end
 
 .PHONY: test-e2e

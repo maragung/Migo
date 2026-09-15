@@ -641,7 +641,8 @@ pub struct RoomRow {
 #[derive(Debug, Clone)]
 pub struct AlertRow {
     pub id: Id,
-    /// The wire's snake_case kind word, as-is: a closed server vocabulary.
+    /// The wire's kind word, as-is: the kind's own number spelled out (`"15"` is a group
+    /// invitation), a closed server vocabulary — the label it draws as is [`alert_label`].
     pub kind: String,
     pub title: Option<String>,
     pub at: Timestamp,
@@ -853,6 +854,46 @@ pub fn spaced_words(word: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => out,
+    }
+}
+
+/// The wire's kind word for one inbox row, parsed back into the vocabulary it names.
+///
+/// The server spells the kind as its number (`"15"` is a group invitation), so the parse is a
+/// number read through the wire enum's own `from_wire` — the one mapping that already knows every
+/// kind this build can name. `None` for a word that names nothing: a newer server's kind, zero,
+/// or a string that was never a number at all.
+#[must_use]
+pub fn alert_kind(kind: &str) -> Option<migo_protocol::NotificationKind> {
+    let parsed = migo_protocol::NotificationKind::from_wire(kind.parse::<u32>().ok()?);
+    (parsed != migo_protocol::NotificationKind::Unknown).then_some(parsed)
+}
+
+/// The sentence an inbox row's kind draws as — the same words the server's own push fallback
+/// uses, so a notification reads the same whichever client shows it.
+///
+/// An unnamed kind falls back to [`spaced_words`] rather than a guessed sentence: a newer
+/// server's kind is stated as it arrived, and the row still carries its time and its place.
+#[must_use]
+pub fn alert_label(kind: &str) -> String {
+    use migo_protocol::NotificationKind;
+    match alert_kind(kind) {
+        Some(NotificationKind::Message) => "New message".to_owned(),
+        Some(NotificationKind::Mention) => "You were mentioned".to_owned(),
+        Some(NotificationKind::Reply) => "New reply".to_owned(),
+        Some(NotificationKind::FriendRequest) => "New friend request".to_owned(),
+        Some(NotificationKind::Gift) => "You received a gift".to_owned(),
+        Some(NotificationKind::LevelUp) => "You levelled up".to_owned(),
+        Some(NotificationKind::Achievement) => "Achievement unlocked".to_owned(),
+        Some(NotificationKind::RoomInvite) => "Room invitation".to_owned(),
+        Some(NotificationKind::RoomAnnouncement) => "Room announcement".to_owned(),
+        Some(NotificationKind::Event) => "Upcoming event".to_owned(),
+        Some(NotificationKind::GameChallenge) => "Game challenge".to_owned(),
+        Some(NotificationKind::VoiceNote) => "New voice message".to_owned(),
+        Some(NotificationKind::MissedCall) => "Missed call".to_owned(),
+        Some(NotificationKind::IncomingCall) => "Incoming call".to_owned(),
+        Some(NotificationKind::GroupInvite) => "Group invitation".to_owned(),
+        Some(NotificationKind::Unknown) | None => spaced_words(kind),
     }
 }
 
@@ -1095,6 +1136,28 @@ mod tests {
         // A kind a newer server knows about collapses, never crashes.
         assert_eq!(RelationshipKind::from_wire(99), RelationshipKind::Unknown);
         assert_eq!(RelationshipKind::from_wire(0), RelationshipKind::Unknown);
+    }
+
+    #[test]
+    fn alert_kinds_label_by_their_numbers() {
+        // The wire spells a kind as its number, and the label is the sentence the server's
+        // own push fallback uses — pinned so the inbox and the activity stream (two callers
+        // of one vocabulary) cannot drift into two tellings of the same row.
+        assert_eq!(
+            alert_kind("15"),
+            Some(migo_protocol::NotificationKind::GroupInvite)
+        );
+        assert_eq!(alert_label("15"), "Group invitation");
+        assert_eq!(alert_label("4"), "New friend request");
+        assert_eq!(alert_label("5"), "You received a gift");
+        assert_eq!(alert_label("12"), "New voice message");
+        assert_eq!(alert_label("13"), "Missed call");
+        // A word that names nothing is stated as it arrived, never guessed at: zero is the
+        // wire's own "unknown", and a newer server's kind is its number, plain.
+        assert_eq!(alert_kind("0"), None);
+        assert_eq!(alert_kind("16"), None);
+        assert_eq!(alert_kind("friend_request"), None);
+        assert_eq!(alert_label("16"), "16");
     }
 
     #[test]

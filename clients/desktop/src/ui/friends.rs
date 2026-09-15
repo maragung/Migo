@@ -132,9 +132,9 @@ pub struct Sections {
     pub friends: Vec<Relationship>,
     pub incoming: Vec<Relationship>,
     pub outgoing: Vec<Relationship>,
-    /// Accounts this caller has blocked. Rendered with no action: the wire is set-only —
-    /// there is no unblock opcode — so a block is the one row the pane is honest about
-    /// being unable to undo from here.
+    /// Accounts this caller has blocked, each with its Unblock: the wire's own lift, which
+    /// restores nothing the block tore down — the friendship and any request stay gone, and
+    /// the mute the block carried stays on, both stated by their own sections above.
     pub blocked: Vec<Relationship>,
     /// Accounts this caller has muted, each with its Unmute.
     pub muted: Vec<Relationship>,
@@ -300,9 +300,9 @@ pub fn show(
                         false,
                     );
                     // The two personal verdicts, after the people: a mute is a volume
-                    // control with its own switch back, a block a door the wire will not
-                    // reopen from here. Both sections state what they are; neither draws
-                    // an action it cannot deliver.
+                    // control with its own switch back, a block a door that now opens
+                    // from this side too. Both sections state what they are, and each
+                    // row carries the switch the wire genuinely delivers.
                     section(ui, context, state, "Muted", &resolved.muted, None, false);
                     section(
                         ui,
@@ -740,7 +740,8 @@ fn new_group_form(
 /// One titled group of rows.
 ///
 /// `with_actions` draws Accept/Decline on each row — only the incoming requests have them,
-/// because acting on anything else is not something this pane offers.
+/// because every other section's act is the one switch its own kind carries (Message and
+/// Unfriend for friends, Unmute for mutes, Unblock for blocks).
 fn section(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -769,6 +770,8 @@ fn section(
     let mut actions: Vec<(Id, bool)> = Vec::new();
     let mut message: Option<Id> = None;
     let mut unmutes: Vec<Id> = Vec::new();
+    let mut unfriends: Vec<Id> = Vec::new();
+    let mut unblocks: Vec<Id> = Vec::new();
     for entry in entries {
         row(
             ui,
@@ -779,6 +782,8 @@ fn section(
             &mut actions,
             &mut message,
             &mut unmutes,
+            &mut unfriends,
+            &mut unblocks,
         );
         ui.add_space(space::XS);
     }
@@ -795,6 +800,17 @@ fn section(
     for user_id in unmutes {
         context.issue(Command::MuteUser { user_id, on: false });
     }
+    // An Unfriend click ends the friendship from this side: the wire asks nobody's
+    // permission, so neither does the button — the row leaves when the re-read says so,
+    // not the moment the click wished it.
+    for user_id in unfriends {
+        context.issue(Command::RemoveFriend { user_id });
+    }
+    // An Unblock click lifts the caller's own verdict and nothing else: what the block
+    // tore down stays down, and each section states what is left.
+    for user_id in unblocks {
+        context.issue(Command::UnblockUser { user_id });
+    }
     ui.add_space(space::SM);
 }
 
@@ -809,6 +825,8 @@ fn row(
     actions: &mut Vec<(Id, bool)>,
     message: &mut Option<Id>,
     unmutes: &mut Vec<Id>,
+    unfriends: &mut Vec<Id>,
+    unblocks: &mut Vec<Id>,
 ) {
     let colors = palette(context.theme);
     let name = state
@@ -844,6 +862,20 @@ fn row(
                 if widgets::ghost_button(ui, context.theme, "Message").clicked() {
                     *message = Some(entry.user_id);
                 }
+                // The friend's own way out, one quiet press beside the door in: the wire asks
+                // nobody's permission, so a confirmation would promise a ceremony the server
+                // does not hold — but the hover states the cost, because "ends for both of
+                // you" is the one fact a person pressing this wants already known.
+                ui.add_space(space::XS);
+                if widgets::ghost_button(ui, context.theme, "Unfriend")
+                    .on_hover_text(
+                        "Ends the friendship for both of you. They are not told, and adding \
+                         them back takes a new request.",
+                    )
+                    .clicked()
+                {
+                    unfriends.push(entry.user_id);
+                }
             } else if entry.kind == RelationshipKind::Mute {
                 // A volume control, so the row carries its own switch back: Unmute is the
                 // same opcode with the flag off, and no confirmation is owed — the choice
@@ -854,9 +886,12 @@ fn row(
             } else if entry.kind == RelationshipKind::PendingOutgoing {
                 widgets::pill(ui, "waiting", colors.text_muted, colors.surface_raised);
             } else if entry.kind == RelationshipKind::Block {
-                // Set-only on the wire: no unblock opcode exists, so the pill states the
-                // fact rather than offering a switch this client cannot deliver.
-                widgets::pill(ui, "blocked", colors.text_muted, colors.surface_raised);
+                // The block's own switch back: Unblock lifts this account's verdict and
+                // nothing else — the friendship the block tore down stays down, and the mute
+                // it carried stays on, both visible in their own sections above.
+                if widgets::ghost_button(ui, context.theme, "Unblock").clicked() {
+                    unblocks.push(entry.user_id);
+                }
             }
         });
     });

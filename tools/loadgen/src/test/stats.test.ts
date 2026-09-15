@@ -26,7 +26,16 @@ function digestOf(samples: readonly number[]): ReturnType<LatencyDigest['snapsho
 
 test('empty digest is all zeros and never NaN or Infinity', () => {
   const snap = new LatencyDigest().snapshot();
-  for (const value of [snap.count, snap.min, snap.max, snap.mean, snap.p50, snap.p90, snap.p99]) {
+  for (const value of [
+    snap.count,
+    snap.min,
+    snap.max,
+    snap.mean,
+    snap.p50,
+    snap.p90,
+    snap.p95,
+    snap.p99,
+  ]) {
     assert.equal(value, 0);
     assert.ok(Number.isFinite(value), 'every field must be finite for an empty sample');
   }
@@ -40,11 +49,13 @@ test('n=1: every percentile is the single sample', () => {
   assert.equal(snap.mean, 42);
   assert.equal(snap.p50, 42);
   assert.equal(snap.p90, 42);
+  assert.equal(snap.p95, 42);
   assert.equal(snap.p99, 42);
 });
 
 test('n=2: nearest-rank splits the pair exactly', () => {
-  // rank(p50) = ceil(0.5*2) = 1 -> index 0 -> 10; rank(p90) = ceil(1.8) = 2 -> index 1 -> 20.
+  // rank(p50) = ceil(0.5*2) = 1 -> index 0 -> 10; rank(p90) = ceil(1.8) = 2 -> index 1 -> 20;
+  // rank(p95) = ceil(1.9) = 2 -> index 1 -> 20.
   const snap = digestOf([10, 20]);
   assert.equal(snap.count, 2);
   assert.equal(snap.mean, 15);
@@ -52,32 +63,36 @@ test('n=2: nearest-rank splits the pair exactly', () => {
   assert.equal(snap.max, 20);
   assert.equal(snap.p50, 10);
   assert.equal(snap.p90, 20);
+  assert.equal(snap.p95, 20);
   assert.equal(snap.p99, 20);
 });
 
 test('even n=4: hand-computed nearest-rank indices', () => {
-  // p50: ceil(0.5*4)=2 -> idx1 -> 20; p90: ceil(0.9*4)=ceil(3.6)=4 -> idx3 -> 40.
+  // p50: ceil(0.5*4)=2 -> idx1 -> 20; p90: ceil(3.6)=4 -> idx3 -> 40; p95: ceil(3.8)=4 -> idx3 -> 40.
   const snap = digestOf([10, 20, 30, 40]);
   assert.equal(snap.mean, 25);
   assert.equal(snap.p50, 20);
   assert.equal(snap.p90, 40);
+  assert.equal(snap.p95, 40);
   assert.equal(snap.p99, 40);
 });
 
 test('odd n=5: hand-computed nearest-rank indices', () => {
-  // p50: ceil(0.5*5)=ceil(2.5)=3 -> idx2 -> 3; p90: ceil(4.5)=5 -> idx4 -> 5.
+  // p50: ceil(2.5)=3 -> idx2 -> 3; p90: ceil(4.5)=5 -> idx4 -> 5; p95: ceil(4.75)=5 -> idx4 -> 5.
   const snap = digestOf([1, 2, 3, 4, 5]);
   assert.equal(snap.mean, 3);
   assert.equal(snap.min, 1);
   assert.equal(snap.max, 5);
   assert.equal(snap.p50, 3);
   assert.equal(snap.p90, 5);
+  assert.equal(snap.p95, 5);
   assert.equal(snap.p99, 5);
 });
 
 test('n=10 with distinct percentiles catches an off-by-one, and sorts first', () => {
   // Recorded out of order to prove the digest sorts before ranking.
-  // p50: ceil(0.5*10)=5 -> idx4 -> 50; p90: ceil(9)=9 -> idx8 -> 90; p99: ceil(9.9)=10 -> idx9 -> 100.
+  // p50: ceil(5)=5 -> idx4 -> 50; p90: ceil(9)=9 -> idx8 -> 90; p95: ceil(9.5)=10 -> idx9 -> 100;
+  // p99: ceil(9.9)=10 -> idx9 -> 100.
   const snap = digestOf([50, 10, 90, 30, 70, 20, 100, 40, 80, 60]);
   assert.equal(snap.count, 10);
   assert.equal(snap.min, 10);
@@ -85,6 +100,7 @@ test('n=10 with distinct percentiles catches an off-by-one, and sorts first', ()
   assert.equal(snap.mean, 55);
   assert.equal(snap.p50, 50);
   assert.equal(snap.p90, 90);
+  assert.equal(snap.p95, 100);
   assert.equal(snap.p99, 100);
 });
 

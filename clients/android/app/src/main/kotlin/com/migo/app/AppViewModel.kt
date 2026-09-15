@@ -60,6 +60,8 @@ import com.migo.app.model.departedRoomConversation
 import com.migo.app.model.gameEventLine
 import com.migo.app.model.gameLabelOf
 import com.migo.app.model.groupMemberLine
+import com.migo.app.model.notificationCategory
+import com.migo.app.model.notificationLabel
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.ResetResync
@@ -3124,6 +3126,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Blocks an account; the graph re-reads after, exactly as the web client does. */
     fun blockUser(userId: Id) = socialAction(userId) { it.blockUser(userId) }
 
+    /**
+     * Ends a friendship. The graph re-reads after, through the same social-action path every other
+     * edge change takes; the other party is told nothing but a quiet hint.
+     */
+    fun removeFriend(userId: Id) = socialAction(userId) { it.removeFriend(userId) }
+
+    /** Lifts the caller's own block on an account; the graph re-reads after, like every social act. */
+    fun unblockUser(userId: Id) = socialAction(userId) { it.unblockUser(userId) }
+
     private fun socialAction(userId: Id, action: suspend (com.migo.core.domain.SocialDomain) -> Unit) {
         val live = session ?: return
         if (signedInState?.friends?.busy?.contains(userId) == true) return
@@ -4959,18 +4970,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** An inbox row as a stream row: category and headline from the kind's own words. */
-    private fun inboxRow(item: InboxItem): ActivityRow {
-        val kind = item.kind
-        val spaced = kind.replace('_', ' ').replaceFirstChar { it.uppercase() }
-        val category = when {
-            kind.contains("friend") -> ActivityCategory.SOCIAL
-            kind.contains("gift") || kind.contains("coin") || kind.contains("ledger") -> ActivityCategory.ECONOMY
-            kind.contains("game") -> ActivityCategory.GAMES
-            kind.contains("room") -> ActivityCategory.ROOMS
-            else -> ActivityCategory.SOCIAL
-        }
-        return ActivityRow(key = "notif-" + item.id.value, category = category, title = item.title ?: spaced, at = item.at)
-    }
+    private fun inboxRow(item: InboxItem): ActivityRow = ActivityRow(
+        key = "notif-" + item.id.value,
+        category = notificationCategory(item),
+        title = item.title ?: notificationLabel(item),
+        at = item.at,
+    )
 
     /** A ledger line as a stream row: the money-side fact, signed by its reason. */
     private fun ledgerRow(entry: LedgerEntryWire): ActivityRow {

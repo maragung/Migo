@@ -122,6 +122,48 @@ const BUDGETS: readonly ScenarioByteBudget[] = [
       'each side of a pair spends roughly 60 KB/user/min plus the one-time conversation setup and ' +
       'sender-key distribution, so 256 KiB/min leaves about four times headroom',
   },
+  {
+    scenario: 'fanout',
+    bytesPerUserPerMinute: 512 * 1024,
+    anchor:
+      'section 56 fan-out budget (PresenceEvent at most 32 bytes sets the envelope scale; a ' +
+      'sealed message event lands in the low hundreds): at the default 5 sends/s one receiver ' +
+      'sees about 300 deliveries per minute at roughly 130 B each — about 40 KB/user/min — plus ' +
+      'the one-time conversation create, watch and sender-key distribution; 512 KiB/min is an ' +
+      'order of magnitude above the measured shape and still catches a fan-out that stops ' +
+      'coalescing or starts re-sending',
+  },
+  {
+    scenario: 'calls',
+    bytesPerUserPerMinute: 128 * 1024,
+    anchor:
+      'section 165 placeholder shape, measured against it: one cycle relays the 1 KiB sealed ' +
+      'offer (invite plus invite event), the 1 KiB sealed answer (answer plus SDP relay), two ' +
+      '256 B ICE batches and the end — roughly 5 KB per pair per cycle, and a cycle spans the ' +
+      '5 s hold plus setup, so about 10 cycles/min is roughly 50 KB/user/min; 128 KiB/min leaves ' +
+      'about double. The media plane is peer-to-peer and never touches these counters, by design',
+  },
+  {
+    scenario: 'voice-notes',
+    bytesPerUserPerMinute: 256 * 1024,
+    anchor:
+      'control plane only, and honestly bounded as such: the ticket, commit and media-state ' +
+      'event frames are a few hundred bytes per upload while the 32 KB WAV itself rides plain ' +
+      'HTTP and is deliberately outside WireBytes (section 171 counts the gateway socket); even ' +
+      'a fast closed loop of one upload per second spends well under 20 KB/user/min on the ' +
+      'socket, so 256 KiB/min gates the control plane and the data plane is read from the ' +
+      "server's migo_media_bytes_committed_total instead",
+  },
+  {
+    scenario: 'outage',
+    bytesPerUserPerMinute: 256 * 1024,
+    anchor:
+      'the messaging budget plus the outage itself: one reconnect handshake and one sync burst ' +
+      'per user add roughly a kilobyte each to a messaging-shaped run, and the outbox retries ' +
+      'ride the same idempotency key so a healthy resume re-sends little; 256 KiB/min therefore ' +
+      'gates the same envelope as messaging and fires precisely when a broken resume starts ' +
+      're-delivering whole backlogs',
+  },
 ];
 
 const BUDGETS_BY_SCENARIO = new Map(BUDGETS.map((budget) => [budget.scenario, budget]));

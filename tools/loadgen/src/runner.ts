@@ -5,8 +5,9 @@
  * server that forbids the registration this tool depends on). Build the VUs. Connect them under a
  * concurrency cap — an open-ended phase, timed but not deadlined. Let the scenario wire up shared
  * state. Then set the deadline and race every workload against it, holding the whole duration even
- * when a scenario has no steady-state op. Finally disconnect and hand back the metrics. Ctrl-C at any
- * point flips the run to a graceful stop and still reports what was gathered.
+ * when a scenario has no steady-state op. Let the scenario settle, when it has a settle phase, so
+ * in-flight work lands before any integrity verdict. Finally disconnect and hand back the metrics.
+ * Ctrl-C at any point flips the run to a graceful stop and still reports what was gathered.
  */
 
 import type { Config } from './config.js';
@@ -93,6 +94,13 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
         ...workloads.map((workload) => driveSafely(workload, ctx)),
       ]);
       durationMsActual = performance.now() - startedAt;
+      // The settle phase, when the scenario has one: in-flight deliveries landing, outboxes
+      // draining, integrity verdicts recording. Skipped on an interrupt — a stop asked for is a
+      // stop honored, with the partial results — and bounded by the scenario itself.
+      if (scenario.settle !== undefined && !ctx.interrupted) {
+        log.info('settling (waiting for in-flight work before the verdict)...');
+        await scenario.settle(vus, ctx);
+      }
     } else if (connectedCount === 0) {
       log.warn('no virtual users connected; skipping the workload');
     }

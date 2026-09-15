@@ -3,7 +3,7 @@
  *
  * The report is deliberately blunt about failure. It never rolls errors into a single "success
  * rate"; it breaks them out by class per operation, because "5 RATE_LIMITED" and "5 transport" are
- * different diagnoses. Latency lines carry p50/p90/p99, not an average alone, since the tail is
+ * different diagnoses. Latency lines carry p50/p90/p95/p99, not an average alone, since the tail is
  * where a real system's trouble hides.
  */
 
@@ -25,11 +25,41 @@ export interface RunOutcome {
   readonly wireBytes: WireByteSummary;
 }
 
-/** Labels that name a lifecycle phase rather than a steady-state operation with a throughput. */
-const PHASE_LABELS = new Set(['connect', 'setup', 'event', 'workload']);
+/**
+ * Labels that name a lifecycle phase or a settle-phase verdict rather than a steady-state
+ * operation with a throughput — a "calls per second" computed from verdict samples would be
+ * meaningless, and a connect-phase count is not an operation rate.
+ */
+const PHASE_LABELS = new Set([
+  'connect',
+  'setup',
+  'event',
+  'workload',
+  'fanout-verdict',
+  'outage-verdict',
+]);
 
 /** Display order; any label not listed sorts after these, alphabetically. */
-const LABEL_ORDER = ['connect', 'setup', 'send', 'presence', 'event', 'workload'];
+const LABEL_ORDER = [
+  'connect',
+  'setup',
+  'send',
+  'deliver',
+  'fanout-deliver',
+  'fanout-verdict',
+  'voice-upload',
+  'call-invite',
+  'call-answer',
+  'call-sdp',
+  'call-setup',
+  'call-ice',
+  'call-ice-deliver',
+  'call-end',
+  'presence',
+  'event',
+  'workload',
+  'outage-verdict',
+];
 
 export function computeErrorRate(outcome: RunOutcome): number {
   let ok = 0;
@@ -177,7 +207,7 @@ function orderedLabels(metrics: Metrics): string[] {
 
 function latencyText(latency: DigestSnapshot): string {
   return (
-    `p50 ${ms(latency.p50)}  p90 ${ms(latency.p90)}  p99 ${ms(latency.p99)}` +
+    `p50 ${ms(latency.p50)}  p90 ${ms(latency.p90)}  p95 ${ms(latency.p95)}  p99 ${ms(latency.p99)}` +
     `  (min ${ms(latency.min)} max ${ms(latency.max)})`
   );
 }

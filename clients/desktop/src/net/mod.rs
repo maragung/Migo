@@ -676,12 +676,27 @@ pub enum Command {
         text: String,
     },
     /// Block an account. One-sided and silent: the server tears down any friendship in both
-    /// directions and tells the blocked party nothing. There is no unblock opcode — the wire
-    /// is set-only — so the control that issues this reads "Block" and then "Blocked".
+    /// directions and tells the blocked party nothing. The wire keeps the two verdicts apart —
+    /// setting a block and lifting it are separate opcodes — so the control that issues this
+    /// reads "Block", and the lift is [`Command::UnblockUser`], offered where the block state
+    /// is shown.
     BlockUser { user_id: Id },
     /// Mute or unmute an account for the caller alone. A volume control, not a verdict: no
     /// teardown, no notification, and a muted account's room messages are simply not drawn.
     MuteUser { user_id: Id, on: bool },
+    /// End a friendship with one account, from the caller's own side. The wire never asks the
+    /// other party to agree — the friendship was already their shared fact, and the server drops
+    /// both rows, and any hanging request, in one transaction, telling them only the same
+    /// FRIEND_EVENT word a decline carries. The graph re-read that follows the acknowledgement
+    /// is what moves the friends pane, the same posture every social act here takes.
+    RemoveFriend { user_id: Id },
+    /// Lift the caller's own block on one account. Restores nothing the block tore down — the
+    /// friendship and any request are gone, and the mute the block carried stays behind
+    /// deliberately, visible in the caller's muted list and reversible with MUTE_SET — so the
+    /// control reads "Unblock" and promises exactly that much. Idempotent on the wire:
+    /// unblocking an account that was never blocked is acknowledged, because it costs nothing
+    /// and tells nobody anything.
+    UnblockUser { user_id: Id },
     /// Fetch one attachment for the thread. Deduplicated by the worker: a bubble that asks
     /// twice still costs one fetch.
     FetchMedia { media_id: Id },
@@ -2768,6 +2783,8 @@ impl Worker {
             }
             Command::BlockUser { user_id } => self.block_user(user_id).await,
             Command::MuteUser { user_id, on } => self.mute_user(user_id, on).await,
+            Command::RemoveFriend { user_id } => self.remove_friend(user_id).await,
+            Command::UnblockUser { user_id } => self.unblock_user(user_id).await,
             Command::FetchMedia { media_id } => {
                 self.want_media(media_id, MediaIntent::Show).await;
             }
@@ -4673,6 +4690,22 @@ impl Worker {
     async fn mute_user(&mut self, user_id: Id, on: bool) {
         let message = migo_protocol::MuteSet { user_id, on };
         self.request(Opcode::MuteSet, &message).await;
+    }
+
+    /// Ends a friendship. Both sides' rows and any hanging request go in one server-side
+    /// transaction, and the other party hears only the FRIEND_EVENT hint a decline carries —
+    /// the graph re-read that follows the acknowledgement is what moves the friends pane.
+    async fn remove_friend(&mut self, user_id: Id) {
+        let message = FriendTarget { user_id };
+        self.request(Opcode::FriendRemove, &message).await;
+    }
+
+    /// Lifts the caller's own block on an account. The wire restores nothing the block tore
+    /// down, and neither does this client: the friends pane re-reads after the acknowledgement
+    /// and each section states what the graph now says.
+    async fn unblock_user(&mut self, user_id: Id) {
+        let message = FriendTarget { user_id };
+        self.request(Opcode::BlockClear, &message).await;
     }
 
     /// Begins a voice-note recording: opens the microphone and hands its chunks to a pump
@@ -8374,10 +8407,13 @@ impl Worker {
             // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
             // moved and the list in the UI is now stale, so both take the same action: re-read.
             Opcode::FriendRequest | Opcode::FriendRespond => self.on_social_ack(&frame).await,
-            // A BLOCK_SET or MUTE_SET acknowledgement: the graph moved the same way a friend
-            // request moves it, so the same re-read answers both — the muted-set view the UI
-            // renders is a filtered read of the very list this refreshes.
-            Opcode::BlockSet | Opcode::MuteSet => self.on_social_ack(&frame).await,
+            // A BLOCK_SET, MUTE_SET, FRIEND_REMOVE, or BLOCK_CLEAR acknowledgement: the graph
+            // moved the same way a friend request moves it, so the same re-read answers both —
+            // the muted-set view the UI renders is a filtered read of the very list this
+            // refreshes.
+            Opcode::BlockSet | Opcode::MuteSet | Opcode::FriendRemove | Opcode::BlockClear => {
+                self.on_social_ack(&frame).await
+            }
             Opcode::FriendEvent => self.on_friend_event(&frame),
             Opcode::PresenceEvent => self.on_presence(&frame),
             Opcode::RoomList => self.on_rooms(&frame),
