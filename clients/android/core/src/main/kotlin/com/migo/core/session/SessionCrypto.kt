@@ -108,10 +108,14 @@ class SessionCrypto(
                 initiation.seed,
                 bundle.signedPrekey.publicKey,
             )
-            // `exposeSharedSecret` hands out a copy, so the seed still holds a live secret that
-            // nothing else will ever zero. Rust gets this from `Drop`; here it is a call.
+            // A copy of the X3DH shared secret, taken before the destroy below: the ratchet keeps
+            // no copy of the seed it was built from, and this is the one byte string both ends of
+            // the session still hold identically -- the input section 163's call-key derivations
+            // read. The SDK stores the same copy on its session entries and the desktop's session
+            // store answers the same question with `pairwise_secret`.
+            val sharedSecret = initiation.seed.exposeSharedSecret()
             initiation.seed.destroy()
-            entry = SessionEntry(session, initiation.message)
+            entry = SessionEntry(session, sharedSecret, initiation.message)
             sessions[key] = entry
         }
 
@@ -126,7 +130,7 @@ class SessionCrypto(
         // The ratchet advanced, so the new state has to reach disk before the envelope reaches the
         // network. The other order loses: a process killed between the send and the save would leave
         // the peer holding a chain step this device has forgotten, and every later message would fail.
-        persistence.save(conversationId, peerDeviceId, entry.session)
+        persistence.save(conversationId, peerDeviceId, entry.session, entry.sharedSecret)
 
         SealedEnvelope(
             scheme = if (pending != null) SCHEME_DOUBLE_RATCHET_PREKEY else SCHEME_DOUBLE_RATCHET,
@@ -182,7 +186,7 @@ class SessionCrypto(
             val plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext)
             // We have now heard from the peer, so they hold a working session; stop re-sending X3DH.
             existing.pendingInit = null
-            persistence.save(conversationId, senderDeviceId, existing.session)
+            persistence.save(conversationId, senderDeviceId, existing.session, existing.sharedSecret)
             return@withLock plaintext
         }
 
@@ -198,10 +202,30 @@ class SessionCrypto(
         // Success: this message was ours. Now -- and only now -- consume the prekey and keep the
         // session.
         derived.oneTimePrekeyId?.let { keys.consumeOneTimePrekey(it) }
-        val committed = SessionEntry(derived.session, null)
+        val committed = SessionEntry(derived.session, derived.sharedSecret, null)
         sessions[key] = committed
-        persistence.save(conversationId, senderDeviceId, committed.session)
+        persistence.save(conversationId, senderDeviceId, committed.session, committed.sharedSecret)
         plaintext
+    }
+
+    /**
+     * The X3DH shared secret behind one remote device's session, or null when there is no session.
+     *
+     * Section 163's call keys derive from this secret -- the wrapper key that seals a mid-call
+     * joiner's first frame key especially -- because the Double Ratchet's root key deliberately
+     * advances beyond any stable export, and the X3DH seed is the one input both ends still hold
+     * identically. Mirrors `sessionSecret` on the SDK's `SessionCrypto` and `pairwise_secret` on
+     * the desktop's session store.
+     *
+     * Returns a copy and never establishes a session: the stored secret outlives any one
+     * derivation and a caller must not be able to zero it as a side effect, and a caller that
+     * only meant to read must not spend one of the peer's one-time prekeys minting a session it
+     * never asked for. A session restored from a record written before the secret was retained
+     * answers null -- legal state, not an error: the session still carries traffic, it just
+     * cannot take part in a unified join ask.
+     */
+    suspend fun sessionSecret(conversationId: Id, deviceId: Id): ByteArray? = lock.withLock {
+        entryOrNull(conversationId, deviceId)?.sharedSecret?.copyOf()
     }
 
     /**
@@ -216,12 +240,17 @@ class SessionCrypto(
     suspend fun forget(conversationId: Id, deviceId: Id? = null) {
         lock.withLock {
             if (deviceId != null) {
-                sessions.remove(sessionKey(conversationId, deviceId))
+                // The retained secret dies with its session: the record on disk goes in the same
+                // breath, so leaving a live copy in the map would outlive the session it sealed.
+                sessions.remove(sessionKey(conversationId, deviceId))?.sharedSecret?.fill(0)
                 persistence.delete(conversationId, deviceId)
                 return@withLock
             }
             val prefix = "${conversationId.value}|"
-            sessions.keys.removeAll { it.startsWith(prefix) }
+            val doomed = sessions.keys.filter { it.startsWith(prefix) }
+            for (key in doomed) {
+                sessions.remove(key)?.sharedSecret?.fill(0)
+            }
             persistence.deleteConversation(conversationId)
         }
     }
@@ -235,13 +264,17 @@ class SessionCrypto(
      * this direction is one redundant prekey preamble on one message; the cost in the other direction
      * is a peer that never learns the session exists.
      *
+     * A restored session's retained secret may be null -- the record was written before the secret
+     * was retained -- and that is legal state rather than an error: [sessionSecret] answers null
+     * for it, and the session itself keeps carrying traffic exactly as it did.
+     *
      * Must be called with [lock] held.
      */
     private fun entryOrNull(conversationId: Id, deviceId: Id): SessionEntry? {
         val key = sessionKey(conversationId, deviceId)
         sessions[key]?.let { return it }
         val restored = persistence.load(conversationId, deviceId) ?: return null
-        val entry = SessionEntry(restored, null)
+        val entry = SessionEntry(restored.session, restored.sharedSecret, null)
         sessions[key] = entry
         return entry
     }
@@ -272,8 +305,12 @@ class SessionCrypto(
         )
         val seed = X3dh.respond(keys.identity(), signedPrekey, oneTimePrekey, message)
         val session = RatchetSession.responder(seed, signedPrekey)
+        // The same retained copy the initiator path keeps -- the X3DH secret is symmetric, so these
+        // are the same bytes the peer stored when it initiated, which is what makes the join
+        // wrapper's derivation agree across the two halves.
+        val sharedSecret = seed.exposeSharedSecret()
         seed.destroy()
-        return DerivedResponder(session, oneTimeId)
+        return DerivedResponder(session, sharedSecret, oneTimeId)
     }
 
     private fun preambleOf(message: InitialMessage): Preamble = Preamble(
@@ -338,11 +375,22 @@ interface PeerBundleSource {
  * Making them suspend would suggest they can be interleaved, and they cannot.
  */
 interface SessionPersistence {
-    /** The stored session for a device, or null when there is none. */
-    fun load(conversationId: Id, deviceId: Id): RatchetSession?
+    /**
+     * The stored session for a device, or null when there is none.
+     *
+     * The record carries the X3DH shared secret the session retains for section 163's call-key
+     * derivations. A record written before the secret was retained loads with a null secret --
+     * legal state, not an error: the session still opens traffic, it just cannot take part in a
+     * unified join ask.
+     */
+    fun load(conversationId: Id, deviceId: Id): StoredSession?
 
-    /** Stores a session's current state, replacing what was there. */
-    fun save(conversationId: Id, deviceId: Id, session: RatchetSession)
+    /**
+     * Stores a session's current state beside the X3DH secret it retains, replacing what was
+     * there. The secret array is the caller's live copy -- a store serialises it and must not
+     * zero it.
+     */
+    fun save(conversationId: Id, deviceId: Id, session: RatchetSession, sharedSecret: ByteArray?)
 
     /** Drops one device's session. */
     fun delete(conversationId: Id, deviceId: Id)
@@ -358,12 +406,27 @@ interface SessionPersistence {
      * silently stopped decrypting.
      */
     object None : SessionPersistence {
-        override fun load(conversationId: Id, deviceId: Id): RatchetSession? = null
-        override fun save(conversationId: Id, deviceId: Id, session: RatchetSession) = Unit
+        override fun load(conversationId: Id, deviceId: Id): StoredSession? = null
+        override fun save(
+            conversationId: Id,
+            deviceId: Id,
+            session: RatchetSession,
+            sharedSecret: ByteArray?,
+        ) = Unit
         override fun delete(conversationId: Id, deviceId: Id) = Unit
         override fun deleteConversation(conversationId: Id) = Unit
     }
 }
+
+/**
+ * A persisted pairwise session as [SessionPersistence.load] hands it back: the ratchet, and the
+ * X3DH shared secret it retains -- null when the record was written before the secret was
+ * retained, the same nullable shape [com.migo.core.session.SessionCrypto]'s own entries hold.
+ */
+class StoredSession(
+    val session: RatchetSession,
+    val sharedSecret: ByteArray?,
+)
 
 /** A sealed envelope, ready to place in a `MessageSend`. */
 class SealedEnvelope(
@@ -385,9 +448,17 @@ class SealedEnvelope(
         "SealedEnvelope(scheme: $scheme, sender_key_id: $senderKeyId, envelope_len: ${envelope.size})"
 }
 
-/** One remote device's ratchet, plus the initiator state that governs the scheme we send. */
+/** One remote device's ratchet, plus the state that governs the schemes and derivations around it. */
 private class SessionEntry(
     val session: RatchetSession,
+    /**
+     * The X3DH shared secret this session was seeded from, retained for the call-key derivations
+     * section 163 specifies: the wrapper key that seals a mid-call joiner's first frame key is an
+     * HKDF output over this secret, and the Double Ratchet deliberately exposes nothing stable --
+     * the root key advances -- so the seed is the one copy both ends still hold identically. Null
+     * for a session restored from a record written before the secret was retained.
+     */
+    val sharedSecret: ByteArray?,
     /**
      * The X3DH material to keep prepending, or null once the peer has replied.
      *
@@ -398,5 +469,12 @@ private class SessionEntry(
     var pendingInit: InitialMessage?,
 )
 
-/** A responder session derived but not yet committed, with the prekey id to spend on success. */
-private class DerivedResponder(val session: RatchetSession, val oneTimePrekeyId: Long?)
+/**
+ * A responder session derived but not yet committed, with the retained secret and the prekey id to
+ * spend on success.
+ */
+private class DerivedResponder(
+    val session: RatchetSession,
+    val sharedSecret: ByteArray,
+    val oneTimePrekeyId: Long?,
+)
