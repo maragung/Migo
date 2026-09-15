@@ -4,11 +4,11 @@
  * The phone's tab strip — the taskbar's replacement below the PC breakpoint.
  *
  * No window chrome survives a phone's width, so the strip is where windows live: the home
- * navigation tabs (Friends, Rooms, Feed — only Feed closable; Friends and Rooms are permanent
- * and ship without an X) come first, a hairline divides them from one tab per open window, and
- * every window tab carries its own close. The strip scrolls horizontally when it must, with
- * chevron arrows that fade in only on the side that still hides tabs, and the active tab keeps
- * itself scrolled into view.
+ * navigation tabs come first (Main leading whenever Chat List Mode is on, then Friends, Rooms,
+ * and Feed — only Feed closable; Main, Friends, and Rooms are permanent and ship without an X),
+ * a hairline divides them from one tab per open window, and every window tab carries its own
+ * close. The strip scrolls horizontally when it must, with chevron arrows that fade in only on
+ * the side that still hides tabs, and the active tab keeps itself scrolled into view.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -21,14 +21,25 @@ import type { WinState } from './window-types.js';
 
 /**
  * The home views the strip navigates between. `main` is the Chat List Mode home screen — the
- * conversation list the mode puts where the tabbed layout keeps its three views — and it is
- * deliberately absent from {@link MOBILE_NAV_ORDER}: the mode has no Main tab. The list is the
- * screen the strip's tabs navigate away from, and the view header's back control returns to it.
+ * conversation list the mode puts where the tabbed layout keeps its three views — and it leads
+ * {@link MOBILE_NAV_ORDER} so the strip offers it as the Main tab whenever the mode is on. The
+ * tabbed layout keeps no conversation list, so its strip offers the other three alone (see
+ * {@link TABBED_NAV_ORDER}); the view header's back control is the mode's other way back to the
+ * list, one step from whichever tabbed view is on screen.
  */
 export type MobileNavTab = 'main' | 'friends' | 'rooms' | 'feed';
 
-/** The home tabs in strip order: Friends, then Rooms, then Feed beside it. */
-export const MOBILE_NAV_ORDER: readonly MobileNavTab[] = ['friends', 'rooms', 'feed'];
+/**
+ * The home tabs in strip order: Main first, then Friends, then Rooms, then Feed. Chat List
+ * Mode's strip offers all four; the tabbed layout offers the order without its Main (see
+ * {@link TABBED_NAV_ORDER}).
+ */
+export const MOBILE_NAV_ORDER: readonly MobileNavTab[] = ['main', 'friends', 'rooms', 'feed'];
+
+/** The tabbed layout's home tabs: the strip's order minus Main, which has no screen there. */
+export const TABBED_NAV_ORDER: readonly MobileNavTab[] = MOBILE_NAV_ORDER.filter(
+  (tab) => tab !== 'main',
+);
 
 /** The home tabs' names and icons. */
 export const MOBILE_NAV_META: Readonly<
@@ -40,7 +51,7 @@ export const MOBILE_NAV_META: Readonly<
   feed: { label: 'Feed', icon: 'space' },
 };
 
-/** Only Feed closes from its X; Friends and Rooms are the home itself. */
+/** Only Feed closes from its X; Main, Friends, and Rooms are the home itself. */
 const NAV_CLOSEABLE: Readonly<Record<MobileNavTab, boolean>> = {
   feed: true,
   friends: false,
@@ -65,6 +76,7 @@ export function MobileTabBar({
   navTab,
   hiddenNavs,
   navUnread,
+  chatList,
   onSelectNav,
   onCloseNav,
   onReopenNav,
@@ -80,6 +92,8 @@ export function MobileTabBar({
   hiddenNavs: readonly MobileNavTab[];
   /** Unread counts for the home tabs themselves. */
   navUnread: Readonly<Record<MobileNavTab, number>>;
+  /** Whether Chat List Mode is on — the mode whose strip leads with the Main tab. */
+  chatList: boolean;
   onSelectNav: (tab: MobileNavTab) => void;
   onCloseNav: (tab: MobileNavTab) => void;
   onReopenNav: (tab: MobileNavTab) => void;
@@ -149,9 +163,10 @@ export function MobileTabBar({
   }
 
   const atHome = activeId === null;
-  // The order is the three it has always been in either navigation mode: Chat List Mode's
-  // conversation list is the home screen the strip navigates away from, not a fourth tab in it.
-  const order = MOBILE_NAV_ORDER;
+  // The strip's home tabs follow the navigation mode: Chat List Mode's strip leads with Main —
+  // the conversation list is one of the mode's screens, and its tab is the way back to it —
+  // while the tabbed layout, which keeps no conversation list, offers the three it always has.
+  const order = chatList ? MOBILE_NAV_ORDER : TABBED_NAV_ORDER;
   const visibleNavs = order.filter((tab) => !hiddenNavs.includes(tab));
 
   return (

@@ -26,13 +26,13 @@
  *
  * Chat List Mode (Settings → Navigation, see lib/migo/nav-mode.ts) reroutes only the
  * conversations, and it is WhatsApp-on-Android shaped: the conversation list is the main screen —
- * on the phone the home the strip's three tabs navigate away from (there is no Main tab; the
- * view header's back control returns to the list), on the desk the panel right of the contacts
- * window — and a tap opens the thread as a full-screen chat activity of its own (see
- * components/chat-activity.tsx) whose back control returns to the list, not a pane replacing
- * content in place. No chat window is minted while the mode is on, on either breakpoint. Every
- * list, panel, and window the tabbed layout offers is untouched by the mode; turning it off
- * restores the windows exactly as they were.
+ * on the phone the home the strip's tabs navigate away from and back to (the mode's strip leads
+ * with the Main tab, and the view header's back control returns from every tabbed view to the
+ * list), on the desk the panel right of the contacts window — and a tap opens the thread as a
+ * full-screen chat activity of its own (see components/chat-activity.tsx) whose back control
+ * returns to the list, not a pane replacing content in place. No chat window is minted while the
+ * mode is on, on either breakpoint. Every list, panel, and window the tabbed layout offers is
+ * untouched by the mode; turning it off restores the windows exactly as they were.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -53,7 +53,7 @@ import { Icon } from './icons.js';
 import { MobileHome } from './mobile-home.js';
 import { MobileTabBar } from './mobile-tab-bar.js';
 import type { MobileNavTab } from './mobile-tab-bar.js';
-import { MOBILE_NAV_ORDER } from './mobile-tab-bar.js';
+import { MOBILE_NAV_META, MOBILE_NAV_ORDER, TABBED_NAV_ORDER } from './mobile-tab-bar.js';
 import { NotificationsPanel } from './notifications-panel.js';
 import { ProfilePanel } from './profile-panel.js';
 import { RetroWindow } from './retro-window.js';
@@ -156,15 +156,16 @@ export function AppShell(): ReactNode {
   // on either breakpoint: no chat window is minted while the mode is on, the list rows carry the
   // attention, and the activity (below) is the thread.
   const suppressChatWindows = chatList;
-  // The home tabs the strip offers and the empty state can reopen — the same three in either
-  // mode: Chat List Mode's list is the home screen the tabs navigate away from, not a fourth tab.
-  const navOrder = MOBILE_NAV_ORDER;
+  // The home tabs the strip offers and the empty state can reopen, by mode: Chat List Mode's
+  // strip leads with Main (the conversation list is the mode's home screen), while the tabbed
+  // layout keeps the three it always has — it has no conversation list for Main to open.
+  const navOrder = chatList ? MOBILE_NAV_ORDER : TABBED_NAV_ORDER;
 
   // A mode switch must not strand the phone on a view the new home does not lead with: entering
-  // Chat List Mode lands on the conversation list (the list is the mode's main screen, and the
-  // strip offers no tab for it), and leaving it returns a stranded list view to the Feed the
-  // tabbed home opens on. The desk needs no such correction — its home is the contacts window,
-  // which the mode does not touch.
+  // Chat List Mode lands on the conversation list — the mode's home screen, the one its Main tab
+  // opens — and leaving it returns a stranded list view to the Feed the tabbed home opens on
+  // (the tabbed strip carries no Main, so `main` is not a view it can stay on). The desk needs
+  // no such correction — its home is the contacts window, which the mode does not touch.
   useEffect(() => {
     if (!isMobile) {
       return;
@@ -512,12 +513,13 @@ export function AppShell(): ReactNode {
         if (cur !== tab) {
           return cur;
         }
-        // Chat List Mode's home screen is the list, which no close can take away, so closing the
-        // view on screen falls back to it; the tabbed home falls back to the next open tab.
+        // Chat List Mode's Main tab is the home the strip leads with, which no close can take
+        // away, so closing the view on screen falls back to it; the tabbed home falls back to
+        // the next open tab of its own three (Main is not one of them there).
         if (chatList) {
           return 'main';
         }
-        return MOBILE_NAV_ORDER.find((x) => x !== tab && !hiddenNavs.includes(x)) ?? cur;
+        return TABBED_NAV_ORDER.find((x) => x !== tab && !hiddenNavs.includes(x)) ?? cur;
       });
     },
     [chatList, hiddenNavs],
@@ -593,7 +595,7 @@ export function AppShell(): ReactNode {
       }
       if (tab === 'chats') {
         // The tabbed layout has no chats list — the friends list is where a person is. Chat List
-        // Mode has one: the phone's home screen.
+        // Mode has one: the Main tab's home screen.
         setContactsTab('friends');
         if (isMobile) {
           selectMobileNav(chatList ? 'main' : 'friends');
@@ -645,9 +647,10 @@ export function AppShell(): ReactNode {
 
   // The home tabs' unread badges: the shell's own attention counts, by where the conversation
   // belongs. Feed is activity, not messages — its badge stays empty. The `main` count is the
-  // Chat List Mode home screen's own (no strip tab carries it any more, but the record keeps the
-  // key honest) and reads the provider: one mark per conversation with something unread, the
-  // same line the list rows and the me card's mail chip count.
+  // Main tab's own — the Chat List Mode strip carries the tab, and it reads the provider: one
+  // mark per conversation with something unread, the same line the list rows and the me card's
+  // mail chip count. (The tabbed strip offers no Main, so the count waits unused there; the
+  // record keeps the key honest either way.)
   const navUnread = useMemo(() => {
     const counts: Record<MobileNavTab, number> = { main: 0, friends: 0, rooms: 0, feed: 0 };
     counts.main = items.filter(
@@ -794,6 +797,8 @@ export function AppShell(): ReactNode {
                 chat windows stay in the strip above.
               </p>
               <div className="mhome-empty-actions">
+                {/* The tabbed home's reopen set — `navOrder` here is the tabbed three, so no
+                    Main button can appear for a layout that has no screen for it. */}
                 {navOrder.map((tab) => (
                   <button
                     key={tab}
@@ -801,13 +806,7 @@ export function AppShell(): ReactNode {
                     className="gloss-pill"
                     onClick={() => reopenMobileNav(tab)}
                   >
-                    {tab === 'main'
-                      ? 'Main'
-                      : tab === 'friends'
-                        ? 'Friends'
-                        : tab === 'rooms'
-                          ? 'Rooms'
-                          : 'Feed'}
+                    {MOBILE_NAV_META[tab].label}
                   </button>
                 ))}
               </div>
@@ -930,6 +929,7 @@ export function AppShell(): ReactNode {
             navTab={mobileNav}
             hiddenNavs={hiddenNavs}
             navUnread={navUnread}
+            chatList={chatList}
             onSelectNav={selectMobileNav}
             onCloseNav={closeMobileNav}
             onReopenNav={reopenMobileNav}

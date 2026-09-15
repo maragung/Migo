@@ -15,9 +15,10 @@
  * panel itself.
  *
  * Chat List Mode makes its fourth view, `main`, the home screen itself: the conversation list,
- * which a tap opens as the phone's full-screen chat activity. The mode adds no tab for it — the
- * strip keeps the three it has always had, and the view header's back control returns from them
- * to the list. The other three views and their behaviour are untouched by it.
+ * which a tap opens as the phone's full-screen chat activity. The mode's strip leads with the
+ * Main tab for it, and the view header's back control is the other way back — one step from
+ * whichever tabbed view is on screen. The other three views and their behaviour are untouched
+ * by it.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -85,8 +86,9 @@ export function MobileHome({
   /** A tap on a room: the parent opens the room intent sheet. */
   onOpenRoomIntent: (room: RoomSummary) => void;
   /**
-   * Chat List Mode's way back: the view header shows it on the three tabbed views, and it
-   * returns the phone to the conversation list that is the mode's home screen. Undefined in the
+   * Chat List Mode's quick way back: the view header shows it on the three tabbed views, and it
+   * returns the phone to the conversation list that is the mode's home screen — the same screen
+   * the strip's Main tab opens, reached in one step instead of a strip trip. Undefined in the
    * tabbed layout, whose home is the strip's own tabs.
    */
   onBackToChats?: () => void;
@@ -329,8 +331,8 @@ export function MobileHome({
 
         {/* ---- view header ---- */}
         <div className="gloss-panel mhome-viewhead">
-          {/* Chat List Mode's way home: the list is the screen the strip's tabs navigate away
-              from, and this is the way back to it — the mode has no Main tab to tap. */}
+          {/* Chat List Mode's quick way home: the strip's Main tab reaches the list too — this
+              is the one-step way back from the view on screen, without a trip to the strip. */}
           {onBackToChats !== undefined && nav !== 'main' ? (
             <button
               type="button"
@@ -385,9 +387,9 @@ export function MobileHome({
         <div className="win-body retro-scroll mhome-body">
           {/* ===== MAIN (Chat List Mode) ===== */}
           {/* The conversation list itself, unchanged from the surface every other client lists
-              chats on — the mode makes it the home screen, not a second list and not a tab. A
-              tap opens the thread as the phone's full-screen chat activity, and its back control
-              returns here. */}
+              chats on — the mode makes it the home screen the strip's Main tab opens, not a
+              second list beside the tabbed views. A tap opens the thread as the phone's
+              full-screen chat activity, and its back control returns here. */}
           {nav === 'main' ? <ConversationList /> : null}
 
           {/* ===== FRIENDS ===== */}
