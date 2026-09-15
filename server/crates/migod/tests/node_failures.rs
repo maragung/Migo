@@ -1747,6 +1747,114 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
 }
 
 // ---------------------------------------------------------------------------
+// Liveness probes on idle links
+// ---------------------------------------------------------------------------
+
+/// A peer that dies while the outbox holds nothing for it is invisible to the drain:
+/// nothing dials, so nothing fails, so the link stays "reachable" until the next
+/// federated write happens to try it — and the rooms it homes stay writable from this
+/// node the whole time. One probe closes the gap: the dial that cannot connect takes
+/// the same mark a failed delivery's dial takes, without owing the peer anything.
+#[tokio::test]
+async fn a_probe_marks_a_silent_peer_down_without_a_federated_write() {
+    let port = closed_port().await;
+    let (mesh_a, _) = node(1, "region-a").await;
+    let (mesh_b, _) = node(2, "region-b").await;
+    admit(
+        &mesh_a,
+        node_id(2),
+        &key_bytes(2),
+        "wss://b.invalid:1".to_string(),
+        "region-b",
+    )
+    .await;
+    admit(
+        &mesh_b,
+        node_id(1),
+        &key_bytes(1),
+        format!("wss://127.0.0.1:{port}"),
+        "region-a",
+    )
+    .await;
+    let transport_b = transport(&mesh_b);
+
+    // Silence about a peer reads as reachable — the permissive default the link state
+    // starts from, and exactly why a dead peer was invisible before the probe existed.
+    assert!(
+        mesh_b.link_reachable(node_id(1)),
+        "a peer nothing has tried is the permissive answer"
+    );
+
+    // The outbox is empty, so the drain has nothing to say; the probe is the only dial.
+    let now = Timestamp::now();
+    assert!(
+        mesh_b.due(now).await.expect("the outbox reads").is_empty(),
+        "nothing is owed, so the drain alone would never dial"
+    );
+    transport_b.probe_once(now).await;
+
+    assert!(
+        !mesh_b.link_reachable(node_id(1)),
+        "a probe that cannot connect marks the link down, the same evidence a failed delivery's dial is"
+    );
+}
+
+/// The other half of the probe's job: a peer that recovers after a failed delivery
+/// stays marked down until something succeeds against it — and with an empty outbox,
+/// nothing ever would. The probe's round trip lifts the mark without a federated write,
+/// so the rooms the peer homes become writable again the minute it is actually back.
+#[tokio::test]
+async fn a_probe_lifts_the_mark_on_a_peer_that_recovered() {
+    let port = closed_port().await;
+    let (mesh_a, _) = node(1, "region-a").await;
+    let (mesh_b, _) = node(2, "region-b").await;
+    admit(
+        &mesh_a,
+        node_id(2),
+        &key_bytes(2),
+        "wss://b.invalid:1".to_string(),
+        "region-b",
+    )
+    .await;
+    admit(
+        &mesh_b,
+        node_id(1),
+        &key_bytes(1),
+        format!("wss://127.0.0.1:{port}"),
+        "region-a",
+    )
+    .await;
+    let transport_b = transport(&mesh_b);
+
+    // One failed delivery takes the mark, exactly as scenario 1 already pins.
+    let now = Timestamp::now();
+    queue(&mesh_b, node_id(1), 8, now).await;
+    transport_b
+        .drain_once(now)
+        .await
+        .expect("a dead peer is a settled failure, not a drain error");
+    assert!(
+        !mesh_b.link_reachable(node_id(1)),
+        "the failed delivery marked the link down"
+    );
+
+    // Node A comes back at its old address — the same restart landing scenario 1 uses.
+    let transport_a = transport(&mesh_a);
+    transport_a
+        .spawn_listener(&format!("127.0.0.1:{port}"))
+        .await
+        .expect("the recovered node binds its old address");
+
+    // The probe dials, handshakes, pings, and is answered: the peer is demonstrably
+    // there, and the mark lifts without the outbox owing it a single event.
+    transport_b.probe_once(now).await;
+    assert!(
+        mesh_b.link_reachable(node_id(1)),
+        "a probe that completes its round trip marks the link up"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The doc's rule that every scenario be automatable, proven for these eight
 // ---------------------------------------------------------------------------
 
