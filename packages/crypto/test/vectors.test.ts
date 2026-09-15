@@ -165,6 +165,8 @@ const KDF_LABELS: ReadonlyMap<string, string> = new Map([
   [kdf.LABEL_SENDER_MESSAGE, kdf.LABEL_SENDER_MESSAGE],
   [kdf.LABEL_BACKUP, kdf.LABEL_BACKUP],
   [kdf.LABEL_RECOVERY, kdf.LABEL_RECOVERY],
+  [kdf.LABEL_CALL_KEY, kdf.LABEL_CALL_KEY],
+  [kdf.LABEL_CALL_JOIN, kdf.LABEL_CALL_JOIN],
 ]);
 
 const MAC_LABELS: ReadonlyMap<string, string> = new Map([
@@ -292,6 +294,8 @@ test('every KDF label is distinct', () => {
     kdf.LABEL_SENDER_MESSAGE,
     kdf.LABEL_BACKUP,
     kdf.LABEL_RECOVERY,
+    kdf.LABEL_CALL_KEY,
+    kdf.LABEL_CALL_JOIN,
   ];
   assert.equal(new Set(labels).size, labels.length, 'two derivations share a label');
   assert.equal(KDF_LABELS.size, labels.length, 'the label table is missing a label');

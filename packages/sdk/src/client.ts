@@ -112,6 +112,7 @@ import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
 import { CallsDomain } from './domains/calls.js';
 import { GroupCallDomain } from './domains/group-calls.js';
+import { GroupCallKeysDomain } from './domains/group-call-keys.js';
 import { ProfileDomain } from './domains/profile.js';
 import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
@@ -226,6 +227,7 @@ interface Connected {
   rooms: RoomsDomain;
   calls: CallsDomain;
   groupCalls: GroupCallDomain;
+  callKeys: GroupCallKeysDomain;
   profile: ProfileDomain;
   media: MediaDomain;
   notifications: NotificationsDomain;
@@ -461,6 +463,14 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     return this.#requireConnected().groupCalls;
   }
 
+  /**
+   * The frame keys of the group calls this device is seated in: the section 163 key-distribution
+   * triggers, and the media plane's seal/open surface.
+   */
+  get callKeys(): GroupCallKeysDomain {
+    return this.#requireConnected().callKeys;
+  }
+
   /** Look up public account profiles. */
   get profile(): ProfileDomain {
     return this.#requireConnected().profile;
@@ -593,6 +603,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.conversations.stop();
     ctx.calls.stop();
     ctx.groupCalls.stop();
+    ctx.callKeys.stop();
     ctx.notifications.stop();
     ctx.social.stop();
     ctx.games.stop();
@@ -1016,6 +1027,40 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
         complete: cached.complete,
       });
     }
+  }
+
+  /**
+   * The membership-change half of section 163's client-side key-distribution duty.
+   *
+   * A `CONVERSATION_MEMBER_EVENT` that changes the group — a join, a leave, a kick, a ban — names
+   * the membership epoch the change produced (`groupKeyEpoch`). The server refuses to relay a
+   * distribution to a removed member and stops at that: it cannot rotate anyone's key, because it
+   * holds none. So the client does, here: this device rotates its own sender key onto that epoch
+   * and re-sends it to every member device ({@link MessagingDomain.redistributeSenderKey}), each
+   * copy sealed through the pairwise channel with that device — a removed member's copy is refused
+   * server-side, and their old chain dies with the epoch it was minted at.
+   *
+   * The redistribution is fire-and-forget on purpose: it runs *after* the cache patch above, an
+   * error in it (a device unreachable, a membership this client never loaded) must never un-deliver
+   * the member event to the application's own listeners, and the next send re-attempts the
+   * distribution to whoever still lacks one ({@link GroupCrypto.needsDistribution}). A connect or
+   * disconnect is presence, not membership — the sender-key audience does not move, so neither does
+   * the key.
+   */
+  #rotateSenderKeyOnMembershipChange(event: ConversationMemberEvent, ctx: Connected): void {
+    const joined = event.change === MemberChange.Joined;
+    const departed =
+      event.change === MemberChange.Left ||
+      event.change === MemberChange.Kicked ||
+      event.change === MemberChange.Banned;
+    if (!joined && !departed) {
+      return;
+    }
+    void ctx.messaging
+      .redistributeSenderKey(event.conversationId, event.groupKeyEpoch)
+      .catch((cause: unknown) => {
+        this.#options.onEventError?.(OP.GROUP_KEY_DISTRIBUTE, cause);
+      });
   }
 
   /**
@@ -1497,6 +1542,18 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     const sessionCrypto = new SessionCrypto(this.#keyStore, this);
     const groupCrypto = new GroupCrypto(this.#keyStore);
 
+    // The frame-key domain listens to the signaling domain's roster events, so the two are built
+    // side by side before the graph is assembled — one construction order, one wiring truth.
+    const groupCalls = new GroupCallDomain(rpc, grant.deviceId, this.#options.onEventError);
+    const callKeys = new GroupCallKeysDomain(
+      rpc,
+      groupCalls,
+      sessionCrypto,
+      grant.accountId,
+      grant.deviceId,
+      this.#options.onEventError,
+    );
+
     const ctx: Connected = {
       grant,
       transport,
@@ -1511,6 +1568,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
         this,
         this.#options.onEventError,
         this,
+        grant.deviceId,
       ),
       conversations: new ConversationsDomain(rpc, this.#options.onEventError),
       sync: new SyncDomain(rpc),
@@ -1518,7 +1576,8 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
       presence: new PresenceDomain(rpc, this.#options.onEventError),
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
       calls: new CallsDomain(rpc, grant.deviceId, this.#options.onEventError),
-      groupCalls: new GroupCallDomain(rpc, grant.deviceId, this.#options.onEventError),
+      groupCalls,
+      callKeys,
       profile: new ProfileDomain(rpc),
       media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
@@ -1536,6 +1595,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.conversations.start();
     ctx.calls.start();
     ctx.groupCalls.start();
+    ctx.callKeys.start();
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();
@@ -1549,6 +1609,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     this.#unsubscribes.push(
       rpc.on(OP.CONVERSATION_MEMBER_EVENT, decodeConversationMemberEvent, (event) => {
         this.#applyMemberEvent(event);
+        this.#rotateSenderKeyOnMembershipChange(event, ctx);
       }),
     );
     // The same duty for rooms, which publish their membership movement on their own topic:

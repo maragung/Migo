@@ -150,6 +150,13 @@ export interface SealedEnvelope {
 interface SessionEntry {
   session: RatchetSession;
   /**
+   * The X3DH shared secret this session was seeded from, retained for the call-key derivations
+   * (section 163): a call's media key and the wrapper key that seals a mid-call joiner's first key
+   * are both HKDF outputs over this secret, and the Double Ratchet deliberately does not expose
+   * its root key — so the seed is the one copy both ends still hold identically.
+   */
+  secret: Uint8Array;
+  /**
    * The X3DH material to keep prepending, or `null` once the peer has replied.
    *
    * Set when we initiate. Until we successfully open a message from the peer we cannot know they
@@ -203,7 +210,11 @@ export class SessionCrypto {
       const bundle = await this.#bundles.fetchBundle(peerUserId, peerDeviceId);
       const initiation = initiate(this.#keys.identity(), bundle);
       const session = RatchetSession.initiator(initiation.seed, bundle.signedPrekey.publicKey);
-      entry = { session, pendingInit: initiation.message };
+      entry = {
+        session,
+        secret: initiation.seed.exposeSharedSecret(),
+        pendingInit: initiation.message,
+      };
       this.#sessions.set(key, entry);
     }
 
@@ -282,8 +293,23 @@ export class SessionCrypto {
     if (derived.oneTimePrekeyId !== null) {
       this.#keys.consumeOneTimePrekey(derived.oneTimePrekeyId);
     }
-    this.#sessions.set(key, { session: derived.session, pendingInit: null });
+    this.#sessions.set(key, {
+      session: derived.session,
+      secret: derived.secret,
+      pendingInit: null,
+    });
     return plaintext;
+  }
+
+  /**
+   * The X3DH shared secret behind one remote device's session, or `null` when there is no session.
+   *
+   * Section 163's call keys derive from this secret (the Double Ratchet's root key is deliberately
+   * not exposed, so the seed is the shared input both ends hold). Returns a copy: the stored secret
+   * outlives any one derivation, and a caller must not be able to zero it as a side effect.
+   */
+  sessionSecret(conversationId: Id, deviceId: Id): Uint8Array | null {
+    return this.#sessions.get(sessionKey(conversationId, deviceId))?.secret.slice() ?? null;
   }
 
   /**
@@ -318,6 +344,7 @@ export class SessionCrypto {
    */
   #deriveResponder(init: InitialMessage): {
     session: RatchetSession;
+    secret: Uint8Array;
     oneTimePrekeyId: number | null;
   } {
     const signedPrekeyPair = this.#keys.signedPrekeyPair(init.signedPrekeyId);
@@ -335,7 +362,11 @@ export class SessionCrypto {
 
     const seed = respond(this.#keys.identity(), signedPrekeyPair, oneTimePrekeyPair, init);
     const session = RatchetSession.responder(seed, signedPrekeyPair);
-    return { session, oneTimePrekeyId: oneTimePrekeyPair !== null ? init.oneTimePrekeyId : null };
+    return {
+      session,
+      secret: seed.exposeSharedSecret(),
+      oneTimePrekeyId: oneTimePrekeyPair !== null ? init.oneTimePrekeyId : null,
+    };
   }
 }
 

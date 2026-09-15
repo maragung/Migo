@@ -172,6 +172,30 @@ export class GroupCrypto {
   }
 
   /**
+   * Rotates the outbound chain *to* a named membership epoch, never below the one it holds.
+   *
+   * Section 163's `CONVERSATION_MEMBER_EVENT` carries `groupKeyEpoch` — the generation the change
+   * produced — and every member device that hears the event rotates onto that generation, so the
+   * whole group moves in lockstep without any device having to see another's distribution first.
+   * An epoch at or below the held one is a no-op: the receiver-side adopt already refuses a
+   * non-advancing distribution, so re-rotating onto a generation this chain has passed would mint
+   * a *different* chain at an epoch peers have already rejected — the one way this rule can break
+   * itself. A no-op still clears nothing, so a device that missed a member's arrival simply sends
+   * the current chain to whoever still lacks it ({@link needsDistribution} decides).
+   */
+  rotateTo(conversationId: Id, epoch: number): void {
+    const previous = this.#sending.get(conversationId);
+    if (epoch <= (previous?.epoch ?? 0)) {
+      return;
+    }
+    this.#sending.set(conversationId, {
+      state: SenderKeyState.create(randomChainId()),
+      epoch,
+      distributed: new Set(),
+    });
+  }
+
+  /**
    * Accepts a sender-key distribution from a remote device, so its future messages can be opened.
    *
    * The first distribution from a sender is the baseline this device measures every later one

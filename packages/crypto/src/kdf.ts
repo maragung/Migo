@@ -45,6 +45,18 @@ export const LABEL_SENDER_MESSAGE = 'migo-sender-message-v1';
 export const LABEL_BACKUP = 'migo-backup-v1';
 /** Label for deriving a device-storage key from a recovery key. */
 export const LABEL_RECOVERY = 'migo-recovery-v1';
+/**
+ * Label for a call's media key, derived from the pairwise session secret the two devices already
+ * share (section 163): the call id is the salt, so one session cannot produce the same media key
+ * for two different calls.
+ */
+export const LABEL_CALL_KEY = 'migo-call-key-v1';
+/**
+ * Label for the wrapper key that seals a mid-call joiner's first call key, derived from the
+ * pairwise session secret the *distributor* shares with *that joiner* — the third purpose that
+ * secret serves, so it owns a label the ratchet and the call key never share.
+ */
+export const LABEL_CALL_JOIN = 'migo-call-join-v1';
 
 /** A derivation label: one of the constants above, or raw `info` bytes. */
 export type Label = string | Uint8Array;
