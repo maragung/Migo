@@ -114,6 +114,26 @@ export function applyRoomState(info: RoomInfo, delta: RoomStateEvent): RoomInfo 
 }
 
 /**
+ * Applies a settings change the shell's own caller made onto the held record.
+ *
+ * Pure, so a test can pin it. The server's fan-out excludes the acting socket, and a rename reaches
+ * no frame at all — the state event carries a topic and an interval and nothing else — so the record
+ * behind the rename is this side's to move, not something a delta will correct. An all-whitespace or
+ * empty topic is a removal on the wire, so the key leaves the record rather than lingering empty:
+ * `topic` is an absent-or-present fact here, never an undefined-valued one.
+ */
+export function applyRoomSettings(info: RoomInfo, name: string, topic: string): RoomInfo {
+  const trimmed = topic.trim();
+  const next: RoomInfo = { ...info, name };
+  if (trimmed.length > 0) {
+    next.topic = trimmed;
+  } else {
+    delete next.topic;
+  }
+  return next;
+}
+
+/**
  * The room a membership change takes away from *this* account, when it names one.
  *
  * Pure, so a test can pin it. The server publishes a removal [`RoomMemberEvent`] naming the
