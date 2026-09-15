@@ -381,6 +381,7 @@ fun RoomSummaryRow(room: RoomSummary, joined: Boolean = false, onJoin: () -> Uni
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             OneLine(text = "${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
         }
@@ -431,6 +432,7 @@ fun ActivityLine(title: String, at: Long?) {
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
             maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         if (at != null) {
             Spacer(modifier = Modifier.width(8.dp))

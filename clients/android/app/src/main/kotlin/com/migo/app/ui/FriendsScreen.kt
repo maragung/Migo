@@ -26,10 +26,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,6 +86,24 @@ fun FriendsScreen(
 ) {
     var field by rememberSaveable { mutableStateOf(state.search.query) }
 
+    // The field's visibility: closed by default, opened by the header's search icon, and closed
+    // again by the field's own trailing clear once the query is empty. Saved rather than
+    // remembered so a rotation keeps a search in progress, and seeded from the shared query so a
+    // search this view still holds opens with its field showing rather than an icon sitting over
+    // filtered results.
+    var searchOpen by rememberSaveable { mutableStateOf(state.search.query.isNotBlank()) }
+
+    // The open owes the person a working field, not just a visible one: the focus and the
+    // keyboard arrive with the icon's tap, so the search begins where the finger already is.
+    val searchFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(searchOpen) {
+        if (searchOpen) {
+            searchFocus.requestFocus()
+            keyboard?.show()
+        }
+    }
+
     // The search field debounces into the shared search state; the people results below it are the
     // same answer the Search section shows.
     LaunchedEffect(field) {
@@ -97,11 +122,12 @@ fun FriendsScreen(
     val outgoing = entries.filter { it.kind == kindOutgoing }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
-        // The header carries the search inline, to the left of the new-group control: a search
-        // that lives below the row of actions it filters for is a search the eye has to leave the
-        // names to find, and the Friends list is the one surface whose whole point is finding a
-        // person. The field keeps the debounce it always had — typing is not yet asking, but a
-        // pause is — so the filtering behaviour is the field's old one, only relocated.
+        // The header carries the search behind its own icon, to the left of the new-group
+        // control: the Friends list is the one surface whose whole point is finding a person, but
+        // a field that is always on screen is a field that competes with the names it filters —
+        // so the icon opens it, the focus and the keyboard arrive with it, and the trailing clear
+        // folds it away again once the query is emptied and dismissed. The field keeps the
+        // debounce it always had — typing is not yet asking, but a pause is.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -114,14 +140,50 @@ fun FriendsScreen(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(modifier = Modifier.width(12.dp))
-            OutlinedTextField(
-                value = field,
-                onValueChange = { field = it },
-                placeholder = { Text("Search by username") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                modifier = Modifier.weight(1f),
-            )
+            if (searchOpen) {
+                OutlinedTextField(
+                    value = field,
+                    onValueChange = { field = it },
+                    placeholder = { Text("Search by username") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    trailingIcon = {
+                        // The field's one extra control: a press clears what was typed, and a
+                        // press on an already-empty field closes the search back into its icon —
+                        // the query's two endings, both stated by the same glyph.
+                        TextButton(
+                            onClick = {
+                                if (field.isNotEmpty()) field = "" else searchOpen = false
+                            },
+                            modifier = Modifier.semantics {
+                                contentDescription = if (field.isNotEmpty()) {
+                                    "Clear the search"
+                                } else {
+                                    "Close the search"
+                                }
+                            },
+                        ) {
+                            Text("✕")
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(searchFocus)
+                        .onFocusChanged { info ->
+                            // Focus leaving an empty field is the search finished the quiet way:
+                            // the field folds back into its icon without asking.
+                            if (!info.isFocused && field.isBlank()) searchOpen = false
+                        },
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { searchOpen = true },
+                    modifier = Modifier.semantics { contentDescription = "Search friends" },
+                ) {
+                    Text("🔍")
+                }
+            }
             // The new-group entry sits beside the search because a group starts from people, and
             // the Friends view is where the people are.
             TextButton(onClick = onOpenGroup, enabled = !state.friends.loading) { Text("New group") }
