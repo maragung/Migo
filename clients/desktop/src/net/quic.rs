@@ -52,9 +52,12 @@ use std::time::Duration;
 use bytes::{Buf, BytesMut};
 use migo_protocol::{from_frame, to_frame, Frame, Opcode};
 
-/// How long any single handshake or read step may take before the attempt is declared failed
-/// rather than waiting on the caller's patience. Generous for a path that crosses the open
-/// internet, short enough that a fallback happens in seconds, not minutes.
+/// How long any single handshake step may take before the attempt is declared failed rather
+/// than waiting on the caller's patience. Generous for a path that crosses the open internet,
+/// short enough that a fallback happens in seconds, not minutes. The session that follows the
+/// handshake does not read on this budget: the WELCOME advertises a heartbeat, and the worker
+/// arms [`QuicGateway::set_read_deadline`] from it, because a fixed step shorter than the
+/// heartbeat period tears a healthy but idle session down between two punctual beats.
 const STEP: Duration = Duration::from_secs(8);
 
 /// How long the connection may sit idle before the client side pings it. QUIC keeps its own
@@ -75,6 +78,9 @@ pub struct QuicGateway {
     buf: BytesMut,
     /// Correlation ids for request frames. Zero means "not a reply to anything", so ids start at one.
     next_correlation: u32,
+    /// How long one read may sit quiet before the connection is declared dead. [`STEP`] until
+    /// the worker re-arms it from the WELCOME's advertised heartbeat.
+    read_deadline: Duration,
     /// Set once the connection is gone, as reported by the datagram reader — which errors
     /// instantly and forever after that, so polling it again would spin. The stream read is
     /// the authority on session lifetime; this flag only retires the loser of the race.
@@ -157,6 +163,7 @@ pub async fn connect(
         recv,
         buf: BytesMut::new(),
         next_correlation: 1,
+        read_deadline: STEP,
         datagrams_dead: false,
     };
 
@@ -197,6 +204,18 @@ impl QuicGateway {
         // requests currently in flight. See the WebSocket gateway's note for the full argument.
         self.next_correlation = self.next_correlation.wrapping_add(1).max(1);
         id
+    }
+
+    /// Arms the quiet-read deadline the session's reads run on.
+    ///
+    /// A half-open connection (NAT mapping retired, peer vanished without a close) never
+    /// errors a send and never returns a read; the only honest witness is time. The deadline
+    /// must be longer than the heartbeat period — the session's own PING/PONG beats keep a
+    /// healthy socket from ever being quiet that long — which is why the worker arms it from
+    /// the WELCOME's advertised heartbeat instead of leaving the fixed handshake budget in
+    /// place.
+    pub fn set_read_deadline(&mut self, deadline: Duration) {
+        self.read_deadline = deadline;
     }
 
     /// Encodes and sends one frame, on whichever binding the record fits: a datagram when the
@@ -256,7 +275,7 @@ impl QuicGateway {
                 // instantly and forever, so it is no longer polled); the stream read — the
                 // authority on session lifetime — reports the end through the path that owns
                 // it.
-                let read = tokio::time::timeout(STEP, self.recv.read(&mut scratch))
+                let read = tokio::time::timeout(self.read_deadline, self.recv.read(&mut scratch))
                     .await
                     .map_err(|_| QuicError::Timeout)?
                     .map_err(|_| QuicError::Transport)?;
@@ -271,10 +290,10 @@ impl QuicGateway {
                     }
                 };
             }
-            // The step budget covers the whole race, the same budget a stream-only read had:
-            // a silent server on both bindings is a dead connection, and the caller's answer
-            // to that is the reconnect ladder, not patience.
-            let raced = tokio::time::timeout(STEP, async {
+            // The quiet-read deadline covers the whole race, the same budget a stream-only read
+            // had: a silent server on both bindings is a dead connection, and the caller's
+            // answer to that is the reconnect ladder, not patience.
+            let raced = tokio::time::timeout(self.read_deadline, async {
                 tokio::select! {
                     read = self.recv.read(&mut scratch) => {
                         match read {
