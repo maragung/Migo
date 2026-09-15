@@ -21,6 +21,14 @@
  * resume contract (§150): Critical frames are retained in a ring, and a resume replays the
  * retained frames past the client's watermark, original bytes intact.
  *
+ * The transport's own timers are virtual here too (see {@link TransportTimers}): its ACK
+ * coalescing and reconnect backoff otherwise ride real timers whose firing moments race the
+ * harness's tick-driven clock, so which frames the seeded PRNG judges lost — and whether a
+ * trailing ACK kills the socket after the last message has landed — depended on runner load.
+ * That is exactly how this test flaked on CI while its tree was green twice around it: a real
+ * 5 ms coalescing timer fired a beat later under load, the draw sequence shifted, and the final
+ * state assert met a backoff only real time could fire.
+ *
  * Exactly-once is asserted where the brief states it: every message event the node ever
  * sequenced reaches the transport's event listener precisely once, in order, and the node ends
  * up knowing the client's full position — the last resume watermark or the last cumulative ACK
@@ -84,14 +92,21 @@ class SeededRandom {
 // small time helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The platform's real timers, captured at load so the harness keeps settling on real
+ * macrotasks even while a test has swapped `globalThis.setTimeout` for a virtual clock.
+ */
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+
 /** Lets pending microtasks and the transport's async frame builds settle. */
 function tick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => realSetTimeout(resolve, 0));
 }
 
 /** Waits in real milliseconds — only for waits whose length is never asserted on. */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => realSetTimeout(resolve, ms));
 }
 
 /** Polls until `condition` holds, bounded by `budgetMs` of real time. */
@@ -103,6 +118,98 @@ async function waitFor(what: string, condition: () => boolean, budgetMs: number)
     await sleep(10);
   }
   assert.ok(condition(), `timed out waiting for ${what}`);
+}
+
+// ---------------------------------------------------------------------------
+// the transport's virtual timers
+// ---------------------------------------------------------------------------
+
+/**
+ * A virtual timer queue the transport's own timers run on while it is installed: `setTimeout`
+ * and `clearTimeout` land here instead of the platform's, and the timers fire only when the
+ * harness advances the clock, which every `elapse` does in step with the link. Without this the
+ * transport's ACK coalescing (5 ms) and reconnect backoff (250–500 ms) rode real timers whose
+ * firing moments raced the tick-driven link, so the seeded PRNG was applied to a frame sequence
+ * that shifted with runner load — a "deterministic" test that flaked on CI (run 34938135872).
+ *
+ * One invariant keeps the run independent of the backoff's unseeded jitter: no armed backoff
+ * ever survives enough clock to fire. Every elapse in this suite advances the transport clock
+ * by at most 120 ms, and every kill is followed by a `driveReady` (whose `reconnectNow` clears
+ * the pending timer) before the next elapse runs, while the smallest backoff window is 250 ms —
+ * so the backoff's *value* can never decide anything; only its being cleared does.
+ */
+class TransportTimers {
+  #now = 0;
+  #nextId = 1;
+  readonly #tasks = new Map<number, { at: number; handler: TimerHandler; args: unknown[] }>();
+
+  /** The `setTimeout` the transport sees while this clock is installed. */
+  readonly setTimeout = ((handler: TimerHandler, ms?: number, ...args: unknown[]) => {
+    const id = this.#nextId++;
+    this.#tasks.set(id, {
+      at: this.#now + Math.max(0, Math.trunc(Number(ms ?? 0))),
+      handler,
+      args,
+    });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as unknown as typeof globalThis.setTimeout;
+
+  /** The `clearTimeout` the transport sees while this clock is installed. */
+  readonly clearTimeout = ((handle: unknown) => {
+    this.#tasks.delete(handle as number);
+  }) as unknown as typeof globalThis.clearTimeout;
+
+  /**
+   * Fires every task due within `ms` of the clock, earliest first, one real macrotask apart so
+   * the transport's async work settles between callbacks exactly as it would between real
+   * timers. Tasks scheduled while advancing (a re-armed coalescing window) fire in the same
+   * step when they come due within it.
+   */
+  async advance(ms: number): Promise<void> {
+    const end = this.#now + ms;
+    for (;;) {
+      let dueId: number | undefined;
+      let dueAt = Number.POSITIVE_INFINITY;
+      for (const [id, task] of this.#tasks) {
+        if (task.at <= end && task.at < dueAt) {
+          dueId = id;
+          dueAt = task.at;
+        }
+      }
+      if (dueId === undefined) {
+        break;
+      }
+      const task = this.#tasks.get(dueId) as { at: number; handler: TimerHandler; args: unknown[] };
+      this.#tasks.delete(dueId);
+      this.#now = task.at;
+      if (typeof task.handler === 'function') {
+        (task.handler as (...args: unknown[]) => void)(...task.args);
+      }
+      await tick();
+    }
+    this.#now = end;
+  }
+}
+
+/**
+ * Runs `body` with the transport's timers on a virtual clock the harness advances in `elapse`.
+ *
+ * The harness's own settling (`tick`, `sleep`) keeps using the real timers captured at load, so
+ * only what the transport schedules becomes virtual — and everything is restored before the
+ * next test, whose backoff assertions read the real timer delays by design.
+ */
+async function withVirtualTransportTimers(
+  body: (clock: TransportTimers) => Promise<void>,
+): Promise<void> {
+  const clock = new TransportTimers();
+  globalThis.setTimeout = clock.setTimeout;
+  globalThis.clearTimeout = clock.clearTimeout;
+  try {
+    await body(clock);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +306,8 @@ class LossyNode {
   readonly #lossRate: number;
   readonly #latencyMs: number;
   readonly #rng: SeededRandom;
+  /** The transport's virtual timers, advanced in lockstep with the link; absent for a real-time rig. */
+  readonly #timers: TransportTimers | undefined;
   #crossings: Crossing[] = [];
   #order = 0;
 
@@ -225,10 +334,11 @@ class LossyNode {
   /** The highest watermark any resume request has carried. */
   lastResumeSeq = 0;
 
-  constructor(options: LossyNodeOptions, seed: number) {
+  constructor(options: LossyNodeOptions, seed: number, timers?: TransportTimers) {
     this.#lossRate = options.lossRate;
     this.#latencyMs = options.oneWayLatencyMs;
     this.#rng = new SeededRandom(seed);
+    this.#timers = timers;
     this.sessionId = idFromBytes(new Uint8Array(16).fill(7));
   }
 
@@ -302,9 +412,17 @@ class LossyNode {
       await tick();
     }
     this.#now = end;
+    // The transport's timers ride the same virtual step: the crossings this elapse fired may
+    // have armed the 5 ms ACK coalescing window, which comes due within this same step.
+    await this.#timers?.advance(ms);
   }
 
-  /** Fires everything still queued, however far into the virtual future it is due. */
+  /**
+   * Fires everything still queued, however far into the virtual future it is due. The
+   * transport's clock deliberately does not move with it: a drain empties the wire, it does not
+   * pass time, so nothing the drain armed (an ACK window, a reconnect backoff) fires here —
+   * the next elapse advances the clock in the open, where the harness can act between steps.
+   */
   async drain(): Promise<void> {
     for (;;) {
       const due = this.#takeDue(Number.MAX_SAFE_INTEGER);
@@ -468,8 +586,8 @@ interface Rig {
 }
 
 /** Builds a transport wired to a lossy node and a message-event listener that records seqs. */
-function rig(options: LossyNodeOptions): Rig {
-  const node = new LossyNode(options, simSeed());
+function rig(options: LossyNodeOptions, timers?: TransportTimers): Rig {
+  const node = new LossyNode(options, simSeed(), timers);
   let resumedTimes = 0;
   const seen: number[] = [];
   const transport = new GatewayTransport({
@@ -502,7 +620,10 @@ function rig(options: LossyNodeOptions): Rig {
  * lost, an attempt that fires into a still-dead network. The loop never waits a real backoff
  * out — it pulls each pending attempt forward with `reconnectNow`, which is the product's own
  * mechanism for exactly this moment (§149: a network switch reconnects immediately, without
- * waiting out a backoff whose cause is already known).
+ * waiting out a backoff whose cause is already known). Under a virtual transport clock this is
+ * not merely impatience but the invariant that keeps the run seed-independent: each round
+ * advances the clock 50 ms while the smallest backoff window is 250 ms, so an armed backoff is
+ * always pulled forward (and cleared) long before it could fire.
  */
 async function driveReady(
   node: LossyNode,
@@ -550,73 +671,92 @@ test('a lossy half-second path cannot duplicate or lose a message: every drop re
   // promised 500. A lost frame kills the socket when it would have arrived — over an ordered
   // WebSocket that is the only shape loss can take — and the client's whole recovery is the
   // resume path this test exists to hold to exactly-once.
-  const { node, transport, seen, resumedCount } = rig({ lossRate: 0.2, oneWayLatencyMs: 250 });
-  try {
-    await driveReady(node, transport);
-    assert.equal(transport.state, 'ready');
-
-    // Push the whole conversation in small batches, letting the link kill sockets between
-    // them: every kill forces a resume, and every resume must replay exactly what fell behind.
-    const total = 36;
-    let pushed = 0;
-    while (pushed < total) {
-      if (transport.state !== 'ready') {
-        await driveReady(node, transport);
-      }
-      for (let batch = 0; batch < 3 && pushed < total; batch++) {
-        pushed += 1;
-        node.pushMessageEvent(pushed);
-      }
-      await node.elapse(120);
-      if (transport.state !== 'ready') {
-        await driveReady(node, transport);
-      }
-      await node.drain();
-    }
-
-    // Whatever is still in flight (a trailing loss, a kill mid-replay) settles here: drive to
-    // Ready, drain, and let the client's position reach the node, until every seq is seen.
-    for (let round = 0; round < 60 && seen.length < total; round++) {
-      if (transport.state !== 'ready') {
-        await driveReady(node, transport);
-      }
-      await node.drain();
-      await node.elapse(50);
-    }
-
-    // No loss, no duplication, and in order: the seqs are exactly 1..N, once each.
-    assert.deepEqual(
-      seen,
-      Array.from({ length: total }, (_unused, index) => index + 1),
-      'the lossy path duplicated, lost, or reordered a message',
+  //
+  // The transport's own timers run on the virtual clock for this run: with real timers, the
+  // moment the 5 ms ACK coalescing fired against the harness's ticks decided how many ACK
+  // frames the seeded PRNG judged, so the "seeded" run was a different run under load.
+  await withVirtualTransportTimers(async (clock) => {
+    const { node, transport, seen, resumedCount } = rig(
+      { lossRate: 0.2, oneWayLatencyMs: 250 },
+      clock,
     );
+    try {
+      await driveReady(node, transport);
+      assert.equal(transport.state, 'ready');
 
-    // The seeded run really did lose frames and really did resume through them — otherwise the
-    // assertions above proved nothing about a bad network at all.
-    assert.ok(node.kills >= 2, 'the seeded link never killed an established connection');
-    assert.ok(node.resumes >= 1, 'the transport never resumed after a kill');
-    assert.ok(resumedCount() >= 1, 'the client never observed a successful resume');
+      // Push the whole conversation in small batches, letting the link kill sockets between
+      // them: every kill forces a resume, and every resume must replay exactly what fell behind.
+      const total = 36;
+      let pushed = 0;
+      while (pushed < total) {
+        if (transport.state !== 'ready') {
+          await driveReady(node, transport);
+        }
+        for (let batch = 0; batch < 3 && pushed < total; batch++) {
+          pushed += 1;
+          node.pushMessageEvent(pushed);
+        }
+        await node.elapse(120);
+        if (transport.state !== 'ready') {
+          await driveReady(node, transport);
+        }
+        await node.drain();
+      }
 
-    // Resume kept the session: same id throughout, and the final state is a resumed Ready.
-    assert.equal(transport.session?.sessionId, node.sessionId);
-    assert.equal(transport.session?.resumed, true);
-    assert.equal(transport.state, 'ready');
+      // Whatever is still in flight (a trailing loss, a kill mid-replay) settles here: drive to
+      // Ready, drain, and let the client's position reach the node, until every seq is seen.
+      for (let round = 0; round < 60 && seen.length < total; round++) {
+        if (transport.state !== 'ready') {
+          await driveReady(node, transport);
+        }
+        await node.drain();
+        await node.elapse(50);
+      }
 
-    // The node ends up knowing the client's full position: the last resume watermark, or the
-    // cumulative ACK if the final stretch of the run was clean, covers every sequenced frame.
-    // A trailing loss here can take the final ACK (or the socket) with it, so the loop also
-    // drives the transport back to Ready — the resume that follows carries the full watermark.
-    for (let round = 0; round < 100 && knownPosition(node) < total; round++) {
+      // No loss, no duplication, and in order: the seqs are exactly 1..N, once each.
+      assert.deepEqual(
+        seen,
+        Array.from({ length: total }, (_unused, index) => index + 1),
+        'the lossy path duplicated, lost, or reordered a message',
+      );
+
+      // The settling loop's exit condition is the seen count, not the connection: a trailing
+      // loss in its last drain can kill the socket after the final message has already landed,
+      // leaving a backoff pending that only more driving clears. Drive back to Ready — the
+      // resume that follows carries the complete watermark, so its replay is empty and the
+      // exactly-once count above is untouched.
       if (transport.state !== 'ready') {
         await driveReady(node, transport);
       }
-      await node.elapse(50);
-      await sleep(5); // the client's ACK rides a 5 ms real coalescing timer
+
+      // The seeded run really did lose frames and really did resume through them — otherwise the
+      // assertions above proved nothing about a bad network at all.
+      assert.ok(node.kills >= 2, 'the seeded link never killed an established connection');
+      assert.ok(node.resumes >= 1, 'the transport never resumed after a kill');
+      assert.ok(resumedCount() >= 1, 'the client never observed a successful resume');
+
+      // Resume kept the session: same id throughout, and the final state is a resumed Ready.
+      assert.equal(transport.session?.sessionId, node.sessionId);
+      assert.equal(transport.session?.resumed, true);
+      assert.equal(transport.state, 'ready');
+
+      // The node ends up knowing the client's full position: the last resume watermark, or the
+      // cumulative ACK if the final stretch of the run was clean, covers every sequenced frame.
+      // A trailing loss here can take the final ACK (or the socket) with it, so the loop also
+      // drives the transport back to Ready — the resume that follows carries the full watermark.
+      // The client's ACK rides the 5 ms coalescing window, which each elapse's clock advance
+      // fires in step, so no real time is waited on anywhere in this loop.
+      for (let round = 0; round < 100 && knownPosition(node) < total; round++) {
+        if (transport.state !== 'ready') {
+          await driveReady(node, transport);
+        }
+        await node.elapse(50);
+      }
+      assert.equal(knownPosition(node), total, 'the node never learned the client had every frame');
+    } finally {
+      transport.close();
     }
-    assert.equal(knownPosition(node), total, 'the node never learned the client had every frame');
-  } finally {
-    transport.close();
-  }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -631,16 +771,16 @@ test('a lossy half-second path cannot duplicate or lose a message: every drop re
  * on wall-clock behaviour.
  */
 async function scheduledDelaysWhile(body: () => Promise<void>): Promise<number[]> {
-  const realSetTimeout = globalThis.setTimeout;
+  const platformSetTimeout = globalThis.setTimeout;
   const delays: number[] = [];
   globalThis.setTimeout = ((handler: TimerHandler, ms?: number, ...rest: unknown[]) => {
     delays.push(ms ?? 0);
-    return realSetTimeout(handler, ms, ...rest);
+    return platformSetTimeout(handler, ms, ...rest);
   }) as typeof globalThis.setTimeout;
   try {
     await body();
   } finally {
-    globalThis.setTimeout = realSetTimeout;
+    globalThis.setTimeout = platformSetTimeout;
   }
   return delays;
 }
