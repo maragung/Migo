@@ -1600,11 +1600,16 @@ main {
   max-width: 960px;
 }
 /* The nickname: bold, colour-keyed by hash (see nickIndex in message-list.tsx), and inline with
-   the body — the colon is part of the element so the two never wrap apart. */
+   the body — the colon is part of the element so the two never wrap apart. The name carries no
+   `white-space: nowrap` of its own: it inherits the bubble's pre-wrap, so an ordinary name still
+   opens the line as one word-run (the line starts with the full bubble width free), while a
+   display name chosen long enough to cross that width wraps inside the bubble rather than
+   pushing the whole row past the pane's edge — the name is author-chosen text, not chrome that
+   can be trusted to stay short. The inherited `overflow-wrap: anywhere` breaks even a name with
+   no spaces in it. */
 .sender-name {
   font-weight: 700;
   margin-right: 5px;
-  white-space: nowrap;
 }
 .nick-0 {
   color: var(--nick-0);
@@ -1647,6 +1652,12 @@ main {
   font-weight: 600;
   color: var(--text-dim);
   white-space: nowrap;
+  /* A flex item's automatic minimum is its content, so without the zero the name's nowrap run
+     would hold the quote's line open however long the name; the name now ellipsizes exactly as
+     the text beside it does, and the quote can never be wider than the line it sits above. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .reply-quote-name:not(:empty)::after {
   content: ':';
@@ -1656,6 +1667,10 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Stated rather than relied on: the hidden overflow already zeroes the flex-item minimum in
+     every engine that matters, and an explicit zero is what keeps that true if the overflow is
+     ever restyled. */
+  min-width: 0;
 }
 /* The line and its hover actions. The actions follow the text for everyone — there is no
    outgoing side to mirror any more. */
@@ -1772,7 +1787,10 @@ main {
 }
 .media-frame img {
   display: block;
-  max-width: 300px;
+  /* The 300px cap is a ceiling, not a width: on a pane narrower than it (the 400px chat window
+     minus its chrome, a phone in the chat activity) a bare 300px would run past the bubble, so
+     the cap yields to whatever width the line actually has. */
+  max-width: min(300px, 100%);
   max-height: 300px;
 }
 .media-attachment {
@@ -1801,7 +1819,8 @@ main {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel-alt);
-  max-width: 300px;
+  /* The same yielding cap the image frame uses: 300px unless the line is narrower than that. */
+  max-width: min(300px, 100%);
 }
 .doc-attachment .doc-icon {
   display: inline-grid;
@@ -3790,7 +3809,11 @@ button.person-row:disabled {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-width: min(420px, 60vw);
+  /* No min-width of its own: the editor is a column item of the bubble stack, so stretch gives
+     it exactly the line's width. The `min(420px, 60vw)` this used to carry was wider than the
+     400px chat window on the desk, pushing the textarea past the pane whenever a message was
+     being edited there. */
+  min-width: 0;
 }
 .message-editor-actions {
   display: flex;
