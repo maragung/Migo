@@ -6161,8 +6161,9 @@ button.activity-row-btn:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-/* The friends search, moved into the view header: the field itself sits left of the
-   new-conversation control, not an icon that opens a field somewhere below. */
+/* The rooms search in the view header: the field sits left of the create-room control and its
+   debounced text is the wire's query. The friends search shares this field style but lives behind
+   its icon (see .mhome-head-search) until someone wants it. */
 .mhome-viewhead-search {
   min-width: 0;
   flex: 1;
@@ -6181,6 +6182,31 @@ button.activity-row-btn:focus-visible {
 }
 .mhome-viewhead-search::placeholder {
   color: var(--text-faint);
+}
+/* The revealed people search in the phone's view header: the field takes the icon's place until
+   the search is finished, so the form holds the header's remaining width beside the field. */
+.mhome-head-search {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+/* The home search field's way out takes the teal band's own white ink — the panel-head close it
+   shares a shape with would paint the panel's dark ink, near-invisible here. */
+.mhome-viewhead-search-x {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+}
+.mhome-viewhead-search-x:hover {
+  color: #ffffff;
 }
 .mhome-row {
   display: flex;

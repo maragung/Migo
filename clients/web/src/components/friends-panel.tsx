@@ -538,8 +538,15 @@ function mutualNote(person: SuggestedUser): string | undefined {
  * Exported presentational over plain props, so the two states — the icon that offers the
  * search, the focused field with its way out — are testable without a live client, the same
  * bargain {@link BlockedSection} and {@link MutedSection} make.
+ *
+ * Two surfaces share this control: the panel's own head (`tone="panel"`, the default) and the
+ * phone's home view header (`tone="home"`). The behaviour is one bargain — the icon offers, the
+ * field arrives focused, the close or an empty blur ends it — so it lives here once; only the ink
+ * differs, because the panel head is a light strip and the home view header is the teal band whose
+ * controls are white glass.
  */
 export function FriendsSearch({
+  tone = 'panel',
   open,
   active,
   query,
@@ -548,6 +555,8 @@ export function FriendsSearch({
   onReveal,
   onDismiss,
 }: {
+  /** Which surface's ink the control wears: the panel head's, or the phone header's teal band. */
+  tone?: 'panel' | 'home';
   /** Whether the field is revealed; the icon stands in for it until someone wants it. */
   open: boolean;
   /** Whether the search results are the view on screen — the icon's chosen state when closed. */
@@ -560,11 +569,18 @@ export function FriendsSearch({
   /** The search is finished: the field leaves, empty, and the icon returns. */
   onDismiss: () => void;
 }): ReactNode {
+  // The home tone rides the teal view header, whose controls are the white-glass `tbtn` set —
+  // the panel classes would paint a near-invisible ink there, and the panel classes are the
+  // default everywhere else.
+  const iconClass =
+    tone === 'home'
+      ? `tbtn tbtn-sm${active ? ' tbtn-on' : ''}`
+      : `panel-head-icon${active ? ' chosen' : ''}`;
   if (!open) {
     return (
       <button
         type="button"
-        className={`panel-head-icon${active ? ' chosen' : ''}`}
+        className={iconClass}
         aria-pressed={active}
         onClick={onReveal}
         aria-label="Search people by username"
@@ -575,10 +591,14 @@ export function FriendsSearch({
     );
   }
   return (
-    <form className="panel-head-search" role="search" onSubmit={onSubmit}>
+    <form
+      className={tone === 'home' ? 'mhome-head-search' : 'panel-head-search'}
+      role="search"
+      onSubmit={onSubmit}
+    >
       <input
         type="search"
-        className="input"
+        className={tone === 'home' ? 'mhome-viewhead-search' : 'input'}
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
         /* The field arrived because someone asked for it, so it arrives ready to type in. */
@@ -596,7 +616,7 @@ export function FriendsSearch({
       {/* The explicit way out: the close finishes the search whatever the query holds. */}
       <button
         type="button"
-        className="panel-head-search-x"
+        className={tone === 'home' ? 'mhome-viewhead-search-x' : 'panel-head-search-x'}
         onClick={onDismiss}
         aria-label="Close search"
         title="Close search"
