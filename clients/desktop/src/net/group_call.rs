@@ -1041,7 +1041,7 @@ mod tests {
                 conversation_id: conversation
             })
         );
-        assert!(calls.in_progress.get(&conversation).is_none());
+        assert!(!calls.in_progress.contains_key(&conversation));
 
         // A retirement of a call the ledger never held has nothing to clear and nothing to
         // say, and a count the event did not carry is not a size to offer anyone.
@@ -1079,7 +1079,7 @@ mod tests {
             calls.spectate(&spectator_event(conversation, id_of(5), Some(2))),
             None
         );
-        assert!(calls.in_progress.get(&conversation).is_none());
+        assert!(!calls.in_progress.contains_key(&conversation));
 
         // A seat in some *other* conversation's call does not bind this one: the device is
         // a spectator of the event's conversation, and the announcement is discovery.
@@ -1111,7 +1111,7 @@ mod tests {
             calls.spectate(&spectator_event(conversation, call, Some(2))),
             None
         );
-        assert!(calls.in_progress.get(&conversation).is_none());
+        assert!(!calls.in_progress.contains_key(&conversation));
     }
 
     /// The join's target id, in precedence order: an ask already in flight is the
