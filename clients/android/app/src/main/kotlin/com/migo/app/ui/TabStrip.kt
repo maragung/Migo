@@ -40,10 +40,12 @@ import com.migo.core.wire.Id
  *
  * The home tabs come first — Friends, Rooms, Feed, in the reference's order — and only Feed carries
  * an X, because Friends and Rooms are the doors everything else opens through; closing Feed parks it
- * in the hidden set until the strip's "+" sheet reopens it. After a 1px divider, one tab per open
- * conversation: tapping it shows that conversation full-bleed below the strip, and its X closes the
- * window outright, decrypted messages and all, per the no-store design. One window is visible at a
- * time; the rest stay parked behind their tabs.
+ * in the hidden set until the strip's "+" sheet reopens it. The Friends tab carries the pending
+ * friend-request count as the same red badge a window tab wears its unread, so an invitation
+ * waiting is visible whichever home view or window is showing. After a 1px divider, one tab per
+ * open conversation: tapping it shows that conversation full-bleed below the strip, and its X closes
+ * the window outright, decrypted messages and all, per the no-store design. One window is visible at
+ * a time; the rest stay parked behind their tabs.
  *
  * The row scrolls horizontally rather than wrapping, exactly as the reference draws it, so the
  * content below never moves when a new tab arrives.
@@ -60,6 +62,8 @@ fun MobileTabStrip(
     onReopenNav: (AppState.Section) -> Unit,
     onSelectWindow: (WindowTab) -> Unit,
     onCloseWindow: (Id) -> Unit,
+    /** The pending incoming friend requests, worn by the Friends tab the way a window tab wears unread. */
+    friendRequests: Long = 0L,
     modifier: Modifier = Modifier,
 ) {
     val extra = LocalMigoExtra.current
@@ -83,6 +87,7 @@ fun MobileTabStrip(
                     glyph = navGlyph(nav),
                     active = open == null && section == nav,
                     closable = nav == AppState.Section.FEED,
+                    badge = if (nav == AppState.Section.FRIENDS) friendRequests else 0L,
                     onClick = { onSelectNav(nav) },
                     onClose = { onCloseNav(nav) },
                 )
@@ -159,8 +164,9 @@ private fun navSheetGlyph(section: AppState.Section): String = when (section) {
 /**
  * One home tab: the chip style the strip has always drawn — the chosen tab the one solid white
  * pill on the deep teal, carrying the teal-head ink and its short underline — with Feed's X set
- * inside the right edge. Active here means the home view is what is showing, so a parked window
- * never lights a home tab.
+ * inside the right edge, and the Friends tab wearing its pending-request badge beside the label,
+ * the same red pill a window tab wears its unread. Active here means the home view is what is
+ * showing, so a parked window never lights a home tab.
  */
 @Composable
 private fun NavChip(
@@ -170,6 +176,7 @@ private fun NavChip(
     closable: Boolean,
     onClick: () -> Unit,
     onClose: () -> Unit,
+    badge: Long = 0L,
     modifier: Modifier = Modifier,
 ) {
     val activeInk = Color(0xFF0D6373)
@@ -200,6 +207,10 @@ private fun NavChip(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 132.dp),
                 )
+                if (badge > 0) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    StripBadge(count = badge)
+                }
                 if (closable) {
                     Spacer(modifier = Modifier.width(6.dp))
                     CloseGlyph(onClose = onClose, tint = if (active) activeInk else idleInk)
@@ -310,7 +321,8 @@ private fun ReopenChip(onClick: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-/** The unread badge, capped at "9+" the reference's way. Red on any chip, active or idle. */
+/** The count badge a chip wears — a window's unread, the Friends tab's pending requests —
+ *  capped at "9+" the reference's way. Red on any chip, active or idle. */
 @Composable
 private fun StripBadge(count: Long) {
     Surface(

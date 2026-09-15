@@ -3374,26 +3374,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Invites one account into the open group.
+     * Invites accounts into the open group, as one batch.
      *
+     * The wire's invite takes the whole list in a single call, so the sheet's picked set travels
+     * together — one request, one answer — and each pick is marked busy until that answer lands.
      * The reply is the group's summary as it now stands, so the member count and the sheet's rows
      * are corrected from it at once; each person who actually landed is announced on the member
      * stream, which is the same path a member invited by someone else takes.
      */
-    fun inviteToGroup(conversationId: Id, userId: Id) {
+    fun inviteToGroup(conversationId: Id, userIds: List<Id>) {
         val live = session ?: return
-        if (signedInState?.open?.acting?.contains(userId) == true) return
-        inChat(conversationId) { it.copy(acting = it.acting + userId) }
+        val acting = signedInState?.open?.acting ?: emptySet()
+        val pending = userIds.filter { it !in acting }
+        if (pending.isEmpty()) return
+        inChat(conversationId) { it.copy(acting = it.acting + pending) }
         viewModelScope.launch {
             try {
-                live.client.conversations.invite(conversationId, listOf(userId))
-                learnAccountNames(live, listOf(userId))
+                live.client.conversations.invite(conversationId, pending)
+                learnAccountNames(live, pending)
                 loadGroupRoster(conversationId)
-                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+                inChat(conversationId) { it.copy(acting = it.acting - pending.toSet()) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+                inChat(conversationId) { it.copy(acting = it.acting - pending.toSet()) }
                 signedIn { it.copy(failure = readable(failure)) }
             }
         }

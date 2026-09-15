@@ -178,8 +178,11 @@ fun ChatScreen(
     onOpenGroupMembers: (() -> Unit)? = null,
     /** Closes the group's member sheet. */
     onCloseGroupMembers: () -> Unit = {},
-    /** Invites the given account into this group, from the sheet's invite row. */
-    onInvite: (Id) -> Unit = {},
+    /**
+     * Invites the given accounts into this group, as one batch from the sheet's picked set — the
+     * wire takes the whole list in a single call, so the picks travel together.
+     */
+    onInvite: (List<Id>) -> Unit = {},
     /** Casts this account's voice in a group kick vote against the given member. */
     onGroupVoteKick: (Id) -> Unit = {},
     /** Applies a founder's group mute -- a term, or null to lift one early. */
@@ -2413,8 +2416,9 @@ data class GroupInviteCandidate(
  * is the only statement of who they are, so the sheet reads it before offering anyone a control:
  *
  * - **Invite** is every member's right. The quick-pick lists the friends this shell knows who are
- *   not already seated; a person not in the graph is reached from the Friends screen's search, the
- *   same path a direct chat starts from.
+ *   not already seated — any number of them picked together, sent as one batch — and a person not
+ *   in the graph is reached from the Friends screen's search, the same path a direct chat starts
+ *   from.
  * - **Rename** is the founders' control, and the roster's **mute terms** and a straight **kick**
  *   are theirs too, offered in the member menu a row's tap opens. A founder cannot touch the other
  *   founder -- a group built by two cannot be halved by one of them -- and cannot mute or kick
@@ -2432,7 +2436,7 @@ private fun GroupMembersSheet(
     onClose: () -> Unit,
     onViewProfile: (Id, String) -> Unit,
     onGift: (Id, String) -> Unit,
-    onInvite: (Id) -> Unit,
+    onInvite: (List<Id>) -> Unit,
     onVoteKick: (Id) -> Unit,
     onMute: (Id, Long?) -> Unit,
     onKick: (Id) -> Unit,
@@ -2446,6 +2450,13 @@ private fun GroupMembersSheet(
     // offers to invite someone who is already in would be a button that can only fail politely.
     val seated = roster?.filter { !it.departed }?.map { it.userId }?.toSet() ?: emptySet()
     val candidates = invitees.filter { it.userId !in seated && it.userId != selfId }
+    // The quick-pick's picks, saved rather than remembered: a rotation mid-pick must not lose the
+    // friends already chosen, the same discipline the member menu's own open flag keeps. Held as
+    // the id values (the saveable form) and intersected with the candidates, so a pick that has
+    // since been seated — the invite landed — retires on its own without a clear to forget.
+    var invitePicked by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    val picked = candidates.filter { it.userId.value in invitePicked }
+    val inviting = picked.any { it.userId in chat.acting }
     val now = System.currentTimeMillis()
 
     // The sheet covers the chat's whole height, and the chat runs to the screen's edge — edge to
@@ -2512,12 +2523,44 @@ private fun GroupMembersSheet(
                     else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
                         if (candidates.isNotEmpty()) {
                             item(key = "invite-label") { SectionLabel(text = "Invite a friend") }
+                            item(key = "invite-action") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = if (picked.isEmpty()) {
+                                            "Tap friends to pick them."
+                                        } else {
+                                            "${picked.size} picked"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    Button(
+                                        onClick = { onInvite(picked.map { it.userId }) },
+                                        enabled = picked.isNotEmpty() && !inviting,
+                                    ) {
+                                        Text(if (picked.isEmpty()) "Invite" else "Invite (${picked.size})")
+                                    }
+                                }
+                            }
                             items(candidates, key = { "invite-" + it.userId.value }) { person ->
                                 GroupInviteRow(
                                     name = person.name,
                                     avatarBytes = avatarBytes[person.userId],
                                     busy = person.userId in chat.acting,
-                                    onInvite = { onInvite(person.userId) },
+                                    picked = person.userId.value in invitePicked,
+                                    onToggle = {
+                                        invitePicked = if (person.userId.value in invitePicked) {
+                                            invitePicked - person.userId.value
+                                        } else {
+                                            invitePicked + person.userId.value
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -2558,13 +2601,23 @@ private fun GroupMembersSheet(
 }
 
 /**
- * One invite candidate: the friend and the single act the row exists for. Busy is the row's own,
- * because an invite is one person's call and no other row should wait for it.
+ * One invite candidate: the friend and the checkmark of a pick. The row's whole length toggles the
+ * pick — the picking is the row's only act, and the Invite (N) above the rows is the one that
+ * sends. Busy is the row's own, because the sheet marks each pick while its batch is in flight.
  */
 @Composable
-private fun GroupInviteRow(name: String, avatarBytes: ByteArray?, busy: Boolean, onInvite: () -> Unit) {
+private fun GroupInviteRow(
+    name: String,
+    avatarBytes: ByteArray?,
+    busy: Boolean,
+    picked: Boolean,
+    onToggle: () -> Unit,
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Avatar(name = name, bytes = avatarBytes, size = 32.dp)
@@ -2580,8 +2633,13 @@ private fun GroupInviteRow(name: String, avatarBytes: ByteArray?, busy: Boolean,
         if (busy) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
         }
-        TextButton(onClick = onInvite, enabled = !busy) {
-            Text("Invite")
+        if (picked) {
+            Text(
+                text = "✓",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }
