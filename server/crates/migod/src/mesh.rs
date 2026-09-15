@@ -1770,7 +1770,7 @@ async fn serve_reads<S: AsyncRead + AsyncWrite + Unpin + Send>(
                         0,
                         &migo_protocol::FedAck {
                             node_id: mesh.region().to_string(),
-                            seq: *watermark,
+                            link_seq: *watermark,
                         },
                     )?,
                 )
@@ -1878,7 +1878,7 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 Opcode::FedAck => {
                     let ack: migo_protocol::FedAck =
                         from_frame(&frame).map_err(fault::from_wire)?;
-                    if ack.seq >= highest {
+                    if ack.link_seq >= highest {
                         return Ok::<(), SessionFailure>(());
                     }
                 }
@@ -2691,7 +2691,7 @@ mod tests {
             .expect("the ack is a frame");
         assert_eq!(ack.header.opcode, Opcode::FedAck.to_wire());
         let ack: migo_protocol::FedAck = from_frame(&ack).expect("the ack decodes");
-        assert_eq!(ack.seq, 1, "the watermark covers sequence one");
+        assert_eq!(ack.link_seq, 1, "the watermark covers sequence one");
 
         // Sequence one again: a replay, dropped silently.
         write_frame(

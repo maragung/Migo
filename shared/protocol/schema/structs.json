@@ -2083,7 +2083,7 @@
           "type": "string"
         },
         {
-          "name": "sequence",
+          "name": "link_seq",
           "type": "u64"
         },
         {
@@ -2321,7 +2321,7 @@
           "type": "string"
         },
         {
-          "name": "seq",
+          "name": "link_seq",
           "type": "u64"
         }
       ]

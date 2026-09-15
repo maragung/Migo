@@ -753,7 +753,7 @@ fn federation_frames_fit_their_budgets() {
         2,
         &FedAck {
             node_id: f.device.to_text(),
-            seq: 5000,
+            link_seq: 5000,
         },
     );
     assert!(ack <= 48, "FED_ACK is {ack} bytes, budget 48 (section 171)");

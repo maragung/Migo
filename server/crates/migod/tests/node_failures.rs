@@ -718,7 +718,7 @@ async fn serve_slow_session(
                 0,
                 &FedAck {
                     node_id: mesh.region().to_string(),
-                    seq: watermark,
+                    link_seq: watermark,
                 },
             )
             .expect("the ack encodes");

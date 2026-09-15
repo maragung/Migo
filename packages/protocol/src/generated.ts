@@ -3733,14 +3733,14 @@ export function decodeFedEpoch(r: Reader): FedEpoch {
 
 export interface FedLinkState {
   nodeId: string;
-  sequence: number;
+  linkSeq: number;
   healthy: boolean;
 }
 
 export function encodeFedLinkState(w: Writer, v: FedLinkState): void {
   w.enter();
   w.str(v.nodeId);
-  w.u64(v.sequence);
+  w.u64(v.linkSeq);
   w.bool(v.healthy);
   w.u32(0);
   w.leave();
@@ -3749,9 +3749,9 @@ export function encodeFedLinkState(w: Writer, v: FedLinkState): void {
 export function decodeFedLinkState(r: Reader): FedLinkState {
   r.enter();
   const nodeId = r.str();
-  const sequence = r.u64();
+  const linkSeq = r.u64();
   const healthy = r.bool();
-  const out: FedLinkState = { nodeId, sequence, healthy } as FedLinkState;
+  const out: FedLinkState = { nodeId, linkSeq, healthy } as FedLinkState;
   const optionalCount = r.u32();
   // No optional fields in this version of the struct. Each entry is length-delimited,
   // so reading it is skipping it, and a newer peer may well have sent one.
@@ -4185,13 +4185,13 @@ export function decodeFedPong(r: Reader): FedPong {
 
 export interface FedAck {
   nodeId: string;
-  seq: number;
+  linkSeq: number;
 }
 
 export function encodeFedAck(w: Writer, v: FedAck): void {
   w.enter();
   w.str(v.nodeId);
-  w.u64(v.seq);
+  w.u64(v.linkSeq);
   w.u32(0);
   w.leave();
 }
@@ -4199,8 +4199,8 @@ export function encodeFedAck(w: Writer, v: FedAck): void {
 export function decodeFedAck(r: Reader): FedAck {
   r.enter();
   const nodeId = r.str();
-  const seq = r.u64();
-  const out: FedAck = { nodeId, seq } as FedAck;
+  const linkSeq = r.u64();
+  const out: FedAck = { nodeId, linkSeq } as FedAck;
   const optionalCount = r.u32();
   // No optional fields in this version of the struct. Each entry is length-delimited,
   // so reading it is skipping it, and a newer peer may well have sent one.

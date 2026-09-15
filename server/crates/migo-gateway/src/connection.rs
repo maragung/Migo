@@ -122,7 +122,10 @@ enum Plan {
         /// stays honest rather than inventing a label for the impossible.
         reconnect: Option<Reconnect>,
         retained: RetainedSession,
-        last_seq: u64,
+        /// The last `frame_seq` the client says it saw, which names the tail of the
+        /// retained ring the resume replays from (section 152: a `frame_seq` gap is a
+        /// resume question, never a message fetch).
+        last_frame_seq: u64,
     },
 }
 
@@ -191,12 +194,12 @@ impl<T: Transport> Connection<'_, T> {
         let (resumed, resume_from_seq, reconnect) = match &plan {
             Plan::Resume {
                 retained,
-                last_seq,
+                last_frame_seq,
                 reconnect,
                 ..
             } => {
-                outbound.seed_resume(&retained.buffer, *last_seq);
-                (Some(true), Some(*last_seq), *reconnect)
+                outbound.seed_resume(&retained.buffer, *last_frame_seq);
+                (Some(true), Some(*last_frame_seq), *reconnect)
             }
             Plan::Fresh { .. } => (None, None, None),
         };
@@ -544,7 +547,7 @@ impl<T: Transport> Connection<'_, T> {
                     session_id: request.session_id,
                     reconnect: Reconnect::of(retained.buffer.closed()),
                     retained,
-                    last_seq: request.last_frame_seq,
+                    last_frame_seq: request.last_frame_seq,
                 })
             }
             Some(_) => {
