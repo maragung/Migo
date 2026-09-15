@@ -31,6 +31,7 @@ import { ConversationKind, EncryptionMode, MemberChange } from '@migo/sdk';
 import type { Id, RoomJoinResponse, RoomMemberEvent, RoomSummary } from '@migo/sdk';
 
 import {
+  applyRoomSettings,
   applyRoomState,
   capacityLabel,
   departedRoomOf,
@@ -101,6 +102,21 @@ test('a room-state delta replaces only the fields it carries', () => {
   // the exact reading that makes the delta shape worth having.
   const untouched = applyRoomState(info, { roomId: ROOM.roomId });
   assert.deepEqual(untouched, info);
+});
+
+test('a settings change moves the record itself, because no frame will bring the actor their own rename', () => {
+  const info = roomInfoOf(joined());
+  // The rename: a name no state event carries, so the record is the only place it can land.
+  const renamed = applyRoomSettings(info, 'Observatory Annex', 'What is above us');
+  assert.equal(renamed.name, 'Observatory Annex');
+  assert.equal(renamed.topic, 'What is above us');
+  // A topic set to nothing is a removal on the wire, so the key leaves rather than lingering empty.
+  const cleared = applyRoomSettings(renamed, 'Observatory Annex', '');
+  assert.ok(!('topic' in cleared), 'an emptied topic must leave the record');
+  assert.equal(cleared.name, 'Observatory Annex', 'the name outlives the topic beside it');
+  // Whitespace is the wire's own reading of "no topic": trimmed, then gone.
+  const spaced = applyRoomSettings(cleared, 'Observatory Annex', '   ');
+  assert.ok(!('topic' in spaced), 'an all-whitespace topic is a removal, not a blank string');
 });
 
 test('a join carries the room’s capacity, and a state delta moves it without touching the rest', () => {
