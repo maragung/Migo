@@ -27,24 +27,36 @@ node tools/loadgen/dist/main.js --scenario connect --vus 500 --duration 2m
 
 # presence fan-out, machine-readable output for a CI gate
 node tools/loadgen/dist/main.js --scenario presence --vus 100 --output json > run.json
+
+# one group conversation at the member ceiling, every member timing delivery
+node tools/loadgen/dist/main.js --scenario fanout --vus 100 --duration 1m
 ```
 
 `pnpm --filter @migo/loadgen start -- --help` prints the full option list.
 
 ## Scenarios
 
-| Scenario    | What each VU does                                                        | Measures                                    |
-| ----------- | ------------------------------------------------------------------------ | ------------------------------------------- |
-| `messaging` | Pairs hold a direct E2E conversation; the sender streams sealed messages | Send-to-ack latency, message throughput     |
-| `presence`  | Flips presence Online/Away at the target rate                            | Presence-update latency and throughput      |
-| `connect`   | Registers and holds a gateway session for the whole duration             | Connection setup latency, sustained fan-out |
+| Scenario      | What each VU does                                                                                                        | Measures                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `messaging`   | Pairs hold a direct E2E conversation; the sender streams sealed messages                                                 | Send-to-ack latency, message throughput                                  |
+| `presence`    | Flips presence Online/Away at the target rate                                                                            | Presence-update latency and throughput                                   |
+| `connect`     | Registers and holds a gateway session for the whole duration                                                             | Connection setup latency, sustained fan-out                              |
+| `fanout`      | One group conversation at the product member ceiling (256); one sender, the rest receive                                 | Send-to-deliver latency per member, fan-out completeness                 |
+| `calls`       | Pairs drive the full 1:1 call signaling lifecycle — invite, answer, SDP and ICE relays, end — holding calls concurrently | Invite/answer/relay/end latency, setup failures                          |
+| `voice-notes` | Uploads valid WAV voice notes through the full ticket/PUT/commit lifecycle, closed-loop                                  | Whole-upload latency (begin to commit)                                   |
+| `outage`      | Pairs stream through the offline outbox while the runner restarts the node mid-run (see `tools/load/run-full.sh`)        | Send latency including the outage, delivery exactly-once, session resume |
+
+Scenarios with an integrity contract (`fanout`, `outage`) run a **settle** phase after the
+deadline: in-flight deliveries land, outboxes drain, and the verdict records per-message
+completeness — a fan-out that silently loses a member, or a resume that re-delivers a backlog,
+fails the error budget even though every send succeeded.
 
 Every scenario records a **connect** digest (registration + handshake) during ramp-up, so
 connection cost is visible even when the steady-state workload is something else.
 
 ## Reading the report
 
-Latency lines carry `p50/p90/p99` (plus min/max), never an average alone — the tail is where
+Latency lines carry `p50/p90/p95/p99` (plus min/max), never an average alone — the tail is where
 trouble hides. Errors are broken out by class per operation, so `remote:RATE_LIMITED` (the server
 pushing back) reads differently from `transport` (the socket dying). When the server asks a client
 to back off, the generator waits it out rather than hammering the limiter.

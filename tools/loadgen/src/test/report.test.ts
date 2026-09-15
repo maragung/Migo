@@ -88,8 +88,10 @@ test('renderText pins the report format for a fixed input', () => {
   const text = renderText(makeOutcome(makeConfig(), fixedMetrics()));
   assert.ok(text.includes('Migo load test — scenario "messaging"'));
   assert.ok(text.includes('  server         http://localhost:8080  (ws://localhost:8080/ws)'));
-  // n=10 send latencies [10..100]: p50 idx4=50, p90 idx8=90, p99 idx9=100.
-  assert.ok(text.includes('p50 50.0ms  p90 90.0ms  p99 100.0ms  (min 10.0ms max 100.0ms)'));
+  // n=10 send latencies [10..100]: p50 idx4=50, p90 idx8=90, p95 idx9=100, p99 idx9=100.
+  assert.ok(
+    text.includes('p50 50.0ms  p90 90.0ms  p95 100.0ms  p99 100.0ms  (min 10.0ms max 100.0ms)'),
+  );
   assert.ok(text.includes('~0.3/s')); // 10 sends / 30s
   // 2 errors of 16 total operations = 12.50%, within the default budget of 1.
   assert.ok(text.includes('Result: OK  (error rate 12.50%)'));

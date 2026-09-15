@@ -191,6 +191,15 @@ SCENARIOS (--scenario)
               messages at the target rate (default)
   presence    every client flips presence Online/Away at the target rate
   connect     register and hold N concurrent gateway sessions for the duration
+  fanout      one group conversation at the product member ceiling (256); one sender,
+              every member measures send-to-deliver latency
+  calls       pairs drive the full 1:1 call signaling lifecycle — invite, answer, SDP
+              and ICE relays, end — with sealed placeholder offers
+  voice-notes every client uploads valid WAV voice notes through the full
+              ticket/PUT/commit lifecycle, closed-loop
+  outage      pairs stream through the offline outbox while the runner restarts the
+              node mid-run; the settle phase demands full delivery, no duplicates,
+              and every session resumed (see tools/load/run-full.sh for the restart)
 
 OPTIONS
   --scenario <name>          workload to run (default: messaging)

@@ -359,6 +359,78 @@ jobs:
       - name: Load run — migod (release) under tools/load/run.sh
         run: make test-load
 
+  # ------------------------------------------------------------------ full-scale load
+  # Section 172's full-scale list, the half the quick `load` job above deliberately
+  # does not touch: ten thousand idle sessions, a thousand messages a second, one
+  # conversation at the product's 256-member ceiling, five hundred concurrent call
+  # pairs, a thousand voice-note upload lifecycles, and mass sync after a mid-run
+  # node restart. Nightly-only for the same reason infra-smoke is: the steps assume
+  # a runner with nothing else on it, take tens of minutes together, and the failure
+  # classes they watch (a session leak that only shows at 10k, a resume that
+  # double-delivers under real restart pressure) surface within a day, which is this
+  # workflow's cadence. The outage step is why this job needs PostgreSQL when `load`
+  # does not: the node is SIGKILLed mid-run and must come back on the same store, and
+  # an in-memory backend would come back with amnesia — the step would then measure
+  # nothing. psql is run-full.sh's database-creation tool; the runner image does not
+  # ship it. Also runs on workflow_dispatch, so a nightly failure reproduces by hand.
+  load-full:
+    name: Load — full-scale scenarios, one node (brief section 172)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    needs: gates
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: migo
+          POSTGRES_PASSWORD: migo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U migo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # run-full.sh reads these directly; its PG_PORT default targets a developer's
+      # infra containers, but GitHub service containers publish on the standard 5432.
+      # The database it creates (migo_loadfull) is fresh on every runner, so a
+      # scheduled run never inherits a previous night's accounts.
+      PG_PORT: '5432'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # Same key as the quick load job: both build the same release binary, so a
+          # warm cache from either one shortens the other.
+          key: server-load
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript
+        run: make build-ts
+
+      - name: Full-scale load run — migod (release) under tools/load/run-full.sh
+        run: make test-load-full
+
   audit:
     name: Dependency advisories (reports, does not gate)
     runs-on: ubuntu-latest
