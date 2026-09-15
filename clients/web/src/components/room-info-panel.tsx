@@ -653,7 +653,10 @@ export function RoomInfoPanel({
   }, [client, leaving, roomId, conversationId, forgetConversation, forgetRoom]);
 
   return (
-    <div className="room-info" aria-label="Room details">
+    // The members variant of the details panel: the chat window stands the transcript and the
+    // composer down while this is open, and the panel fills the whole column below the header —
+    // the roster is the panel's scrollable body, the head with the leave control stays pinned.
+    <div className="room-info room-info-members" aria-label="Room details">
       {error ? <p className="form-error">{error}</p> : null}
       {roster === null ? (
         <div className="center-fill">

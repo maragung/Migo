@@ -235,6 +235,12 @@ export function ChatWindow({
   // the account's remembered rooms): the header's live counters and topic come from it, because
   // the conversation summary carries neither.
   const roomInfo = rooms.infoFor(conversationId);
+  // A members panel is the thread's body, not an accessory: while a room's or a group's details are
+  // open, the transcript, its typing line, and the composer stand down entirely so the roster can
+  // fill the whole column below the fixed header (the panel's own layout keeps the roster scrolling
+  // and the invite tools pinned). The 1:1 safety numbers stay a drawer that shares the column with
+  // the transcript, so they are deliberately not part of this gate.
+  const membersOpen = (isRoom && roomInfoOpen && roomInfo !== null) || (isGroup && groupInfoOpen);
 
   // The open room's live membership pills — who joined, left, dropped, or was removed — kept only
   // for the room on screen and interleaved into the transcript at the moment each happened.
@@ -657,7 +663,9 @@ export function ChatWindow({
 
       {isDirect && safetyOpen ? <DirectInfoPanel safety={safety} /> : null}
 
-      {loading && messages.length === 0 ? (
+      {/* While a members panel is open it IS the thread's body: the transcript (and its loading,
+          error, and search surfaces) stand down so the roster can take the whole column. */}
+      {membersOpen ? null : loading && messages.length === 0 ? (
         <div className="center-fill">
           <Spinner />
         </div>
@@ -721,8 +729,12 @@ export function ChatWindow({
         />
       ) : null}
 
-      <TypingIndicator userId={typingUser} />
-      {emoticonOpen ? (
+      {/* The typing line and the composer's own picker belong to the transcript's tail, so they
+          stand down with it while a members panel owns the column. The gift picker is deliberately
+          NOT gated: a roster row's Gift control opens it while the panel is up, and it takes its
+          place under the panel the same way it takes it under the transcript. */}
+      {!membersOpen ? <TypingIndicator userId={typingUser} /> : null}
+      {!membersOpen && emoticonOpen ? (
         <EmoticonPicker
           owned={ownedPacks}
           onInsert={(glyph) => {
@@ -754,33 +766,35 @@ export function ChatWindow({
         )
       ) : null}
       {giftError ? <p className="composer-meta composer-error">{giftError}</p> : null}
-      <MessageComposer
-        onSend={send}
-        // File send is a private-and-group feature: in a server-readable room the attach button is
-        // hidden entirely (the composer renders no picker when onAttach is undefined), while the mic
-        // below stays for every conversation kind.
-        onAttach={endToEnd ? sendAttachment : undefined}
-        onVoiceNote={sendVoiceNote}
-        onTyping={setTyping}
-        disabled={!!error}
-        replyPreview={replyPreview}
-        onCancelReply={() => setReplyTo(null)}
-        emoticonOpen={emoticonOpen}
-        // Disappearing messages are a private-and-group feature: a room's history is its record
-        // (the room's transcripts are the point of a room), so the clock control stays out of a
-        // room's composer entirely — the same rule that hides file send there.
-        expiresAfterMs={isRoom ? null : expiresAfterMs}
-        onToggleDisappearing={
-          isRoom
-            ? undefined
-            : () => setExpiresAfterMs(expiresAfterMs == null ? DISAPPEARING_MS : null)
-        }
-        onToggleEmoticon={() => {
-          setGiftOpen(false);
-          setEmoticonOpen((open) => !open);
-        }}
-        insertRef={emoticonInputRef}
-      />
+      {!membersOpen ? (
+        <MessageComposer
+          onSend={send}
+          // File send is a private-and-group feature: in a server-readable room the attach button is
+          // hidden entirely (the composer renders no picker when onAttach is undefined), while the mic
+          // below stays for every conversation kind.
+          onAttach={endToEnd ? sendAttachment : undefined}
+          onVoiceNote={sendVoiceNote}
+          onTyping={setTyping}
+          disabled={!!error}
+          replyPreview={replyPreview}
+          onCancelReply={() => setReplyTo(null)}
+          emoticonOpen={emoticonOpen}
+          // Disappearing messages are a private-and-group feature: a room's history is its record
+          // (the room's transcripts are the point of a room), so the clock control stays out of a
+          // room's composer entirely — the same rule that hides file send there.
+          expiresAfterMs={isRoom ? null : expiresAfterMs}
+          onToggleDisappearing={
+            isRoom
+              ? undefined
+              : () => setExpiresAfterMs(expiresAfterMs == null ? DISAPPEARING_MS : null)
+          }
+          onToggleEmoticon={() => {
+            setGiftOpen(false);
+            setEmoticonOpen((open) => !open);
+          }}
+          insertRef={emoticonInputRef}
+        />
+      ) : null}
 
       {profileOpen && peerId !== null ? (
         <UserProfileModal

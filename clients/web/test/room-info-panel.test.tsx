@@ -65,6 +65,13 @@ test('the roster list renders one labelled row per member, with roles as badges'
   assert.ok(markup.includes('Alan Turing'), 'a member\u2019s resolved name is missing');
   // An unresolved account keeps its row: the rank is the fact, the name is its label.
   assert.ok(markup.includes('Someone'), 'an unresolved member lost their row');
+  // The rows sit in the roster-list container: the full-height members layout hangs off that class
+  // (.room-info-members .roster-list in globals.css is the panel's scroll region), so a row
+  // escaping the container would fall out of the scroll and break the panel's body.
+  assert.ok(
+    markup.includes('class="roster-list"'),
+    'the roster rows must sit inside the roster-list container',
+  );
   assert.ok(markup.includes('role-owner'), 'the owner badge lost its distinguishing style');
   assert.ok(markup.includes('role-admin'), 'the admin badge lost its distinguishing style');
   assert.equal(
