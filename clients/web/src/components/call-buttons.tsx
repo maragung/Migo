@@ -19,6 +19,7 @@ import type { Id } from '@migo/sdk';
 
 import type { CallManagerValue } from '@/lib/migo/call-manager.js';
 import type { GroupCallManagerValue } from '@/lib/migo/group-call-manager.js';
+import type { InProgressGroupCall } from '@/lib/migo/group-roster.js';
 
 /** What the buttons need from the managers: the one action each performs. */
 type StartCall = CallManagerValue['startCall'];
@@ -64,18 +65,25 @@ export function CallButtons({
 }
 
 /**
- * The group-call control in a group conversation's header: join the call's roster.
+ * The group-call control in a group conversation's header: seat this device in the call's roster.
  *
  * There is no ring to answer — a group call in this build is a roster anyone in the conversation
  * may seat themselves in, so the one action is join, and `conversationId` being null (not a group
  * conversation) renders nothing, the same self-gating the 1:1 buttons keep.
+ *
+ * When other members are already seated (`inProgress`), the same button names the running call
+ * and the count it last had: joining a call in progress and starting one are the same wire
+ * action — the join's call id decides which — so the affordance changes its words, not its shape.
  */
 export function GroupCallButton({
   conversationId,
+  inProgress,
   onJoin,
 }: {
   /** The group conversation whose call is joined; `null` renders nothing. */
   conversationId: Id | null;
+  /** The call already running in the conversation, when one is and this device is not seated in it. */
+  inProgress: InProgressGroupCall | null;
   /** Seats this device in the call; the manager's, already bound. */
   onJoin: JoinGroupCall;
 }): ReactNode {
@@ -86,9 +94,19 @@ export function GroupCallButton({
     <button
       type="button"
       className="icon-btn call-btn"
-      aria-label="Join group call"
-      title="Group voice call — join the roster"
-      onClick={() => void onJoin(conversationId)}
+      aria-label={
+        inProgress === null
+          ? 'Join group call'
+          : `Join group call in progress (${inProgress.participantCount})`
+      }
+      title={
+        inProgress === null
+          ? 'Group voice call — join the roster'
+          : `Group voice call — join the ${inProgress.participantCount} already in the roster`
+      }
+      onClick={() =>
+        void onJoin(conversationId, inProgress === null ? undefined : inProgress.callId)
+      }
     >
       📞
     </button>

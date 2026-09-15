@@ -2,7 +2,8 @@
 
 /**
  * The pure halves of the group-call roster: the projection every roster event updates, the
- * placeholder this build seals as its offer, and the words the roster screen shows.
+ * placeholder this build seals as its offer, the map of calls in progress a member who is not
+ * seated keeps, and the words the roster screen shows.
  *
  * A group call is a *roster* (see the SDK's group-call domain): the server stores one seat per
  * account and re-serves the sealed blobs between them, and what a screen renders is the seat list
@@ -117,6 +118,61 @@ export function seatDeparted(
  */
 export function isCallRetired(event: GroupCallLeftEvent): boolean {
   return event.participantCount === 0;
+}
+
+/**
+ * A group call running in a conversation this device is *not* seated in, as the announcements
+ * every member hears on the conversation's topic tell it: the call id a join would reuse — the
+ * protocol's idempotency key, so joining the running call seats into it rather than minting a
+ * second one — and the size the header's affordance states in its words.
+ */
+export interface InProgressGroupCall {
+  callId: Id;
+  /** The call's size as the last announcement counted it. */
+  participantCount: number;
+}
+
+/**
+ * Folds a join announcement into the in-progress map: a call this device is not seated in is now
+ * running in the announcement's conversation.
+ *
+ * The fold takes the whole map because the announcement names its conversation, and a
+ * conversation tracks at most one running call — a join naming a call id the entry does not hold
+ * (a fresh call after a retirement this device missed) simply replaces it, the same honesty the
+ * seat folds keep: the announcement stream is the only source this device has.
+ */
+export function inProgressArrived(
+  tracked: ReadonlyMap<Id, InProgressGroupCall>,
+  event: GroupCallJoinedEvent,
+): Map<Id, InProgressGroupCall> {
+  const next = new Map(tracked);
+  next.set(event.conversationId, {
+    callId: event.callId,
+    participantCount: event.participantCount,
+  });
+  return next;
+}
+
+/**
+ * Folds a departure announcement into the in-progress map: the count moves, or the call is gone.
+ *
+ * `participantCount` of zero is the retirement ({@link isCallRetired}) — there is nothing left to
+ * join, so the entry goes entirely rather than sitting at a count no join can answer.
+ */
+export function inProgressDeparted(
+  tracked: ReadonlyMap<Id, InProgressGroupCall>,
+  event: GroupCallLeftEvent,
+): Map<Id, InProgressGroupCall> {
+  const next = new Map(tracked);
+  if (isCallRetired(event)) {
+    next.delete(event.conversationId);
+  } else {
+    next.set(event.conversationId, {
+      callId: event.callId,
+      participantCount: event.participantCount,
+    });
+  }
+  return next;
 }
 
 /**

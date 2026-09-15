@@ -1,15 +1,18 @@
 'use client';
 
 /**
- * The group-call manager: one React context that owns this device's seat in one group call.
+ * The group-call manager: one React context that owns this device's seat in one group call, and
+ * the map of the calls it could still join.
  *
  * The SDK's group-call domain is pure signaling — it sends what it is handed and delivers what
  * arrives. This provider is the piece above it a roster UI needs: it joins with a sealed
  * placeholder offer (see {@link ./group-roster.ts} for why the placeholder is really sealed),
  * projects the tracked {@link ActiveGroupCall} the roster screen renders from the three SDK
- * events, and owns the exits — a leave, the call's retirement, a seat replacement by this
- * account's other device, a dropped session — each with its own words on the screen, because a
- * roster that vanishes without a sentence teaches its user to distrust the next one.
+ * events, keeps the calls in progress in conversations this device is not seated in — the fact a
+ * header button turns into "join the running call" — and owns the exits — a leave, the call's
+ * retirement, a seat replacement by this account's other device, a dropped session — each with its
+ * own words on the screen, because a roster that vanishes without a sentence teaches its user to
+ * distrust the next one.
  *
  * # What this manager deliberately does not do
  *
@@ -28,10 +31,11 @@
  * # The events, and which of them are ours
  *
  * The join announcements and departure announcements ride the *conversation's* topic: every
- * member's client hears them, seated or not. This manager tracks only the call this device joined
- * (matched by call id — a join from this account's other device is that device's screen), so an
- * announcement for any other call is ignored here. A future "call in progress" banner for
- * not-yet-seated members would subscribe to the same stream; it is not this build's shape.
+ * member's client hears them, seated or not. Each announcement has two readers here: the roster
+ * of the call this device joined (matched by call id — a join from this account's other device is
+ * that device's screen), and the in-progress map of calls in conversations this device is *not*
+ * seated in, which is what lets a member who has not joined see the running call and join it by
+ * its id, rather than minting a second call the conversation did not ask for.
  */
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -42,6 +46,8 @@ import type { Id } from '@migo/sdk';
 
 import { generateCallKey } from './call-signal.js';
 import {
+  inProgressArrived,
+  inProgressDeparted,
   isCallRetired,
   namesOwnSeat,
   placeholderSealedOffer,
@@ -49,11 +55,17 @@ import {
   seatDeparted,
   seatsFromSnapshot,
 } from './group-roster.js';
-import type { GroupCallNote, GroupCallSeat } from './group-roster.js';
+import type { GroupCallNote, GroupCallSeat, InProgressGroupCall } from './group-roster.js';
 import { useMigo } from './use-migo.js';
 
 /** What a group call that could not even be joined says, as a fact. */
 export const GROUP_CALL_JOIN_FAILED = 'Could not join the group call.';
+
+/**
+ * The empty in-progress map, shared: the folds below always build a fresh map, so no write ever
+ * reaches into this one.
+ */
+const NO_CALLS_IN_PROGRESS: ReadonlyMap<Id, InProgressGroupCall> = new Map();
 
 /**
  * The tracked group call: the seat list as this device last knew it, plus the phase of our own
@@ -83,8 +95,16 @@ export interface GroupCallManagerValue {
   activeGroupCall: ActiveGroupCall | null;
   /** Why a group call could not be joined, when nothing else is showing. */
   groupCallError: string | null;
-  /** Joins the conversation's group call (or re-seats this device in one it knows the id of). */
-  joinGroupCall: (conversationId: Id) => Promise<void>;
+  /**
+   * The call running in a conversation this device is not seated in, when one is — the fact a
+   * header's join affordance names and joins by id.
+   */
+  groupCallInProgress: (conversationId: Id) => InProgressGroupCall | null;
+  /**
+   * Joins the conversation's group call: the running call's id when the caller has one (seating
+   * into it), a freshly minted id otherwise.
+   */
+  joinGroupCall: (conversationId: Id, callId?: Id) => Promise<void>;
   /** Leaves the tracked call: the screen turns to its "left" note, and the server frees the seat. */
   leaveGroupCall: () => Promise<void>;
   /** Dismisses the ended screen, leaving no call tracked. */
@@ -98,6 +118,11 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
 
   const [activeGroupCall, setActiveGroupCall] = useState<ActiveGroupCall | null>(null);
   const [groupCallError, setGroupCallError] = useState<string | null>(null);
+  // The calls running in conversations this device is not seated in, keyed by conversation. The
+  // announcements keep it true and nothing else does, so it is honestly empty until the first one
+  // lands — a member who opens the thread between movements sees "join" until the roster speaks.
+  const [trackedCalls, setTrackedCalls] =
+    useState<ReadonlyMap<Id, InProgressGroupCall>>(NO_CALLS_IN_PROGRESS);
 
   // The event handlers are registered once per client, so everything they read must be a ref.
   const clientRef = useRef(client);
@@ -107,12 +132,18 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
   const deviceIdRef = useRef(deviceId);
   deviceIdRef.current = deviceId;
   const activeRef = useRef<ActiveGroupCall | null>(null);
+  const trackedRef = useRef<ReadonlyMap<Id, InProgressGroupCall>>(NO_CALLS_IN_PROGRESS);
 
-  // --- tracked-state writer: ref first (handlers read it synchronously), then React state ---
+  // --- tracked-state writers: ref first (handlers read it synchronously), then React state ---
 
   const setActive = useCallback((call: ActiveGroupCall | null): void => {
     activeRef.current = call;
     setActiveGroupCall(call);
+  }, []);
+
+  const setTracked = useCallback((calls: ReadonlyMap<Id, InProgressGroupCall>): void => {
+    trackedRef.current = calls;
+    setTrackedCalls(calls);
   }, []);
 
   // --- the flows the UI calls ---
@@ -120,11 +151,14 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
   /**
    * Joins the conversation's group call.
    *
-   * The call id is minted here — client-minted ids are the protocol's idempotency key, so a
-   * retried join re-seats the same call — and the offer is the roster module's sealed placeholder:
-   * this build's honest stand-in for a media description, sealed under a per-call key exactly as
-   * the real one will be (section 165's rule is about what the server sees, not about whether the
-   * media plane has landed).
+   * The call id is the caller's when the join answers a call already running — the header's
+   * "join in progress" affordance hands the tracked call's id over for exactly this, and reusing
+   * it is the point: client-minted ids are the protocol's idempotency key, so this join seats
+   * into the running call rather than minting a second one the conversation did not ask for. A
+   * fresh join mints the id here, and a retried join re-seats the same call either way. The
+   * offer is the roster module's sealed placeholder: this build's honest stand-in for a media
+   * description, sealed under a per-call key exactly as the real one will be (section 165's rule
+   * is about what the server sees, not about whether the media plane has landed).
    *
    * The roster snapshot the screen builds from does not come back on the reply: the server
    * *publishes* it to this account's own topic, and the snapshot handler below may fire before or
@@ -132,7 +166,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
    * marks the seat accepted, not the reply.
    */
   const joinGroupCall = useCallback(
-    async (conversationId: Id): Promise<void> => {
+    async (conversationId: Id, callId?: Id): Promise<void> => {
       const current = clientRef.current;
       if (current === null || accountIdRef.current === null || deviceIdRef.current === null) {
         return;
@@ -147,9 +181,9 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       if (seated !== null) {
         return;
       }
-      const callId = newId();
+      const joinedCallId = callId ?? newId();
       setActive({
-        callId,
+        callId: joinedCallId,
         conversationId,
         mediaKind: CallMediaKind.Audio,
         phase: 'joining',
@@ -158,30 +192,37 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         participantCount: 0,
         joinedAt: null,
       });
+      // Seating in the tracked call makes the roster this conversation's call state; the
+      // tracker's entry has nothing left to tell the header.
+      if (trackedRef.current.get(conversationId)?.callId === joinedCallId) {
+        const without = new Map(trackedRef.current);
+        without.delete(conversationId);
+        setTracked(without);
+      }
       try {
         await current.groupCalls.join(
           conversationId,
           CallMediaKind.Audio,
-          placeholderSealedOffer(generateCallKey(), callId),
-          callId,
+          placeholderSealedOffer(generateCallKey(), joinedCallId),
+          joinedCallId,
         );
         // The snapshot may already have marked the seat accepted (it is published, not replied);
         // this only fills in the timestamp for a reply that won the race.
         const active = activeRef.current;
-        if (active !== null && active.callId === callId && active.phase === 'joining') {
+        if (active !== null && active.callId === joinedCallId && active.phase === 'joining') {
           setActive({ ...active, phase: 'seated', joinedAt: active.joinedAt ?? Date.now() });
         }
       } catch {
         // The join never landed (membership refused, the socket gone). A snapshot that arrived
         // despite the failure means it did land — only fail a call still waiting for its seat.
         const active = activeRef.current;
-        if (active !== null && active.callId === callId && active.phase === 'joining') {
+        if (active !== null && active.callId === joinedCallId && active.phase === 'joining') {
           setActive(null);
           setGroupCallError(GROUP_CALL_JOIN_FAILED);
         }
       }
     },
-    [setActive],
+    [setActive, setTracked],
   );
 
   /**
@@ -219,7 +260,8 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
    * The roster snapshot: the authoritative seat list for a join this device made. Snapshots for
    * any other call id are this account's *other* devices joining — that device's screen, not
    * this one's — and are ignored. The announcements below ride the conversation's topic and reach
-   * every member's client; the same call-id match keeps this manager to this device's call.
+   * every member's client, seated or not; the same call-id match keeps the roster fold to this
+   * device's call, and everything the match turns away feeds the in-progress map instead.
    */
 
   useEffect(() => {
@@ -231,6 +273,9 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       if (active !== null && active.note === null) {
         setActive({ ...active, note: 'connection' });
       }
+      // The tracked calls are announcement-kept; with no signaling left they could only go
+      // stale, and a stale entry is a join the server would refuse.
+      setTracked(NO_CALLS_IN_PROGRESS);
       return;
     }
     const offs = [
@@ -249,39 +294,51 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       }),
       client.groupCalls.onParticipantJoined((event) => {
         const active = activeRef.current;
-        if (active === null || active.callId !== event.callId || active.note !== null) {
+        // The announcements name every member's movement, so the call-id match is what says
+        // which of the two readers below an event is for: the roster when this device holds a
+        // seat in that call (frozen once a note ends it), the in-progress map when it does not.
+        if (active !== null && active.callId === event.callId) {
+          if (active.note !== null) {
+            return;
+          }
+          setActive({
+            ...active,
+            seats: seatArrived(active.seats, event, Date.now()),
+            participantCount: event.participantCount,
+          });
           return;
         }
-        setActive({
-          ...active,
-          seats: seatArrived(active.seats, event, Date.now()),
-          participantCount: event.participantCount,
-        });
+        setTracked(inProgressArrived(trackedRef.current, event));
       }),
       client.groupCalls.onParticipantLeft((event) => {
         const active = activeRef.current;
-        if (active === null || active.callId !== event.callId || active.note !== null) {
+        // The same match as the arrival above, with the same split of readers.
+        if (active !== null && active.callId === event.callId) {
+          if (active.note !== null) {
+            return;
+          }
+          const accountId = accountIdRef.current;
+          const deviceId = deviceIdRef.current;
+          if (
+            accountId !== null &&
+            deviceId !== null &&
+            namesOwnSeat(event, { accountId, deviceId })
+          ) {
+            // This connection never hears its own leave (the server skips the origin session when
+            // publishing), so a departure naming this exact account *and* device is the seat being
+            // replaced from this account's other device — the call continues, just not here.
+            setActive({ ...active, note: 'moved' });
+            return;
+          }
+          setActive({
+            ...active,
+            note: isCallRetired(event) ? 'ended' : null,
+            seats: seatDeparted(active.seats, event),
+            participantCount: event.participantCount,
+          });
           return;
         }
-        const accountId = accountIdRef.current;
-        const deviceId = deviceIdRef.current;
-        if (
-          accountId !== null &&
-          deviceId !== null &&
-          namesOwnSeat(event, { accountId, deviceId })
-        ) {
-          // This connection never hears its own leave (the server skips the origin session when
-          // publishing), so a departure naming this exact account *and* device is the seat being
-          // replaced from this account's other device — the call continues, just not here.
-          setActive({ ...active, note: 'moved' });
-          return;
-        }
-        setActive({
-          ...active,
-          note: isCallRetired(event) ? 'ended' : null,
-          seats: seatDeparted(active.seats, event),
-          participantCount: event.participantCount,
-        });
+        setTracked(inProgressDeparted(trackedRef.current, event));
       }),
     ];
     return () => {
@@ -289,7 +346,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         off();
       }
     };
-  }, [client, setActive]);
+  }, [client, setActive, setTracked]);
 
   // Closing the tab while seated must tell the server, the same contract the 1:1 manager keeps:
   // without it the seat lingers until the server notices the dead session. The RPC is fired
@@ -311,13 +368,21 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
   useEffect(
     () => (): void => {
       setActive(null);
+      setTracked(NO_CALLS_IN_PROGRESS);
     },
-    [setActive],
+    [setActive, setTracked],
+  );
+
+  /** The call running in a conversation this device is not seated in, when one is. */
+  const groupCallInProgress = useCallback(
+    (conversationId: Id): InProgressGroupCall | null => trackedCalls.get(conversationId) ?? null,
+    [trackedCalls],
   );
 
   const value: GroupCallManagerValue = {
     activeGroupCall,
     groupCallError,
+    groupCallInProgress,
     joinGroupCall,
     leaveGroupCall,
     dismissGroupCall,
