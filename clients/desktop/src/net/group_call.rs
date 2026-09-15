@@ -46,6 +46,18 @@
 //! The engine follows the call module's shape: state in [`GroupCalls`] plus methods on the
 //! worker, because every transition either sends a frame or emits an event — the same
 //! single-owner discipline [`super::call`] follows for the same reasons.
+//!
+//! # The call a member is not in
+//!
+//! The conversation topic's announcements reach every member, seated or not, so a device
+//! that holds no seat still hears every join and departure of its conversations' calls.
+//! That discovery is what makes "join a call already in progress" possible: the ledger
+//! [`GroupCalls::in_progress`] keeps the running call's id and size per conversation, the
+//! header offers "Join call in progress (N)" off it, and the press passes the call id back
+//! so the join seats the running call — where a fresh mint would start a second call
+//! beside it, the one mistake the idempotency key exists to prevent.
+
+use std::collections::HashMap;
 
 use migo_core::id::ID_BYTE_LEN;
 use migo_core::{Id, OsRandom, Random, Timestamp};
@@ -85,6 +97,12 @@ pub(crate) struct GroupCalls {
     /// arrives, so a press that lands before the snapshot re-sends the *same* join — the
     /// server re-seats the same call — rather than minting a second call id.
     joining: Option<JoinAsk>,
+    /// Calls running in conversations this device holds no seat in, as the conversation
+    /// topic's announcements reported them: conversation → (call, size after the last
+    /// change). This is the discovery the header's join-in-progress offer is built on, and
+    /// an entry dies only two ways — the roster empties (the call retired) or this device
+    /// takes a seat in the conversation (it is nobody's spectator anymore).
+    in_progress: HashMap<Id, (Id, u32)>,
 }
 
 /// A join in flight.
@@ -166,19 +184,101 @@ impl GroupCalls {
         Self {
             seat: None,
             joining: None,
+            in_progress: HashMap::new(),
         }
     }
+
+    /// The id a join for one conversation carries, and the ask that remembers it. Three
+    /// sources, in precedence order: an ask already in flight for the conversation (the
+    /// press is a retry of a commitment the server may already be seating, and the ask's
+    /// id is what makes the retry the *same* join), the id the caller offered (a call the
+    /// header learned is running — joining it seats the call everyone else is in, where a
+    /// fresh mint would start a second call beside it), and a fresh mint (this device is
+    /// starting the conversation's call).
+    fn join_target(&mut self, conversation_id: Id, offered: Option<Id>) -> Id {
+        if let Some(ask) = &self.joining {
+            if ask.conversation_id == conversation_id {
+                return ask.call_id;
+            }
+        }
+        let call_id = offered.unwrap_or_else(|| Id::generate_at(Timestamp::now(), &mut OsRandom));
+        self.joining = Some(JoinAsk {
+            call_id,
+            conversation_id,
+        });
+        call_id
+    }
+
+    /// Records one announcement's worth of spectator news: a device with no seat and no
+    /// join in the event's conversation hears the announcement as discovery — the call is
+    /// running, at the size the event names — and the ledger keeps it for the header's
+    /// join-in-progress offer. Returns what the announcement amounted to, so the worker
+    /// can say it as an event; `None` when the event was not the spectator's to keep — a
+    /// conversation this device is bound to (its own call's announcements belong to the
+    /// roster path, and a join in flight hears its *own* join announced before the
+    /// snapshot answers), or a shape with no count to show for it.
+    fn spectate(&mut self, event: &CallStateEvent) -> Option<Spectated> {
+        let conversation_id = event.conversation_id?;
+        let bound = self
+            .seat
+            .as_ref()
+            .is_some_and(|seat| seat.conversation_id == conversation_id)
+            || self
+                .joining
+                .as_ref()
+                .is_some_and(|ask| ask.conversation_id == conversation_id);
+        if bound {
+            return None;
+        }
+        match event.participant_count {
+            // The retirement the seated path knows by its emptied roster: the last seat
+            // left, the call no longer exists server-side, and the offer to join it goes
+            // with it. A retirement of a call the ledger never held has nothing to clear
+            // and nothing to say.
+            Some(0) => self
+                .in_progress
+                .remove(&conversation_id)
+                .map(|_| Spectated::Retired { conversation_id }),
+            Some(count) => {
+                self.in_progress
+                    .insert(conversation_id, (event.call_id, count));
+                Some(Spectated::Running {
+                    conversation_id,
+                    call_id: event.call_id,
+                    count,
+                })
+            }
+            None => None,
+        }
+    }
+}
+
+/// What one spectator announcement amounted to, for the event the worker emits beside it.
+#[derive(Debug, PartialEq, Eq)]
+enum Spectated {
+    /// The conversation's call is running at this size.
+    Running {
+        conversation_id: Id,
+        call_id: Id,
+        count: u32,
+    },
+    /// The call retired: its last seat left.
+    Retired { conversation_id: Id },
 }
 
 impl Worker {
     /// Joins the group call of one conversation — or re-sends the join already in flight.
     ///
-    /// The call id is minted here and kept in the ask, because the id is the join's
-    /// idempotency key: a press that lands before the roster snapshot re-sends the same frame
-    /// and the server re-seats the same call, while a fresh mint would build a *second* call
-    /// for the same conversation — the one mistake a client-minted id allows that no server
-    /// would ever forgive.
-    pub(super) async fn join_group_call(&mut self, conversation_id: Id) {
+    /// The id the join carries is its idempotency key, and it has three sources (see
+    /// [`GroupCalls::join_target`]): the ask already standing for the conversation, the
+    /// running call the caller named — the header's join-in-progress offer, joining the
+    /// call everyone else is in rather than minting a second beside it — and a fresh
+    /// mint for the conversation's first call. Whichever it is, the ask keeps it, because
+    /// a press that lands before the roster snapshot re-sends the same frame and the
+    /// server re-seats the same call, while a fresh mint would build a *second* call
+    /// for the same conversation — the one mistake a client-minted id allows that no
+    /// server would ever forgive.
+    pub(super) async fn join_group_call(&mut self, conversation_id: Id, call_id: Option<Id>) {
         // Already seated in this conversation's call: the press is a duplicate of a join the
         // snapshot already answered.
         if let Some(seat) = &self.group_calls.seat {
@@ -186,16 +286,7 @@ impl Worker {
                 return;
             }
         }
-        let (call_id, fresh) = match &self.group_calls.joining {
-            Some(ask) if ask.conversation_id == conversation_id => (ask.call_id, false),
-            _ => (Id::generate_at(Timestamp::now(), &mut OsRandom), true),
-        };
-        if fresh {
-            self.group_calls.joining = Some(JoinAsk {
-                call_id,
-                conversation_id,
-            });
-        }
+        let call_id = self.group_calls.join_target(conversation_id, call_id);
         let Some(my_device) = self.device_id() else {
             return;
         };
@@ -320,12 +411,44 @@ impl Worker {
             key,
             key_ask_waiting: false,
         });
+        // The seat is also the end of spectating: whatever the ledger held for the
+        // conversation, this device is part of the call now, and the header's
+        // join-in-progress offer must not outlive the seat it offered to.
+        self.group_calls.in_progress.remove(&conversation_id);
         self.sink.send(Event::GroupCallSeated {
             conversation_id,
             participant_count: count,
         });
         if count > 1 {
             self.send_group_key_ask().await;
+        }
+    }
+
+    /// The spectator half of an announcement, shared by the join and departure paths: the
+    /// ledger records what a not-bound device learned about a conversation's running call
+    /// and the event says it to the UI. Returns whether the event was spectator news and
+    /// is fully handled — a bound device's announcements are the roster path's, not this
+    /// one's.
+    fn spectate_group_call(&mut self, event: &CallStateEvent) -> bool {
+        match self.group_calls.spectate(event) {
+            Some(Spectated::Running {
+                conversation_id,
+                call_id,
+                count,
+            }) => {
+                self.sink.send(Event::GroupCallInProgress {
+                    conversation_id,
+                    call_id,
+                    count,
+                });
+                true
+            }
+            Some(Spectated::Retired { conversation_id }) => {
+                self.sink
+                    .send(Event::GroupCallInProgressEnded { conversation_id });
+                true
+            }
+            None => false,
         }
     }
 
@@ -339,6 +462,13 @@ impl Worker {
         let Some(device) = event.device_id else {
             return;
         };
+        // The spectator half comes first: a device with no seat and no join in the event's
+        // conversation hears the announcement as discovery, not roster movement, and the
+        // ledger is where it lands. A bound device falls through to the roster path its
+        // own call's announcements belong to.
+        if self.spectate_group_call(event) {
+            return;
+        }
         let mine = self.own_seat_ids();
         let mut rotate_now = false;
         {
@@ -378,6 +508,11 @@ impl Worker {
         let Some(device) = event.device_id else {
             return;
         };
+        // The same spectator half: a departure is discovery too — the running call's size
+        // moved, or its last seat left and the offer to join it must not outlive it.
+        if self.spectate_group_call(event) {
+            return;
+        }
         let mine = self.own_seat_ids();
         let mut rotate_now = false;
         let mut ended_conversation: Option<Id> = None;
@@ -731,15 +866,19 @@ impl Worker {
     }
 
     /// Sign-out: nothing of any call survives the session that held it, the group seat no
-    /// more than the 1:1 engine's own state.
+    /// more than the 1:1 engine's own state — and the spectator's ledger no more than the
+    /// seat, since the announcements that fill it were this session's to hear.
     pub(super) fn group_calls_sign_out(&mut self) {
         self.group_calls.joining = None;
         self.group_calls.seat = None;
+        self.group_calls.in_progress.clear();
     }
 
     /// Drops the seat of one conversation, for the conversation's own teardown (a leave, a
     /// kick): the membership that authorised the seat is gone. Returns whether a seat went,
-    /// so the caller can say the call ended for the UI.
+    /// so the caller can say the call ended for the UI. The spectator's ledger entry goes
+    /// with it — a conversation this account is no longer in is not one whose calls it
+    /// will be offered.
     pub(super) fn forget_group_call(&mut self, conversation_id: Id) -> bool {
         let dropped = self
             .group_calls
@@ -757,6 +896,7 @@ impl Worker {
         {
             self.group_calls.joining = None;
         }
+        self.group_calls.in_progress.remove(&conversation_id);
         dropped
     }
 }
@@ -841,6 +981,165 @@ mod tests {
         assert!(remove_seat(&mut seats, id_of(1)));
         assert!(!remove_seat(&mut seats, id_of(1)));
         assert_eq!(seats, vec![(id_of(3), id_of(4))]);
+    }
+
+    /// A spectator-shaped announcement: any count, over a conversation and call the event
+    /// names — the three things the ledger reads, with the participant filled in because
+    /// the handlers require one before they ask the ledger anything.
+    fn spectator_event(conversation_id: Id, call_id: Id, count: Option<u32>) -> CallStateEvent {
+        CallStateEvent {
+            call_id,
+            state: STATE_CONNECTED,
+            reason: None,
+            conversation_id: Some(conversation_id),
+            user_id: Some(id_of(9)),
+            device_id: Some(id_of(9)),
+            participant_count: count,
+            sealed_offer: None,
+            participants: None,
+        }
+    }
+
+    /// The spectator's ledger: a join announcement for a call this device holds no seat in
+    /// records the running call (the header's join-in-progress offer is built on it), later
+    /// announcements move the count — a departure's as much as a join's, which is how a
+    /// device that connects mid-call learns of one — and the count-0 announcement that
+    /// names the call's retirement clears the entry, so the offer cannot outlive the call.
+    #[test]
+    fn a_spectator_records_the_running_call_and_clears_it_when_it_retires() {
+        let mut calls = GroupCalls::new();
+        let conversation = id_of(1);
+        let call = id_of(2);
+
+        // A join announcement, no seat and no ask anywhere: the call is running at three.
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(3))),
+            Some(Spectated::Running {
+                conversation_id: conversation,
+                call_id: call,
+                count: 3,
+            })
+        );
+        assert_eq!(calls.in_progress.get(&conversation), Some(&(call, 3)));
+
+        // A departure's count moves the same entry — the size after the change, whichever
+        // direction the change went.
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(2))),
+            Some(Spectated::Running {
+                conversation_id: conversation,
+                call_id: call,
+                count: 2,
+            })
+        );
+        assert_eq!(calls.in_progress.get(&conversation), Some(&(call, 2)));
+
+        // The retirement: the last seat left, the call no longer exists server-side.
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(0))),
+            Some(Spectated::Retired { conversation_id })
+        );
+        assert!(calls.in_progress.get(&conversation).is_none());
+
+        // A retirement of a call the ledger never held has nothing to clear and nothing to
+        // say, and a count the event did not carry is not a size to offer anyone.
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(0))),
+            None
+        );
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, None)),
+            None
+        );
+    }
+
+    /// The ledger is not this device's own call's: a seat in the conversation — or a join
+    /// asked and still waiting on its snapshot — binds the announcements to the roster
+    /// path instead. Otherwise a joiner would hear its *own* join announced before the
+    /// snapshot answered, and be offered the call it is already entering.
+    #[test]
+    fn a_bound_device_is_not_a_spectator_of_its_own_call() {
+        let mut calls = GroupCalls::new();
+        let conversation = id_of(1);
+        let call = id_of(2);
+
+        calls.seat = Some(GroupSeat {
+            call_id: call,
+            conversation_id: conversation,
+            seats: vec![(id_of(3), id_of(4))],
+            key: None,
+            key_ask_waiting: false,
+        });
+        // Seated in the conversation: even another call's announcement (a shape only a
+        // server running two calls in one conversation could send) is not recorded — the
+        // seat is the header's whole truth for the conversation.
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, id_of(5), Some(2))),
+            None
+        );
+        assert!(calls.in_progress.get(&conversation).is_none());
+
+        // A seat in some *other* conversation's call does not bind this one: the device is
+        // a spectator of the event's conversation, and the announcement is discovery.
+        calls.seat = Some(GroupSeat {
+            call_id: id_of(7),
+            conversation_id: id_of(6),
+            seats: vec![(id_of(3), id_of(4))],
+            key: None,
+            key_ask_waiting: false,
+        });
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(2))),
+            Some(Spectated::Running {
+                conversation_id: conversation,
+                call_id: call,
+                count: 2,
+            })
+        );
+
+        // A join asked and not yet seated binds the same way: what it hears before the
+        // snapshot is its own call's business, not the ledger's.
+        calls.seat = None;
+        calls.in_progress.clear();
+        calls.joining = Some(JoinAsk {
+            call_id: call,
+            conversation_id: conversation,
+        });
+        assert_eq!(
+            calls.spectate(&spectator_event(conversation, call, Some(2))),
+            None
+        );
+        assert!(calls.in_progress.get(&conversation).is_none());
+    }
+
+    /// The join's target id, in precedence order: an ask already in flight is the
+    /// commitment a second press re-sends (whatever the caller offers — the ask's id is
+    /// what makes the retry the *same* join), an offered id is the running call the
+    /// header learned of (the whole point of join-in-progress: seat the call everyone
+    /// else is in, not a second one minted beside it), and only a press with nothing to
+    /// offer mints. The id this returns is the id the `CALL_SFU_JOIN` frame carries —
+    /// the same binding flows into the `CallInvite` unchanged.
+    #[test]
+    fn a_join_targets_the_ask_then_the_offered_call_then_a_mint() {
+        let conversation = id_of(1);
+        let running = id_of(2);
+
+        // Nothing in flight, a running call offered: the offer is the target, and the ask
+        // carries it — a press before the snapshot re-sends the same join of the same
+        // call.
+        let mut calls = GroupCalls::new();
+        assert_eq!(calls.join_target(conversation, Some(running)), running);
+        assert_eq!(calls.joining.as_ref().map(|ask| ask.call_id), Some(running));
+        assert_eq!(calls.join_target(conversation, Some(running)), running);
+
+        // The ask outranks a different offer: the second press is a retry, not a switch.
+        assert_eq!(calls.join_target(conversation, Some(id_of(3))), running);
+
+        // Nothing offered, nothing in flight: a mint, remembered the same way.
+        let mut fresh = GroupCalls::new();
+        let minted = fresh.join_target(conversation, None);
+        assert_eq!(fresh.joining.as_ref().map(|ask| ask.call_id), Some(minted));
+        assert_eq!(fresh.join_target(conversation, None), minted);
     }
 
     /// The whole mid-call join hand-shake in one test: two devices hold a pairwise session,
