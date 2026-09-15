@@ -756,6 +756,11 @@ impl App {
                     }));
                     // The conversation is closed server-side; its notice tail goes with it.
                     self.chat.room_notices.remove(&room_id);
+                    // The room's own panel facts go the same way: a roster and a vote tally
+                    // for a room this account can no longer read are records of a membership
+                    // that has ended, and the panel that would draw them is closing below.
+                    self.chat.room_rosters.remove(&room_id);
+                    self.chat.room_votes.remove(&room_id);
                     // The thread's own closure, the same teardown a group's departure performs:
                     // this account can no longer read the room, and a thread (or a list row, or
                     // a member sheet) it cannot read must not stay on screen offering sends the
@@ -795,6 +800,38 @@ impl App {
                     }
                     let live = self.rooms.live.entry(room_id).or_default();
                     live.member_count = member_count;
+                    // Membership is the roster's whole subject, so a change is the panel's cue
+                    // to re-read — but only when the panel is actually open on the room, and
+                    // only when the change moved a body in or out (the changes that alter the
+                    // roster). The re-read, not a local patch, is the honest update: the roster
+                    // is the server's record, and a client that edited its own copy would be
+                    // guessing at ranks it was never told.
+                    use migo_protocol::MemberChange;
+                    // A change naming this account itself is not the panel's business: the
+                    // worker runs the join or the removal's whole teardown for it, and a
+                    // re-read asked beside that would only race it — or, for a removal, ask
+                    // a room this account has just left to list its members.
+                    let self_change = self
+                        .account
+                        .is_some_and(|account| account.account_id == user_id);
+                    let panel_open_on_room = self
+                        .rooms
+                        .joined
+                        .get(&room_id)
+                        .and_then(|conversation_id| self.chat.roster_open.get(conversation_id))
+                        .is_some_and(|open| *open);
+                    if !self_change
+                        && panel_open_on_room
+                        && matches!(
+                            change,
+                            MemberChange::Joined
+                                | MemberChange::Left
+                                | MemberChange::Kicked
+                                | MemberChange::Banned
+                        )
+                    {
+                        self.commands.push(Command::RoomRoster { room_id });
+                    }
                 }
                 // A watched room's counters moved: fold the deltas onto the live record, absent
                 // meaning unchanged, and reset the tail when the room goes.
@@ -809,6 +846,65 @@ impl App {
                     }
                     if member_count.is_some() {
                         live.member_count = member_count;
+                    }
+                }
+                // A room's roster arrived: the panel's own copy, filed by the room because the
+                // room's membership is the roster's subject — the conversation this window reads
+                // is only this account's window onto it, and the panel draws the room, not the
+                // bridge. The names arrive the same way every roster's do, through the profile
+                // reads the worker fired beside the event.
+                Event::RoomRoster { room_id, members } => {
+                    self.chat.room_rosters.insert(room_id, members);
+                }
+                // This account's own room kick-vote landed: the room twin of the group vote
+                // arm below, filed the same way — the room's running tally, retired the
+                // moment the vote carries.
+                Event::RoomVoteStatus {
+                    room_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    open,
+                } => {
+                    if open {
+                        self.chat.room_votes.insert(
+                            room_id,
+                            crate::model::VoteTally {
+                                target_id,
+                                votes,
+                                needed,
+                                member_count,
+                                closed: None,
+                            },
+                        );
+                    } else {
+                        self.chat.room_votes.remove(&room_id);
+                    }
+                }
+                // A room kick vote's tally, for every member watching: the newest tally per
+                // room is the one that matters, and a closed one retires.
+                Event::RoomVoteBroadcast {
+                    room_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    closed,
+                } => {
+                    if closed == Some(true) {
+                        self.chat.room_votes.remove(&room_id);
+                    } else {
+                        self.chat.room_votes.insert(
+                            room_id,
+                            crate::model::VoteTally {
+                                target_id,
+                                votes,
+                                needed,
+                                member_count,
+                                closed,
+                            },
+                        );
                     }
                 }
                 // A group's roster arrived: the panel's copy, filed for the conversation the
@@ -1121,12 +1217,28 @@ impl App {
                 }
                 Event::People(rows) => {
                     if self.search.query.trim().is_empty() {
-                        // The graph's own suggestions, kept for the pre-query state.
-                        self.search.suggestions = rows;
+                        // The graph's own suggestions, kept for the pre-query state — in both
+                        // homes that offer them, since a suggestion is nobody's answer and
+                        // every pane that asks for it holds its own copy.
+                        self.search.suggestions = rows.clone();
+                        self.friends.suggestions = rows;
                     } else {
                         self.search.people = Some(rows);
                         self.search.busy = false;
                     }
+                }
+                // The Friends pane's own people answer: its results section alone, because the
+                // pane asked under its own correlation and the Search place's answer must not
+                // land in a home it was never asked from.
+                Event::FriendsPeople(rows) => {
+                    self.friends.people = Some(rows);
+                    self.friends.people_busy = false;
+                }
+                // The account's global standing, as the room panel's moderation gates read it.
+                // Filed as one fact — "this account outranks every room" — because that is the
+                // only question the gates ask of it.
+                Event::AdminStanding { owner, admin } => {
+                    self.chat.global_admin = Some(owner || admin);
                 }
                 Event::Call(view) => {
                     // The worker's projection of the one call this device can be in — a whole
@@ -1783,7 +1895,13 @@ impl App {
                 zoom_choice,
                 navigation_choice,
             };
-            crate::ui::chat::thread(ui, &mut context, &mut self.chat, conversation_id);
+            crate::ui::chat::thread(
+                ui,
+                &mut context,
+                &mut self.chat,
+                &self.friends,
+                conversation_id,
+            );
         });
 
         // The window's own close button: closing the window closes the conversation, which is
@@ -1996,7 +2114,15 @@ impl App {
     /// graph does: the other devices of this account act on it too.
     fn entered_place(&mut self, target: Place) {
         match target {
-            Place::Friends => self.commands.push(Command::Friends),
+            Place::Friends => {
+                self.commands.push(Command::Friends);
+                // The pane's own pre-query state offers the graph's suggestions the same way
+                // the Search place's does, and asks for them the same way: once per entry,
+                // and only when a copy is not already held.
+                if self.friends.suggestions.is_empty() {
+                    self.commands.push(Command::Suggestions);
+                }
+            }
             Place::Rooms => self.commands.push(Command::Rooms {
                 query: self.rooms.query.clone(),
             }),

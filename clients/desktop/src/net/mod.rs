@@ -105,6 +105,13 @@ const SYNC_PAGE: u32 = 200;
 /// so no one of them invents its own unbounded walk.
 const MAX_CATCHUP_PAGES: u32 = 5;
 
+/// How many roster rows one room-roster read asks for, matching the web panel's own limit —
+/// the same number on every client so a room costs the same wire on each. The wire pages by
+/// cursor (`after`, the last id of a page); the panel reads one page, so a room longer than
+/// this shows its first hundred members, highest role first, rather than walking pages nobody
+/// is scrolling yet.
+const ROOM_ROSTER_LIMIT: u32 = 100;
+
 /// The server's error symbols that mean "the captcha proof is dead, whatever else is true".
 ///
 /// Wrong, expired, or never sent: the three differ on the wire but demand the same response from
@@ -332,6 +339,39 @@ pub enum Command {
     },
     /// Leave a room; the server closes its conversation for this account.
     LeaveRoom { room_id: Id },
+    /// Read a room's roster: every member with their room role, highest role first, one page
+    /// of [`ROOM_ROSTER_LIMIT`] ids. The answer is what the room's roster panel draws and what
+    /// its moderation gates read rank from — the member cache the send path keeps is an
+    /// audience, not a roster, the same trade the group roster makes.
+    RoomRoster { room_id: Id },
+    /// Cast this account's voice in a room member's kick vote, opening one when no vote runs.
+    /// Every member's lever, never aimed at the owner — a show of hands cannot unseat the room
+    /// — with the reply carrying the tally after this voice landed and the same tally for
+    /// everyone else arriving as the room's vote event.
+    RoomVoteKick { room_id: Id, target_id: Id },
+    /// Apply a moderation action to a room member: mute, unmute, kick, ban, or unban. The
+    /// staff path, not the vote — the server admits it only from a caller who outranks the
+    /// target (a room moderator or above) or a global admin, and refuses it otherwise, so the
+    /// panel's gates mirror the ladder rather than promising the wire would allow more.
+    /// `reason` is an optional note the server may record.
+    RoomSanction {
+        room_id: Id,
+        target_id: Id,
+        action: migo_protocol::SanctionAction,
+        reason: Option<String>,
+    },
+    /// Read the account's global standing — whether it is this deployment's owner or one of its
+    /// admins — over REST, for the room roster's moderation gates: a global admin may sanction
+    /// a room member whatever room rank they hold, so the panel asks before it draws levers
+    /// that rank alone would hide.
+    AdminStanding,
+    /// Search public profiles by username prefix, for the Friends pane's own results section.
+    ///
+    /// The same wire ask as [`Command::SearchPeople`], a distinct command because the answer
+    /// must find the pane that asked: the reply frame names its correlation and nothing else,
+    /// so the worker remembers which pane sent the ask and the rows land in the friends pane's
+    /// own state rather than the Search place's.
+    SearchPeopleForFriends { query: String },
     /// Read the durable notification inbox.
     Notifications,
     /// Mark every notification at or before one instant read.
@@ -920,6 +960,47 @@ pub enum Event {
         online_count: Option<u32>,
         member_count: Option<u32>,
     },
+    /// A room's roster arrived: every member of the page the panel asked for, highest role
+    /// first, keyed by the room because a room's membership is a room fact — the conversation
+    /// the bridge names is this account's window onto it, not the roster's subject.
+    RoomRoster {
+        room_id: Id,
+        members: Vec<crate::model::RoomRosterMember>,
+    },
+    /// This account's own room kick-vote landed: the tally as the caller sees it, straight off
+    /// the reply the request was owed. The room twin of [`Event::GroupVoteStatus`] — and unlike
+    /// the group's, the reply names its room and target, so no ask needs remembering.
+    /// `open: false` is the moment the vote carried and the kick landed (the member event for
+    /// it follows separately).
+    RoomVoteStatus {
+        room_id: Id,
+        target_id: Id,
+        votes: u32,
+        needed: u32,
+        member_count: u32,
+        open: bool,
+    },
+    /// A room kick vote's tally, for everyone the vote concerns: the same numbers the voter's
+    /// own reply carries, arriving as the event the room's topic publishes. `closed: Some(true)`
+    /// is a vote that ended without passing — expired, or its target left — and the UI drops
+    /// the tally it was drawing.
+    RoomVoteBroadcast {
+        room_id: Id,
+        target_id: Id,
+        votes: u32,
+        needed: u32,
+        member_count: u32,
+        closed: Option<bool>,
+    },
+    /// The account's global standing — owner or admin — as the room panel's moderation gates
+    /// read it. A failure to read it never arrives: the gates keep their safe default (room
+    /// rank alone), the same default the web panel falls back to.
+    AdminStanding { owner: bool, admin: bool },
+    /// Accounts found by a search the Friends pane asked for: its own results section, kept
+    /// apart from [`Event::People`] because the Search place's answer and the pane's answer
+    /// share a wire and nothing else — a reply that landed in both homes would put a friends
+    /// query's strangers into the Search place's results, or the reverse.
+    FriendsPeople(Vec<PersonRow>),
     /// The durable notification inbox, newest first.
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
@@ -1937,6 +2018,19 @@ impl Realtime {
     }
 }
 
+/// Which pane asked for people, when the ask's answer must find the pane that asked.
+///
+/// The Search place and the Friends pane send the same wire question for different homes, and
+/// the reply frame names neither — only its correlation — so the asker is remembered beside
+/// the ask and the answer is delivered as the asker's own event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeopleFor {
+    /// The Search place's box: the answer lands as [`Event::People`].
+    Search,
+    /// The Friends pane's own results section: the answer lands as [`Event::FriendsPeople`].
+    Friends,
+}
+
 /// The worker itself.
 struct Worker {
     sink: Sink,
@@ -2111,6 +2205,21 @@ struct Worker {
     /// reply carries only the tally — neither the conversation nor the target — so the ask is
     /// the only place the answer's subject lives.
     pending_vote: Option<(Id, Id)>,
+    /// Room rosters asked for by the panel and not yet answered, keyed by the correlation each
+    /// ask carried. The reply names nothing but the correlation it answers, so the correlation
+    /// is the one exact key — a second room's panel may be asking at the same time, and unlike
+    /// the group roster's map the answer must not be handed to every asker at once.
+    room_roster_asks: HashMap<u32, Id>,
+    /// The room sanction awaiting its acknowledgement: the correlation its ask carried, and
+    /// the room, because the bare ack names neither. Keyed by the correlation so a refusal —
+    /// which arrives as an error frame, with no opcode to say whose ask it refuses — can retire
+    /// the ask as precisely as the ack consumes it.
+    pending_room_sanction: Option<(u32, Id)>,
+    /// People asks in flight, keyed by the correlation the reply will carry, saying which pane
+    /// asked: the search answer and the suggestion answer share one opcode and one event shape
+    /// with the friends pane's own ask, and only the ask's correlation can say whose answer a
+    /// frame is.
+    people_asks: HashMap<u32, PeopleFor>,
     /// The gateway session this worker would resume on its next connect, if the socket drops.
     /// `None` until a WELCOME mints one, and again after a fresh session replaces it or the
     /// server refuses the resume.
@@ -2178,6 +2287,9 @@ impl Worker {
             listened: HashSet::new(),
             voice_listened,
             group_rosters: HashMap::new(),
+            room_roster_asks: HashMap::new(),
+            pending_room_sanction: None,
+            people_asks: HashMap::new(),
             group_leave: None,
             pending_vote: None,
             session: None,
@@ -2443,6 +2555,22 @@ impl Worker {
                 self.create_room(slug, name, managed, topic).await;
             }
             Command::LeaveRoom { room_id } => self.leave_room(room_id).await,
+            Command::RoomRoster { room_id } => self.request_room_roster(room_id).await,
+            Command::RoomVoteKick { room_id, target_id } => {
+                self.room_vote_kick(room_id, target_id).await;
+            }
+            Command::RoomSanction {
+                room_id,
+                target_id,
+                action,
+                reason,
+            } => {
+                self.room_sanction(room_id, target_id, action, reason).await;
+            }
+            Command::AdminStanding => self.read_admin_standing().await,
+            Command::SearchPeopleForFriends { query } => {
+                self.search_people_for_friends(query).await;
+            }
             Command::Notifications => self.request_notifications().await,
             Command::AcknowledgeAlerts { through_unix_ms } => {
                 self.acknowledge_alerts(through_unix_ms).await;
@@ -2988,6 +3116,11 @@ impl Worker {
         self.catchups.clear();
         self.earlier_asks.clear();
         self.sync_asks.clear();
+        // The pane-keyed asks go the same way: a reply the new session will never send cannot
+        // file a people answer to the pane that asked, nor a roster page to the panel awaiting
+        // it — the panes re-ask when their draw needs the fact again.
+        self.room_roster_asks.clear();
+        self.people_asks.clear();
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
         self.last_backup_at = Some((account_id, last_backup_at));
@@ -3190,6 +3323,11 @@ impl Worker {
                 self.catchups.clear();
                 self.earlier_asks.clear();
                 self.sync_asks.clear();
+                // The pane-keyed asks are session-boundary facts the same way: the reconnect's
+                // new correlations cannot be answered by the dropped session's replies, so the
+                // panes' asks die with it and re-ask on their own next draw.
+                self.room_roster_asks.clear();
+                self.people_asks.clear();
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
                 // presence go back to "never subscribed" and the own-topic subscribe below is the
@@ -6868,19 +7006,102 @@ impl Worker {
         self.request(Opcode::KickPointsBuy, &message).await;
     }
 
-    /// Searches public profiles by username prefix.
+    /// Searches public profiles by username prefix, for the Search place. The correlation is
+    /// remembered with the asker because the reply names nothing else: the same wire answer
+    /// also serves the Friends pane's own ask, and only the ask's correlation can say whose
+    /// answer a frame is.
     async fn search_people(&mut self, query: String) {
         let message = SearchReq {
             query: query.trim().to_owned(),
             limit: Some(10),
         };
-        self.request(Opcode::Search, &message).await;
+        if let Some(correlation) = self.send_and_remember(Opcode::Search, &message).await {
+            self.people_asks.insert(correlation, PeopleFor::Search);
+        }
+    }
+
+    /// The Friends pane's own people search: the same wire ask, registered under the pane's
+    /// own flag so the answer crosses as [`Event::FriendsPeople`] rather than the Search
+    /// place's event.
+    async fn search_people_for_friends(&mut self, query: String) {
+        let message = SearchReq {
+            query: query.trim().to_owned(),
+            limit: Some(10),
+        };
+        if let Some(correlation) = self.send_and_remember(Opcode::Search, &message).await {
+            self.people_asks.insert(correlation, PeopleFor::Friends);
+        }
     }
 
     /// Asks the social graph for its own suggestions.
     async fn request_suggestions(&mut self) {
         let message = SuggestReq { limit: Some(8) };
         self.request(Opcode::Suggestions, &message).await;
+    }
+
+    /// Reads a room's roster for the panel, one page of [`ROOM_ROSTER_LIMIT`] ids — the web
+    /// panel's own limit — highest role first. The correlation is remembered because the
+    /// reply's frame names nothing else, and a second room's panel may be asking at the same
+    /// time.
+    async fn request_room_roster(&mut self, room_id: Id) {
+        let roster = migo_protocol::RosterReq {
+            room_id,
+            limit: Some(ROOM_ROSTER_LIMIT),
+            after: None,
+        };
+        if let Some(correlation) = self.send_and_remember(Opcode::RoomRoster, &roster).await {
+            self.room_roster_asks.insert(correlation, room_id);
+        }
+    }
+
+    /// Casts this account's voice in a room member's kick vote. The reply carries the room,
+    /// the target, and the tally, so nothing needs remembering — the room twin of the group
+    /// vote's ask-and-remember, spared by a wire that names its subject.
+    async fn room_vote_kick(&mut self, room_id: Id, target_id: Id) {
+        let vote = migo_protocol::RoomVoteKick { room_id, target_id };
+        self.request(Opcode::RoomVoteKick, &vote).await;
+    }
+
+    /// Applies a moderation action to a room member. The room is remembered because the bare
+    /// acknowledgement names nothing, and a successful one re-reads the roster so the panel
+    /// shows the server's truth — a silenced member's quiet and a removed member's absence are
+    /// roster facts, not local echoes. A refusal toasts through the ordinary error path.
+    async fn room_sanction(
+        &mut self,
+        room_id: Id,
+        target_id: Id,
+        action: migo_protocol::SanctionAction,
+        reason: Option<String>,
+    ) {
+        let sanction = migo_protocol::RoomSanction {
+            room_id,
+            target_id,
+            action,
+            reason,
+        };
+        if let Some(correlation) = self
+            .send_and_remember(Opcode::RoomSanction, &sanction)
+            .await
+        {
+            self.pending_room_sanction = Some((correlation, room_id));
+        }
+    }
+
+    /// Reads the account's global standing — owner or admin — over REST, for the room panel's
+    /// moderation gates. A failure is folded into the safe default rather than an event: the
+    /// gates fall back to room rank alone, the same default the web panel falls back to, and
+    /// "could not check" and "not yours" draw identically there.
+    async fn read_admin_standing(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let (owner, admin) = signed
+            .rest
+            .admin_standing(&signed.access_token)
+            .await
+            .map(|standing| (standing.owner, standing.admin))
+            .unwrap_or((false, false));
+        self.sink.send(Event::AdminStanding { owner, admin });
     }
 
     /// The room directory came back: reduce it to rows.
@@ -7021,20 +7242,98 @@ impl Worker {
         self.room_bridges.save(signed.account.account_id, &bridges);
     }
 
-    /// The join-bell's membership probe answered: the roster read only succeeds for a member,
-    /// so a room that answers is a room this account is still in — re-join it, idempotently,
-    /// and let `on_room_joined` run the join's other half (the room topic watch, the room to
-    /// conversation bridge, the list re-read). A refusal arrives as an error frame and fails
-    /// the decode below, which drops the probe just as quietly: a bell for a room the account
-    /// has since left is not this device's to act on.
-    async fn on_room_probe(&mut self, frame: &migo_protocol::Frame) {
+    /// A roster answer off a room: the panel's ask, or the join-bell's membership probe.
+    ///
+    /// The two askers share one opcode, so the reply is filed by the correlation its request
+    /// carried — the one exact key, because the frame names nothing else. A panel ask reduces
+    /// the page to model rows for the panel's own event and asks for the members' names, the
+    /// same fetch a group roster's answer triggers; a probe answer means only "this account is
+    /// still a member" (the roster read succeeds for a member alone), so the room is re-joined,
+    /// idempotently, and `on_room_joined` runs the join's other half. A refusal never reaches
+    /// this handler — the error path answers it before dispatch — so a probe whose room the
+    /// account has since left simply never hears back, the same quiet it always kept: a bell
+    /// for a room this account has left is not this device's to act on.
+    async fn on_room_roster(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::RosterResponse>(frame) else {
+            return;
+        };
+        // The panel's ask first: an answer that names a correlation the panel minted is the
+        // panel's, whatever probe might also be waiting.
+        if let Some(room_id) = self.room_roster_asks.remove(&frame.header.correlation) {
+            let members: Vec<crate::model::RoomRosterMember> = response
+                .members
+                .into_iter()
+                .map(|entry| crate::model::RoomRosterMember {
+                    account_id: entry.account_id,
+                    role: entry.role,
+                    joined_at: entry.joined_at,
+                })
+                .collect();
+            let named: Vec<Id> = members.iter().map(|member| member.account_id).collect();
+            self.sink.send(Event::RoomRoster { room_id, members });
+            self.fetch_profiles(named).await;
+            return;
+        }
         let Some(room_id) = self.pending_room_probe.take() else {
             return;
         };
-        if gateway::decode::<migo_protocol::RosterResponse>(frame).is_err() {
-            return;
-        }
         self.join_room(room_id).await;
+    }
+
+    /// This account's own room kick-vote landed: the tally as the caller sees it, straight off
+    /// the reply. The room's reply, unlike the group's, names its room and its target, so no
+    /// ask needs remembering — `open: false` is the moment the vote carried and the kick
+    /// landed, with the member event for it following separately.
+    fn on_room_vote_reply(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::RoomVoteKickResponse>(frame) else {
+            return;
+        };
+        self.sink.send(Event::RoomVoteStatus {
+            room_id: response.room_id,
+            target_id: response.target_id,
+            votes: response.votes,
+            needed: response.needed,
+            member_count: response.member_count,
+            open: response.open,
+        });
+    }
+
+    /// A room kick vote's tally, for everyone the vote concerns: the same numbers the voter's
+    /// own reply carries, arriving as the event the room's topic publishes. `closed` retires a
+    /// tally a client was still drawing.
+    fn on_room_vote_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::RoomVoteEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::RoomVoteBroadcast {
+            room_id: event.room_id,
+            target_id: event.target_id,
+            votes: event.votes,
+            needed: event.needed,
+            member_count: event.member_count,
+            closed: event.closed,
+        });
+    }
+
+    /// A room sanction's acknowledgement: the bare ack names nothing, so the room is read back
+    /// out of the remembered ask, and a successful one re-reads the roster so the panel draws
+    /// the server's truth rather than the asker's echo of it.
+    async fn on_room_sanction_ack(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
+            return;
+        };
+        // The ack's own correlation says whose ask it answers; any other frame here — a push
+        // this build cannot name — is not this ask's answer and must not consume it.
+        let Some(room_id) = self
+            .pending_room_sanction
+            .take_if(|(correlation, _)| *correlation == frame.header.correlation)
+            .map(|(_, room_id)| room_id)
+        else {
+            return;
+        };
+        if acknowledged.ok {
+            self.request_room_roster(room_id).await;
+        }
     }
 
     /// A member event off a watched room's topic — or off the account's own user topic, the
@@ -7799,13 +8098,16 @@ impl Worker {
         self.request_wallet().await;
     }
 
-    /// People came back, from search or suggestions: one event for both, because a row cannot tell
-    /// them apart and neither can the screen that draws it.
+    /// People came back, from search or suggestions: the wire's one people answer, filed to the
+    /// pane that asked. The reply's correlation names the asking pane — the Search place or the
+    /// Friends pane — because a row cannot tell them apart and neither, on its own, can the
+    /// screen that draws it. A reply with no remembered ask is the graph's own suggestion
+    /// stream, which no pane asked for, so it stays the shared `People` event it always was.
     fn on_people(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::SearchResponse>(frame) else {
             return;
         };
-        let rows = response
+        let rows: Vec<PersonRow> = response
             .results
             .into_iter()
             .map(|person| PersonRow {
@@ -7815,7 +8117,10 @@ impl Worker {
                 mutual_friends: person.mutual_friends,
             })
             .collect();
-        self.sink.send(Event::People(rows));
+        match self.people_asks.remove(&frame.header.correlation) {
+            Some(PeopleFor::Friends) => self.sink.send(Event::FriendsPeople(rows)),
+            _ => self.sink.send(Event::People(rows)),
+        }
     }
 
     /// Signs out: forgets the keys locally first, then tells the server.
@@ -7943,6 +8248,20 @@ impl Worker {
                     }
                 }
             }
+            // The pane-keyed asks are retired by the same refusal: an error reply is an answer,
+            // just not the page the pane asked for, and an ask left standing would hold its
+            // correlation against a reply that never comes. A refused sanction retires the same
+            // way — an error frame carries no opcode to say whose ask it refuses, so the
+            // correlation is the one exact key here too.
+            self.room_roster_asks.remove(&frame.header.correlation);
+            self.people_asks.remove(&frame.header.correlation);
+            if self
+                .pending_room_sanction
+                .as_ref()
+                .is_some_and(|(correlation, _)| *correlation == frame.header.correlation)
+            {
+                self.pending_room_sanction = None;
+            }
             self.sink.toast(error.to_string(), ToastKind::Error);
             return;
         }
@@ -8035,7 +8354,12 @@ impl Worker {
             Opcode::RoomList => self.on_rooms(&frame),
             Opcode::RoomJoin | Opcode::RoomCreate => self.on_room_joined(&frame).await,
             Opcode::RoomLeave => self.on_room_left(&frame).await,
-            Opcode::RoomRoster => self.on_room_probe(&frame).await,
+            Opcode::RoomRoster => self.on_room_roster(&frame).await,
+            // This account's own vote landed; the room's broadcast of the same tally arrives
+            // as the event below, and both draw the same tally.
+            Opcode::RoomVoteKick => self.on_room_vote_reply(&frame),
+            Opcode::RoomVoteEvent => self.on_room_vote_event(&frame),
+            Opcode::RoomSanction => self.on_room_sanction_ack(&frame).await,
             Opcode::RoomMemberEvent => self.on_room_member(&frame).await,
             Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),

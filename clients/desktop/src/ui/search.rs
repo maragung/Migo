@@ -194,8 +194,10 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
         });
 }
 
-/// One person row: the name, the handle, and the two doors a stranger is offered.
-fn person_row(ui: &mut Ui, context: &mut Context<'_>, person: &PersonRow) {
+/// One person row: the name, the handle, and the two doors a stranger is offered. Shared with
+/// the Friends pane, whose own people search answers in the same rows — a person found the
+/// same way is offered the same doors wherever the pane that found them is drawn.
+pub(crate) fn person_row(ui: &mut Ui, context: &mut Context<'_>, person: &PersonRow) {
     let colors = palette(context.theme);
     ui.horizontal(|ui| {
         ui.add_space(space::MD);

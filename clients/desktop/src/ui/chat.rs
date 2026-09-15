@@ -178,15 +178,32 @@ pub struct ChatState {
     /// panel folds a typed field out under it, and the draft is kept the way every other
     /// per-conversation draft is.
     pub renames: HashMap<Id, RenamePanel>,
-    /// The invite row's state, per conversation: every member's invite affordance, folding a
-    /// typed account-id field out under the roster, one name at a time — the web panel's
-    /// username search is a REST surface the gateway path does not offer, so the desktop's
-    /// invitation is an account id the person already knows.
+    /// The invite row's state, per conversation: every member's invite affordance, folding the
+    /// friends pane's own rows out under the roster as pickable chips — a whole batch per
+    /// send, because the wire's invite takes a list — with a typed account-id field beside
+    /// them for the person the friends list does not show.
     pub invites: HashMap<Id, InvitePanel>,
     /// A running kick vote's tally, per conversation: the newest tally the wire sent. The
     /// panel draws it under the roster; a closed tally is dropped rather than kept, because a
     /// question the server has stopped asking is not a fact to render.
     pub votes: HashMap<Id, crate::model::VoteTally>,
+    /// Room rosters, per room: the panel the header's people button folds out for a room, the
+    /// room twin of `rosters`. Keyed by the room, not the conversation, because the room's
+    /// membership is the roster's subject — the conversation this window reads is only this
+    /// account's window onto it. `None`-free: an absent entry means "not asked yet", and the
+    /// panel's first open is the ask.
+    pub room_rosters: HashMap<Id, Vec<crate::model::RoomRosterMember>>,
+    /// A running room kick vote's tally, per room: the room twin of `votes`, drawn under the
+    /// room's roster panel and dropped the same way when the server stops asking.
+    pub room_votes: HashMap<Id, crate::model::VoteTally>,
+    /// The account's global standing — owner or admin — as the room panel's moderation gates
+    /// read it, once asked. `None` is "not asked yet": until the read answers, the gates fall
+    /// back to room rank alone, the same default the web panel holds before its own read.
+    pub global_admin: Option<bool>,
+    /// The sanction reason field's contents, per room: the sanction menu folds a typed reason
+    /// under the member it acts on, and the draft is kept the way every other per-room draft
+    /// is, so a slip does not cost the words already typed.
+    pub sanction_reasons: HashMap<Id, String>,
     /// Group membership notices, keyed by conversation — the group twin of the room notices,
     /// the same live tail, the same cap, the same draw at the scroll's end.
     pub group_notices: HashMap<Id, Vec<RoomNotice>>,
@@ -349,7 +366,11 @@ pub struct RenamePanel {
 pub struct InvitePanel {
     /// Whether the row is showing in the roster panel.
     pub open: bool,
-    /// The account id as typed.
+    /// The friends picked to invite, in pick order — the same chip vocabulary the
+    /// new-group form uses, because inviting into an existing group is the same choice
+    /// founding one is, made one conversation later.
+    pub picked: Vec<Id>,
+    /// The account id as typed, for the friend the list does not show.
     pub account_id: String,
 }
 
@@ -791,7 +812,13 @@ fn delivery_rank(state: Delivery) -> u8 {
 /// this thread is called once per open window with the id that window was minted for. The
 /// `selected` field is the *last* conversation any door opened, not the one being drawn, and
 /// reading it here would make every window show whichever thread was opened most recently.
-pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+pub fn thread(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    friends: &crate::ui::friends::FriendsState,
+    conversation_id: Id,
+) {
     // The disappearing sweep, once per second: the deadline a sealed lifetime set is this
     // client's to honour, so a repaint cadence is asked for and the drop checked before the
     // thread borrows its messages. Called from `thread` rather than each window's pane
@@ -800,7 +827,7 @@ pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, con
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
     state.sweep_expired();
-    thread_pane(ui, context, state, conversation_id);
+    thread_pane(ui, context, state, friends, conversation_id);
 }
 
 /// Opens a conversation and asks for anything missing from its history.
@@ -888,7 +915,17 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
 /// settles the split by measurement every frame instead — the composer takes exactly what it
 /// needs, and the thread's scroll takes everything that remains, which is the whole Growing
 /// Area a chat window owes its history.
-fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+///
+/// The friends pane rides along for the roster panels' invite rows: the friends a group's
+/// invite offers are the friends pane's own rows, and passing them in keeps the chat state —
+/// which holds the conversation's members — from having to hold a second copy of the graph.
+fn thread_pane(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    friends: &crate::ui::friends::FriendsState,
+    conversation_id: Id,
+) {
     thread_header(ui, context, state, conversation_id);
     widgets::divider(ui, context.theme);
 
@@ -916,21 +953,31 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
     // and — behind each row's click — the options a member and a founder hold. Claimed from
     // the right edge *before* the composer claims the bottom, so the roster runs the window's
     // full remaining height beside the thread and a long list scrolls inside it instead of
-    // squeezing the messages. Drawn only for a group and only while the header's people
-    // button left it open; the panel's own first draw is the roster read's ask.
+    // squeezing the messages. Drawn only for a group or a room and only while the header's
+    // people button left it open; the panel's own first draw is the roster read's ask. A room
+    // gets the room's own panel — the roster and the moderation levers the wire offers a
+    // room's staff — while a group keeps the founder-and-vote panel it has always had.
     let roster_open = state
         .roster_open
         .get(&conversation_id)
         .copied()
         .unwrap_or(false);
+    let room_id = state
+        .conversations
+        .iter()
+        .find(|c| c.conversation_id == conversation_id)
+        .and_then(|c| c.room_id);
     if roster_open {
         let width = roster_panel_width(ui.available_width());
         egui::Panel::right(egui::Id::new("chat-roster").with(conversation_id))
             .exact_size(width)
             .frame(egui::Frame::NONE)
             .show_separator_line(false)
-            .show(ui, |ui| {
-                group_roster_panel(ui, context, state, conversation_id);
+            .show(ui, |ui| match room_id {
+                Some(room_id) => {
+                    room_roster_panel(ui, context, state, conversation_id, room_id);
+                }
+                None => group_roster_panel(ui, context, state, friends, conversation_id),
             });
     }
 
@@ -1432,6 +1479,7 @@ fn group_roster_panel(
     ui: &mut Ui,
     context: &mut Context<'_>,
     state: &mut ChatState,
+    friends: &crate::ui::friends::FriendsState,
     conversation_id: Id,
 ) {
     let colors = palette(context.theme);
@@ -1448,6 +1496,10 @@ fn group_roster_panel(
     // end here, as values, not live into it.
     let listed_members = conversation.members.len();
     let current_title = conversation.title.clone().unwrap_or_default();
+    // The conversation's members, for the invite row's list: a friend already in the group is
+    // not a friend the picker offers, and the check needs the ids as values the frame may
+    // outlive.
+    let member_ids: Vec<Id> = conversation.members.clone();
     // Who the signed-in member is on this roster: a founder holds rename, mute, and kick;
     // a member holds invite and the vote. Read from the roster, not assumed from the
     // create — a founder who left passed the role on, and the last founder out promotes
@@ -1556,33 +1608,122 @@ fn group_roster_panel(
                         );
                     }
 
-                    // The invite row, every member's right: an account id typed by hand. The friends
-                    // the panel could offer are the friends pane's rows, not this pane's, and a
-                    // one-at-a-time field keeps the wire's "any current member may invite" honest.
+                    // The invite row, every member's right: the friends pane's own rows as
+                    // pickable chips, a whole batch at a time — the wire's invite takes a
+                    // list, so the panel picks a list — with the manual account-id field
+                    // kept beside it for the person the friends list does not show.
                     let invite_open = state
                         .invites
                         .get(&conversation_id)
                         .is_some_and(|panel| panel.open);
                     if invite_open {
                         let panel = state.invites.entry(conversation_id).or_default();
+                        // The picked friends, as removable chips: a pick is reversible until
+                        // the invite, the same patience the new-group form's chips are given,
+                        // and the removal is deferred past the iteration it would interrupt.
+                        if !panel.picked.is_empty() {
+                            let mut unpick: Option<usize> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                for (index, picked) in panel.picked.iter().enumerate() {
+                                    let name = friends
+                                        .names
+                                        .get(picked)
+                                        .cloned()
+                                        .unwrap_or_else(|| model::short_id(*picked));
+                                    if ui
+                                        .add(
+                                            egui::Button::new(format!("{name} \u{2715}"))
+                                                .fill(egui::Color32::TRANSPARENT)
+                                                .stroke(egui::Stroke::NONE),
+                                        )
+                                        .clicked()
+                                    {
+                                        unpick = Some(index);
+                                    }
+                                }
+                            });
+                            if let Some(index) = unpick {
+                                panel.picked.remove(index);
+                            }
+                        }
+                        // The friends not already in the group and not yet picked, as one-tap
+                        // adds — the same toggleable rows the new-group form draws, on the
+                        // same rule: the panel offers only what the invite would change.
+                        let candidates: Vec<Id> = friends
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.kind == crate::model::RelationshipKind::Friend)
+                            .map(|entry| entry.user_id)
+                            .filter(|id| !member_ids.contains(id) && !panel.picked.contains(id))
+                            .collect();
+                        let mut add_pick: Option<Id> = None;
+                        for friend in &candidates {
+                            let name = friends
+                                .names
+                                .get(friend)
+                                .cloned()
+                                .unwrap_or_else(|| model::short_id(*friend));
+                            ui.horizontal(|ui| {
+                                widgets::avatar(ui, context.theme, &name, 22.0);
+                                ui.label(
+                                    RichText::new(name)
+                                        .font(egui::FontId::proportional(font::SMALL))
+                                        .color(colors.text),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new("Add")
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .stroke(egui::Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    add_pick = Some(*friend);
+                                }
+                            });
+                        }
+                        if let Some(pick) = add_pick {
+                            panel.picked.push(pick);
+                        }
+                        // The manual field, for the account id the friends list cannot name.
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut panel.account_id)
-                                .hint_text("account id")
+                                .hint_text("or paste an account id")
                                 .desired_width(ui.available_width() - 96.0),
                         );
                         let submitted =
                             response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if (ui.button("Invite").clicked() || submitted)
+                        if (ui.button("Add by id").clicked() || submitted)
                             && !panel.account_id.trim().is_empty()
                         {
                             if let Ok(id) = Id::parse(panel.account_id.trim()) {
-                                invite_send = Some(vec![id]);
+                                if !panel.picked.contains(&id) {
+                                    panel.picked.push(id);
+                                }
                                 panel.account_id.clear();
                             }
+                        }
+                        // The invite, one send for the whole batch: the wire's list, sent as
+                        // the list it is, once the pick holds anybody at all.
+                        let can_invite = !panel.picked.is_empty();
+                        if widgets::primary_button(
+                            ui,
+                            context.theme,
+                            &format!("Invite ({})", panel.picked.len()),
+                            can_invite,
+                        )
+                        .clicked()
+                            && can_invite
+                        {
+                            invite_send = Some(panel.picked.clone());
+                        }
+                        if ui.button("Done").clicked() {
+                            panel.open = false;
                         }
                     } else if ui.button("+ Invite").clicked() {
                         let panel = state.invites.entry(conversation_id).or_default();
                         panel.open = true;
+                        panel.picked.clear();
                         panel.account_id.clear();
                     }
 
@@ -1846,6 +1987,12 @@ fn group_roster_panel(
             conversation_id,
             members,
         });
+        // The row folds with its send, the pick with it: a second invite starts from an
+        // empty pick the way the first one did.
+        if let Some(panel) = state.invites.get_mut(&conversation_id) {
+            panel.open = false;
+            panel.picked.clear();
+        }
     }
     if let Some(title) = rename_send {
         context.issue(Command::RenameGroup {
@@ -1884,6 +2031,411 @@ fn group_roster_panel(
     if leave {
         context.issue(Command::LeaveGroup { conversation_id });
     }
+}
+
+/// The room's roster panel: every member with their role, and — folded behind each row until
+/// the row is clicked — the two recourses the wire offers a room. The **vote** is the members'
+/// own: any member may call for a kick, and when half the room agrees the target is removed.
+/// The **sanction** is the staff path: a member who outranks the target — or a global admin,
+/// who outranks every room — may mute, kick, or ban outright, no vote needed.
+///
+/// The panel's facts are the roster the wire answered, keyed by the room rather than the
+/// conversation: the room's membership is the roster's subject, and the conversation this
+/// window reads is only this account's window onto it. The ask went out when the header's
+/// people button opened the panel; until the answer lands the panel says so, because a roster
+/// that guessed would be a list of names with wrong authority beside them. A membership change
+/// re-asks while the panel is open, so the rows stay the server's truth.
+///
+/// The gates are the server's own, mirrored from the web client's room panel so both clients
+/// say what the wire would allow: the vote never aims at this account's own row and never at
+/// the owner, whom a show of hands cannot unseat; the sanctions never touch the owner at all,
+/// and a room's own ladder must stand at moderator or above and strictly above the target.
+/// The roster's role numbers are compared number to number, never named and re-parsed, so a
+/// rank a newer server numbers that this build has no label for still gates the way the server
+/// will judge it. The sanctions carry a reason — one field, serving whichever verb follows,
+/// because it is an optional note the server may record rather than a question any one verb
+/// asks on its own.
+fn room_roster_panel(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+    room_id: Id,
+) {
+    let colors = palette(context.theme);
+    let me = context.account.map(|account| account.account_id);
+    // Owned facts read before the panel's frame, the same patience the group panel gives its
+    // borrows: the frame's closure mutates `state` (the reason field, the menu), so the roster
+    // reads end here, as values.
+    let my_role = state
+        .room_rosters
+        .get(&room_id)
+        .and_then(|rows| me.and_then(|me| rows.iter().find(|m| m.account_id == me)))
+        .map_or(0, |m| m.role);
+    let global_admin = state.global_admin.unwrap_or(false);
+    let member_count = state
+        .room_rosters
+        .get(&room_id)
+        .map_or(0, |rows| rows.len());
+    // The sanction reason, drawn as a draft so the field may be typed into inside the frame
+    // while the roster the rows draw from is still borrowed, and written back once the frame
+    // has closed.
+    let mut reason_draft = state
+        .sanction_reasons
+        .get(&room_id)
+        .cloned()
+        .unwrap_or_default();
+
+    // Deferred intents, past every borrow: the same patience the group panel's levers are
+    // given, extended to the sanction — a click is intent, applied after the panel has
+    // finished drawing.
+    let mut vote_send: Option<Id> = None;
+    let mut sanction_send: Option<(Id, migo_protocol::SanctionAction)> = None;
+    let mut leave = false;
+    let mut menu_toggle: Option<Id> = None;
+    let mut profile_ask: Option<Id> = None;
+    let mut gift_ask: Option<Id> = None;
+
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Members")
+                        .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                        .color(colors.text_muted),
+                );
+                widgets::pill(
+                    ui,
+                    &member_count.to_string(),
+                    colors.text_muted,
+                    colors.surface,
+                );
+            });
+            ui.add_space(space::XS);
+
+            if !state.room_rosters.contains_key(&room_id) {
+                ui.label(
+                    RichText::new("Reading the room's roster…")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+                return;
+            }
+            // The pinned foot, claimed from the frame's bottom edge before the rows take the
+            // rest: the running tally and the leave stay in reach while a long roster scrolls
+            // above them.
+            egui::Panel::bottom(egui::Id::new("chat-room-roster-foot").with(room_id))
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    // A running vote's tally, if the wire has one open: the room twin of the
+                    // group panel's line, the same "still answering" reading of a fraction.
+                    if let Some(tally) = state.room_votes.get(&room_id) {
+                        ui.label(
+                            RichText::new(format!(
+                                "Vote to remove {}: {} of {} needed",
+                                state
+                                    .names
+                                    .get(&tally.target_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| model::short_id(tally.target_id)),
+                                tally.votes,
+                                tally.needed,
+                            ))
+                            .font(egui::FontId::proportional(font::TINY))
+                            .color(colors.warning),
+                        );
+                    }
+                    // Leaving the room, the lever every member holds. The window's copy of
+                    // the thread goes when the ack arrives, so no confirmation is spent here
+                    // — the click is the confirmation, the same as the group's leave.
+                    if ui.button("Leave room").clicked() {
+                        leave = true;
+                    }
+                });
+
+            // The member rows themselves, in the scroll that fills the frame's remaining
+            // height — the same strip the group panel's rows are, with the room's own pill
+            // and the room's own folded menu behind the click.
+            let empty = Vec::new();
+            egui::ScrollArea::vertical()
+                .id_salt(("room-roster", room_id.to_string()))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for member in state.room_rosters.get(&room_id).unwrap_or(&empty) {
+                        let name = state
+                            .names
+                            .get(&member.account_id)
+                            .cloned()
+                            .unwrap_or_else(|| model::short_id(member.account_id));
+                        let is_self = me == Some(member.account_id);
+                        // The gates, the web panel's own: the vote is every member's but
+                        // never at self and never at the owner; the sanctions are the staff's,
+                        // never at the owner, and either by global standing or by the room's
+                        // own ladder. The menu itself is offered on any row but this
+                        // account's own — the person themselves needs no menu to view their
+                        // own card.
+                        let votable = can_room_vote_kick(member.role, is_self);
+                        let sanctionable =
+                            !is_self && can_room_sanction(my_role, member.role, global_admin);
+                        let has_menu = !is_self;
+                        let menu_open = state
+                            .member_menus
+                            .get(&conversation_id)
+                            .is_some_and(|open| *open == member.account_id);
+
+                        let height = 30.0;
+                        let width = ui.available_width();
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+                        let background = if menu_open {
+                            colors.surface_selected
+                        } else if response.hovered() && has_menu {
+                            colors.surface_hover
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        if background != egui::Color32::TRANSPARENT {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(crate::theme::radius::MD),
+                                background,
+                            );
+                        }
+                        let mut inner = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect.shrink2(egui::vec2(space::XS, 0.0)))
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        widgets::avatar(&mut inner, context.theme, &name, 22.0);
+                        inner.add_space(space::XS);
+                        inner.label(
+                            RichText::new(name)
+                                .font(egui::FontId::proportional(font::SMALL))
+                                .color(colors.text),
+                        );
+                        widgets::pill(
+                            &mut inner,
+                            room_role_label(member.role),
+                            colors.text_muted,
+                            colors.surface,
+                        );
+                        if has_menu {
+                            inner.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(if menu_open { "\u{25BE}" } else { "\u{25B8}" })
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                );
+                            });
+                        }
+                        if response.clicked() && has_menu {
+                            menu_toggle = Some(member.account_id);
+                        }
+
+                        // The options themselves, folded out under the row while it is open:
+                        // the profile and the gift every row offers, the vote every member
+                        // holds, and the staff's sanctions when the gates admit them.
+                        if menu_open && has_menu {
+                            egui::Frame::new()
+                                .fill(colors.surface)
+                                .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+                                .inner_margin(egui::Margin::symmetric(
+                                    space::MD as i8,
+                                    space::XS as i8,
+                                ))
+                                .show(ui, |ui| {
+                                    if quiet_action(ui, "View profile", colors.text).clicked() {
+                                        profile_ask = Some(member.account_id);
+                                    }
+                                    if quiet_action(ui, "Gift", colors.text)
+                                        .on_hover_text("Send this person a gift from the shop.")
+                                        .clicked()
+                                    {
+                                        gift_ask = Some(member.account_id);
+                                    }
+                                    // The vote, every member's lever: the members' own
+                                    // recourse, free, and answered by the tally the whole
+                                    // room watches climb.
+                                    if votable
+                                        && quiet_action(ui, "Vote kick", colors.text)
+                                            .on_hover_text(
+                                                "Call a vote to remove this person. When half \
+                                                 the room agrees, they are kicked. Free — the \
+                                                 vote costs nothing.",
+                                            )
+                                            .clicked()
+                                    {
+                                        vote_send = Some(member.account_id);
+                                    }
+                                    // The staff path: the verbs the wire defines, each a
+                                    // sanction the server judges by rank. Mute silences the
+                                    // person for the whole room and unmute lifts it; kick
+                                    // removes with the door open, ban bars re-entry, and
+                                    // unban re-opens it. The reason is one field for all of
+                                    // them — a note the server may record, not a question
+                                    // any one verb asks.
+                                    if sanctionable {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut reason_draft)
+                                                .hint_text("reason (optional)")
+                                                .desired_width(
+                                                    ui.available_width() - space::SM * 2.0,
+                                                ),
+                                        );
+                                        for (label, action, ink) in [
+                                            (
+                                                "Mute",
+                                                migo_protocol::SanctionAction::Mute,
+                                                colors.text,
+                                            ),
+                                            (
+                                                "Unmute",
+                                                migo_protocol::SanctionAction::Unmute,
+                                                colors.text,
+                                            ),
+                                            (
+                                                "Kick",
+                                                migo_protocol::SanctionAction::Kick,
+                                                colors.danger,
+                                            ),
+                                            (
+                                                "Ban",
+                                                migo_protocol::SanctionAction::Ban,
+                                                colors.danger,
+                                            ),
+                                            (
+                                                "Unban",
+                                                migo_protocol::SanctionAction::Unban,
+                                                colors.text,
+                                            ),
+                                        ] {
+                                            if quiet_action(ui, label, ink).clicked() {
+                                                sanction_send = Some((member.account_id, action));
+                                            }
+                                        }
+                                    }
+                                });
+                        }
+                        ui.add_space(space::XS);
+                    }
+                });
+        });
+
+    // The reason field's draft, written back now that the frame's borrows have closed: the
+    // words survive the click that spent them on nothing, the way every other draft here does.
+    state.sanction_reasons.insert(room_id, reason_draft);
+    // The menu's own state, applied now that the roster borrow has closed: one menu per
+    // conversation, so opening one member's options closes another's.
+    if let Some(member) = menu_toggle {
+        let already = state
+            .member_menus
+            .get(&conversation_id)
+            .is_some_and(|open| *open == member);
+        if already {
+            state.member_menus.remove(&conversation_id);
+        } else {
+            state.member_menus.insert(conversation_id, member);
+        }
+    }
+    // The gift picker opens with a fresh idempotency key and a fresh read of the shelves, the
+    // same patience the group panel's gift ask is given.
+    if let Some(member) = gift_ask {
+        state.gifting = Some(GiftPick {
+            conversation_id,
+            member: Some(member),
+            key: gift_intent_key(),
+        });
+        context.issue(Command::GiftCatalogue);
+    }
+    // The profile view opens with its card ask and its standing asks together — the same
+    // bundle of facts the group panel's profile ask opens.
+    if let Some(user_id) = profile_ask {
+        context.issue(Command::MemberProfile {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberStanding {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberRank {
+            conversation_id,
+            user_id,
+        });
+        context.issue(Command::MemberEdge {
+            conversation_id,
+            user_id,
+        });
+    }
+    if let Some(target_id) = vote_send {
+        context.issue(Command::RoomVoteKick { room_id, target_id });
+    }
+    if let Some((target_id, action)) = sanction_send {
+        let reason = reason_trimmed(state, room_id);
+        context.issue(Command::RoomSanction {
+            room_id,
+            target_id,
+            action,
+            reason,
+        });
+    }
+    if leave {
+        context.issue(Command::LeaveRoom { room_id });
+    }
+}
+
+/// The sanction reason as the wire wants it: `None` for a field that holds nothing but
+/// whitespace, because an empty string is a reason that says nothing and the wire's `None` is
+/// exactly "no note". Pure, so the trim is pinned by a test.
+fn reason_trimmed(state: &ChatState, room_id: Id) -> Option<String> {
+    let trimmed = state
+        .sanction_reasons
+        .get(&room_id)
+        .map(|reason| reason.trim())
+        .unwrap_or("");
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// The room role's label, the web panel's own three: the owner is the owner, a manager and an
+/// admin are both "Admin" (the two ranks differ in appointment rights, not in anything a
+/// member list needs to say), and everyone else — helper, moderator, member, and any rank a
+/// newer server numbers that this build has no name for — is a member. Numbers compared to
+/// numbers, never named and re-parsed. Pure, so the label is pinned by a test.
+fn room_role_label(role: u32) -> &'static str {
+    use migo_protocol::RoomRole;
+    if role == RoomRole::Owner.to_wire() {
+        "Owner"
+    } else if role == RoomRole::Manager.to_wire() || role == RoomRole::Admin.to_wire() {
+        "Admin"
+    } else {
+        "Member"
+    }
+}
+
+/// Whether the vote belongs on a room member's row: the members' own recourse is open to
+/// everyone and needs no rank — but never against yourself, and never against the owner, whom
+/// a show of hands cannot unseat. Pure, so the gate is pinned by a test.
+fn can_room_vote_kick(target_role: u32, is_self: bool) -> bool {
+    !is_self && target_role != migo_protocol::RoomRole::Owner.to_wire()
+}
+
+/// Whether the staff sanctions belong on a room member's row: the owner is never sanctioned
+/// from this panel, by anyone; a global admin outranks every room; otherwise it is the room's
+/// own ladder — moderator or above, and strictly above the target's rank. Identity is the
+/// caller's to check, the same division the web panel holds. Pure, so the gate is pinned by
+/// a test.
+fn can_room_sanction(my_role: u32, target_role: u32, global_admin: bool) -> bool {
+    use migo_protocol::RoomRole;
+    if target_role == RoomRole::Owner.to_wire() {
+        return false;
+    }
+    if global_admin {
+        return true;
+    }
+    my_role >= RoomRole::Moderator.to_wire() && my_role > target_role
 }
 
 /// The mute terms a founder may set, as the member menu offers them — the web panel's own
@@ -2577,16 +3129,23 @@ fn thread_header(
             {
                 want_search_panel = true;
             }
-            // The people button, on a group only: the roster, the roles, and every lever a
-            // member or a founder holds — invite, rename, mute, kick, the vote, and leaving.
-            // Gated on the server's own kind and not the member count, because a group of
-            // two (one member just left) is still a group with a roster and a rename.
-            if conversation.is_group()
-                && header_control(ui, context.theme, "\u{1F465}")
-                    .on_hover_text("Group members")
+            // The people button, on a group or a room: the roster, the roles, and the levers
+            // the kind holds — a group's invite, rename, mute, kick and vote; a room's vote
+            // and the sanctions its staff may apply. Gated on the server's own kind and not
+            // the member count, because a group of two (one member just left) is still a
+            // group with a roster and a rename.
+            if conversation.is_group() || conversation.room_id.is_some() {
+                let room = conversation.room_id.is_some();
+                if header_control(ui, context.theme, "\u{1F465}")
+                    .on_hover_text(if room {
+                        "Room members"
+                    } else {
+                        "Group members"
+                    })
                     .clicked()
-            {
-                want_roster_panel = true;
+                {
+                    want_roster_panel = true;
+                }
             }
             // The gift, last of the glyph controls before the avatar: gifting is a thread-level
             // act — it picks a person and spends balance — so its control lives with the
@@ -2625,9 +3184,18 @@ fn thread_header(
         let open = state.roster_open.entry(conversation_id).or_insert(false);
         *open = !*open;
         // Opening is the ask: the roster the panel draws is a wire fact, and the panel's
-        // first frame is the moment it starts waiting for one.
+        // first frame is the moment it starts waiting for one. A room asks for the room's own
+        // roster — and, once, for the global standing its sanction gates read; the standing
+        // is a REST read, not a frame, so it is asked for only while unread.
         if *open {
-            context.issue(Command::GroupRoster { conversation_id });
+            if let Some(room_id) = conversation.room_id {
+                context.issue(Command::RoomRoster { room_id });
+                if state.global_admin.is_none() {
+                    context.issue(Command::AdminStanding);
+                }
+            } else {
+                context.issue(Command::GroupRoster { conversation_id });
+            }
         }
     }
     if want_gift {
@@ -4357,6 +4925,92 @@ fn waveform_bars(ui: &mut Ui, bars: &[u8], color: egui::Color32, width: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The room role's three labels in one test: the owner is named, a manager and an admin
+    /// collapse to the one word a member list needs, and everything else — helper, moderator,
+    /// plain member, and any rank a newer server numbers that this build has no name for — is
+    /// a member. The names are the web panel's own, so both clients call the same person the
+    /// same thing.
+    #[test]
+    fn room_roles_label_as_the_web_panel_labels_them() {
+        use migo_protocol::RoomRole;
+        assert_eq!(room_role_label(RoomRole::Owner.to_wire()), "Owner");
+        assert_eq!(room_role_label(RoomRole::Manager.to_wire()), "Admin");
+        assert_eq!(room_role_label(RoomRole::Admin.to_wire()), "Admin");
+        assert_eq!(room_role_label(RoomRole::Moderator.to_wire()), "Member");
+        assert_eq!(room_role_label(RoomRole::Helper.to_wire()), "Member");
+        assert_eq!(room_role_label(RoomRole::Member.to_wire()), "Member");
+        // A rank this build cannot name is still a member, never a guess.
+        assert_eq!(room_role_label(0), "Member");
+        assert_eq!(room_role_label(99), "Member");
+    }
+
+    /// The vote's gate in one test: everyone holds it, nobody aims it at themselves, and not
+    /// even the whole room may unseat an owner by a show of hands.
+    #[test]
+    fn a_room_vote_never_aims_at_self_or_the_owner() {
+        use migo_protocol::RoomRole;
+        assert!(can_room_vote_kick(RoomRole::Member.to_wire(), false));
+        assert!(can_room_vote_kick(RoomRole::Manager.to_wire(), false));
+        assert!(!can_room_vote_kick(RoomRole::Member.to_wire(), true));
+        assert!(!can_room_vote_kick(RoomRole::Owner.to_wire(), false));
+        // A rank this build cannot name still is not the owner.
+        assert!(can_room_vote_kick(99, false));
+    }
+
+    /// The sanctions' gate in one test: the owner is never sanctioned by anyone; a global
+    /// admin outranks every room; and the room's own ladder stands at moderator or above and
+    /// strictly above the target — never on a peer, never up the ladder.
+    #[test]
+    fn room_sanctions_follow_the_ladder_and_never_touch_the_owner() {
+        use migo_protocol::RoomRole;
+        let moderator = RoomRole::Moderator.to_wire();
+        let admin = RoomRole::Admin.to_wire();
+        let owner = RoomRole::Owner.to_wire();
+        // The owner is immune, even to a global admin.
+        assert!(!can_room_sanction(admin, owner, true));
+        // A global admin outranks every room.
+        assert!(can_room_sanction(0, admin, true));
+        // Below moderator, no lever — not even on a plain member.
+        assert!(!can_room_sanction(
+            RoomRole::Member.to_wire(),
+            RoomRole::Member.to_wire(),
+            false
+        ));
+        // At moderator and above, strictly below the caller's own rank.
+        assert!(can_room_sanction(
+            moderator,
+            RoomRole::Member.to_wire(),
+            false
+        ));
+        assert!(can_room_sanction(
+            moderator,
+            RoomRole::Helper.to_wire(),
+            false
+        ));
+        // Never on a peer of equal standing, never up the ladder.
+        assert!(!can_room_sanction(moderator, moderator, false));
+        assert!(!can_room_sanction(moderator, admin, false));
+    }
+
+    /// The sanction reason in one test: whitespace is no reason at all — the wire's `None` —
+    /// and words survive their own trim.
+    #[test]
+    fn a_sanction_reason_is_none_only_when_it_says_nothing() {
+        let mut state = ChatState::default();
+        let room = Id::from_bytes([3; 16]);
+        // An unread room has no reason on record.
+        assert_eq!(reason_trimmed(&state, room), None);
+        state.sanction_reasons.insert(room, "   ".to_owned());
+        assert_eq!(reason_trimmed(&state, room), None);
+        state
+            .sanction_reasons
+            .insert(room, "  flooding the feed  ".to_owned());
+        assert_eq!(
+            reason_trimmed(&state, room),
+            Some("flooding the feed".to_owned())
+        );
+    }
 
     /// The roster panel's width share in one test: a chat window's own width lands
     /// mid-range (a little under half the window for the roster), a wide window tops out at

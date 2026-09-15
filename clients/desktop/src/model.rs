@@ -230,6 +230,19 @@ pub struct RosterMember {
     pub left_at: Option<Timestamp>,
 }
 
+/// One member of a room's roster, as the room panel draws it. The wire's own entry reduced by
+/// the worker — with the role kept as the plain number the wire carried, because a newer
+/// server may send a rank this build has no name for, and the panel's gates compare number to
+/// number (the way the web panel's do) rather than guessing a name for a value they cannot
+/// read. `joined_at` is the room's own record of when the member entered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomRosterMember {
+    pub account_id: Id,
+    /// The member's room role, as the raw `RoomRole` number the roster carried.
+    pub role: u32,
+    pub joined_at: Timestamp,
+}
+
 /// A running kick vote's tally, as the interface draws it: the votes in, the strict majority
 /// that carries it, and the group the count is a share of. `closed: Some(true)` is a vote
 /// that ended without passing; the UI drops the tally rather than drawing a retired question.
