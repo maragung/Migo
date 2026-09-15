@@ -59,11 +59,12 @@ import com.migo.app.ui.panelTitle
  *
  * The screen itself is the conversation list — every conversation this session knows, with its
  * preview and unread — the way a phone's messenger wears its home, and tapping a row stacks
- * [ChatActivity] for that conversation; back from it returns here. A bottom bar of Friends, Rooms,
- * Feed instead of the top strip carries the views the list cannot be, drawn by the same
- * [MobileHome], because the mode changes how a person moves between those views, not what the
- * views are. The list is not a tab among them: it is the ground the bar stands on, and back from
- * any of the bar's views returns to it, so no tab is spent saying where the person already is.
+ * [ChatActivity] for that conversation; back from it returns here. A bottom bar of Main, Friends,
+ * Rooms, Feed instead of the top strip carries the list's own way home plus the views the list
+ * cannot be, drawn by the same [MobileHome], because the mode changes how a person moves between
+ * those views, not what the views are. Main is the bar's first tab and always present: it returns
+ * to — or stays on — the list itself, so the screen a person spends their day on is named by the
+ * bar rather than reached only through the system's back gesture.
  *
  * What the bar cannot carry is still the model's: a conversation opened from inside Friends or
  * Rooms (a new direct chat, a room's open) or minted by an arriving message opens in place, the
@@ -87,10 +88,11 @@ internal fun ChatListShell(state: AppState.SignedIn, model: AppViewModel, modifi
         enabled = open == null && state.section.isPanel,
         onBack = { model.selectSection(state.stripSection) },
     )
-    // The list is the ground the bar's tabs stand on, so back from a home view the bar chose
-    // returns to it — the way home is the system's own gesture, not a tab spent saying where the
-    // person already is. The bar's views are the only sections this covers: the list itself is
-    // the resting state back stands on, and a panel's handler above has already taken its turn.
+    // Back and the bar's Main tab are the same step from any of the bar's other views: home is
+    // both the system's own gesture and a tab the bar names, so a person who never learned the
+    // gesture still finds the way back. The bar's views are the only sections this covers: the
+    // list itself is the resting state back stands on, and a panel's handler above has already
+    // taken its turn.
     BackHandler(
         enabled = open == null && !state.section.isPanel && state.section != AppState.Section.CHATS,
         onBack = { model.selectSection(AppState.Section.CHATS) },
@@ -156,8 +158,8 @@ internal fun ChatListShell(state: AppState.SignedIn, model: AppViewModel, modifi
                         modifier = Modifier.fillMaxSize(),
                     )
 
-                    // The list itself: the screen the shell is, reached by back from the bar's
-                    // views and landed on at the session's start.
+                    // The list itself: the screen the shell is, reached by the bar's Main tab,
+                    // by back from its other views, and landed on at the session's start.
                     open == null && state.section == AppState.Section.CHATS -> ChatListScreen(
                         state = state,
                         onOpen = { row ->
@@ -274,11 +276,12 @@ private fun ChatListRow(row: ConversationRow, onOpen: () -> Unit) {
 }
 
 /**
- * The bottom bar: Friends, Rooms, Feed — the strip's chip style turned upside down, the selected
- * tab the one solid white pill on the deep teal. The conversation list is not among the tabs: it
- * is the screen the bar stands on, reached by back from any of them, and its unread is the list
- * rows' own pills rather than a badge here, because the conversations themselves are the ground
- * rather than a tab each.
+ * The bottom bar: Main, Friends, Rooms, Feed — the strip's chip style turned upside down, the
+ * selected tab the one solid white pill on the deep teal. Main is the first tab and the list's
+ * own: it lands on the conversation list the shell is, so the home the person stands on is one
+ * tap from anywhere the bar can take them, and stays put when it is pressed where it already is.
+ * The list's unread stays in the rows' own pills rather than a badge on the tab, because the
+ * conversations themselves — not the list — are what is unread.
  */
 @Composable
 private fun ChatListBottomNav(
@@ -308,9 +311,10 @@ private fun ChatListBottomNav(
     }
 }
 
-/** The bar's tabs in order, as label to section. The list is not among them — it is the ground
- *  the bar stands on, not a peer of its tabs, and back is its way home. */
+/** The bar's tabs in order, as label to section. Main leads and is the list itself, so the
+ *  shell's home is a tab the bar always offers rather than a place only back reaches. */
 private val listNavOrder = listOf(
+    "Main" to AppState.Section.CHATS,
     "Friends" to AppState.Section.FRIENDS,
     "Rooms" to AppState.Section.ROOMS,
     "Feed" to AppState.Section.FEED,
@@ -361,6 +365,7 @@ private fun ListNavItem(
 
 /** The bar's glyph for a section, the strip's own set. */
 private fun glyphKind(section: AppState.Section): TabGlyph = when (section) {
+    AppState.Section.CHATS -> TabGlyph.CHATS
     AppState.Section.FRIENDS -> TabGlyph.FRIENDS
     AppState.Section.ROOMS -> TabGlyph.ROOMS
     AppState.Section.FEED -> TabGlyph.FEED
