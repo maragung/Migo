@@ -89,10 +89,13 @@ class CallKeyTest {
         // from RFC 5869 directly (HMAC-SHA256 extract with the call id as salt, one expand round
         // over the label), so a change to the construction — not just the dependency — fails here.
         val expected = byteArrayOf(
-            0x3e, 0xc0.toByte(), 0xb5, 0xb2.toByte(), 0x95, 0x15, 0xed.toByte(), 0xc6.toByte(),
+            0x3e, 0xc0.toByte(), 0xb5.toByte(), 0xb2.toByte(), 0x95.toByte(), 0x15,
+            0xed.toByte(), 0xc6.toByte(),
             0xb4.toByte(), 0xb5.toByte(), 0x1d, 0x92.toByte(), 0xc1.toByte(), 0x31,
-            0xc7, 0x56, 0xd1, 0xef.toByte(), 0x49, 0x66, 0xdc.toByte(), 0xa0.toByte(), 0x54, 0x29,
-            0xed.toByte(), 0x92.toByte(), 0x6d, 0xc0.toByte(), 0x12, 0xa9, 0xcf.toByte(), 0xa0.toByte(),
+            0xc7.toByte(), 0x56, 0xd1.toByte(), 0xef.toByte(), 0x49, 0x66,
+            0xdc.toByte(), 0xa0.toByte(), 0x54, 0x29,
+            0xed.toByte(), 0x92.toByte(), 0x6d, 0xc0.toByte(), 0x12, 0xa9.toByte(),
+            0xcf.toByte(), 0xa0.toByte(),
         )
         val state = CallKeyState.fromSession(SESSION, callId())
         // The key is never exposed, so prove the pin through behaviour: the state must seal a
