@@ -66,6 +66,14 @@ entity-check: ## Fail if generated entities are stale (CI gate)
 
 .PHONY: brief-check
 brief-check: ## Fail if migo.md contradicts the schema or docs (CI gate, see brief section 178)
+	# The checker runs against itself first, for the reason section 178 states:
+	# a checker that has never failed proves nothing. --selftest copies the brief,
+	# the schema and the two protocol docs, breaks one cross-document fact per
+	# case -- a drifted limit, a reassigned feature bit, a wrong opcode code, a
+	# budget that no longer matches, an invented identifier in a product
+	# section, a dangling "brief §NN" -- and requires the audit to reject each
+	# one, plus requires the unmutated copy to stay clean.
+	python3 tools/scripts/brief-audit.py --selftest
 	python3 tools/scripts/brief-audit.py
 
 .PHONY: vectors

@@ -133,7 +133,7 @@ pub(crate) async fn handle_ack(
     let ack: FedAck = from_frame(frame).map_err(fault::from_wire)?;
     let node =
         Id::parse(&ack.node_id).map_err(|_| fault::validation("node_id", "invalid node id"))?;
-    svc.check_sequence(node, ack.seq);
+    svc.check_sequence(node, ack.link_seq);
     ctx.reply(&Acknowledged { ok: true })
 }
 

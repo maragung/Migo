@@ -1185,6 +1185,113 @@ async fn sync_tells_the_truth_when_history_is_gone() {
 }
 
 #[tokio::test]
+async fn a_ranged_fetch_for_a_purged_range_is_answered_sequence_gap() {
+    let harness = Harness::new();
+    let conversation = harness.direct(MINUTE).await;
+    // Two disappearing messages, then a durable one: sequences 1 and 2 vanish
+    // when the sweeper runs, sequence 3 stays, so a client that asks for the
+    // band it is missing by name is asking for a range that existed and was
+    // taken — which section 152 says is answered SEQUENCE_GAP, not an empty
+    // page the client would read as "nothing to fetch".
+    for index in 0..2u128 {
+        harness
+            .messaging
+            .send(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                MessageSend {
+                    message_id: id(18_100 + index),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"disappearing".to_vec(),
+                    expires_in_ms: Some(SECOND as u32),
+                    ..MessageSend::default()
+                },
+            )
+            .await
+            .expect("a disappearing message is accepted");
+    }
+    harness
+        .send(conversation, 18_102, b"still here", 3 * MINUTE)
+        .await;
+
+    let purged = harness
+        .messaging
+        .purge_expired(ts(4 * MINUTE), 100)
+        .await
+        .expect("the sweeper can always run");
+    assert_eq!(purged, 2, "both disappearing messages are gone");
+
+    // The client holds nothing, saw sequence 3 arrive live, and asks for the
+    // hole it detected: exactly (0, 2].
+    expect_code(
+        harness
+            .messaging
+            .sync(
+                &caller(BOB, BOB_LAPTOP, 5 * MINUTE),
+                SyncRequest {
+                    conversation_id: conversation,
+                    have_seq: 0,
+                    limit: 50,
+                    to_seq: Some(2),
+                    ..SyncRequest::default()
+                },
+            )
+            .await,
+        codes::SEQUENCE_GAP,
+    );
+
+    // The same conversation asked without a range keeps section 158's answer:
+    // what survives, plus the Truncated status, and never an error.
+    let page = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 5 * MINUTE),
+            sync_from(conversation, 0, 50),
+        )
+        .await
+        .expect("a member may read history");
+    assert_eq!(seqs(&page), vec![3]);
+    assert_eq!(page.status, SyncStatus::Truncated);
+
+    // A range whose floor survives is served what remains: the client holds 2
+    // and asks for (2, 3], which is exactly the durable message.
+    let tail = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 5 * MINUTE),
+            SyncRequest {
+                conversation_id: conversation,
+                have_seq: 2,
+                limit: 50,
+                to_seq: Some(3),
+                ..SyncRequest::default()
+            },
+        )
+        .await
+        .expect("a range with survivors is served");
+    assert_eq!(seqs(&tail), vec![3]);
+
+    // A range at or below what the client already holds is a no-op rather than
+    // a gap: there is nothing missing in it.
+    let noop = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 5 * MINUTE),
+            SyncRequest {
+                conversation_id: conversation,
+                have_seq: 3,
+                limit: 50,
+                to_seq: Some(2),
+                ..SyncRequest::default()
+            },
+        )
+        .await
+        .expect("a range below the watermark is a no-op");
+    assert!(noop.messages.is_empty());
+    assert_eq!(noop.status, SyncStatus::Ok);
+}
+
+#[tokio::test]
 async fn sync_backwards_returns_an_ascending_page_ending_where_it_was_asked_to() {
     let harness = Harness::new();
     let conversation = harness.group(MINUTE).await;

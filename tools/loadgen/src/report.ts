@@ -10,6 +10,8 @@
 import type { Config } from './config.js';
 import { sanitizeUrl } from './redact.js';
 import type { DigestSnapshot, Metrics } from './stats.js';
+import { byteBudgetVerdict, BYTE_BUDGET_HEADROOM } from './wire-bytes.js';
+import type { WireByteSummary } from './wire-bytes.js';
 
 export interface RunOutcome {
   readonly config: Config;
@@ -19,6 +21,8 @@ export interface RunOutcome {
   readonly durationMsActual: number;
   readonly interrupted: boolean;
   readonly metrics: Metrics;
+  /** The run's gateway wire bytes, reduced to the per-user per-minute figure §171 asks for. */
+  readonly wireBytes: WireByteSummary;
 }
 
 /** Labels that name a lifecycle phase rather than a steady-state operation with a throughput. */
@@ -42,6 +46,16 @@ export function computeErrorRate(outcome: RunOutcome): number {
 /** Whether the run stayed within its configured error budget (drives the exit code). */
 export function isOk(outcome: RunOutcome): boolean {
   return computeErrorRate(outcome) <= outcome.config.maxErrorRate;
+}
+
+/**
+ * Whether the scenario stayed within its byte budget plus §171's 10 percent headroom (drives the
+ * exit code alongside {@link isOk}). A scenario without a budget is never failed here — but every
+ * scenario in the registry has one, so an undefined budget means a scenario was added without its
+ * budget, which the wire-bytes suite refuses to let happen unnoticed.
+ */
+export function isWithinByteBudget(outcome: RunOutcome): boolean {
+  return !byteBudgetVerdict(outcome.scenarioName, outcome.wireBytes).exceeded;
 }
 
 export function renderText(outcome: RunOutcome): string {
@@ -83,6 +97,10 @@ export function renderText(outcome: RunOutcome): string {
     }
   }
 
+  const byteVerdict = byteBudgetVerdict(outcome.scenarioName, outcome.wireBytes);
+  lines.push('');
+  lines.push(wireBytesText(outcome.wireBytes, byteVerdict));
+
   const errorRate = computeErrorRate(outcome);
   lines.push('');
   lines.push(
@@ -96,6 +114,8 @@ export function renderText(outcome: RunOutcome): string {
 export function renderJson(outcome: RunOutcome): string {
   const { config, metrics } = outcome;
   const durationSec = outcome.durationMsActual / 1000;
+  const wb = outcome.wireBytes;
+  const byteVerdict = byteBudgetVerdict(outcome.scenarioName, wb);
   const operations = orderedLabels(metrics).map((label) => {
     const op = metrics.operation(label);
     return {
@@ -121,6 +141,24 @@ export function renderJson(outcome: RunOutcome): string {
     appVersion: config.appVersion,
     errorRate: computeErrorRate(outcome),
     ok: isOk(outcome),
+    wireBytes: {
+      users: wb.users,
+      minutes: wb.minutes,
+      sentBytes: wb.sentBytes,
+      receivedBytes: wb.receivedBytes,
+      totalBytes: wb.totalBytes,
+      perUserBytes: wb.perUserBytes,
+      bytesPerUserPerMinute: wb.bytesPerUserPerMinute,
+      budget:
+        byteVerdict.budget === undefined || byteVerdict.limitBytesPerUserPerMinute === null
+          ? null
+          : {
+              bytesPerUserPerMinute: byteVerdict.budget.bytesPerUserPerMinute,
+              limitBytesPerUserPerMinute: byteVerdict.limitBytesPerUserPerMinute,
+              anchor: byteVerdict.budget.anchor,
+            },
+      withinBudget: !byteVerdict.exceeded,
+    },
     operations,
   };
   return JSON.stringify(document, null, 2);
@@ -141,6 +179,29 @@ function latencyText(latency: DigestSnapshot): string {
   return (
     `p50 ${ms(latency.p50)}  p90 ${ms(latency.p90)}  p99 ${ms(latency.p99)}` +
     `  (min ${ms(latency.min)} max ${ms(latency.max)})`
+  );
+}
+
+/**
+ * The §171 wire-byte line: what the run's gateway sockets carried, the per-user per-minute figure,
+ * and the scenario's budget verdict. Rounded — the number is read by humans and compared against a
+ * budget, and a byte rate with seven decimals implies a precision no amortized per-minute figure
+ * has.
+ */
+function wireBytesText(wb: WireByteSummary, verdict: ReturnType<typeof byteBudgetVerdict>): string {
+  const rate = Math.round(wb.bytesPerUserPerMinute);
+  const carried =
+    `  wire bytes     ${wb.sentBytes} sent, ${wb.receivedBytes} received (${wb.totalBytes} total)` +
+    ` over ${wb.users} user${wb.users === 1 ? '' : 's'} in ${wb.minutes.toFixed(1)} min`;
+  if (verdict.budget === undefined || verdict.limitBytesPerUserPerMinute === null) {
+    return `${carried}\n                 ${rate} B/user/min  (no byte budget defined for this scenario)`;
+  }
+  return (
+    `${carried}\n` +
+    `                 ${rate} B/user/min` +
+    `  (budget ${verdict.budget.bytesPerUserPerMinute} B/user/min` +
+    `, limit +${Math.round(BYTE_BUDGET_HEADROOM * 100)}% ${Math.round(verdict.limitBytesPerUserPerMinute)})` +
+    ` — ${verdict.exceeded ? 'OVER BYTE BUDGET' : 'WITHIN'}`
   );
 }
 

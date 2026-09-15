@@ -74,10 +74,10 @@ struct Queued {
     hold_until: Option<Timestamp>,
 }
 
-/// A Critical frame kept in the resume ring, tagged with its sequence and when it was sent.
+/// A Critical frame kept in the resume ring, tagged with its `frame_seq` and when it was sent.
 #[derive(Clone)]
 struct Retained {
-    seq: u64,
+    frame_seq: u64,
     sent_at: Timestamp,
     bytes: Bytes,
 }
@@ -113,7 +113,9 @@ pub(crate) enum PushOutcome {
 #[derive(Clone)]
 pub(crate) struct ResumeBuffer {
     frames: Vec<Retained>,
-    next_seq: u64,
+    /// The next `frame_seq` this session will assign, so a resume can refuse a
+    /// client that claims to have seen past what was ever sent.
+    next_frame_seq: u64,
     expires_at: Timestamp,
     /// Why the session this buffer belonged to closed, carried so the reconnect that consumes
     /// the buffer can be labelled with its cause (section 174).
@@ -121,30 +123,30 @@ pub(crate) struct ResumeBuffer {
 }
 
 impl ResumeBuffer {
-    /// Whether this buffer can still bridge a client that last saw `last_seq`.
+    /// Whether this buffer can still bridge a client that last saw `last_frame_seq`.
     ///
     /// It can when the buffer has not expired, the client is not claiming a frame past what
     /// was ever sent, and there is no gap below the oldest retained frame — a gap means a
     /// Critical frame was evicted before the client acknowledged it, which only a full resync
     /// can repair.
-    pub(crate) fn covers(&self, last_seq: u64, now: Timestamp) -> bool {
+    pub(crate) fn covers(&self, last_frame_seq: u64, now: Timestamp) -> bool {
         if now.as_unix_ms() > self.expires_at.as_unix_ms() {
             return false;
         }
-        if last_seq >= self.next_seq {
+        if last_frame_seq >= self.next_frame_seq {
             return false;
         }
         match self.frames.first() {
-            Some(first) => last_seq + 1 >= first.seq,
+            Some(first) => last_frame_seq + 1 >= first.frame_seq,
             None => true,
         }
     }
 
     /// The retained frames the client has not seen, oldest first.
-    fn frames_after(&self, last_seq: u64) -> Vec<Retained> {
+    fn frames_after(&self, last_frame_seq: u64) -> Vec<Retained> {
         self.frames
             .iter()
-            .filter(|frame| frame.seq > last_seq)
+            .filter(|frame| frame.frame_seq > last_frame_seq)
             .cloned()
             .collect()
     }
@@ -168,7 +170,7 @@ struct Inner {
     capacity: usize,
     /// The next `frame_seq` to assign to a Critical frame (section 152). Per session, per
     /// direction; this is the server-to-client direction.
-    next_seq: u64,
+    next_frame_seq: u64,
     ring: VecDeque<Retained>,
     ring_cap: usize,
     resume_window_ms: i64,
@@ -245,7 +247,7 @@ impl Outbound {
             inner: Mutex::new(Inner {
                 queue: VecDeque::new(),
                 capacity,
-                next_seq: 1,
+                next_frame_seq: 1,
                 ring: VecDeque::new(),
                 ring_cap,
                 resume_window_ms,
@@ -352,8 +354,8 @@ impl Outbound {
         }
         match class {
             DeliveryClass::Critical => {
-                let seq = inner.next_seq;
-                inner.next_seq += 1;
+                let frame_seq = inner.next_frame_seq;
+                inner.next_frame_seq += 1;
                 inner.queue.push_back(Queued {
                     bytes: bytes.clone(),
                     class,
@@ -362,7 +364,7 @@ impl Outbound {
                     hold_until: None,
                 });
                 inner.ring.push_back(Retained {
-                    seq,
+                    frame_seq,
                     sent_at: now,
                     bytes,
                 });
@@ -500,7 +502,7 @@ impl Outbound {
         }
         inner.ack_watermark = watermark;
         while let Some(front) = inner.ring.front() {
-            if front.seq <= watermark {
+            if front.frame_seq <= watermark {
                 inner.ring.pop_front();
             } else {
                 break;
@@ -514,7 +516,7 @@ impl Outbound {
         let inner = self.inner.lock();
         ResumeBuffer {
             frames: inner.ring.iter().cloned().collect(),
-            next_seq: inner.next_seq,
+            next_frame_seq: inner.next_frame_seq,
             expires_at: now.saturating_add_millis(inner.resume_window_ms),
             closed,
         }
@@ -523,12 +525,12 @@ impl Outbound {
     /// Seeds a freshly-built mailbox from a retained buffer on resume, re-queuing every frame
     /// the client has not seen (keeping its original bytes, and so its original id, per
     /// section 150) and returning how many were re-queued.
-    pub(crate) fn seed_resume(&self, buffer: &ResumeBuffer, last_seq: u64) -> usize {
-        let pending = buffer.frames_after(last_seq);
+    pub(crate) fn seed_resume(&self, buffer: &ResumeBuffer, last_frame_seq: u64) -> usize {
+        let pending = buffer.frames_after(last_frame_seq);
         let mut inner = self.inner.lock();
-        inner.next_seq = buffer.next_seq;
+        inner.next_frame_seq = buffer.next_frame_seq;
         inner.ring = buffer.frames.iter().cloned().collect();
-        inner.ack_watermark = last_seq;
+        inner.ack_watermark = last_frame_seq;
         for frame in &pending {
             inner.queue.push_back(Queued {
                 bytes: frame.bytes.clone(),

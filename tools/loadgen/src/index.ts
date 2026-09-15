@@ -9,7 +9,7 @@ export type { Config, ParseResult } from './config.js';
 export { Logger } from './logger.js';
 export type { LogLevel } from './logger.js';
 export { run } from './runner.js';
-export { renderText, renderJson, isOk, computeErrorRate } from './report.js';
+export { renderText, renderJson, isOk, isWithinByteBudget, computeErrorRate } from './report.js';
 export type { RunOutcome } from './report.js';
 export { getScenario, scenarioNames } from './scenarios.js';
 export type { Scenario, Workload } from './scenarios.js';
@@ -19,3 +19,10 @@ export { RunContext, sleep } from './run-context.js';
 export { runPool } from './pool.js';
 export { Metrics, LatencyDigest, classifyError } from './stats.js';
 export type { DigestSnapshot, OperationSnapshot } from './stats.js';
+export {
+  BYTE_BUDGET_HEADROOM,
+  byteBudgetVerdict,
+  scenarioByteBudget,
+  summarizeWireBytes,
+} from './wire-bytes.js';
+export type { ByteBudgetVerdict, ScenarioByteBudget, WireByteSummary } from './wire-bytes.js';

@@ -181,7 +181,7 @@ const HELP = `migo-loadgen — load generator for the Migo server
 
 Drives many virtual clients through the real @migo/sdk path (REST register, gateway
 handshake, end-to-end encrypted sends) and reports throughput, latency percentiles,
-and errors by class.
+errors by class, and the gateway wire bytes each session spent.
 
 USAGE
   migo-loadgen [options]
@@ -214,6 +214,8 @@ OPTIONS
 
 EXIT CODES
   0 success   1 fatal error   2 bad usage   3 error-rate threshold exceeded
+  4 byte budget exceeded (a scenario spent more than its per-user per-minute wire-byte
+    budget plus the 10 percent headroom of brief section 171)
 
 The generator registers fresh throwaway accounts, so the target server must allow
 registration. It never reads or writes real user data.`;

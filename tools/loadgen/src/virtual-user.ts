@@ -9,7 +9,7 @@
  */
 
 import { MigoClient, Platform, BandwidthMode, serverEndpointFromUrl } from '@migo/sdk';
-import type { Id } from '@migo/sdk';
+import type { Id, WireBytes } from '@migo/sdk';
 
 import type { Config } from './config.js';
 
@@ -81,5 +81,20 @@ export class VirtualUser {
       // Ignore: the socket may already be gone, and a failed disconnect changes no measurement.
     }
     this.connected = false;
+  }
+
+  /**
+   * This session's wire bytes so far (§171): a snapshot of the SDK transport's counters.
+   *
+   * The counters are the same ones the web client shows in its Diagnostics group — every byte
+   * written to the gateway socket at its post-compression wire size (frame headers included,
+   * HELLO and ACK included) and every byte read off the socket at the incoming record's outer
+   * envelope size. They survive a reconnect and count the reconnect's own handshake, because
+   * those bytes are a real cost the client paid; a VU builds exactly one transport per run, so
+   * the reading taken after teardown is the whole session. The REST bootstrap (register, key
+   * publication) rides HTTP and is not part of these counters.
+   */
+  wireBytes(): WireBytes {
+    return this.client.wireBytes;
   }
 }

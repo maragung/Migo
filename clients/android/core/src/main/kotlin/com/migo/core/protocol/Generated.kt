@@ -4922,13 +4922,13 @@ data class FedEpoch(
 
 data class FedLinkState(
     val nodeId: String,
-    val sequence: Long,
+    val linkSeq: Long,
     val healthy: Boolean,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.str(nodeId)
-        w.u64(sequence)
+        w.u64(linkSeq)
         w.bool(healthy)
         w.u32(0)
         w.leave()
@@ -4938,14 +4938,14 @@ data class FedLinkState(
         fun decode(r: Reader): FedLinkState {
             r.enter()
             val nodeId = r.str()
-            val sequence = r.u64()
+            val linkSeq = r.u64()
             val healthy = r.bool()
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 r.optional() // no optional fields in this build; a newer peer's are skipped by length
             }
             r.leave()
-            return FedLinkState(nodeId, sequence, healthy)
+            return FedLinkState(nodeId, linkSeq, healthy)
         }
     }
 }
@@ -5422,12 +5422,12 @@ data class FedPong(
 
 data class FedAck(
     val nodeId: String,
-    val seq: Long,
+    val linkSeq: Long,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.str(nodeId)
-        w.u64(seq)
+        w.u64(linkSeq)
         w.u32(0)
         w.leave()
     }
@@ -5436,13 +5436,13 @@ data class FedAck(
         fun decode(r: Reader): FedAck {
             r.enter()
             val nodeId = r.str()
-            val seq = r.u64()
+            val linkSeq = r.u64()
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 r.optional() // no optional fields in this build; a newer peer's are skipped by length
             }
             r.leave()
-            return FedAck(nodeId, seq)
+            return FedAck(nodeId, linkSeq)
         }
     }
 }

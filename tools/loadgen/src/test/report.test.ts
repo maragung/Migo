@@ -11,9 +11,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { Config } from '../config.js';
-import { computeErrorRate, isOk, renderJson, renderText } from '../report.js';
+import { computeErrorRate, isOk, isWithinByteBudget, renderJson, renderText } from '../report.js';
 import type { RunOutcome } from '../report.js';
 import { Metrics } from '../stats.js';
+import { summarizeWireBytes } from '../wire-bytes.js';
 
 const BASE_CONFIG: Config = {
   apiUrl: 'http://localhost:8080',
@@ -63,6 +64,9 @@ function makeOutcome(
     durationMsActual: 30_000,
     interrupted: false,
     metrics,
+    // A quiet session by default, so the pinned-format tests below are about the report shape
+    // and not about whichever budget the scenario name happens to carry.
+    wireBytes: summarizeWireBytes([{ sent: 1_000, received: 2_000 }], 30_000),
     ...overrides,
   };
 }
@@ -147,6 +151,59 @@ test('an error class carries its sample into both renderings', () => {
   assert.deepEqual(connect.errorSamples, {
     'remote:VALIDATION_FAILED': 'username: VALIDATION_FAILED: no hyphens',
   });
+});
+
+test('the wire-byte section reports the per-user per-minute figure and the scenario verdict', () => {
+  // Default summary: 3000 bytes over 1 user in 0.5 min = 6000 B/user/min, far under the
+  // messaging budget.
+  const text = renderText(makeOutcome(makeConfig(), fixedMetrics()));
+  assert.ok(
+    text.includes('  wire bytes     1000 sent, 2000 received (3000 total) over 1 user in 0.5 min'),
+  );
+  assert.ok(
+    text.includes('6000 B/user/min  (budget 262144 B/user/min, limit +10% 288358) — WITHIN'),
+  );
+  assert.equal(isWithinByteBudget(makeOutcome(makeConfig(), fixedMetrics())), true);
+});
+
+test('a scenario past its byte budget is named in the text and failed by the verdict', () => {
+  // 600 KB out over half a minute is 1.2 MB/user/min — past messaging's 256 KiB budget and its
+  // 10 percent headroom, so the report must say so and the verdict must fail the run.
+  const spendy = summarizeWireBytes([{ sent: 600_000, received: 0 }], 30_000);
+  const outcome = makeOutcome(makeConfig(), fixedMetrics(), { wireBytes: spendy });
+  assert.ok(renderText(outcome).includes('OVER BYTE BUDGET'));
+  assert.equal(isWithinByteBudget(outcome), false);
+});
+
+test('renderJson carries the wire-byte summary, budget, and verdict', () => {
+  const doc = JSON.parse(renderJson(makeOutcome(makeConfig(), fixedMetrics()))) as {
+    wireBytes: {
+      users: number;
+      minutes: number;
+      sentBytes: number;
+      receivedBytes: number;
+      totalBytes: number;
+      perUserBytes: number;
+      bytesPerUserPerMinute: number;
+      budget: {
+        bytesPerUserPerMinute: number;
+        limitBytesPerUserPerMinute: number;
+        anchor: string;
+      } | null;
+      withinBudget: boolean;
+    };
+  };
+  assert.equal(doc.wireBytes.users, 1);
+  assert.equal(doc.wireBytes.minutes, 0.5);
+  assert.equal(doc.wireBytes.sentBytes, 1000);
+  assert.equal(doc.wireBytes.receivedBytes, 2000);
+  assert.equal(doc.wireBytes.totalBytes, 3000);
+  assert.equal(doc.wireBytes.perUserBytes, 3000);
+  assert.equal(doc.wireBytes.bytesPerUserPerMinute, 6000);
+  assert.equal(doc.wireBytes.budget?.bytesPerUserPerMinute, 262144);
+  assert.equal(doc.wireBytes.budget?.limitBytesPerUserPerMinute, 288358.4);
+  assert.ok((doc.wireBytes.budget?.anchor ?? '').length > 0);
+  assert.equal(doc.wireBytes.withinBudget, true);
 });
 
 test('computeErrorRate and isOk read the budget correctly', () => {
