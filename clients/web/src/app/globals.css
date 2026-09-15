@@ -1048,11 +1048,13 @@ main {
   flex: 1;
   min-width: 0;
 }
-/* The friends search, living in the panel head: a compact field that lines up with the view
-   icons beside it, left of the new-conversation control — the field itself, not a toggle. */
+/* The friends search, revealed in the panel head: a compact field that lines up with the view
+   icons beside it, left of the new-conversation control — offered from its icon, not idle on
+   the row. */
 .panel-head-search {
   display: flex;
   align-items: center;
+  gap: 2px;
   margin-right: 4px;
 }
 .panel-head-search .input {
@@ -1061,6 +1063,23 @@ main {
   height: var(--touch);
   padding: 0 10px;
   font-size: 13px;
+}
+/* The revealed field's way out: the close finishes the search whatever the query holds (the
+   blur path only ends an empty one), so it takes the header icons' quiet ink rather than the
+   field's own frame. */
+.panel-head-search-x {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.panel-head-search-x:hover {
+  color: var(--text);
 }
 @media (max-width: 1023px) {
   .panel-head-search .input {
