@@ -1121,6 +1121,7 @@ pub enum NotificationKind {
     VoiceNote = 12,
     MissedCall = 13,
     IncomingCall = 14,
+    GroupInvite = 15,
 }
 
 impl NotificationKind {
@@ -1147,6 +1148,7 @@ impl NotificationKind {
             12 => Self::VoiceNote,
             13 => Self::MissedCall,
             14 => Self::IncomingCall,
+            15 => Self::GroupInvite,
             _ => Self::Unknown,
         }
     }
@@ -1169,6 +1171,7 @@ impl NotificationKind {
             Self::VoiceNote => "VoiceNote",
             Self::MissedCall => "MissedCall",
             Self::IncomingCall => "IncomingCall",
+            Self::GroupInvite => "GroupInvite",
         }
     }
 }
@@ -11198,6 +11201,10 @@ pub enum Opcode {
     Search = 119,
     /// Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room.
     MuteSet = 120,
+    /// Ends a friendship: both sides' rows and any hanging request go in one store transaction. Silent toward the other party except the FRIEND_EVENT hint, the same word a decline carries. Removing an account that is not a friend is acknowledged without error, because "not friends" is already the truth.
+    FriendRemove = 121,
+    /// Lifts the caller's own block on one account. Restores nothing the block tore down, and the mute the block carried stays behind deliberately: removing it would silently drop a mute the caller may have chosen before ever blocking, while leaving it is visible in the caller's muted list and reversible with MUTE_SET. Unblocking an account that was never blocked is acknowledged, because idempotence here costs nothing and tells nobody anything.
+    BlockClear = 122,
     MediaUploadBegin = 128,
     MediaUploadStatus = 129,
     MediaUploadCommit = 130,
@@ -11375,6 +11382,8 @@ impl Opcode {
             118 => Self::Suggestions,
             119 => Self::Search,
             120 => Self::MuteSet,
+            121 => Self::FriendRemove,
+            122 => Self::BlockClear,
             128 => Self::MediaUploadBegin,
             129 => Self::MediaUploadStatus,
             130 => Self::MediaUploadCommit,
@@ -11510,6 +11519,8 @@ impl Opcode {
             Self::Suggestions => "SUGGESTIONS",
             Self::Search => "SEARCH",
             Self::MuteSet => "MUTE_SET",
+            Self::FriendRemove => "FRIEND_REMOVE",
+            Self::BlockClear => "BLOCK_CLEAR",
             Self::MediaUploadBegin => "MEDIA_UPLOAD_BEGIN",
             Self::MediaUploadStatus => "MEDIA_UPLOAD_STATUS",
             Self::MediaUploadCommit => "MEDIA_UPLOAD_COMMIT",
@@ -11645,6 +11656,8 @@ impl Opcode {
             Self::Suggestions => 3,
             Self::Search => 3,
             Self::MuteSet => 5,
+            Self::FriendRemove => 5,
+            Self::BlockClear => 5,
             Self::MediaUploadBegin => 10,
             Self::MediaUploadStatus => 2,
             Self::MediaUploadCommit => 5,
@@ -11779,6 +11792,8 @@ impl Opcode {
             Self::Suggestions => DeliveryClass::Critical,
             Self::Search => DeliveryClass::Critical,
             Self::MuteSet => DeliveryClass::Critical,
+            Self::FriendRemove => DeliveryClass::Critical,
+            Self::BlockClear => DeliveryClass::Critical,
             Self::MediaUploadBegin => DeliveryClass::Critical,
             Self::MediaUploadStatus => DeliveryClass::Critical,
             Self::MediaUploadCommit => DeliveryClass::Critical,
@@ -11917,6 +11932,8 @@ impl Opcode {
             Self::Suggestions => false,
             Self::Search => false,
             Self::MuteSet => false,
+            Self::FriendRemove => false,
+            Self::BlockClear => false,
             Self::MediaUploadBegin => false,
             Self::MediaUploadStatus => false,
             Self::MediaUploadCommit => false,
@@ -12059,6 +12076,8 @@ impl Opcode {
             Self::Suggestions => AuthLevel::User,
             Self::Search => AuthLevel::User,
             Self::MuteSet => AuthLevel::User,
+            Self::FriendRemove => AuthLevel::User,
+            Self::BlockClear => AuthLevel::User,
             Self::MediaUploadBegin => AuthLevel::User,
             Self::MediaUploadStatus => AuthLevel::User,
             Self::MediaUploadCommit => AuthLevel::User,
@@ -12277,6 +12296,8 @@ impl Opcode {
             Self::Suggestions => Direction::ClientToServer,
             Self::Search => Direction::ClientToServer,
             Self::MuteSet => Direction::ClientToServer,
+            Self::FriendRemove => Direction::ClientToServer,
+            Self::BlockClear => Direction::ClientToServer,
             Self::MediaUploadBegin => Direction::ClientToServer,
             Self::MediaUploadStatus => Direction::ClientToServer,
             Self::MediaUploadCommit => Direction::ClientToServer,
@@ -12412,6 +12433,8 @@ impl Opcode {
             Self::Suggestions => false,
             Self::Search => false,
             Self::MuteSet => false,
+            Self::FriendRemove => false,
+            Self::BlockClear => false,
             Self::MediaUploadBegin => false,
             Self::MediaUploadStatus => false,
             Self::MediaUploadCommit => false,
@@ -12554,6 +12577,8 @@ impl Opcode {
         Self::Suggestions,
         Self::Search,
         Self::MuteSet,
+        Self::FriendRemove,
+        Self::BlockClear,
         Self::MediaUploadBegin,
         Self::MediaUploadStatus,
         Self::MediaUploadCommit,

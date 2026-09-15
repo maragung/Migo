@@ -771,7 +771,8 @@ enum class NotificationKind(val wire: Int) {
     GameChallenge(11),
     VoiceNote(12),
     MissedCall(13),
-    IncomingCall(14);
+    IncomingCall(14),
+    GroupInvite(15);
 
     fun toWire(): Int = wire
 
@@ -792,6 +793,7 @@ enum class NotificationKind(val wire: Int) {
             12L -> VoiceNote
             13L -> MissedCall
             14L -> IncomingCall
+            15L -> GroupInvite
             else -> Unknown
         }
     }
@@ -9179,6 +9181,10 @@ object Op {
     const val SEARCH: Long = 119L
     /** Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room. */
     const val MUTE_SET: Long = 120L
+    /** Ends a friendship: both sides' rows and any hanging request go in one store transaction. Silent toward the other party except the FRIEND_EVENT hint, the same word a decline carries. Removing an account that is not a friend is acknowledged without error, because "not friends" is already the truth. */
+    const val FRIEND_REMOVE: Long = 121L
+    /** Lifts the caller's own block on one account. Restores nothing the block tore down, and the mute the block carried stays behind deliberately: removing it would silently drop a mute the caller may have chosen before ever blocking, while leaving it is visible in the caller's muted list and reversible with MUTE_SET. Unblocking an account that was never blocked is acknowledged, because idempotence here costs nothing and tells nobody anything. */
+    const val BLOCK_CLEAR: Long = 122L
     const val MEDIA_UPLOAD_BEGIN: Long = 128L
     const val MEDIA_UPLOAD_STATUS: Long = 129L
     const val MEDIA_UPLOAD_COMMIT: Long = 130L
@@ -9364,6 +9370,8 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     118L to OpcodeMeta(118L, "SUGGESTIONS", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SuggestReq", "SearchResponse", null, false, listOf(), null),
     119L to OpcodeMeta(119L, "SEARCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SearchReq", "SearchResponse", null, false, listOf(), null),
     120L to OpcodeMeta(120L, "MUTE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MuteSet", "Acknowledged", null, false, listOf(), null),
+    121L to OpcodeMeta(121L, "FRIEND_REMOVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null, false, listOf(), null),
+    122L to OpcodeMeta(122L, "BLOCK_CLEAR", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null, false, listOf(), null),
     128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null, false, listOf(), null),
     129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null, false, listOf(), null),
     130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null, false, listOf(), null),

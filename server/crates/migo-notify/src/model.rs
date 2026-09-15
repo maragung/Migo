@@ -99,6 +99,7 @@ impl Wakeup {
             NotificationKind::RoomAnnouncement => "Room announcement",
             NotificationKind::Event => "Upcoming event",
             NotificationKind::GameChallenge => "Game challenge",
+            NotificationKind::GroupInvite => "Group invitation",
             NotificationKind::Unknown => "Migo",
         }
     }

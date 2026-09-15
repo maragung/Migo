@@ -57,8 +57,9 @@
 //! the inbox item. A ringing call does, by becoming a missed call, which is a row.
 //!
 //! A gift, a level up, a badge, a room invitation, an announcement, an event, a game
-//! challenge, a missed call: each one happened, and nothing else records whether the person
-//! it happened to has seen it. Those are the eight kinds this table exists for, and
+//! challenge, a missed call, a group invitation: each one happened, and nothing else
+//! records whether the person it happened to has seen it. Those are the nine kinds this
+//! table exists for, and
 //! [`migo_store::model::notification_kind::is_storable`] is where the list lives — checked
 //! by both storage backends, so it is enforced rather than remembered.
 //!

@@ -673,6 +673,28 @@
    "doc": "Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room."
   },
   {
+   "name": "FRIEND_REMOVE",
+   "code": 121,
+   "direction": "client_to_server",
+   "payload": "FriendTarget",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Ends a friendship: both sides' rows and any hanging request go in one store transaction. Silent toward the other party except the FRIEND_EVENT hint, the same word a decline carries. Removing an account that is not a friend is acknowledged without error, because \"not friends\" is already the truth."
+  },
+  {
+   "name": "BLOCK_CLEAR",
+   "code": 122,
+   "direction": "client_to_server",
+   "payload": "FriendTarget",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Lifts the caller's own block on one account. Restores nothing the block tore down, and the mute the block carried stays behind deliberately: removing it would silently drop a mute the caller may have chosen before ever blocking, while leaving it is visible in the caller's muted list and reversible with MUTE_SET. Unblocking an account that was never blocked is acknowledged, because idempotence here costs nothing and tells nobody anything."
+  },
+  {
    "name": "MEDIA_UPLOAD_BEGIN",
    "code": 128,
    "direction": "client_to_server",

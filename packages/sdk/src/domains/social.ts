@@ -4,7 +4,8 @@
  * # The graph is server-owned, the client only mirrors it
  *
  * A friendship is a server-side edge between two accounts, and every mutation here — request,
- * respond, block — is a *request* that the server apply a rule it owns: who may message whom, whether
+ * respond, remove, block, unblock — is a *request* that the server apply a rule it owns: who may
+ * message whom, whether
  * the recipient's privacy settings admit the request at all, whether either side is on the other's
  * block list. The client never derives relationship state locally, because a client-side guess would
  * drift from the server's the moment either party acted from another device. Instead the graph is
@@ -115,7 +116,8 @@ export class SocialDomain {
    * An event names the other account and a `state` string — `"request"` (an edge now waits),
    * `"accepted"` (a friendship now exists), `"removed"` (an edge is gone: a declined request,
    * an un-friend, or the teardown a block performs), `"blocked"` (this account blocked
-   * somebody; only ever delivered to the blocker's own devices), or `"muted"`/`"unmuted"`
+   * somebody; only ever delivered to the blocker's own devices), `"unblocked"` (this account
+   * lifted a block; only ever delivered to the unblocker's own devices), or `"muted"`/`"unmuted"`
    * (this account flipped a personal mute; only ever delivered to the muter's own devices).
    * It is a hint that the graph
    * moved, not a source of truth — re-read {@link listRelationships} to draw the right buttons,
@@ -159,6 +161,21 @@ export class SocialDomain {
   }
 
   /**
+   * Ends a friendship.
+   *
+   * Both sides' rows and any hanging request are removed in one server-side transaction, so the
+   * exit lands whole. Silent toward the other party except a `"removed"` {@link onFriendEvent}
+   * hint — the same word a declined request carries, so the two stay indistinguishable — with
+   * no bell and no inbox row: a quiet exit is not announced. Removing an account that is not a
+   * friend resolves without error; "not friends" is already the truth. A caller that holds the
+   * relationship list should refresh it after this resolves.
+   */
+  async removeFriend(userId: Id): Promise<void> {
+    const request: FriendTarget = { userId };
+    await this.#rpc.call(OP.FRIEND_REMOVE, encodeFriendTarget, decodeAcknowledged, request);
+  }
+
+  /**
    * Blocks an account.
    *
    * One-sided toward the other party: the blocked account is not *told* they were blocked, and
@@ -173,6 +190,23 @@ export class SocialDomain {
   async blockUser(userId: Id): Promise<void> {
     const request: FriendTarget = { userId };
     await this.#rpc.call(OP.BLOCK_SET, encodeFriendTarget, decodeAcknowledged, request);
+  }
+
+  /**
+   * Lifts the caller's own block on an account.
+   *
+   * Restores nothing the block tore down: the friendship and the follows are gone, and
+   * rebuilding them would be deciding on the caller's behalf that two people who fell out want
+   * the old graph back. The mute the block carried stays behind deliberately — clearing it here
+   * would silently drop a mute the caller may have chosen before ever blocking, while leaving
+   * it is visible in {@link mutedAccounts} and reversible with {@link muteUser}. Unblocking an
+   * account that was never blocked resolves without error. The formerly blocked account is told
+   * nothing (they were never told about the block either), while this account's other devices
+   * receive an `"unblocked"` {@link onFriendEvent} so their block list re-reads.
+   */
+  async unblockUser(userId: Id): Promise<void> {
+    const request: FriendTarget = { userId };
+    await this.#rpc.call(OP.BLOCK_CLEAR, encodeFriendTarget, decodeAcknowledged, request);
   }
 
   /**
