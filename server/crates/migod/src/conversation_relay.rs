@@ -22,7 +22,7 @@
 //!   through `publish_messaging`, which hands the fanout here when the store
 //!   says the conversation is not a room's, and the call plane's group-call
 //!   membership announcements reach the same half through
-//!   [`forward_call_event`](Self::forward_call_event). The node that homes the
+//!   [`forward_call_event`](ConversationRelay::forward_call_event). The node that homes the
 //!   conversation enqueues one `FED_CONVERSATION_EVENT` per watching node, the
 //!   inner event frame sealed exactly as a local session would have received
 //!   it; the receiving node's ingest path (`mesh::route_conversation_event`)
