@@ -4922,16 +4922,16 @@ impl Worker {
         // The pace the note starts at is the pace the player last chose, so a saved 2x
         // survives a restart without a press of the speed control.
         let speed = Arc::new(AtomicU32::new(self.voice_speed.percent()));
-        spawn_playback_pump(
-            speaker.frames.clone(),
-            speaker.rate,
+        spawn_playback_pump(PlaybackPump {
+            frames: speaker.frames.clone(),
+            sink_rate: speaker.rate,
             samples,
             rate,
-            Arc::clone(&stop),
-            Arc::clone(&speed),
-            self.commands.clone(),
+            stop: Arc::clone(&stop),
+            speed: Arc::clone(&speed),
+            commands: self.commands.clone(),
             media_id,
-        );
+        });
         self.playing = Some(Playing {
             media_id,
             speaker,
@@ -9302,6 +9302,29 @@ fn spawn_recording_pump(
         .expect("the recording pump's thread spawns")
 }
 
+/// Everything the playback pump thread owns, handed over in one piece the way the recording
+/// pump takes its shared half: the speaker's channel and clock, the note's samples at their
+/// own rate, the two flags the worker shares with the playing state, and the loop's own ways
+/// home — the command channel and the note's id.
+struct PlaybackPump {
+    /// The speaker's frame channel; one send per chunk of output.
+    frames: std_mpsc::Sender<Vec<i16>>,
+    /// The rate the speaker actually plays at — the resampler's target.
+    sink_rate: u32,
+    /// The note's own samples, at the rate they were recorded at.
+    samples: Arc<Vec<i16>>,
+    /// The rate the samples were recorded at.
+    rate: u32,
+    /// The stop flag the playing state shares: a stop is an end even mid-chunk.
+    stop: Arc<AtomicBool>,
+    /// The pace flag (§179): a whole percent, re-read before every chunk.
+    speed: Arc<AtomicU32>,
+    /// The worker's command channel, for the heard threshold and the ending.
+    commands: mpsc::UnboundedSender<Command>,
+    /// The note being played — the id its listened mark is filed under.
+    media_id: Id,
+}
+
 /// The playback pump for a voice note.
 ///
 /// Feeds the speaker a hundred milliseconds of source audio at a time and sleeps just under
@@ -9323,16 +9346,17 @@ fn spawn_recording_pump(
 /// When the samples run out the pump reports the ending into the worker's own loop (the
 /// same self-addressing a chain tracker's completion takes), because the playing state —
 /// and the stopped button that turns back into a play button — belongs to the loop.
-fn spawn_playback_pump(
-    frames: std_mpsc::Sender<Vec<i16>>,
-    sink_rate: u32,
-    samples: Arc<Vec<i16>>,
-    rate: u32,
-    stop: Arc<AtomicBool>,
-    speed: Arc<AtomicU32>,
-    commands: mpsc::UnboundedSender<Command>,
-    media_id: Id,
-) {
+fn spawn_playback_pump(pump: PlaybackPump) {
+    let PlaybackPump {
+        frames,
+        sink_rate,
+        samples,
+        rate,
+        stop,
+        speed,
+        commands,
+        media_id,
+    } = pump;
     std::thread::Builder::new()
         .name("migo-voice-play".to_owned())
         .spawn(move || {

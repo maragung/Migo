@@ -2468,7 +2468,7 @@ impl eframe::App for App {
 
         // Drained into a local first: the speed below writes settings through `self`, and a
         // drain iterated in place would hold the borrow of the buffer across the loop body.
-        let commands: Vec<_> = self.commands.drain(..).collect();
+        let commands = std::mem::take(&mut self.commands);
         for command in commands {
             // The playback speed is a live command and a setting at once: the shell owns the
             // record, so the choice is persisted here — the same after-the-frame seam every
