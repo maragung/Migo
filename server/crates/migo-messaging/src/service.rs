@@ -939,6 +939,27 @@ where
                 // grow a parameter for it.
                 let ceiling = i64::try_from(to).unwrap_or(i64::MAX);
                 page.retain(|message| message.seq <= ceiling);
+                // A range the client asked for by name, with nothing of it left,
+                // is answered SEQUENCE_GAP (section 152) rather than an empty
+                // page — an empty page reads as "nothing to fetch", and the
+                // client would wait on a hole that will never close. The
+                // conversation's own high-water mark is the witness that the
+                // range once existed: `last_seq` never regresses, so a
+                // conversation that extends past what the client holds while the
+                // requested band came back empty is one whose middle was taken
+                // by the expiry sweeper, not one that never had one. A range at
+                // or below what the client already holds is not a gap but a
+                // no-op, and keeps the empty answer; a range with survivors
+                // below is served what remains and told about the hole through
+                // the Truncated status, which is section 158's half of the
+                // same promise.
+                if to > request.have_seq && page.is_empty() && conversation.last_seq > have {
+                    return Err(fault::error(
+                        codes::SEQUENCE_GAP,
+                        "sync asked for a range the expiry sweeper has already taken",
+                    )
+                    .public("the requested range is no longer available"));
+                }
             }
             // Exact, and free: the conversation's own high-water mark was read
             // above, so whether anything remains is a comparison rather than a

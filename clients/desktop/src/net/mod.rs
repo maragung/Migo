@@ -2044,6 +2044,10 @@ struct Worker {
     /// SYNC answer names its conversation but not its direction, so the ask's own correlation
     /// is the only thing that can say the page that arrived is a load-earlier page.
     earlier_asks: HashMap<u32, Id>,
+    /// Forward SYNC asks in flight, keyed the same way: a refusal that ends a walk carries no
+    /// conversation of its own, so the correlation is the only thing that can say which walk
+    /// an error reply retires.
+    sync_asks: HashMap<u32, Id>,
     /// The persisted room bridge, beside the vault: what a join wrote, the next process reads
     /// back, so the room topics a restart lost are re-subscribed without a re-join.
     room_bridges: room_bridge::RoomBridgeStore,
@@ -2095,6 +2099,7 @@ impl Worker {
             session: None,
             catchups: HashMap::new(),
             earlier_asks: HashMap::new(),
+            sync_asks: HashMap::new(),
             room_bridges,
         }
     }
@@ -2879,6 +2884,7 @@ impl Worker {
         self.session = None;
         self.catchups.clear();
         self.earlier_asks.clear();
+        self.sync_asks.clear();
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
         self.last_backup_at = Some((account_id, last_backup_at));
@@ -3072,6 +3078,7 @@ impl Worker {
                 // catch-ups they still need.
                 self.catchups.clear();
                 self.earlier_asks.clear();
+                self.sync_asks.clear();
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
                 // presence go back to "never subscribed" and the own-topic subscribe below is the
@@ -3271,6 +3278,11 @@ impl Worker {
     /// it. The contiguous watermark is the only cursor that heals: a page asked from the maximum
     /// would leave the hole below it unfilled for good (§152's gapless seqs are what make the
     /// hole knowable at all).
+    ///
+    /// The correlation is remembered beside the ask, because the reply that ends a walk is not
+    /// always a page: a ranged repair whose range the server has purged is answered
+    /// SEQUENCE_GAP, and an error frame names no conversation — only the ask's own correlation
+    /// can say which walk the refusal retires.
     async fn sync_page(&mut self, conversation_id: Id, have_seq: u64) {
         let to_seq = self
             .catchups
@@ -3283,7 +3295,9 @@ impl Worker {
             to_seq,
             backwards: None,
         };
-        self.request(Opcode::Sync, &message).await;
+        if let Some(correlation) = self.send_and_remember(Opcode::Sync, &message).await {
+            self.sync_asks.insert(correlation, conversation_id);
+        }
     }
 
     /// Asks for one page of history *below* what the thread holds, for the "Load earlier" row.
@@ -7519,6 +7533,7 @@ impl Worker {
         self.session = None;
         self.catchups.clear();
         self.earlier_asks.clear();
+        self.sync_asks.clear();
         self.sink.send(Event::Connection(Connection::Offline));
         self.sink.send(Event::SignedOut);
         self.sink.toast(
@@ -7578,6 +7593,28 @@ impl Worker {
         }
         if gateway::is_error(&frame) {
             let error = gateway::refusal(&frame);
+            // A refusal to a remembered SYNC ask retires the walk that asked, whatever the
+            // code: the walk's continuation is driven by the page that now never comes, and a
+            // walk left in `catchups` blocks every later one for its conversation until a
+            // reconnect. SEQUENCE_GAP (§152: the range the repair asked for was purged) is
+            // also the stall the watermark already knows how to keep — without it, every later
+            // above-gap event would re-ask a hole the server has already said it cannot fill.
+            if let Some(conversation_id) = self.sync_asks.remove(&frame.header.correlation) {
+                self.catchups.remove(&conversation_id);
+                let gap_gone = match &error {
+                    GatewayError::Refused { code, .. } => {
+                        *code == migo_protocol::codes::SEQUENCE_GAP
+                    }
+                    _ => false,
+                };
+                if gap_gone {
+                    if let Some(signed) = self.signed.as_mut() {
+                        if let Some(account) = signed.sequences.get_mut(&conversation_id) {
+                            account.stalled_at = Some(account.watermark);
+                        }
+                    }
+                }
+            }
             self.sink.toast(error.to_string(), ToastKind::Error);
             return;
         }
@@ -8034,6 +8071,9 @@ impl Worker {
     }
 
     async fn on_history(&mut self, frame: &migo_protocol::Frame) {
+        // A page arrived, so the ask it answers is settled; what remains in `sync_asks` is
+        // exactly the asks whose replies are still owed — the ones an error frame must retire.
+        self.sync_asks.remove(&frame.header.correlation);
         let Ok(response) = gateway::decode::<migo_protocol::SyncResponse>(frame) else {
             return;
         };
