@@ -57,7 +57,7 @@ use migo_protocol::{
 
 use super::call_signal::{self, CallEndReason};
 use super::gateway;
-use super::{Event, Sink, Worker};
+use super::{Event, Worker};
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::model::ToastKind;
@@ -322,7 +322,6 @@ impl Worker {
         });
         self.sink.send(Event::GroupCallSeated {
             conversation_id,
-            call_id: event.call_id,
             participant_count: count,
         });
         if count > 1 {
@@ -361,7 +360,6 @@ impl Worker {
             }
             self.sink.send(Event::GroupCallSeated {
                 conversation_id: seat.conversation_id,
-                call_id: seat.call_id,
                 participant_count: seat.seats.len() as u32,
             });
         }
@@ -509,9 +507,7 @@ impl Worker {
         from_device: Id,
         sealed: &[u8],
     ) -> Option<Id> {
-        let Some(signed) = self.signed.as_mut() else {
-            return None;
-        };
+        let signed = self.signed.as_mut()?;
         let plaintext = Envelope::decode(sealed)
             .and_then(|envelope| {
                 signed
@@ -942,7 +938,7 @@ mod tests {
         assert!(seated.adopt(epoch, &sealed).is_err());
         assert_eq!(seated.epoch(), epoch);
         // A blob sealed under a different key does not adopt either, whatever epoch it claims.
-        let other = CallKeyState::from_session(&[0xef; 32], call_id);
+        let mut other = CallKeyState::from_session(&[0xef; 32], call_id);
         let stranger = other
             .rotate(&mut OsRandom)
             .expect("a stranger rotates their own call");

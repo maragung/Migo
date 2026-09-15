@@ -1077,7 +1077,6 @@ pub enum Event {
     /// the UI's badge is the number of people in the call, not devices.
     GroupCallSeated {
         conversation_id: Id,
-        call_id: Id,
         participant_count: u32,
     },
     /// The group call of one conversation is over for this device: left, ended, dropped with

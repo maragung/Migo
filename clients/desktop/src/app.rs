@@ -1134,7 +1134,6 @@ impl App {
                 Event::GroupCallSeated {
                     conversation_id,
                     participant_count,
-                    ..
                 } => {
                     self.chat
                         .group_calls
