@@ -2431,31 +2431,26 @@ impl MeshTransport {
             .map_err(|error| error.to_string())?;
 
         let pong = timeout(PROBE_PONG_TIMEOUT, async {
-            loop {
-                let frame = match read_frame(&mut io).await {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => {
-                        return Err("the peer closed the link before answering the probe".to_owned())
-                    }
-                    Err(error) => return Err(error.to_string()),
-                };
-                match Opcode::from_wire(frame.header.opcode) {
-                    // The heartbeat reuses the PING opcode for both directions (section
-                    // 145); the FedPong body is what says this is an answer.
-                    Some(Opcode::Ping) => {
-                        let pong: migo_protocol::FedPong =
-                            from_frame(&frame).map_err(|error| error.to_string())?;
-                        if pong.nonce == nonce {
-                            return Ok(());
-                        }
-                        return Err("the probe's pong came back with the wrong nonce".to_owned());
-                    }
-                    _ => {
-                        return Err(
-                            "unexpected mesh frame while awaiting the probe's pong".to_owned()
-                        )
+            let frame = match read_frame(&mut io).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    return Err("the peer closed the link before answering the probe".to_owned())
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            match Opcode::from_wire(frame.header.opcode) {
+                // The heartbeat reuses the PING opcode for both directions (section
+                // 145); the FedPong body is what says this is an answer.
+                Some(Opcode::Ping) => {
+                    let pong: migo_protocol::FedPong =
+                        from_frame(&frame).map_err(|error| error.to_string())?;
+                    if pong.nonce == nonce {
+                        Ok(())
+                    } else {
+                        Err("the probe's pong came back with the wrong nonce".to_owned())
                     }
                 }
+                _ => Err("unexpected mesh frame while awaiting the probe's pong".to_owned()),
             }
         })
         .await;
