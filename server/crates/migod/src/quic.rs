@@ -49,6 +49,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -296,6 +297,14 @@ fn frame_may_ride_datagram(frame: &[u8]) -> bool {
 /// the same way the WebSocket upgrade route builds one. Returns the address actually bound, so
 /// the caller (and the operator's log) sees the port the OS chose for a `:0` bind.
 ///
+/// `heartbeat` is the gateway's base heartbeat — the `heartbeat_ms` a `WELCOME` advertises
+/// before a session's bandwidth mode adjusts it — and it sizes the transport's keep-alive
+/// pair: the connection pings at half the heartbeat, and its idle timeout sits past the
+/// slowest cadence a session can run (section 159's `UltraLowData` quadruples the interval).
+/// Without them quinn's defaults apply — no keep-alive, a thirty-second idle timeout — and a
+/// quiet session whose beats are more than thirty seconds apart has its connection torn down
+/// by the transport between two perfectly punctual heartbeats.
+///
 /// # Errors
 ///
 /// Returns an error if the certificate cannot be minted or the socket cannot be bound — the
@@ -306,6 +315,7 @@ pub async fn spawn_listener(
     clock: Arc<dyn Clock>,
     shutdown: Shutdown,
     bind: &str,
+    heartbeat: Duration,
 ) -> anyhow::Result<SocketAddr> {
     let addr: SocketAddr = bind
         .parse()
@@ -318,11 +328,29 @@ pub async fn spawn_listener(
         rcgen::generate_simple_self_signed(vec!["migo-node".to_owned()]).map_err(|error| {
             anyhow::anyhow!("cannot mint the QUIC self-signed certificate: {error}")
         })?;
-    let server_config = quinn::ServerConfig::with_single_cert(
+    let mut server_config = quinn::ServerConfig::with_single_cert(
         vec![rustls::pki_types::CertificateDer::from(certificate.cert)],
         rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der()).into(),
     )
     .map_err(|error| anyhow::anyhow!("cannot build the QUIC server TLS config: {error}"))?;
+
+    // The keep-alive pair, sized by the heartbeat rather than quinn's defaults. The
+    // interval is half the heartbeat — the same cadence the session's own PING/PONG
+    // beats at — and the idle timeout must clear the widest gap between beats any
+    // session can produce: `UltraLowData` quadruples the advertised interval, so the
+    // timeout is that slowest beat plus the keep-alive's own margin. The session
+    // driver's two-heartbeat deadline (section 149) remains the real liveness bound;
+    // this only stops the transport from killing a quiet-but-healthy connection the
+    // session still believes in.
+    let keep_alive = heartbeat / 2;
+    let idle = heartbeat * 4 + keep_alive;
+    let idle_ms = u32::try_from(idle.as_millis()).unwrap_or(u32::MAX);
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(keep_alive));
+    transport.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
+        idle_ms,
+    ))));
+    server_config.transport_config(Arc::new(transport));
 
     let endpoint = quinn::Endpoint::server(server_config, addr)
         .map_err(|error| anyhow::anyhow!("cannot bind the QUIC listener to {bind}: {error}"))?;
