@@ -1,19 +1,25 @@
 /**
  * The workloads a run can drive, and the registry that names them.
  *
- * A {@link Scenario} is two phases. `prepare` runs once after every VU is connected, to wire up
- * shared state that steady-state work depends on — pairing conversation partners, subscribing the
- * receiving side. `workloads` then returns one paced loop per active VU; the runner races them all
- * against the deadline. Splitting it this way keeps setup cost (which is real, but one-time) out of
- * the steady-state latency numbers.
+ * A {@link Scenario} is two phases, plus an optional third. `prepare` runs once after every VU is
+ * connected, to wire up shared state that steady-state work depends on — pairing conversation
+ * partners, subscribing the receiving side. `workloads` then returns one paced loop per active
+ * VU; the runner races them all against the deadline. Splitting it this way keeps setup cost
+ * (which is real, but one-time) out of the steady-state latency numbers. `settle`, when a
+ * scenario defines one, runs after the deadline and before teardown, for the integrity verdicts
+ * that must wait for in-flight work to land.
+ *
+ * The section-172 full-scale scenarios (fan-out, calls, voice notes, the outage integrity run)
+ * live in {@link ./full-scale.js} and are registered here so this module stays the one catalogue
+ * every consumer names scenarios through.
  */
 
-import { ContentType, ConversationKind, PresenceState } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
+import { ContentType, PresenceState } from '@migo/sdk';
 
-import { runPool } from './pool.js';
+import { calls, fanout, outage, voiceNotes } from './full-scale.js';
+import { openDirectConversations, pairUp } from './pairs.js';
 import type { RunContext } from './run-context.js';
-import { classifyError, describeError } from './stats.js';
 import type { VirtualUser } from './virtual-user.js';
 
 /** A per-VU loop that runs, self-paced, until the run's deadline. */
@@ -26,10 +32,16 @@ export interface Scenario {
   readonly minVus: number;
   prepare(vus: readonly VirtualUser[], ctx: RunContext): Promise<void>;
   workloads(vus: readonly VirtualUser[]): Workload[];
+  /**
+   * Runs once after the workloads hit the deadline and before teardown — the phase where a
+   * scenario with an integrity contract waits for in-flight work to land (draining offline
+   * outboxes, letting fan-out deliveries arrive) and then records its verdict, because a
+   * verdict counted at the deadline itself would call messages still crossing the wire "lost".
+   * Optional: a scenario without a settle phase tears down the moment the deadline passes.
+   * Implementations must bound their own wall-clock.
+   */
+  settle?(vus: readonly VirtualUser[], ctx: RunContext): Promise<void>;
 }
-
-/** Conversations to open concurrently during messaging setup — enough to be quick, not a stampede. */
-const SETUP_CONCURRENCY = 16;
 
 /**
  * Hold N concurrent gateway sessions open for the duration.
@@ -91,30 +103,11 @@ const messaging: Scenario = {
   description: 'Pairs of VUs hold a direct E2E conversation; senders stream sealed messages.',
   minVus: 2,
   async prepare(vus, ctx) {
-    const pairs: Array<{ sender: VirtualUser; receiver: VirtualUser }> = [];
-    for (let i = 0; i + 1 < vus.length; i += 2) {
-      const sender = vus[i];
-      const receiver = vus[i + 1];
-      if (sender?.connected === true && receiver?.connected === true)
-        pairs.push({ sender, receiver });
-    }
+    const pairs = pairUp(vus);
     if (vus.filter((vu) => vu.connected).length % 2 === 1) {
       ctx.log.warn('an odd number of VUs connected; one has no partner and will stay idle');
     }
-
-    await runPool(pairs, SETUP_CONCURRENCY, async ({ sender, receiver }) => {
-      try {
-        const summary = await sender.client.startConversation(ConversationKind.Direct, [
-          receiver.client.accountId,
-        ]);
-        sender.conversationId = summary.conversationId;
-        sender.partner = receiver;
-        await receiver.client.watchConversation(summary.conversationId);
-      } catch (error) {
-        ctx.metrics.recordError('setup', classifyError(error), describeError(error));
-        ctx.log.debug(`pair ${sender.index}/${receiver.index} setup failed`);
-      }
-    });
+    await openDirectConversations(pairs, ctx);
   },
   workloads(vus) {
     // Narrow to senders that actually hold a conversation, capturing the id so the loop needs no
@@ -143,6 +136,12 @@ const REGISTRY = new Map<string, Scenario>([
   [connect.name, connect],
   [presence.name, presence],
   [messaging.name, messaging],
+  // The section-172 full-scale scenarios, kept in their own module so this file stays the
+  // catalogue of the shapes a CI runner drives and that one the shapes a nightly runner does.
+  [fanout.name, fanout],
+  [calls.name, calls],
+  [voiceNotes.name, voiceNotes],
+  [outage.name, outage],
 ]);
 
 export function getScenario(name: string): Scenario | undefined {

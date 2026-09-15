@@ -64,26 +64,35 @@ export class RunContext {
 
   /**
    * Await `operation`, recording its latency on success and its error class on failure. Never throws,
-   * so a single failed op cannot tear down the VU's loop. When the server asks for back-off (a
-   * {@link RemoteError} carrying `retryAfterMs`), waits it out — a load generator should apply
-   * pressure, not hammer a limiter that has already said "slow down".
+   * so a single failed op cannot tear down the VU's loop, and resolves to whether the op succeeded —
+   * a scenario that must account for exactly which sends landed (the integrity verdicts of section
+   * 172's full-scale scenarios) cannot tell from the outside, because a failure is tallied rather
+   * than rethrown. When the server asks for back-off (a {@link RemoteError} carrying
+   * `retryAfterMs`), waits it out — a load generator should apply pressure, not hammer a limiter
+   * that has already said "slow down".
    */
-  async measure(label: string, operation: () => Promise<unknown>): Promise<void> {
+  async measure(label: string, operation: () => Promise<unknown>): Promise<boolean> {
     const started = performance.now();
     try {
       await operation();
       this.metrics.latency(label).record(performance.now() - started);
       this.metrics.recordOk(label);
+      return true;
     } catch (error) {
       this.metrics.recordError(label, classifyError(error), describeError(error));
       if (error instanceof RemoteError && error.retryAfterMs !== undefined) {
         await this.#sleepBounded(error.retryAfterMs);
       }
+      return false;
     }
   }
 
-  /** Run `body` in a paced loop until the deadline, honouring {@link ratePerSec}. */
-  async paceLoop(body: () => Promise<void>): Promise<void> {
+  /**
+   * Run `body` in a paced loop until the deadline, honouring {@link ratePerSec}. The body's
+   * resolution value is ignored — it is usually a {@link RunContext.measure} call, whose verdict
+   * is already tallied inside.
+   */
+  async paceLoop(body: () => Promise<unknown>): Promise<void> {
     const started = performance.now();
     let iterations = 0;
     while (!this.deadlineReached()) {

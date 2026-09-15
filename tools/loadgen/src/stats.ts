@@ -27,6 +27,7 @@ export interface DigestSnapshot {
   readonly mean: number;
   readonly p50: number;
   readonly p90: number;
+  readonly p95: number;
   readonly p99: number;
 }
 
@@ -72,7 +73,7 @@ export class LatencyDigest {
 
   snapshot(): DigestSnapshot {
     if (this.#count === 0) {
-      return { count: 0, min: 0, max: 0, mean: 0, p50: 0, p90: 0, p99: 0 };
+      return { count: 0, min: 0, max: 0, mean: 0, p50: 0, p90: 0, p95: 0, p99: 0 };
     }
     const sorted = [...this.#reservoir].sort((a, b) => a - b);
     return {
@@ -82,6 +83,10 @@ export class LatencyDigest {
       mean: this.#sum / this.#count,
       p50: percentile(sorted, 0.5),
       p90: percentile(sorted, 0.9),
+      // Section 172's load metrics name p50, p95, and p99; p90 stays because the
+      // messaging budgets were written against it and a regression gate should not
+      // silently change the percentile it reads.
+      p95: percentile(sorted, 0.95),
       p99: percentile(sorted, 0.99),
     };
   }
