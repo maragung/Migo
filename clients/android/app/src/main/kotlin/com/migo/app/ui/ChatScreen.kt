@@ -56,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -2382,6 +2383,11 @@ data class GroupInviteCandidate(
  * The group's member sheet: the rename, the invite quick-pick, and the roster whose rows open the
  * member menu.
  *
+ * It covers the thread at the chat layout's full height, as the room's member sheet does: a roster
+ * is a list that scrolls, so the sheet is a full surface rather than a panel beside the thread,
+ * with its own controls — the close, the rename — pinned at the top while the roster takes every
+ * remaining line and scrolls beneath them.
+ *
  * # Who may do what
  *
  * A group is built by two founders -- the creator and the first person they named -- and the roster
@@ -2423,8 +2429,12 @@ private fun GroupMembersSheet(
     val candidates = invitees.filter { it.userId !in seated && it.userId != selfId }
     val now = System.currentTimeMillis()
 
+    // The sheet covers the chat's whole height, and the chat runs to the screen's edge — edge to
+    // edge, with only the composer lifting itself above the gesture bar — so the sheet's content
+    // stands above the bar the same way while the surface behind it still paints to the edge.
+    // Without this, the tail of a long roster scrolls its last rows behind the system's own bar.
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
             Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
@@ -2582,7 +2592,10 @@ private fun GroupMemberRow(
     val founder = canFounderAct(myRole, member.role, isSelf)
     val canVote = canVoteKickGroup(member.role, isSelf)
     val muted = member.mutedUntil != null && member.mutedUntil > now
-    val menuOpen = remember { mutableStateOf(false) }
+    // Saved rather than remembered: the sheet itself rides a rotation out (its open flag is the
+    // model's, and the roster's scroll place is the list's own saved state), so the menu a row
+    // had open should survive the turn too.
+    val menuOpen = rememberSaveable { mutableStateOf(false) }
     val sub = buildString {
         append(groupRoleLabel(member.role))
         if (member.departed) append(" · left")
@@ -2723,8 +2736,12 @@ private fun MembersSheet(
     // is not shows the short id the shell holds -- honest about the one fact it has.
     val rosterNames = roster?.associate { it.userId to it.name } ?: emptyMap()
 
+    // The same edge discipline the group's member sheet keeps: the sheet covers the chat's whole
+    // height and the chat runs to the screen's edge, so the content stands above the gesture bar
+    // while the surface behind it still paints to the edge — the roster's last row must be the
+    // row a person reads, not the row the system's bar hides.
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
             Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
@@ -2820,7 +2837,9 @@ private fun MemberRow(
 ) {
     val staff = !isSelf && myRole.wire >= RoomRole.Moderator.wire && member.role.wire < myRole.wire
     val canVote = !isSelf && member.role != RoomRole.Owner
-    val menuOpen = remember { mutableStateOf(false) }
+    // Saved rather than remembered, as the group roster's rows keep it: the sheet rides a rotation
+    // out, and the menu a row had open should ride it out too.
+    val menuOpen = rememberSaveable { mutableStateOf(false) }
 
     Row(
         modifier = Modifier
