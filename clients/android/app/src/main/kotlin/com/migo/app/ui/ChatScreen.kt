@@ -77,6 +77,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1212,6 +1213,11 @@ private fun GuessCard(
  * A long-press opens the quick-reaction bar — the reactions affordance, offered on every line
  * (one's own included, because reacting to one's own words is legal speech). A media or voice body
  * draws its [AttachmentBlock] under the line, in the same avatar-indented column the text sits in.
+ *
+ * The line's width is that column's weighted share of the row: the reserved avatar column and the
+ * row's padding are the only things taken off the screen's width, so the body wraps at the layout's
+ * own edge — and an unbroken run a word-break cannot split (a URL, a base64 blob) is force-broken
+ * there by the text layout, never drawn past it.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1624,6 +1630,10 @@ private fun DocumentRow(
             Text(text = "📄", fontSize = 20.sp)
             Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
+                // One line, and ended by an ellipsis rather than the default hard cut: a file
+                // name chopped mid-character is a name the reader cannot match against what the
+                // sender named, and the row owes a too-long name the same honest ending the list
+                // rows give a too-long title.
                 Text(
                     text = attachment.caption ?: "Attachment",
                     style = MaterialTheme.typography.bodyMedium,
@@ -1633,6 +1643,7 @@ private fun DocumentRow(
                         MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = when (mediaObject) {
@@ -1837,6 +1848,7 @@ private fun VoiceBubble(
                         else -> MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 if (total > 0 && !failed && mediaObject !is MediaObject.Failed) {
                     val played = (positionMs.coerceIn(0, total)).toFloat() / total.toFloat()
@@ -2533,6 +2545,7 @@ private fun GroupInviteRow(name: String, avatarBytes: ByteArray?, busy: Boolean,
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         if (busy) {
@@ -2595,6 +2608,7 @@ private fun GroupMemberRow(
                     MaterialTheme.colorScheme.onSurface
                 },
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = sub,
@@ -2823,6 +2837,7 @@ private fun MemberRow(
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = roleLabel(member.role),
@@ -2909,6 +2924,7 @@ private fun MutedRow(name: String, avatarBytes: ByteArray?, acting: Boolean, onU
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onUnmute, enabled = !acting) {
