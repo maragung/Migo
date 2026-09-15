@@ -172,6 +172,33 @@ class GroupCrypto(
     }
 
     /**
+     * Rotates the outbound chain up to a membership event's [targetEpoch], never below what is held.
+     *
+     * Section 163's member events carry the membership generation the change produced, so every
+     * remaining client rotates to the *same* number rather than each inventing its own. The two
+     * guards are what make at-least-once delivery harmless:
+     *
+     *  - a target at or below the held epoch is a no-op, so a redelivered event — or one that lost
+     *    a race to a local rotation — cannot mint a second chain at an epoch a receiver's adopt
+     *    would refuse;
+     *  - a conversation with no chain yet gains its baseline chain (epoch 1) and then rotates up to
+     *    the target, so a member who has never sent still distributes a chain of the right
+     *    generation.
+     */
+    fun rotateTo(conversationId: Id, targetEpoch: Long) {
+        lock.withLock {
+            var current = sendingOrNull(conversationId)?.epoch ?: 0L
+            if (current == 0L && targetEpoch > 0L) {
+                current = ensureSendingLocked(conversationId).epoch
+            }
+            while (current < targetEpoch) {
+                rotateLocked(conversationId)
+                current += 1L
+            }
+        }
+    }
+
+    /**
      * Accepts a sender-key distribution from a remote device, so its later messages can be opened.
      *
      * The first distribution from a sender is the baseline every later one is measured against. A

@@ -46,9 +46,11 @@ const val GROUP_CALL_JOIN_FAILED: String = "Could not join the group call."
  * join's offer is the sealed placeholder the protocol defines for exactly that state: a genuine
  * sealed envelope (an empty-sdp offer, sealed under a per-call key with the call id as associated
  * data), so the join is end-to-end opaque to the server from the first frame. The key is minted
- * here and kept for the call's life; the frame-key agreement between participants -- how every
- * seat ends up holding the same call key -- is the piece that is still specification (migo.md
- * section 165), which is why the roster below has no media to attach to it.
+ * here and kept for the call's life. The frame-key agreement between participants is the core's
+ * own domain now (section 163): the key minted here becomes the call's epoch-0 frame key, and the
+ * manager below fires the domain's triggers on roster movement -- every join, departure and
+ * mid-call ask re-keys the call exactly as the section requires -- which is also why the roster
+ * has no media to attach to it yet: the keys are agreed before the plane that would use them.
  *
  * # The join's two halves
  *
@@ -99,11 +101,45 @@ class GroupCallManager(
      * Writes the tracked call and its state together. A local read of the old call first, the same
      * discipline [CallManager] keeps: `active` is a volatile another thread may retire between a
      * check and a use, and a handler that read it twice could fold an event into a call that is
-     * no longer tracked.
+     * no longer tracked. A call that stops being live here -- cleared, or given its ending note --
+     * also drops its frame key: a key for a seat this screen no longer holds is key material with
+     * nothing left to seal.
      */
     private fun setActive(next: ActiveGroupCall?) {
+        val previous = active
+        when {
+            next == null -> if (previous != null) forgetFrameKey(previous.callId)
+            next.note != null -> forgetFrameKey(next.callId)
+        }
         active = next
         _state.update { it.copy(call = next, error = if (next == null) null else it.error) }
+    }
+
+    /** Drops the frame key of a call this screen is done with, whatever the session's own state. */
+    private fun forgetFrameKey(callId: Id) {
+        try {
+            client.groupCallKeys.forget(callId)
+        } catch (_: Exception) {
+            // The session may already be closing; the store is cleared at disconnect.
+        }
+    }
+
+    /**
+     * Runs one frame-key trigger off the session's scope, best effort: the trigger's own failure
+     * (a rotation frame the socket could not carry, an ask that could not leave) never takes the
+     * roster screen with it, and each trigger is idempotent enough to be re-fired by the next
+     * event of its kind.
+     */
+    private fun launchFrameKeyTrigger(trigger: suspend () -> Unit) {
+        scope.launch {
+            try {
+                trigger()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // See the doc: the roster is the screen's truth, the key channel is the core's.
+            }
+        }
     }
 
     // --- lifecycle ---
@@ -179,6 +215,10 @@ class GroupCallManager(
                 ),
             )
             try {
+                // The minted key is seated as the call's epoch-0 frame key before the join frame
+                // can leave: the roster it answers with may already carry other seats, and the
+                // triggers below need the state standing by the time it lands.
+                client.groupCallKeys.seated(callId, conversationId, callKey)
                 client.groupCalls.join(
                     conversationId,
                     CallMediaKind.Audio,
@@ -259,6 +299,17 @@ class GroupCallManager(
                 joinedAt = call.joinedAt ?: now(),
             ),
         )
+        // The frame-key trigger (section 163): a snapshot that shows other seats means this device
+        // joined a call people are already in. A device holding the call's key is seated among
+        // them and rotates -- its own arrival changed the membership; a device holding none is the
+        // mid-call joiner, and asks a seated participant for the running key instead.
+        if (roster.participants.any { it.userId != accountId }) {
+            if (client.groupCallKeys.holdsKey(call.callId)) {
+                launchFrameKeyTrigger { client.groupCallKeys.rotateForMembership(call.callId) }
+            } else {
+                launchFrameKeyTrigger { client.groupCallKeys.requestJoinKey(roster) }
+            }
+        }
     }
 
     /**
@@ -280,6 +331,10 @@ class GroupCallManager(
                 participantCount = event.participantCount,
             ),
         )
+        // The join changed the call's membership, so the frame key rotates (section 163). This
+        // connection never hears its own join announced -- the server publishes it excluding the
+        // origin session -- so a rotation here is always for somebody else's arrival.
+        launchFrameKeyTrigger { client.groupCallKeys.rotateForMembership(call.callId) }
     }
 
     /**
@@ -312,6 +367,11 @@ class GroupCallManager(
                 participantCount = event.participantCount,
             ),
         )
+        // A departure changed the call's membership too, so the frame key rotates here as well
+        // (section 163) -- for the retirement the rotation is moot (nobody is left to adopt it,
+        // and the store is dropped with the note), but for a call that simply got smaller it is
+        // the whole point: what follows the departure must not open for the one who left.
+        launchFrameKeyTrigger { client.groupCallKeys.rotateForMembership(call.callId) }
     }
 
     private fun now(): Long = System.currentTimeMillis()

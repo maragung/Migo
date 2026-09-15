@@ -3,6 +3,7 @@ package com.migo.core
 import com.migo.core.account.DeviceCredential
 import com.migo.core.account.IdentityKey
 import com.migo.core.crypto.PrekeyBundle
+import com.migo.core.domain.CallKeyStore
 import com.migo.core.domain.CallsDomain
 import com.migo.core.domain.ConversationsDomain
 import com.migo.core.domain.DeviceAddress
@@ -12,6 +13,7 @@ import com.migo.core.domain.EventErrorHandler
 import com.migo.core.domain.GamesDomain
 import com.migo.core.domain.GapFiller
 import com.migo.core.domain.GroupCallJoinedEvent
+import com.migo.core.domain.GroupCallKeysDomain
 import com.migo.core.domain.GroupCallLeftEvent
 import com.migo.core.domain.GroupCallRoster
 import com.migo.core.domain.GroupCallsDomain
@@ -355,6 +357,13 @@ class MigoClient private constructor(
     private val groupCrypto = GroupCrypto(keyStore, options.groupPersistence)
 
     /**
+     * The group-call frame keys. Built once and shared by every connection for the same reason the
+     * crypto layers are: a call keeps running across a dropped socket, and a frame key that died
+     * with the connection is a call that has silently stopped decrypting when it resumes.
+     */
+    private val callKeys = CallKeyStore()
+
+    /**
      * The contiguous-sequence ledger, built once for the same reason the crypto layers are: a
      * reconnect must not forget what is held. Every per-connection [MessagingDomain] advances this
      * same instance, so the watermark a reset resync reads — section 158's local `last_seq` —
@@ -509,6 +518,12 @@ class MigoClient private constructor(
      * announcements a roster UI renders.
      */
     val groupCalls: GroupCallsDomain get() = requireConnected().groupCalls
+
+    /**
+     * The frame-key plane of the live session: membership-triggered rotations of a seated group
+     * call's media key, and the mid-call joiner's ask-and-answer for the running key.
+     */
+    val groupCallKeys: GroupCallKeysDomain get() = requireConnected().groupCallKeys
 
     /** Friendship changes, bridged across reconnects like every application-facing stream. */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
@@ -1390,6 +1405,17 @@ class MigoClient private constructor(
         return devices
     }
 
+    /**
+     * Which account a device belongs to, answered from the same audience a distribution seals for.
+     *
+     * The relayed `GROUP_KEY_DISTRIBUTE` names its distributor by device only, and this lookup is
+     * what lets the pairwise open name the sender honestly. It is a walk of the audience rather
+     * than a reverse index because the question is asked once per inbound distribution, not per
+     * message — the cost is the same membership read [recipientDevices] already makes.
+     */
+    override suspend fun accountOfDevice(conversationId: Id, deviceId: Id): Id? =
+        recipientDevices(conversationId).firstOrNull { it.deviceId == deviceId }?.userId
+
     // --- PeerBundleSource ---
 
     /**
@@ -1604,6 +1630,7 @@ class MigoClient private constructor(
             messaging = MessagingDomain(
                 rpc,
                 scope,
+                deviceId,
                 sessionCrypto,
                 groupCrypto,
                 this,
@@ -1623,6 +1650,15 @@ class MigoClient private constructor(
             media = MediaDomain(rpc, rest),
             calls = CallsDomain(rpc, deviceId, options.onEventError),
             groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
+            groupCallKeys = GroupCallKeysDomain(
+                rpc,
+                deviceId,
+                scope,
+                callKeys,
+                sessionCrypto,
+                this,
+                options.onEventError,
+            ),
         )
         session.startAll()
         bridge(session)
@@ -1677,7 +1713,7 @@ class MigoClient private constructor(
     }
 
     /**
-     * Applies one membership movement onto the membership cache.
+     * Applies one membership movement onto the membership cache, then fires section 163's trigger.
      *
      * A join adds the account; a leave, kick, or ban removes it. Everything else (a connect or
      * disconnect is a *presence* fact, not a membership one) leaves the cache alone. An
@@ -1686,15 +1722,23 @@ class MigoClient private constructor(
      * unknown conversation is ignored rather than created: the event for a conversation this
      * client has never loaded carries no membership to patch, and the roster read will find
      * the truth.
+     *
+     * The trigger runs after the patch, so the redistribution's audience is the group as it
+     * stands *after* the movement: rotate this device's sender key to the generation the event
+     * stamped, then hand every remaining member device the new chain over the dedicated relay.
+     * A departure naming *this* account has nothing left to re-key for -- the account is out of
+     * the group and the server would refuse the frames -- so it patches the cache and stops
+     * there. A join also invalidates the joined account's cached device list, because a stale
+     * list is what would leave a new device out of the audience the redistribution seals for.
      */
     private suspend fun applyMemberEvent(event: ConversationMemberEvent) {
+        val joined = event.change == MemberChange.Joined
+        val departed = event.change == MemberChange.Left ||
+            event.change == MemberChange.Kicked ||
+            event.change == MemberChange.Banned
+        if (!joined && !departed) return
         cacheLock.withLock {
             val cached = members[event.conversationId] ?: return
-            val joined = event.change == MemberChange.Joined
-            val departed = event.change == MemberChange.Left ||
-                event.change == MemberChange.Kicked ||
-                event.change == MemberChange.Banned
-            if (!joined && !departed) return
             val held = event.userId in cached.ids
             when {
                 joined && !held -> members[event.conversationId] =
@@ -1703,6 +1747,12 @@ class MigoClient private constructor(
                     MemberCache(cached.ids - event.userId, cached.complete)
             }
         }
+        if (joined) {
+            invalidateDevices(event.userId)
+        }
+        val session = requireConnected()
+        if (departed && event.userId == session.accountId) return
+        session.messaging.redistributeOnMembership(event.conversationId, event.groupKeyEpoch)
     }
 
     /**
@@ -1912,6 +1962,7 @@ private class Session(
     val media: MediaDomain,
     val calls: CallsDomain,
     val groupCalls: GroupCallsDomain,
+    val groupCallKeys: GroupCallKeysDomain,
 ) {
     /** Registers every inbound handler. Called before the pump starts. */
     fun startAll() {
@@ -1926,6 +1977,7 @@ private class Session(
         social.start()
         calls.start()
         groupCalls.start()
+        groupCallKeys.start()
     }
 
     /** Unregisters them. The stateless domains have nothing to stop. */
@@ -1941,6 +1993,7 @@ private class Session(
         social.stop()
         calls.stop()
         groupCalls.stop()
+        groupCallKeys.stop()
     }
 }
 

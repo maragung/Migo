@@ -2,6 +2,7 @@ package com.migo.core.domain
 
 import com.migo.core.crypto.Content
 import com.migo.core.protocol.Acknowledged
+import com.migo.core.protocol.GroupKeyDistribution
 import com.migo.core.protocol.MessageAccepted
 import com.migo.core.protocol.MessageDelete
 import com.migo.core.protocol.MessageEdit
@@ -129,6 +130,17 @@ class DeviceAddress(
 interface DeviceDirectory {
     /** Every device that must receive this conversation's sender-key distributions. */
     suspend fun recipientDevices(conversationId: Id): List<DeviceAddress>
+
+    /**
+     * Which account a device id belongs to, inside one conversation, or null when unknown.
+     *
+     * A relayed `GROUP_KEY_DISTRIBUTE` names its distributor by *device* only, while the pairwise
+     * open below is keyed by conversation and device — the account slot exists in that signature
+     * for the caller's own bookkeeping and is never read cryptographically (the sender's identity
+     * comes from the envelope's own X3DH material), so this lookup answers the slot honestly
+     * rather than letting a caller guess.
+     */
+    suspend fun accountOfDevice(conversationId: Id, deviceId: Id): Id?
 }
 
 /**
@@ -234,6 +246,8 @@ class MessagingDomain(
      * problem: the crypto layers would still be advancing ratchets for an account that is gone.
      */
     private val scope: CoroutineScope,
+    /** This session's own device, the `from_device` a distributed relay stamps and the `to_device` filter. */
+    private val deviceId: Id,
     private val sessionCrypto: SessionCrypto,
     private val groupCrypto: GroupCrypto,
     private val directory: DeviceDirectory,
@@ -283,6 +297,14 @@ class MessagingDomain(
             rpc.on(Op.MESSAGE_RECEIPT, { r -> MessageReceipt.decode(r) }) { receipt, _ ->
                 // Nothing to decrypt: a receipt is a sequence watermark, so it needs no coroutine.
                 receiptListeners.deliver(receipt)
+            },
+            // The section 163 relay: a peer's membership-triggered redistribution arrives on this
+            // device's own user topic, outside the ordered message stream, so it takes its own
+            // subscription rather than riding the pending-buffer path. One sealed copy per device;
+            // a copy addressed to a sibling device of ours is not ours to open and fails the open
+            // below, exactly as a sibling's key-exchange message does.
+            rpc.on(Op.GROUP_KEY_DISTRIBUTE, { r -> GroupKeyDistribution.decode(r) }) { event, _ ->
+                scope.launch(start = CoroutineStart.UNDISPATCHED) { handleGroupKeyDistribution(event) }
             },
         )
     }
@@ -455,6 +477,111 @@ class MessagingDomain(
                 { r -> MessageAccepted.decode(r) },
             )
             groupCrypto.markDistributed(conversationId, device.deviceId)
+        }
+    }
+
+    /**
+     * The section 163 membership trigger: rotate this device's sender key to the generation the
+     * member event named, then hand every member device the new distribution over the dedicated
+     * relay.
+     *
+     * Every remaining member runs the same trigger off the same event, so each sender re-keys
+     * their *own* chain — a group has one chain per sending device, and a membership change retires
+     * all of them. A null [groupKeyEpoch] is an event this server generation did not stamp (a
+     * room's member movement, which predates the field): the rotation falls back to a plain
+     * epoch bump, the same rule the UI layer applied before the trigger moved into the core.
+     *
+     * Idempotency is the whole design: [GroupCrypto.rotateTo] no-ops on a target at or below the
+     * held epoch, and [GroupCrypto.needsDistribution] answers per device, so a redelivered event
+     * sends nothing the second time.
+     */
+    suspend fun redistributeOnMembership(conversationId: Id, groupKeyEpoch: Long?) {
+        if (groupKeyEpoch != null) {
+            groupCrypto.rotateTo(conversationId, groupKeyEpoch)
+        } else {
+            groupCrypto.rotate(conversationId)
+        }
+        distributeGroupKeys(conversationId)
+    }
+
+    /**
+     * Sends the current chain's distribution to every member device that still needs it, one
+     * `GROUP_KEY_DISTRIBUTE` per device.
+     *
+     * The relay frame differs from the message-borne distribution ([distribute]) in exactly one
+     * way: the payload is the *raw* serialised distribution, sealed for the target device's
+     * pairwise session with this one — no control-event wrapper, because the frame is already
+     * addressed and typed on the wire. The server routes each copy to the named device's own user
+     * topic and never opens it; a distribution aimed at a member a removal already dropped is
+     * refused by the server, unread.
+     *
+     * The audience is the membership as it stands *after* the movement — the caller rotated
+     * because somebody left, and the departed are simply absent from [DeviceDirectory.recipientDevices]
+     * once the membership cache is patched, which is why the cache patch runs before this in the
+     * client's own member-event handling.
+     */
+    suspend fun distributeGroupKeys(conversationId: Id) {
+        for (device in directory.recipientDevices(conversationId)) {
+            if (!groupCrypto.needsDistribution(conversationId, device.deviceId)) continue
+
+            // Raw distribution bytes, sealed pairwise and zeroed after — the same discipline
+            // [distribute] keeps for the copy this method owns.
+            val distribution = groupCrypto.distributionFor(conversationId)
+            val sealed = try {
+                sessionCrypto.seal(conversationId, device.userId, device.deviceId, distribution)
+            } finally {
+                distribution.fill(0)
+            }
+
+            val request = GroupKeyDistribution(
+                conversationId = conversationId,
+                fromDevice = deviceId,
+                toAccount = device.userId,
+                toDevice = device.deviceId,
+                sealedDistribution = sealed.envelope,
+            )
+            rpc.call(
+                Op.GROUP_KEY_DISTRIBUTE,
+                { w -> request.encode(w) },
+                { r -> Acknowledged.decode(r) },
+            )
+            groupCrypto.markDistributed(conversationId, device.deviceId)
+        }
+    }
+
+    /**
+     * Handles one relayed distribution addressed to this device.
+     *
+     * A failed open is swallowed for the same reason [onKeyExchange] swallows one, and more often:
+     * every sibling device of ours receives its own copy, so a copy that does not open here is the
+     * expected case for every device but the addressee. The accepted distribution feeds the pending
+     * buffer immediately, under the same [eventLock] the message path serialises on, so content
+     * that arrived ahead of this key is retried before anything else moves.
+     */
+    private suspend fun handleGroupKeyDistribution(event: GroupKeyDistribution) {
+        if (event.toDevice != deviceId) return
+        eventLock.withLock {
+            val senderAccount = directory.accountOfDevice(event.conversationId, event.fromDevice)
+                ?: return@withLock
+            val distribution = try {
+                sessionCrypto.open(
+                    event.conversationId,
+                    senderAccount,
+                    event.fromDevice,
+                    event.sealedDistribution,
+                )
+            } catch (_: Throwable) {
+                return@withLock
+            }
+            try {
+                groupCrypto.acceptDistribution(event.conversationId, event.fromDevice, distribution)
+            } catch (cause: Throwable) {
+                onEventError?.invoke(Op.GROUP_KEY_DISTRIBUTE, cause)
+                return@withLock
+            } finally {
+                distribution.fill(0)
+            }
+            drainPending(event.conversationId, event.fromDevice)
         }
     }
 
