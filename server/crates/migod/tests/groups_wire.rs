@@ -762,6 +762,35 @@ async fn a_group_invite_notifies_every_account_the_invite_seated() {
     let mut second_session = LiveSession::connect(addr, &second).await;
     let mut outsider_session = LiveSession::connect(addr, &outsider).await;
 
+    // Default message privacy accepts friends only, so the founder is made
+    // friends with every account the wire calls below will seat — through the
+    // domain service, as the dispatcher tests do it, because the wire path
+    // under test here is the bell, not the friendship. The outsider is a
+    // friend who is never invited to the group: friendship alone must not
+    // ring a bell.
+    let friender = migo_social::Caller::new(
+        founder.account_id,
+        founder.device_id,
+        migo_ratelimit::TrustTier::Established,
+        app.clock.now(),
+    );
+    for member in [&first, &second, &outsider] {
+        let accepter = migo_social::Caller::new(
+            member.account_id,
+            member.device_id,
+            migo_ratelimit::TrustTier::Established,
+            app.clock.now(),
+        );
+        app.social
+            .request_friend(&friender, member.account_id)
+            .await
+            .expect("a friend request between fresh accounts must be taken");
+        app.social
+            .respond_friend(&accepter, founder.account_id, true)
+            .await
+            .expect("the friend request must be accepted");
+    }
+
     // A group whose first member arrives through the create call. The create is
     // not the invite: no member it seats is owed a bell.
     let summary: migo_protocol::ConversationSummary = founder_session
