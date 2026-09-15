@@ -3064,8 +3064,9 @@ fn thread_header(
             }
             // The peer's own row of verdicts, on a direct chat only: the personal mute the
             // web profile modal offers, and the block that ends the conversation. The mute
-            // needs the muted set to say which way its switch points; the block is set-only
-            // on the wire, so it states what it does and never offers an undo.
+            // needs the muted set to say which way its switch points; the block states what
+            // it does, and its lift lives in the Friends pane that owns every verdict about
+            // a person.
             if !conversation.is_group() && conversation.room_id.is_none() {
                 if let Some(me) = context.account.map(|account| account.account_id) {
                     if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
@@ -3099,7 +3100,7 @@ fn thread_header(
                                 .stroke(egui::Stroke::NONE),
                             )
                             .on_hover_text(
-                                "End the friendship and stop contact. There is no unblock.",
+                                "End the friendship and stop contact. A block is lifted from the Friends tab.",
                             )
                             .clicked()
                         {
