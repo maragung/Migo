@@ -58,7 +58,11 @@ const FRIEND_EVENT_DEBOUNCE_MS = 300;
  * two reads happen together on every refresh.
  *
  * A friend row is a door: clicking it opens that person's profile modal, where blocking (and
- * messaging) live — the list rows stay clean of per-row block controls on purpose.
+ * messaging) live — the list rows stay clean of per-row block controls on purpose. Un-friending
+ * is the friendship's own affair, not the person's, so it is the one control the row itself
+ * carries — behind a confirm, since one tap ends the friendship on both sides at once — and the
+ * Blocked section's rows carry their own Unblock beside the door, the same bargain the Muted
+ * section's Unmute makes.
  */
 export function FriendsPanel({
   onOpenConversation,
@@ -274,6 +278,41 @@ export function FriendsPanel({
     [setMuted],
   );
 
+  // Unfriend from a friend row: a quiet exit on the wire (the other party is told nothing beyond
+  // the bare "removed" hint), so the confirm says so — the friendship ends on both sides at once
+  // and rebuilding it means asking all over again.
+  const removeFriend = useCallback(
+    async (userId: Id): Promise<void> => {
+      if (!client) {
+        return;
+      }
+      const name = profiles.get(userId)?.displayName ?? 'Someone';
+      if (!window.confirm(`Remove ${name} from your friends? They will not be told.`)) {
+        return;
+      }
+      await act(userId, () => client.social.removeFriend(userId));
+    },
+    // `act` is a stable-shape closure over state setters only; the client and the profile cache
+    // (the confirm's name for the person) are the live dependencies.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, profiles],
+  );
+
+  // Unblock from the Blocked section: the wire lifts the block and restores nothing it tore down
+  // (the friendship and the follows stay gone), so the row's button is the whole act — no confirm,
+  // because unblocking takes nothing away from the person pressing it.
+  const unblock = useCallback(
+    async (userId: Id): Promise<void> => {
+      if (!client) {
+        return;
+      }
+      await act(userId, () => client.social.unblockUser(userId));
+    },
+    // `act` is a stable-shape closure over state setters only; the client is the live dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client],
+  );
+
   return (
     <div className="panel panel-flush">
       {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
@@ -352,28 +391,15 @@ export function FriendsPanel({
         <>
           {/* The contact list leads: friends, presence-first, before anything administrative.
               No heading of its own — the panel title is the list's name. */}
-          <section className="panel-section" aria-label="Your friends">
-            {friends.length === 0 ? (
-              <p className="muted">No friends yet. Add someone from the suggestions below.</p>
-            ) : (
-              friends.map((entry) => (
-                <PersonRow
-                  key={entry.userId}
-                  id={entry.userId}
-                  name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
-                  username={profiles.get(entry.userId)?.username}
-                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
-                  note={
-                    profiles.get(entry.userId)?.customStatus ??
-                    presenceLabel(presence.get(entry.userId))
-                  }
-                  presence={presence.get(entry.userId)}
-                  onSelect={() => setSelected(entry.userId)}
-                  onMessage={() => void startDirect(entry.userId)}
-                />
-              ))
-            )}
-          </section>
+          <FriendsSection
+            entries={friends}
+            profiles={profiles}
+            presence={presence}
+            busy={busy}
+            onSelect={(userId) => setSelected(userId)}
+            onMessage={(userId) => void startDirect(userId)}
+            onRemove={(userId) => void removeFriend(userId)}
+          />
 
           <MutedSection
             entries={mutedEntries}
@@ -472,7 +498,9 @@ export function FriendsPanel({
         <BlockedSection
           entries={blocked}
           profiles={profiles}
+          busy={busy}
           onSelect={(userId) => setSelected(userId)}
+          onUnblock={(userId) => void unblock(userId)}
         />
       ) : (
         <section className="panel-section" aria-label="Suggested friends">
@@ -524,6 +552,78 @@ export function FriendsPanel({
 /** The mutual-friends line under a suggested person, omitted when the count is zero. */
 function mutualNote(person: SuggestedUser): string | undefined {
   return person.mutualFriends > 0 ? `${person.mutualFriends} mutual friends` : undefined;
+}
+
+/**
+ * The friends list: the graph's Friend-kind rows, presence-first, each row a door to the person's
+ * profile with the friendship's own exit beside it.
+ *
+ * Exported presentational over plain data, so the list's rules — an honest empty state, one row
+ * per friend, every row opening the profile, the Remove control on every row and disabled only
+ * while its own wire call flies — are testable without a live client, the same bargain the other
+ * sections make.
+ */
+export function FriendsSection({
+  entries,
+  profiles,
+  presence,
+  busy,
+  onSelect,
+  onMessage,
+  onRemove,
+}: {
+  entries: RelationshipEntry[];
+  /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
+  profiles: ReadonlyMap<
+    Id,
+    { displayName: string; username?: string; avatarUrl?: string; customStatus?: string }
+  >;
+  /** Live presence by id, when the caller watches it; absent leaves the rows ambient-free. */
+  presence?: ReadonlyMap<Id, PresenceState>;
+  /** The ids with a removal in flight, so a row's button can disable itself. */
+  busy?: ReadonlySet<Id>;
+  onSelect: (userId: Id) => void;
+  onMessage: (userId: Id) => void;
+  /** Ends the friendship; the caller owns the confirm, since it owns the person's name. */
+  onRemove: (userId: Id) => void;
+}): ReactNode {
+  return (
+    <section className="panel-section" aria-label="Your friends">
+      {entries.length === 0 ? (
+        <p className="muted">No friends yet. Add someone from the suggestions below.</p>
+      ) : (
+        entries.map((entry) => (
+          <PersonRow
+            key={entry.userId}
+            id={entry.userId}
+            name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+            username={profiles.get(entry.userId)?.username}
+            avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            note={
+              profiles.get(entry.userId)?.customStatus ?? presenceLabel(presence?.get(entry.userId))
+            }
+            presence={presence?.get(entry.userId)}
+            onSelect={() => onSelect(entry.userId)}
+            onMessage={() => onMessage(entry.userId)}
+            actions={
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy?.has(entry.userId) ?? false}
+                onClick={(event) => {
+                  // The row is a door to the profile; the button is not — stop the row's open.
+                  event.stopPropagation();
+                  onRemove(entry.userId);
+                }}
+              >
+                Remove friend
+              </button>
+            }
+          />
+        ))
+      )}
+    </section>
+  );
 }
 
 /**
@@ -629,20 +729,26 @@ export function FriendsSearch({
 
 /**
  * The Blocked section: the block list the whole-graph read surfaced, each row a door to the
- * person's profile (where the block state is stated).
+ * person's profile with an Unblock button beside it.
  *
  * Exported presentational over plain data, so the section's rules — an honest empty state, one
- * row per blocked account, every row opening the profile — are testable without a live client.
+ * row per blocked account, every row opening the profile, the unblock disabled only while its
+ * own wire call flies — are testable without a live client.
  */
 export function BlockedSection({
   entries,
   profiles,
+  busy,
   onSelect,
+  onUnblock,
 }: {
   entries: RelationshipEntry[];
   /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
   profiles: ReadonlyMap<Id, { displayName: string; username?: string; avatarUrl?: string }>;
+  /** The ids with an unblock in flight, so a row's button can disable itself. */
+  busy?: ReadonlySet<Id>;
   onSelect: (userId: Id) => void;
+  onUnblock: (userId: Id) => void;
 }): ReactNode {
   return (
     <section className="panel-section" aria-label="Blocked accounts">
@@ -659,6 +765,20 @@ export function BlockedSection({
             avatarUrl={profiles.get(entry.userId)?.avatarUrl}
             note="blocked"
             onSelect={() => onSelect(entry.userId)}
+            actions={
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy?.has(entry.userId) ?? false}
+                onClick={(event) => {
+                  // The row is a door to the profile; the button is not — stop the row's open.
+                  event.stopPropagation();
+                  onUnblock(entry.userId);
+                }}
+              >
+                Unblock
+              </button>
+            }
           />
         ))
       )}
@@ -670,10 +790,10 @@ export function BlockedSection({
  * The Muted section: the personal-mute set the provider owns, each row a door to the person's
  * profile and an Unmute button beside it.
  *
- * Mirrors {@link BlockedSection} — exported presentational over plain data — but a mute, unlike a
- * block, has a one-tap undo on the wire, so the row carries it. The note names what a mute does and
- * does not do, since it is the gentler cousin of a block: room chatter hidden, direct messages left
- * alone.
+ * Mirrors {@link BlockedSection} — exported presentational over plain data — and carries its
+ * edge's one-tap undo the same way the Blocked rows now carry Unblock. The note names what a mute
+ * does and does not do, since it is the gentler cousin of a block: room chatter hidden, direct
+ * messages left alone.
  */
 export function MutedSection({
   entries,

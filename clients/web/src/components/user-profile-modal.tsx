@@ -9,8 +9,9 @@
  * beside the profile because the wire keeps them on a different service; a failure of either is
  * degraded, not fatal — the card shows the profile with the standing lines simply absent.
  *
- * Blocking is one-sided and set-only on the wire ({@link SocialDomain.blockUser}; there is no
- * unblock call), so the control reads "Block" until it succeeds and "Blocked" (disabled) after.
+ * Blocking is one-sided and set-only here ({@link SocialDomain.blockUser}); the unblock call
+ * ({@link SocialDomain.unblockUser}) belongs to the Friends tab's Blocked section, so this
+ * control reads "Block" until it succeeds and "Blocked" (disabled) after.
  * Whether the person is already blocked stays the opener's fact to pass in — the block edges are
  * only half of the graph the modal reads for its social line, and openers that hold the whole
  * graph re-read it on their own block handler anyway.

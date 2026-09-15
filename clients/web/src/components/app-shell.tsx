@@ -710,7 +710,7 @@ export function AppShell(): ReactNode {
     }
     switch (w.kind) {
       case 'notifications':
-        return <NotificationsPanel />;
+        return <NotificationsPanel onOpenConversation={openChat} />;
       case 'search':
         return <SearchPanel onOpenConversation={openChat} />;
       case 'wallet':
