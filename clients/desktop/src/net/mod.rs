@@ -39,10 +39,11 @@ pub(crate) mod room_bridge;
 pub mod server_probe;
 pub mod tcp;
 pub(crate) mod voice_draft;
+pub(crate) mod voice_listened;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +73,7 @@ use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::quic::QuicGateway;
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Grant, Rest, RestError};
 use crate::net::tcp::TcpGateway;
+use crate::settings::VoiceSpeed;
 use crate::vault::{self, SavedSession, TxRecord};
 
 /// When to warn that the one-time prekey pool is running down.
@@ -644,6 +646,19 @@ pub enum Command {
     PlayVoiceNote { media_id: Id },
     /// Stop whatever voice note is playing.
     StopVoiceNote,
+    /// Set the voice-note playback speed (§179): 1x, 1.5x, or 2x, done entirely in the
+    /// client — the media is never asked for again. A note playing now keeps its position
+    /// and only changes pace; a note started later begins at this speed.
+    SetVoiceSpeed { speed: VoiceSpeed },
+    /// Mark one voice note listened or unlistened on this device, by hand. §179's
+    /// receiver-local rule: nothing is sent, the sender is never told, and an unmark does
+    /// not unsay a receipt that already went.
+    SetVoiceNoteListened { media_id: Id, listened: bool },
+    /// Internal: a playback pump crossed the listened threshold — the note has been heard
+    /// to (near) its end. Sent by the playback thread into this worker's own loop, the same
+    /// way [`Command::VoiceNoteEnded`] is, because the marks belong to the loop, not the
+    /// thread.
+    VoiceNoteHeard { media_id: Id },
     /// Internal: a voice note finished playing on its own — the pump ran out of samples.
     /// Sent by the playback thread into this worker's own loop, the same way a chain
     /// tracker's ending is, because the playing state belongs to the loop, not the thread.
@@ -1126,6 +1141,14 @@ pub enum Event {
     VoicePlaying { media_id: Id },
     /// A voice note stopped playing — the stop button, or the last sample itself.
     VoiceStopped { media_id: Id },
+    /// The listened marks for the account that just signed in, read back from this device's
+    /// store: every voice note this account has heard to (near) its end or marked by hand.
+    /// The whole set at once, so a fresh sign-in replaces whatever a previous account left
+    /// on screen. §179's receiver-local state — nothing behind this event was ever sent.
+    VoiceNotesListened { media_ids: Vec<Id> },
+    /// One voice note became listened — played through to (near) its end. The mark is this
+    /// device's own memory, and the sender is not told.
+    VoiceNoteListened { media_id: Id },
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -1593,6 +1616,9 @@ struct Playing {
     speaker: call_audio::Speaker,
     /// The pump's stop flag.
     stop: Arc<AtomicBool>,
+    /// The pump's speed flag, as a whole percent: the loop re-reads it every chunk and
+    /// changes pace without losing its place, the same shared-flag shape `stop` takes.
+    speed: Arc<AtomicU32>,
 }
 
 /// The reconnect schedule after a lost gateway connection.
@@ -2037,6 +2063,17 @@ struct Worker {
     /// The voice note playing, if one plays. One at a time, like the recording: a speaker is
     /// a device, and the second note would mix with the first.
     playing: Option<Playing>,
+    /// The playback speed the next note starts at (§179): 1x, 1.5x, or 2x, changed by the
+    /// player's own control and seeded from the saved setting at startup. The pump playing
+    /// now is told through its shared flag, so a change never restarts the note.
+    voice_speed: VoiceSpeed,
+    /// The voice notes this account has listened to, by media id — heard to (near) the end
+    /// or marked by hand. §179's receiver-local state: nothing here is ever sent, and it is
+    /// written beside the vault so it survives a restart.
+    listened: HashSet<Id>,
+    /// The listened marks' store, beside the vault: what one session heard, the next
+    /// session reads back at sign-in.
+    voice_listened: voice_listened::VoiceListenedStore,
     /// Group rosters asked for by the panel and not yet answered, keyed by the conversation
     /// the ask named. More than one may be in flight — the roster panel asks for whichever
     /// group window is open, and the reply names nothing but the correlation it answers, so
@@ -2080,6 +2117,7 @@ impl Worker {
         // struct literal moves it.
         let drafts = voice_draft::VoiceDraftStore::beside(&vault_path);
         let room_bridges = room_bridge::RoomBridgeStore::beside(&vault_path);
+        let voice_listened = voice_listened::VoiceListenedStore::beside(&vault_path);
         Self {
             sink,
             commands,
@@ -2115,6 +2153,9 @@ impl Worker {
             note_undo_until: None,
             drafts,
             playing: None,
+            voice_speed: VoiceSpeed::default(),
+            listened: HashSet::new(),
+            voice_listened,
             group_rosters: HashMap::new(),
             group_leave: None,
             pending_vote: None,
@@ -2558,6 +2599,11 @@ impl Worker {
             }
             Command::PlayVoiceNote { media_id } => self.play_voice_note(media_id).await,
             Command::StopVoiceNote => self.stop_voice_note(),
+            Command::SetVoiceSpeed { speed } => self.set_voice_speed(speed),
+            Command::SetVoiceNoteListened { media_id, listened } => {
+                self.set_voice_listened(media_id, listened);
+            }
+            Command::VoiceNoteHeard { media_id } => self.voice_note_heard(media_id),
             Command::VoiceNoteEnded { media_id } => self.voice_note_ended(media_id),
             Command::Shutdown => {}
         }
@@ -2887,6 +2933,11 @@ impl Worker {
             self.room_bridges.load(account_id).into_iter().collect();
         let rooms_watched: HashSet<Id> = room_conversations.keys().copied().collect();
 
+        // The listened marks read back beside the room bridges, for the same reason: they are
+        // this account's own memory on this device, and a session that started with them
+        // empty would draw every note it had already heard as unheard.
+        self.listened = self.voice_listened.load(account_id);
+
         self.signed = Some(Signed {
             server,
             rest,
@@ -2922,6 +2973,11 @@ impl Worker {
         // owns, and an event filed before the reset would be an event nobody kept.
         self.sink.send(Event::BackupState { last_backup_at });
         self.sink.send(Event::ChainActivity(self.chain_rows()));
+        // The listened marks, the same way: they are this account's own thread state, seeded
+        // after the reset so a previous account's marks are replaced rather than merged.
+        self.sink.send(Event::VoiceNotesListened {
+            media_ids: self.listened.iter().copied().collect(),
+        });
         self.connect().await;
     }
 
@@ -4863,12 +4919,16 @@ impl Worker {
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
+        // The pace the note starts at is the pace the player last chose, so a saved 2x
+        // survives a restart without a press of the speed control.
+        let speed = Arc::new(AtomicU32::new(self.voice_speed.percent()));
         spawn_playback_pump(
             speaker.frames.clone(),
             speaker.rate,
             samples,
             rate,
             Arc::clone(&stop),
+            Arc::clone(&speed),
             self.commands.clone(),
             media_id,
         );
@@ -4876,6 +4936,7 @@ impl Worker {
             media_id,
             speaker,
             stop,
+            speed,
         });
         self.sink.send(Event::VoicePlaying { media_id });
     }
@@ -4904,6 +4965,50 @@ impl Worker {
             return;
         }
         self.stop_voice_note();
+    }
+
+    /// Sets the playback speed (§179): the pump feeding the speaker now is told through its
+    /// shared flag, so the note playing keeps its position and only changes pace — the
+    /// client-side rule is that the media is never asked for again, and the pump already
+    /// holds every sample. The choice is also the pace the next note starts at.
+    fn set_voice_speed(&mut self, speed: VoiceSpeed) {
+        self.voice_speed = speed;
+        if let Some(playing) = self.playing.as_ref() {
+            playing.speed.store(speed.percent(), Ordering::Relaxed);
+        }
+    }
+
+    /// Marks one voice note listened or unlistened by hand, and persists the set. §179's
+    /// receiver-local rule: nothing is sent — a mark is the receiver's own memory of what it
+    /// has heard, and marking unlistened does not unsay a receipt that already went either.
+    fn set_voice_listened(&mut self, media_id: Id, listened: bool) {
+        let changed = if listened {
+            self.listened.insert(media_id)
+        } else {
+            self.listened.remove(&media_id)
+        };
+        if changed {
+            self.save_listened();
+        }
+    }
+
+    /// A playback pump crossed the listened threshold: the note has been heard to (near) its
+    /// end, so the receiver's own mark goes on without a press. Reported by the thread the
+    /// same way an ending is, and filed the same way a hand mark is.
+    fn voice_note_heard(&mut self, media_id: Id) {
+        if self.listened.insert(media_id) {
+            self.save_listened();
+            self.sink.send(Event::VoiceNoteListened { media_id });
+        }
+    }
+
+    /// Persists the account's listened marks, best-effort: the store's own rule is that a
+    /// failed write costs one restart's worth of memory, never the click that caused it.
+    fn save_listened(&self) {
+        if let Some(signed) = self.signed.as_ref() {
+            self.voice_listened
+                .save(signed.account.account_id, &self.listened);
+        }
     }
 
     /// Wants one attachment: serves it from the cache when this session already has it, and
@@ -7722,6 +7827,10 @@ impl Worker {
         self.media_cache.clear();
         self.recording = None;
         self.playing = None;
+        // The listened marks go with the account that earned them: they are this account's
+        // own memory, and the next sign-in reads its own back from the store beside the
+        // vault — an empty set here means a second account inherits nothing.
+        self.listened.clear();
         // The gateway session and its walks go with the account that minted them: a sign-in
         // over the same window must not resume a session it cannot speak for, nor continue a
         // walk whose pages belong to a conversation list it has not read.
@@ -9195,11 +9304,21 @@ fn spawn_recording_pump(
 
 /// The playback pump for a voice note.
 ///
-/// Feeds the speaker a hundred milliseconds of samples at a time and sleeps just under a
-/// chunk between sends, so the pump stays ahead of the device without queuing the whole
-/// note into a channel that would outlive a stop. The pace is a sleep, not a clock: a
-/// desktop voice note is a bubble's button, not a studio monitor, and the speaker's own
-/// buffer is the timing authority — the pump only has to not run dry.
+/// Feeds the speaker a hundred milliseconds of source audio at a time and sleeps just under
+/// a chunk of output between sends, so the pump stays ahead of the device without queuing
+/// the whole note into a channel that would outlive a stop. The pace is a sleep, not a
+/// clock: a desktop voice note is a bubble's button, not a studio monitor, and the speaker's
+/// own buffer is the timing authority — the pump only has to not run dry.
+///
+/// Speed (§179) is a shared flag the loop re-reads every chunk: playing at `s` times speed
+/// is resampling the source as though it had been recorded at `s` times its rate, so the
+/// same samples become a shorter note and the media is never asked for again. The cursor is
+/// untouched by a change, so a mid-playback switch continues from the same position at the
+/// new pace rather than restarting the note.
+///
+/// The listened threshold (§179: played to near the end) is crossed at nine-tenths of the
+/// note, and reported once — through the loop's own channel, like the ending below, because
+/// the marks belong to the loop.
 ///
 /// When the samples run out the pump reports the ending into the worker's own loop (the
 /// same self-addressing a chain tracker's completion takes), because the playing state —
@@ -9210,22 +9329,42 @@ fn spawn_playback_pump(
     samples: Arc<Vec<i16>>,
     rate: u32,
     stop: Arc<AtomicBool>,
+    speed: Arc<AtomicU32>,
     commands: mpsc::UnboundedSender<Command>,
     media_id: Id,
 ) {
     std::thread::Builder::new()
         .name("migo-voice-play".to_owned())
         .spawn(move || {
-            let mut resampler =
-                (rate != sink_rate).then(|| call_audio::Resampler::new(rate, sink_rate));
+            let mut resampler: Option<call_audio::Resampler> = None;
             let mut resampled: Vec<i16> = Vec::new();
             // A tenth of a second of source audio per chunk, floored at one sample so a
             // pathological rate cannot produce an empty chunk loop.
             let chunk_len = (rate as usize / 10).max(1);
             let mut cursor = 0usize;
+            // The pace the loop last adopted, as a whole percent. Zero is "no pace yet", so
+            // the first iteration builds the resampler for whatever the note started at —
+            // which is the pace the loop handed in, the saved setting included.
+            let mut at_percent = 0u32;
+            // Just under a chunk of *output* time: the faster the pace, the shorter the wait,
+            // because a faster note drains the device in less time per chunk of source.
+            let mut pacing = Duration::from_millis(90);
+            // Whether the listened threshold has been crossed and reported. The report goes
+            // once, at the moment of crossing — a note stopped at nine-tenths was heard to
+            // (near) the end, and a note stopped sooner was not.
+            let mut heard = false;
             while cursor < samples.len() {
                 if stop.load(Ordering::Relaxed) {
                     return;
+                }
+                let percent = speed.load(Ordering::Relaxed);
+                if percent != at_percent {
+                    at_percent = percent;
+                    let factor = VoiceSpeed::from_percent(percent).factor();
+                    let effective = (f64::from(rate) * f64::from(factor)).round() as u32;
+                    resampler = (effective != sink_rate)
+                        .then(|| call_audio::Resampler::new(effective, sink_rate));
+                    pacing = Duration::from_millis((90.0 / f64::from(factor)).round() as u64);
                 }
                 let end = (cursor + chunk_len).min(samples.len());
                 let chunk = &samples[cursor..end];
@@ -9242,9 +9381,11 @@ fn spawn_playback_pump(
                     return;
                 }
                 cursor = end;
-                // Just under a chunk of pacing, so the pump re-checks the stop flag while
-                // the device still has audio buffered.
-                std::thread::sleep(Duration::from_millis(90));
+                if !heard && cursor * 10 >= samples.len() * 9 {
+                    heard = true;
+                    let _ = commands.send(Command::VoiceNoteHeard { media_id });
+                }
+                std::thread::sleep(pacing);
             }
             // The note finished on its own. Tell the loop, unless a stop already did.
             if !stop.load(Ordering::Relaxed) {

@@ -46,6 +46,84 @@ pub enum ServerMode {
     Auto,
 }
 
+/// The voice-note playback speeds the player offers (§179): 1x, 1.5x, and 2x, applied
+/// entirely in the client — the pump that feeds the speaker changes pace, and the media is
+/// never asked for again.
+///
+/// The wire form is the label itself (`"1x"`, `"1.5x"`, `"2x"`), because a settings file is
+/// user-readable and those are the words the speed button shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceSpeed {
+    /// The sender's own pace. The default, and the reading of a file written before the
+    /// field existed.
+    #[default]
+    #[serde(rename = "1x")]
+    Normal,
+    /// Half again as fast.
+    #[serde(rename = "1.5x")]
+    HalfAgain,
+    /// Twice as fast.
+    #[serde(rename = "2x")]
+    Double,
+}
+
+impl VoiceSpeed {
+    /// The multiplier the playback pump resamples by: a note at 2x is the same samples
+    /// played in half the time.
+    #[must_use]
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::HalfAgain => 1.5,
+            Self::Double => 2.0,
+        }
+    }
+
+    /// The speed as a whole percent — the form the playback pump's shared flag carries,
+    /// because an `AtomicU32` can say 150 but not one and a half.
+    #[must_use]
+    pub fn percent(self) -> u32 {
+        match self {
+            Self::Normal => 100,
+            Self::HalfAgain => 150,
+            Self::Double => 200,
+        }
+    }
+
+    /// The percent form back again. An unknown value reads as 1x: the flag is this client's
+    /// own and an unseen number is a bug, and the honest pace to play a note at under a bug
+    /// is its own.
+    #[must_use]
+    pub fn from_percent(percent: u32) -> Self {
+        match percent {
+            150 => Self::HalfAgain,
+            200 => Self::Double,
+            _ => Self::Normal,
+        }
+    }
+
+    /// The label the speed button wears, the same three words on every control.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "1x",
+            Self::HalfAgain => "1.5x",
+            Self::Double => "2x",
+        }
+    }
+
+    /// The next speed in the cycle the button steps through, so one control both shows and
+    /// changes the pace.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::HalfAgain,
+            Self::HalfAgain => Self::Double,
+            Self::Double => Self::Normal,
+        }
+    }
+}
+
 /// The on-disk settings record. Versioned so a future field that the older binary does not know
 /// about is at least an explicit migration rather than a silent misread.
 ///
@@ -94,6 +172,11 @@ pub struct Settings {
     /// under it.
     #[serde(default)]
     pub navigation_mode: NavigationMode,
+    /// The voice-note playback speed (§179): 1x, 1.5x, or 2x, chosen on the player and
+    /// remembered so the next note starts at the pace the last one left. Absent — a first
+    /// run, or a file written before the field existed — means 1x, the brief's own default.
+    #[serde(default)]
+    pub voice_speed: Option<VoiceSpeed>,
 }
 
 impl Settings {
@@ -111,6 +194,7 @@ impl Settings {
             ui_scale: None,
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::default(),
+            voice_speed: None,
         }
     }
 
@@ -119,6 +203,13 @@ impl Settings {
     #[must_use]
     pub fn zoom(&self) -> f32 {
         f32::from(self.ui_scale.unwrap_or(100)) / 100.0
+    }
+
+    /// The voice-note playback speed as the player speaks it: the saved choice, or 1x when
+    /// no preference was ever saved.
+    #[must_use]
+    pub fn voice_speed(&self) -> VoiceSpeed {
+        self.voice_speed.unwrap_or_default()
     }
 
     /// The path to the settings file, under the platform's data directory.
@@ -231,6 +322,7 @@ mod tests {
             ui_scale: None,
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
+            voice_speed: None,
         };
         save(&path, &record).expect("save");
         let loaded = load(&path).expect("load");
@@ -342,6 +434,7 @@ mod tests {
             ui_scale: None,
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
+            voice_speed: None,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
@@ -371,6 +464,7 @@ mod tests {
             ui_scale: None,
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
+            voice_speed: None,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
     }
@@ -453,5 +547,68 @@ mod tests {
         assert_eq!(loaded.navigation_mode, NavigationMode::Tabbed);
         assert_eq!(loaded.server.host, "localhost");
         let _ = fs::remove_file(&old_path);
+    }
+
+    /// The playback speed round-trips, and a file written before the field existed reads as
+    /// 1x: the pace a note plays at is the person's own choice, and an upgrade must neither
+    /// lose it nor invent one they never made.
+    #[test]
+    fn voice_speed_round_trips_and_defaults_to_1x() {
+        let path = std::env::temp_dir().join("migo-desktop-test-voice-speed.json");
+        let record = Settings {
+            voice_speed: Some(VoiceSpeed::Double),
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.voice_speed(), VoiceSpeed::Double);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"voice_speed\": \"2x\""));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            Settings::default_for_dev().voice_speed(),
+            VoiceSpeed::Normal
+        );
+
+        let old_path = std::env::temp_dir().join("migo-desktop-test-voice-speed-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&old_path, old.to_string()).expect("write");
+        let loaded = load(&old_path).expect("load");
+        assert_eq!(loaded.voice_speed(), VoiceSpeed::Normal);
+        let _ = fs::remove_file(&old_path);
+    }
+
+    /// The speed's own arithmetic: the three factors, labels, and percent forms are the same
+    /// three speeds by any name, the cycle the button steps through visits all three and
+    /// returns, and an unknown percent is 1x — the honest pace under a bug, never a panic.
+    #[test]
+    fn the_three_speeds_agree_with_their_own_numbers() {
+        let facts = [
+            (VoiceSpeed::Normal, 1.0, "1x", 100u32),
+            (VoiceSpeed::HalfAgain, 1.5, "1.5x", 150),
+            (VoiceSpeed::Double, 2.0, "2x", 200),
+        ];
+        for (speed, factor, label, percent) in facts {
+            assert_eq!(speed.factor(), factor);
+            assert_eq!(speed.label(), label);
+            assert_eq!(speed.percent(), percent);
+            assert_eq!(VoiceSpeed::from_percent(percent), speed);
+        }
+        assert_eq!(VoiceSpeed::Normal.next(), VoiceSpeed::HalfAgain);
+        assert_eq!(VoiceSpeed::HalfAgain.next(), VoiceSpeed::Double);
+        assert_eq!(VoiceSpeed::Double.next(), VoiceSpeed::Normal);
+        assert_eq!(VoiceSpeed::from_percent(0), VoiceSpeed::Normal);
+        assert_eq!(VoiceSpeed::from_percent(137), VoiceSpeed::Normal);
     }
 }
