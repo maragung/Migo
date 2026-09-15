@@ -927,6 +927,11 @@ impl App {
                     self.chat.votes.remove(&conversation_id);
                     self.chat.roster_open.remove(&conversation_id);
                     self.chat.messages.remove(&conversation_id);
+                    // The seat of a conversation this account has left goes with the thread:
+                    // forget_group already ended it worker-side (the GroupCallEnded arm above
+                    // is what usually clears this), and the removal here is the belt to that
+                    // braces for an event raced past the teardown.
+                    self.chat.group_calls.remove(&conversation_id);
                     self.chat
                         .conversations
                         .retain(|c| c.conversation_id != conversation_id);
@@ -1121,6 +1126,22 @@ impl App {
                 }
                 Event::CallGone => {
                     self.call = None;
+                }
+                // The group-call seat: seated (or the roster moved and the count changed) and
+                // ended are the header button's whole truth — the button reads the map, the
+                // worker owns it, and no overlay exists yet because the seat is the
+                // signalling half of section 163 only.
+                Event::GroupCallSeated {
+                    conversation_id,
+                    participant_count,
+                    ..
+                } => {
+                    self.chat
+                        .group_calls
+                        .insert(conversation_id, participant_count);
+                }
+                Event::GroupCallEnded { conversation_id } => {
+                    self.chat.group_calls.remove(&conversation_id);
                 }
                 Event::MediaImage {
                     media_id,

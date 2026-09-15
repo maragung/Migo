@@ -179,6 +179,38 @@ impl GroupStore {
         entry.distributed.clear();
     }
 
+    /// Rotates for a membership change the wire has already numbered, on the epoch the member
+    /// event carries: every device that saw the same event names its new chain the same
+    /// generation, which is what keeps one device's re-distribution from being refused as a
+    /// regression by a peer that had already advanced further.
+    ///
+    /// The wire's number is a floor, not an order. A member event from a slower path — the same
+    /// change redelivered, or a snapshot that lags a leave this device already acted on — can
+    /// carry an epoch at or below the one held, and following it down would strand this chain
+    /// behind every peer that stayed at the higher number; the target is therefore the largest of
+    /// the wire's epoch, the held epoch plus one, and 1. A `None` epoch (an older server's
+    /// member event, which never numbered the change) degrades to [`Self::rotate`]'s rule of
+    /// held-plus-one.
+    pub fn rotate_on_membership(&mut self, conversation: Id, wire_epoch: Option<u32>) {
+        let held = self
+            .sending
+            .get(&conversation)
+            .map_or(0, |entry| entry.state.group_key_epoch());
+        let target = wire_epoch.unwrap_or(0).max(held.saturating_add(1)).max(1);
+        let entry = self
+            .sending
+            .entry(conversation)
+            .or_insert_with(|| Outbound {
+                state: SenderKeyState::create(0, random_chain_id(), &mut OsRandom),
+                distributed: HashSet::new(),
+            });
+        // A fresh chain minted at the target epoch rather than a rotate from `held`: a rotate
+        // lands on held-plus-one, which is short of the target whenever the wire skipped a
+        // generation, and an epoch below the one the peers were told must never be minted.
+        entry.state = SenderKeyState::create(target, random_chain_id(), &mut OsRandom);
+        entry.distributed.clear();
+    }
+
     /// Accepts a distribution from a remote device, so its future messages can open. The first
     /// distribution is the baseline; every later one must advance the epoch the receiver holds,
     /// and one that does not is dropped with the current chain kept — a stale re-send must not
@@ -568,5 +600,90 @@ mod tests {
         assert!(receiver
             .open(conversation, sender_device, &sealed.envelope)
             .is_err());
+    }
+
+    #[test]
+    fn a_membership_rotation_lands_on_the_epoch_the_event_numbered() {
+        // The member event carries the generation the change belongs to. Two devices that saw the
+        // same event must mint chains of the same generation, or whichever re-distributes second
+        // would be refused as a regression by a peer already holding a higher one.
+        let mut sender = GroupStore::new(device_identity());
+        let conversation = fresh_id();
+
+        // A first send creates the epoch-1 chain, so there is a held epoch to advance from.
+        sender
+            .seal(conversation, b"before the change")
+            .expect("seals");
+        sender.rotate_on_membership(conversation, Some(5));
+
+        let distribution = decode_distribution(&sender.distribution(conversation)).expect("parses");
+        assert_eq!(distribution.group_key_epoch, 5);
+
+        // And the chain it names is the one that seals from here: a receiver that adopts it opens
+        // what follows, not what preceded.
+        let mut receiver = GroupStore::new(device_identity());
+        let sender_device = fresh_id();
+        receiver.accept(
+            conversation,
+            sender_device,
+            &sender.distribution(conversation),
+        );
+        let sealed = sender
+            .seal(conversation, b"after the change")
+            .expect("seals");
+        assert_eq!(
+            receiver
+                .open(conversation, sender_device, &sealed.envelope)
+                .expect("the numbered generation opens"),
+            b"after the change"
+        );
+    }
+
+    #[test]
+    fn a_stale_event_epoch_never_pulls_the_chain_down() {
+        // The same change can arrive twice — a redelivered event, or a snapshot that lags a leave
+        // this device already acted on. The wire's number is a floor, not an order: the held
+        // epoch plus one always wins against a lower or equal wire epoch.
+        let mut sender = GroupStore::new(device_identity());
+        let conversation = fresh_id();
+        sender.rotate_on_membership(conversation, Some(5));
+
+        // A re-delivery of the same event names 5 again; the chain must still advance, because
+        // the receiver already holds 5 and `adopt` refuses an epoch it does not exceed.
+        sender.rotate_on_membership(conversation, Some(5));
+        let held = decode_distribution(&sender.distribution(conversation))
+            .expect("parses")
+            .group_key_epoch;
+        assert_eq!(held, 6);
+
+        // An older path's number is refused the same way.
+        sender.rotate_on_membership(conversation, Some(3));
+        let held = decode_distribution(&sender.distribution(conversation))
+            .expect("parses")
+            .group_key_epoch;
+        assert_eq!(held, 7);
+    }
+
+    #[test]
+    fn an_unnumbered_membership_change_advances_by_one() {
+        // An older server's member event carries no epoch at all: the rotation degrades to the
+        // plain rule of held-plus-one, the same number every other member of the generation
+        // mints from the same held epoch.
+        let mut sender = GroupStore::new(device_identity());
+        let conversation = fresh_id();
+        sender.rotate_on_membership(conversation, None);
+        assert_eq!(
+            decode_distribution(&sender.distribution(conversation))
+                .expect("parses")
+                .group_key_epoch,
+            1
+        );
+        sender.rotate_on_membership(conversation, None);
+        assert_eq!(
+            decode_distribution(&sender.distribution(conversation))
+                .expect("parses")
+                .group_key_epoch,
+            2
+        );
     }
 }
