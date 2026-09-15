@@ -1,7 +1,7 @@
 /**
  * What the group-call surface is allowed to say, and when it is allowed to exist.
  *
- * The tests pin three layers, each against the rule that would silently regress under an
+ * The tests pin four layers, each against the rule that would silently regress under an
  * innocent-looking refactor:
  *
  *   1. **The roster projection.** One seat per account is a server rule the client only observes —
@@ -19,12 +19,18 @@
  *      is — the chat header passes the conversation id for a `Group` conversation and nothing for
  *      any other kind, so the button appears precisely where the SFU's membership gate can admit
  *      the joiner.
+ *   4. **The call in progress, as a member who is not seated hears it.** The same announcements
+ *      that keep a roster true also tell a not-yet-seated member a call is running — and the join
+ *      that answers it must reuse the running call's id, because a fresh id would mint a second
+ *      call the conversation did not ask for.
  */
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
+import { isValidElement } from 'react';
+import type { ReactNode } from 'react';
 
 import { CallMediaKind } from '@migo/sdk';
 import type { GroupCallJoinedEvent, GroupCallLeftEvent, GroupCallRoster, Id } from '@migo/sdk';
@@ -32,10 +38,14 @@ import type { GroupCallJoinedEvent, GroupCallLeftEvent, GroupCallRoster, Id } fr
 import { GroupCallButton } from '../src/components/call-buttons.js';
 import { GroupCallScreen } from '../src/components/group-call-overlay.js';
 import type { GroupCallScreenProps } from '../src/components/group-call-overlay.js';
+import { GroupCallManagerProvider, useGroupCall } from '../src/lib/migo/group-call-manager.js';
 import type { ActiveGroupCall } from '../src/lib/migo/group-call-manager.js';
+import { MigoContext } from '../src/lib/migo/provider.js';
 import {
   GROUP_CALL_NOTES,
   groupCallNoteLabel,
+  inProgressArrived,
+  inProgressDeparted,
   isCallRetired,
   namesOwnSeat,
   placeholderSealedOffer,
@@ -279,16 +289,133 @@ test('an ended screen shows its note and a way back, not a leave control', () =>
 test('the group-call button exists only where a group conversation is', () => {
   assert.equal(
     renderToStaticMarkup(
-      <GroupCallButton conversationId={null} onJoin={() => Promise.resolve()} />,
+      <GroupCallButton conversationId={null} inProgress={null} onJoin={() => Promise.resolve()} />,
     ),
     '',
     'no group conversation, no button',
   );
   const markup = renderToStaticMarkup(
-    <GroupCallButton conversationId={CONVERSATION} onJoin={() => Promise.resolve()} />,
+    <GroupCallButton
+      conversationId={CONVERSATION}
+      inProgress={null}
+      onJoin={() => Promise.resolve()}
+    />,
   );
   assert.ok(markup.includes('aria-label="Join group call"'));
   // One button, not a voice/video pair: this build renders the roster, and a video button would
   // promise video it cannot show.
   assert.equal(markup.match(/<button/g)?.length ?? 0, 1);
+});
+
+// --- a call in progress, as a member who is not seated hears it ---
+
+test('announcements keep the call a member is not seated in, and its count', () => {
+  // The first seat opens the conversation's entry: a member who never joined now knows a call
+  // is running, which call it is, and how big — the whole "join in progress" fact.
+  let tracked = inProgressArrived(new Map(), joined({ participantCount: 1 }));
+  assert.deepEqual(tracked.get(CONVERSATION), {
+    callId: CALL,
+    participantCount: 1,
+  });
+  // Every movement after that is a count update on the same entry.
+  tracked = inProgressArrived(
+    tracked,
+    joined({ userId: ADA, deviceId: 'ada_laptop' as Id, participantCount: 2 }),
+  );
+  assert.deepEqual(tracked.get(CONVERSATION), { callId: CALL, participantCount: 2 });
+  tracked = inProgressDeparted(tracked, departed({ userId: ADA, participantCount: 1 }));
+  assert.deepEqual(tracked.get(CONVERSATION), { callId: CALL, participantCount: 1 });
+});
+
+test('the last seat retires the tracked call; a fresh call replaces the entry', () => {
+  let tracked = inProgressArrived(new Map(), joined());
+  // Zero is the retirement: nothing is left to join, so the entry goes entirely rather than
+  // sitting at a count no join can answer.
+  tracked = inProgressDeparted(tracked, departed({ participantCount: 0 }));
+  assert.equal(tracked.size, 0);
+  // A new call in the same conversation is a new entry — the announcement stream is the only
+  // source this device has, and it names the call it names.
+  tracked = inProgressArrived(tracked, joined({ callId: 'call_next' as Id, participantCount: 1 }));
+  assert.deepEqual(tracked.get(CONVERSATION), { callId: 'call_next' as Id, participantCount: 1 });
+});
+
+test('a call in progress turns the join button into joining the running call, by its id', () => {
+  const joins: Array<{ conversationId: Id; callId: Id | undefined }> = [];
+  // The button is a plain function of its props (no hooks), so the test can invoke it directly
+  // and press what it rendered — the rig's static markup cannot carry a click.
+  const button: ReactNode = GroupCallButton({
+    conversationId: CONVERSATION,
+    inProgress: { callId: CALL, participantCount: 2 },
+    onJoin: (conversationId, callId) => {
+      joins.push({ conversationId, callId });
+      return Promise.resolve();
+    },
+  });
+  const markup = renderToStaticMarkup(button);
+  assert.ok(markup.includes('aria-label="Join group call in progress (2)"'));
+  assert.ok(isValidElement(button));
+  (button.props as { onClick: () => void }).onClick();
+  // The join must carry the running call's id: a fresh one would mint a second call the
+  // conversation did not ask for, and the id is the protocol's idempotency key.
+  assert.deepEqual(joins, [{ conversationId: CONVERSATION, callId: CALL }]);
+});
+
+test('with no call in progress the join button passes no id, and the manager mints one', () => {
+  const joins: Array<{ conversationId: Id; callId: Id | undefined }> = [];
+  const button: ReactNode = GroupCallButton({
+    conversationId: CONVERSATION,
+    inProgress: null,
+    onJoin: (conversationId, callId) => {
+      joins.push({ conversationId, callId });
+      return Promise.resolve();
+    },
+  });
+  assert.ok(renderToStaticMarkup(button).includes('aria-label="Join group call"'));
+  assert.ok(isValidElement(button));
+  (button.props as { onClick: () => void }).onClick();
+  assert.deepEqual(joins, [{ conversationId: CONVERSATION, callId: undefined }]);
+});
+
+test('the manager exposes the in-progress read and its actions bound', () => {
+  function Probe(): ReactNode {
+    const manager = useGroupCall();
+    return (
+      <div
+        data-inprogress={manager.groupCallInProgress(CONVERSATION) === null ? 'none' : 'call'}
+        data-bound={
+          typeof manager.joinGroupCall === 'function' &&
+          typeof manager.leaveGroupCall === 'function' &&
+          typeof manager.dismissGroupCall === 'function'
+            ? 'bound'
+            : 'missing'
+        }
+      />
+    );
+  }
+
+  const markup = renderToStaticMarkup(
+    <MigoContext.Provider
+      value={{
+        status: 'ready',
+        connectionState: 'ready',
+        accountId: ME,
+        deviceId: null,
+        error: null,
+        resetNonce: 0,
+        persistKeyStore: () => {},
+        client: null,
+        register: () => Promise.resolve(),
+        loginWithFile: () => Promise.resolve(),
+        logout: () => Promise.resolve(),
+      }}
+    >
+      <GroupCallManagerProvider>
+        <Probe />
+      </GroupCallManagerProvider>
+    </MigoContext.Provider>,
+  );
+  // No announcements have arrived (there is no client), so nothing is in progress — the read
+  // must be honest about that, not throw or invent.
+  assert.ok(markup.includes('data-inprogress="none"'));
+  assert.ok(markup.includes('data-bound="bound"'), 'every action the UI calls must be exposed');
 });

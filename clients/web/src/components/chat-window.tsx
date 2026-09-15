@@ -151,7 +151,7 @@ export function ChatWindow({
   } = useChat(conversationId, { endToEnd });
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
-  const { joinGroupCall } = useGroupCall();
+  const { joinGroupCall, groupCallInProgress } = useGroupCall();
   const { muted } = useMuted();
 
   // The thread's overlays: the peer's profile (a direct chat), the room's details (a room), and
@@ -575,9 +575,14 @@ export function ChatWindow({
           </button>
         ) : null}
         {/* A 1:1 is the one conversation the wire's 1:1 invite can name a callee for; a group
-            conversation has the SFU roster instead, which anyone in it may join. */}
+            conversation has the SFU roster instead, which anyone in it may join — into the call
+            already running when one is, by its id, or a fresh one otherwise. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
-        <GroupCallButton conversationId={isGroup ? conversationId : null} onJoin={joinGroupCall} />
+        <GroupCallButton
+          conversationId={isGroup ? conversationId : null}
+          inProgress={isGroup ? groupCallInProgress(conversationId) : null}
+          onJoin={joinGroupCall}
+        />
         {/* Gifting is a thread-level act — it picks a person and spends balance — so its control
             lives with the thread's other actions in the header, left of games, not in the row
             the composer keeps exclusively for chat. */}
