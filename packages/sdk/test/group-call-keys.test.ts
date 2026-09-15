@@ -32,12 +32,15 @@ import {
   decodeCallSdp,
 } from '@migo/protocol';
 import type { CallKeyUpdate, CallRenegotiate, CallSdp, CallSfuParticipant } from '@migo/protocol';
-import { idFromBytes } from '@migo/wire';
+import { idFromBytes, idToBytes } from '@migo/wire';
 import type { Id } from '@migo/wire';
 
 import {
+  CALL_KEY_ASK_EVENT,
   CallState,
+  ContentType,
   decodeBody,
+  decodeContent,
   encodeBody,
   GroupCallDomain,
   GroupCallKeysDomain,
@@ -55,6 +58,7 @@ interface Node {
   device: Id;
   store: KeyStore;
   transport: RecordingTransport;
+  sessionCrypto: SessionCrypto;
   groupCalls: GroupCallDomain;
   callKeys: GroupCallKeysDomain;
   /** How many recorded frames the relay has already delivered. */
@@ -94,7 +98,7 @@ function node(user: Id, device: Id, peers: KeyStore[] = []): Node {
   );
   groupCalls.start();
   callKeys.start();
-  return { user, device, store, transport, groupCalls, callKeys, cursor: 0, errors };
+  return { user, device, store, transport, sessionCrypto, groupCalls, callKeys, cursor: 0, errors };
 }
 
 /** One roster line, as the server projects a seated participant. */
@@ -274,6 +278,35 @@ test('call keys: a mid-call join asks the first seated participant and installs 
   assert.throws(() => {
     b.callKeys.openFrame(CALL, preJoin);
   }, 'a mid-call joiner must not open the media that predates it');
+});
+
+test('call keys: the ask carries the joiner account id as the control event data', async () => {
+  const a = node(idOf(1), idOf(2));
+  snapshot(a, [a], 1);
+  const b = node(idOf(3), idOf(4), [a.store]);
+  snapshot(b, [a, b], 2);
+  // Flush only — no relay — so the distributor's session layer has not opened the ask yet and the
+  // open below is the first, exactly the one a real holder performs.
+  for (let round = 0; round < 8 && asksOf(b).length === 0; round += 1) {
+    await flush();
+  }
+
+  const asks = asksOf(b);
+  assert.equal(asks.length, 1, 'the joiner asked exactly once');
+  const ask = asks[0];
+  assert.ok(ask !== undefined);
+
+  // Open the ask the way its holder does: the pairwise envelope, then the inner control event. The
+  // data must be the joiner's *account* id — the one fact the frame's fromDevice cannot say, and
+  // the one the desktop holder's designated-rotator rule requires (an ask without it is ignored
+  // there, so this pins the cross-client contract byte-for-byte).
+  const plaintext = a.sessionCrypto.open(CONVERSATION, b.user, b.device, ask.sealedSdp);
+  const content = decodeContent(plaintext);
+  assert.equal(content.type, ContentType.ControlEvent);
+  assert.equal(content.event, CALL_KEY_ASK_EVENT);
+  assert.ok(content.data !== undefined, 'the ask must carry data');
+  assert.equal(content.data.length, 16, 'the data is one id, 16 bytes');
+  assert.deepEqual(content.data, idToBytes(b.user), 'the data is the joiner account id');
 });
 
 test('call keys: only the first seat rotates on roster movement, and everyone else adopts', async () => {
