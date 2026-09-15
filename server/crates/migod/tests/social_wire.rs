@@ -1,6 +1,6 @@
 //! The SOCIAL opcodes answered on the wire, where the handler layer lives.
 //!
-//! Seven behaviours only the dispatcher can get wrong, because the service under it is
+//! Eight behaviours only the dispatcher can get wrong, because the service under it is
 //! correct in isolation:
 //! * **A full friends page must not hide the request behind it.** The combined
 //!   relationship listing once truncated the concatenated answer to the caller's
@@ -45,7 +45,11 @@
 //!   nothing to the stranger at all — the privacy half of the same fan-out. A mute
 //!   is the quietest member of the family: the muter's other device hears the
 //!   switch flip both ways, and the muted account hears nothing, because a volume
-//!   control is not a verdict.
+//!   control is not a verdict. An un-friend and an unblock join the family from
+//!   the same tests: the un-friend reaches the ex-friend as the same `removed`
+//!   word a decline carries, while the unblock reaches nobody but the
+//!   unblocker's own devices — the formerly blocked account is told nothing, and
+//!   the mute the block carried is still in the graph the listings read back.
 //! * **A hidden member stays hidden across a reconnect.** The invisibility
 //!   preference once lived only in the connection cache's presence entry, which
 //!   the disconnect clears — so the very next reconnect answered the arriving
@@ -1510,4 +1514,250 @@ async fn an_invisible_member_stays_hidden_across_a_reconnect() {
         !pong.header.is_error(),
         "the friend's session keeps serving the frames it did negotiate"
     );
+}
+
+/// An un-friend over the wire severs both sides, and the other party hears the same
+/// bare `removed` hint a declined request carries — no bell, no inbox row, and no
+/// verdict the reader could render as one.
+#[tokio::test]
+async fn a_friend_remove_severs_both_sides_and_hints_the_ex_friend() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "riva").await;
+    let alice_laptop_grant = second_device_grant(&app, "riva").await;
+    let bob_grant = registered_grant(&app, "teo").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+    let mut bob = LiveSession::connect(addr, &bob_grant).await;
+
+    // The friendship, established the ordinary way, with each device's expected
+    // events drained as they arrive so the removal below reads a quiet stream.
+    alice.friend_request(10, bob_grant.account_id).await;
+    let _: FriendEvent = from_frame(&next_event_of(&mut bob.stream, Opcode::FriendEvent).await)
+        .expect("the recipient's request event decodes");
+    let _: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the asker's other device gets the request echo");
+
+    let _: Acknowledged = bob
+        .ask(
+            Opcode::FriendRespond,
+            11,
+            &FriendRespond {
+                user_id: alice_grant.account_id,
+                accept: true,
+            },
+        )
+        .await;
+    let _: FriendEvent = from_frame(&next_event_of(&mut alice.stream, Opcode::FriendEvent).await)
+        .expect("the asker's acceptance decodes");
+    let _: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the asker's other device gets the acceptance");
+
+    // Alice un-friends Bob over the wire. Both graphs move at once.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::FriendRemove,
+            12,
+            &FriendTarget {
+                user_id: bob_grant.account_id,
+            },
+        )
+        .await;
+
+    // The ex-friend: the same word a decline carries, and no more.
+    let removed: FriendEvent =
+        from_frame(&next_event_of(&mut bob.stream, Opcode::FriendEvent).await)
+            .expect("the ex-friend's device gets an event");
+    assert_eq!(removed.user_id, alice_grant.account_id);
+    assert_eq!(
+        removed.state, "removed",
+        "an un-friend is indistinguishable from a decline in the hint"
+    );
+
+    // The caller's other device: the same stale list, the same echo.
+    let echo: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the caller's other device gets an event");
+    assert_eq!(echo.user_id, bob_grant.account_id);
+    assert_eq!(echo.state, "removed");
+
+    // Both graphs agree with the frames: no friendship survives on either side.
+    for (session, correlation) in [(&mut bob, 13u32), (&mut alice, 14u32)] {
+        let listing: RelationshipList = session
+            .ask(
+                Opcode::RelationshipList,
+                correlation,
+                &RelationshipListReq {
+                    limit: 0,
+                    kind: None,
+                    cursor: None,
+                },
+            )
+            .await;
+        assert!(
+            !listing
+                .entries
+                .iter()
+                .any(|entry| { entry.kind == migo_protocol::RelationshipKind::Friend.to_wire() }),
+            "no friendship survives the removal: {:?}",
+            listing.entries
+        );
+    }
+}
+
+/// Removing an account that is not a friend acknowledges: "not friends" is already
+/// the truth, and the client that retries a removal whose first reply was lost must
+/// not be told it failed.
+#[tokio::test]
+async fn removing_a_non_friend_acknowledges() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "nadia").await;
+    let bob_grant = registered_grant(&app, "karel").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::FriendRemove,
+            10,
+            &FriendTarget {
+                user_id: bob_grant.account_id,
+            },
+        )
+        .await;
+
+    let listing: RelationshipList = alice
+        .ask(
+            Opcode::RelationshipList,
+            11,
+            &RelationshipListReq {
+                limit: 0,
+                kind: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        listing.entries.is_empty(),
+        "removing a stranger writes no edge: {:?}",
+        listing.entries
+    );
+}
+
+/// Lifting a block over the wire clears the block edge and leaves the mute the block
+/// carried behind, and the caller's other devices hear the block list move.
+#[tokio::test]
+async fn a_block_clear_lifts_the_block_and_leaves_the_mute_behind() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "gita").await;
+    let alice_laptop_grant = second_device_grant(&app, "gita").await;
+    let bob_grant = registered_grant(&app, "hendra").await;
+
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+    let mut alice_laptop = LiveSession::connect(addr, &alice_laptop_grant).await;
+
+    // The block, of a stranger: it writes the block edge and the mute the block
+    // carries, and the blocker's other device hears the block list move.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::BlockSet,
+            10,
+            &FriendTarget {
+                user_id: bob_grant.account_id,
+            },
+        )
+        .await;
+    let blocked: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the blocker's other device hears the block");
+    assert_eq!(blocked.state, "blocked");
+
+    let seeded: RelationshipList = alice
+        .ask(
+            Opcode::RelationshipList,
+            11,
+            &RelationshipListReq {
+                limit: 0,
+                kind: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        seeded
+            .entries
+            .iter()
+            .any(|entry| entry.kind == migo_protocol::RelationshipKind::Block.to_wire()),
+        "the block is where the blocker left it: {:?}",
+        seeded.entries
+    );
+    assert!(
+        seeded
+            .entries
+            .iter()
+            .any(|entry| entry.kind == migo_protocol::RelationshipKind::Mute.to_wire()),
+        "the block carries a mute: {:?}",
+        seeded.entries
+    );
+
+    // The lift. The block goes; the mute stays.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::BlockClear,
+            12,
+            &FriendTarget {
+                user_id: bob_grant.account_id,
+            },
+        )
+        .await;
+    let unblocked: FriendEvent =
+        from_frame(&next_event_of(&mut alice_laptop.stream, Opcode::FriendEvent).await)
+            .expect("the blocker's other device hears the lift");
+    assert_eq!(unblocked.user_id, bob_grant.account_id);
+    assert_eq!(unblocked.state, "unblocked");
+
+    let lifted: RelationshipList = alice
+        .ask(
+            Opcode::RelationshipList,
+            13,
+            &RelationshipListReq {
+                limit: 0,
+                kind: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        !lifted
+            .entries
+            .iter()
+            .any(|entry| entry.kind == migo_protocol::RelationshipKind::Block.to_wire()),
+        "the block is gone: {:?}",
+        lifted.entries
+    );
+    assert!(
+        lifted
+            .entries
+            .iter()
+            .any(|entry| entry.kind == migo_protocol::RelationshipKind::Mute.to_wire()),
+        "the mute the block carried stays behind, visible and reversible: {:?}",
+        lifted.entries
+    );
+
+    // And the lift is idempotent: clearing a block that is already gone
+    // acknowledges, because the block list is already in the state asked for.
+    let _: Acknowledged = alice
+        .ask(
+            Opcode::BlockClear,
+            14,
+            &FriendTarget {
+                user_id: bob_grant.account_id,
+            },
+        )
+        .await;
 }

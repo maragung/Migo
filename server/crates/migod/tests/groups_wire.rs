@@ -17,8 +17,16 @@
 //!   title it renamed away. The dispatcher now publishes the delta to the
 //!   actor's user topic *including* that device; the second test renames over
 //!   the wire and asserts the renaming session itself hears the new title.
+//! * **The invited, again, in their inbox.** A seat granted through
+//!   `CONVERSATION_INVITE` is worth a bell: the third test drives a real invite
+//!   over TCP and asserts every account the invite actually seated receives a
+//!   `GroupInvite` notification — the frame on their own topic with the
+//!   sentence left for the client to write, and the inbox row that survives
+//!   them being offline — while a member seated by the create call, a name the
+//!   service dropped as already seated, and the peer of a direct conversation
+//!   all receive none.
 //!
-//! Both tests use the reply rule as their clock: every frame they wait for is
+//! Every test uses the reply rule as its clock: every frame it waits for is
 //! one the server owes somebody, so the timeout is the assertion.
 
 use std::net::SocketAddr;
@@ -33,8 +41,9 @@ use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
     from_frame, to_frame, ConversationCreateRequest, ConversationInviteRequest, ConversationKind,
     ConversationMemberEvent, ConversationStateEvent, ConversationUpdateRequest, Encode, Frame,
-    Hello, MemberChange, MessageKind, MessageSend, Opcode, Platform, ReactionSet, SubscribeRequest,
-    SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    Hello, InboxReq, InboxResponse, MemberChange, MessageKind, MessageSend, NotificationEvent,
+    NotificationKind, Opcode, Platform, ReactionSet, SubscribeRequest, SubscribeResponse, Topic,
+    TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -727,4 +736,167 @@ async fn a_created_conversation_names_its_members_on_their_own_topics() {
     assert_eq!(event.conversation_id, conversation_id);
     assert_eq!(event.user_id, peer.account_id, "the join names the peer");
     assert_eq!(event.change, MemberChange::Joined);
+}
+
+/// A group invite rings one bell per account the invite actually seated — and only
+/// per account the invite actually seated.
+///
+/// The seat is the thing worth waking somebody for: a member added by the create
+/// call chose their own company, a name the service dropped as already seated holds
+/// the seat it was told about, and the peer of a direct conversation has a
+/// conversation, not an invitation. Each of those receives no `GroupInvite` row,
+/// while the freshly invited account receives exactly one — the frame on their own
+/// topic with the sentence left for the client to write, and the inbox row that
+/// survives them being offline.
+#[tokio::test]
+async fn a_group_invite_notifies_every_account_the_invite_seated() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "bellfounder").await;
+    let first = registered_grant(&app, "bellfirst").await;
+    let second = registered_grant(&app, "bellsecond").await;
+    let outsider = registered_grant(&app, "belloutsider").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut first_session = LiveSession::connect(addr, &first).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+    let mut outsider_session = LiveSession::connect(addr, &outsider).await;
+
+    // A group whose first member arrives through the create call. The create is
+    // not the invite: no member it seats is owed a bell.
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            41,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![first.account_id],
+                title: Some("The Bell Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // The create publishes the first member's Joined to their own user topic;
+    // drained here so the inbox read below is not read over a pending frame.
+    let _ = next_event_of(&mut first_session.stream, Opcode::ConversationMemberEvent).await;
+
+    // The invite: one name, freshly seated.
+    let _: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationInvite,
+            42,
+            &ConversationInviteRequest {
+                conversation_id,
+                members: vec![second.account_id],
+            },
+        )
+        .await;
+
+    // The bell: the invitee's own topic carries the notification, with the actor
+    // naming the inviter and the sentence left for the client to write.
+    let frame = next_event_of(&mut second_session.stream, Opcode::NotificationEvent).await;
+    let event: NotificationEvent = from_frame(&frame).expect("the notification decodes");
+    assert_eq!(event.kind, NotificationKind::GroupInvite);
+    assert_eq!(event.actor_id, Some(founder.account_id));
+    assert_eq!(event.conversation_id, Some(conversation_id));
+    assert_eq!(event.title, None, "the client writes the sentence");
+    assert_eq!(event.body, None, "the client writes the sentence");
+
+    // The row: one GroupInvite in the invitee's inbox, naming the inviter.
+    let inbox: InboxResponse = second_session
+        .ask(
+            Opcode::NotificationList,
+            43,
+            &InboxReq {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await;
+    let group_invite = NotificationKind::GroupInvite.to_wire().to_string();
+    let rows: Vec<_> = inbox
+        .items
+        .iter()
+        .filter(|item| item.kind == group_invite)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one row for one seat: {:?}",
+        inbox.items
+    );
+    assert_eq!(rows[0].actor_id, Some(founder.account_id));
+
+    // A re-invite of the already-seated name is dropped silently by the service,
+    // so it must cost neither a bell nor a second row.
+    let _: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationInvite,
+            44,
+            &ConversationInviteRequest {
+                conversation_id,
+                members: vec![second.account_id],
+            },
+        )
+        .await;
+    let inbox: InboxResponse = second_session
+        .ask(
+            Opcode::NotificationList,
+            45,
+            &InboxReq {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await;
+    let rows: Vec<_> = inbox
+        .items
+        .iter()
+        .filter(|item| item.kind == group_invite)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the re-invite rings nothing: {:?}",
+        inbox.items
+    );
+
+    // A direct conversation with the outsider seats its peer through the create
+    // call — the invite opcode refuses a direct conversation outright — and
+    // produces no GroupInvite row for either side of it.
+    let _: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            46,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Direct,
+                members: vec![outsider.account_id],
+                title: None,
+            },
+        )
+        .await;
+    let _ = next_event_of(
+        &mut outsider_session.stream,
+        Opcode::ConversationMemberEvent,
+    )
+    .await;
+
+    for (session, correlation) in [(&mut first_session, 47u32), (&mut outsider_session, 48u32)] {
+        let inbox: InboxResponse = session
+            .ask(
+                Opcode::NotificationList,
+                correlation,
+                &InboxReq {
+                    limit: 10,
+                    cursor: None,
+                },
+            )
+            .await;
+        assert!(
+            !inbox.items.iter().any(|item| item.kind == group_invite),
+            "no GroupInvite row for a seat the invite did not grant: {:?}",
+            inbox.items
+        );
+    }
 }

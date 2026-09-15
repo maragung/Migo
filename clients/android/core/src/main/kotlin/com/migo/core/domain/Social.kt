@@ -71,10 +71,13 @@ class SocialDomain(
      *
      * An event names the other account and a `state` string -- `"request"` (an edge now waits),
      * `"accepted"` (a friendship now exists), `"removed"` (an edge is gone: a declined request,
-     * an un-friend, or the teardown a block performs), or `"blocked"` (this account blocked
-     * somebody; only ever delivered to the blocker's own devices). It is a hint that the graph
-     * moved, not a source of truth -- re-read [listRelationships] to draw the right buttons,
-     * since the event carries no direction (incoming vs outgoing) and no verdict.
+     * an un-friend, or the teardown a block performs), `"blocked"` (this account blocked
+     * somebody; only ever delivered to the blocker's own devices), `"unblocked"` (this account
+     * lifted a block; only ever delivered to the unblocker's own devices), or `"muted"`/
+     * `"unmuted"` (this account flipped a personal mute; only ever delivered to the muter's own
+     * devices). It is a hint that the graph moved, not a source of truth -- re-read
+     * [listRelationships] to draw the right buttons, since the event carries no direction
+     * (incoming vs outgoing) and no verdict.
      */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
 
@@ -102,6 +105,21 @@ class SocialDomain(
     }
 
     /**
+     * Ends a friendship.
+     *
+     * Both sides' rows and any hanging request are removed in one server-side transaction, so the
+     * exit lands whole. Silent toward the other party except a `"removed"` [onFriendEvent] hint --
+     * the same word a declined request carries, so the two stay indistinguishable -- with no bell
+     * and no inbox row: a quiet exit is not announced. Removing an account that is not a friend
+     * resolves without error; "not friends" is already the truth. A caller that holds the
+     * relationship list should refresh it after this resolves.
+     */
+    suspend fun removeFriend(userId: Id) {
+        val request = FriendTarget(userId)
+        rpc.call(Op.FRIEND_REMOVE, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
+    }
+
+    /**
      * Blocks an account.
      *
      * One-sided and unnotified: the blocked account is not told, and the block shows only in the
@@ -111,6 +129,23 @@ class SocialDomain(
     suspend fun blockUser(userId: Id) {
         val request = FriendTarget(userId)
         rpc.call(Op.BLOCK_SET, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
+    }
+
+    /**
+     * Lifts the caller's own block on an account.
+     *
+     * Restores nothing the block tore down: the friendship and the follows are gone, and
+     * rebuilding them would be deciding on the caller's behalf that two people who fell out want
+     * the old graph back. The mute the block carried stays behind deliberately -- clearing it here
+     * would silently drop a mute the caller may have chosen before ever blocking, while leaving
+     * it is visible in [listMuted] and reversible with [muteUser]. Unblocking an account that was
+     * never blocked resolves without error. The formerly blocked account is told nothing (they
+     * were never told about the block either), while this account's other devices receive an
+     * `"unblocked"` [onFriendEvent] so their block list re-reads.
+     */
+    suspend fun unblockUser(userId: Id) {
+        val request = FriendTarget(userId)
+        rpc.call(Op.BLOCK_CLEAR, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
     }
 
     /**
