@@ -2194,7 +2194,7 @@ pub mod join_policy {
 ///
 /// The kinds that live here are the ones that answering does not clear by itself:
 /// a gift, a level up, a badge, a room invitation, a room announcement, an event, a
-/// game challenge, a missed call. The message-shaped kinds are counted from
+/// game challenge, a missed call, a group invitation. The message-shaped kinds are counted from
 /// [`Cursor`] instead, and a pending friend request is counted from
 /// [`Relationship`], because both of those already record their own state and a
 /// second copy of a count is a count that will disagree with the first.
@@ -2244,9 +2244,13 @@ pub mod notification_kind {
     pub const GAME_CHALLENGE: i16 = 11;
     /// A call rang out unanswered. `subject_id` is the call.
     pub const MISSED_CALL: i16 = 13;
+    /// Somebody was invited to a group conversation. `actor_id` is the inviter and
+    /// `room_id` is unset — a group is a conversation, not a room, and the row a
+    /// client wakes to fetch is the conversation the invite named.
+    pub const GROUP_INVITE: i16 = 15;
 
     /// Every kind this table accepts.
-    pub const STORABLE: [i16; 8] = [
+    pub const STORABLE: [i16; 9] = [
         GIFT,
         LEVEL_UP,
         ACHIEVEMENT,
@@ -2255,6 +2259,7 @@ pub mod notification_kind {
         EVENT,
         GAME_CHALLENGE,
         MISSED_CALL,
+        GROUP_INVITE,
     ];
 
     /// Whether a kind belongs in the inbox rather than only on the wire.

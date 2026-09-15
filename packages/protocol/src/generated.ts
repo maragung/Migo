@@ -447,6 +447,7 @@ export enum NotificationKind {
   VoiceNote = 12,
   MissedCall = 13,
   IncomingCall = 14,
+  GroupInvite = 15,
 }
 
 export enum RelationshipKind {
@@ -7431,6 +7432,10 @@ export const OP = {
   SEARCH: 119,
   /** Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room. */
   MUTE_SET: 120,
+  /** Ends a friendship: both sides' rows and any hanging request go in one store transaction. Silent toward the other party except the FRIEND_EVENT hint, the same word a decline carries. Removing an account that is not a friend is acknowledged without error, because "not friends" is already the truth. */
+  FRIEND_REMOVE: 121,
+  /** Lifts the caller's own block on one account. Restores nothing the block tore down, and the mute the block carried stays behind deliberately: removing it would silently drop a mute the caller may have chosen before ever blocking, while leaving it is visible in the caller's muted list and reversible with MUTE_SET. Unblocking an account that was never blocked is acknowledged, because idempotence here costs nothing and tells nobody anything. */
+  BLOCK_CLEAR: 122,
   MEDIA_UPLOAD_BEGIN: 128,
   MEDIA_UPLOAD_STATUS: 129,
   MEDIA_UPLOAD_COMMIT: 130,
@@ -7616,6 +7621,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   118: { code: 118, name: 'SUGGESTIONS', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SuggestReq', response: 'SearchResponse', paced: false, suppressOn: [] },
   119: { code: 119, name: 'SEARCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SearchReq', response: 'SearchResponse', paced: false, suppressOn: [] },
   120: { code: 120, name: 'MUTE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MuteSet', response: 'Acknowledged', paced: false, suppressOn: [] },
+  121: { code: 121, name: 'FRIEND_REMOVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged', paced: false, suppressOn: [] },
+  122: { code: 122, name: 'BLOCK_CLEAR', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged', paced: false, suppressOn: [] },
   128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket', paced: false, suppressOn: [] },
   129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress', paced: false, suppressOn: [] },
   130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged', paced: false, suppressOn: [] },

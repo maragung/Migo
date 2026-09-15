@@ -25,6 +25,15 @@
  * and when half the room has cast the same call the target is removed — the reply and the {@link onVote}
  * stream both report the tally. {@link sanction} is the staff path: a member with rank enough (a
  * moderator, or a global admin) mutes, kicks, or bans a lower-ranked member outright, no vote needed.
+ *
+ * # Settings
+ *
+ * The room's own shape moves through three more calls, each answered with a bare acknowledgement and
+ * gated by the server on the caller's room rank. {@link update} patches the name, the topic, or the
+ * slow-mode interval — a patch, not a snapshot: each field encodes by presence and an absent field is
+ * left alone. {@link roleSet} moves a member up or down the {@link RoomRole} ladder, which the server
+ * admits only from a caller who outranks both the member and the granted role. {@link archive} ends the
+ * room for everybody, and the server admits it from the owner alone.
  */
 
 import type { Id } from '@migo/wire';
@@ -44,6 +53,9 @@ import {
   encodeRoomVoteKick,
   decodeRoomVoteKickResponse,
   encodeRoomSanction,
+  encodeRoomRoleSet,
+  encodeRoomUpdate,
+  encodeRoomArchive,
   decodeAcknowledged,
 } from '@migo/protocol';
 import type {
@@ -54,12 +66,16 @@ import type {
   RoomListRequest,
   RoomListResponse,
   RoomMemberEvent,
+  RoomRole,
   RoomStateEvent,
   RoomVoteEvent,
   RoomVoteKick,
   RoomVoteKickResponse,
   RoomSanction,
   SanctionAction,
+  RoomRoleSet,
+  RoomUpdate,
+  RoomArchive,
   RosterEntry,
   RosterReq,
   RosterResponse,
@@ -301,5 +317,63 @@ export class RoomsDomain {
       request,
     );
     return response.members;
+  }
+
+  /**
+   * Changes a member's role in the room.
+   *
+   * The server admits it only from a caller who holds the room's manage permission — a Manager or the
+   * Owner by default — acting on a member strictly below their own rank, and it refuses a grant of
+   * {@link RoomRole.Owner} outright: ownership moves by transfer, not by a role change. The change the
+   * room hears arrives as a member event on the {@link onMember} stream; the reply here is a bare
+   * acknowledgement, and a role the member already holds is acknowledged with no event at all.
+   */
+  async roleSet(roomId: Id, member: Id, role: RoomRole): Promise<Acknowledged> {
+    const request: RoomRoleSet = { roomId, member, role };
+    return this.#rpc.call(OP.ROOM_ROLE_SET, encodeRoomRoleSet, decodeAcknowledged, request);
+  }
+
+  /**
+   * Applies a settings patch to the room: its name, its topic, or its slow-mode interval.
+   *
+   * A patch, not a snapshot — each field encodes by presence, and an absent field is left alone rather
+   * than cleared. The name is trimmed server-side and refused when empty or longer than 64 characters;
+   * the topic is trimmed to at most 256, and one that is empty or all whitespace is a removal. A
+   * field already holding the value sent is dropped, so submitting an unchanged screen changes
+   * nothing. `slowModeMs` is milliseconds on the wire and whole seconds in the store — the division
+   * truncates, so a sub-second interval is slow mode off, and the server refuses anything above an
+   * hour. The reply is a bare acknowledgement: what moved reaches the room as a state event on the
+   * {@link onState} stream, except a rename, which the state event cannot carry and a client learns
+   * from the next summary.
+   */
+  async update(
+    roomId: Id,
+    settings: { name?: string; topic?: string; slowModeMs?: number },
+  ): Promise<Acknowledged> {
+    const request: RoomUpdate = { roomId };
+    if (settings.name !== undefined) {
+      request.name = settings.name;
+    }
+    if (settings.topic !== undefined) {
+      request.topic = settings.topic;
+    }
+    if (settings.slowModeMs !== undefined) {
+      request.slowModeMs = settings.slowModeMs;
+    }
+    return this.#rpc.call(OP.ROOM_UPDATE, encodeRoomUpdate, decodeAcknowledged, request);
+  }
+
+  /**
+   * Archives the room, ending it for everybody in it.
+   *
+   * The server admits this from the room's owner alone — no other rank, however senior, may close the
+   * room on everyone else's behalf. An archived room refuses new joins and further settings changes
+   * while its history stays readable and its links keep resolving, which is why archive exists instead
+   * of delete; there is no unarchive. A second archive of an already-archived room is acknowledged
+   * rather than refused, so a repeated press of the button shows no error.
+   */
+  async archive(roomId: Id): Promise<Acknowledged> {
+    const request: RoomArchive = { roomId };
+    return this.#rpc.call(OP.ROOM_ARCHIVE, encodeRoomArchive, decodeAcknowledged, request);
   }
 }

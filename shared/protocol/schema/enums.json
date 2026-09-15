@@ -429,6 +429,10 @@
     {
      "name": "IncomingCall",
      "value": 14
+    },
+    {
+     "name": "GroupInvite",
+     "value": 15
     }
    ]
   },

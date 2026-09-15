@@ -16,6 +16,9 @@
  *      presence, so an unbounded read must leave both off the wire entirely rather than send
  *      zeros — a zero `limit` is a client-bound page of nothing, and a zero `after` is a cursor
  *      naming an account that was never seen.
+ *   3. **A settings patch encodes by presence.** An absent field in `update` is "leave it alone",
+ *      not "clear it", and the one exception is the topic, where an empty string is a removal the
+ *      caller meant — so it must ride as sent rather than be dropped for falseness.
  */
 
 import assert from 'node:assert/strict';
@@ -24,8 +27,12 @@ import test from 'node:test';
 import { decodeBody, encodeBody, RoomKind, RoomRole, RoomsDomain, Rpc } from '../src/index.js';
 import { OP } from '@migo/protocol';
 import {
+  decodeRoomArchive,
   decodeRoomCreate,
+  decodeRoomRoleSet,
+  decodeRoomUpdate,
   decodeRosterReq,
+  encodeAcknowledged,
   encodeRoomJoinResponse,
   encodeRosterResponse,
 } from '@migo/protocol';
@@ -156,4 +163,58 @@ test('rooms: getRoster sends only the room when unbounded', async () => {
   // Both page parameters encode by presence; a zero limit or zero cursor would be a page the
   // caller never asked for, so they must be absent rather than defaulted.
   assert.deepEqual(decodeBody(decodeRosterReq, sentAt(transport, 0).body), { roomId: ROOM });
+});
+
+test('rooms: roleSet sends ROOM_ROLE_SET with the member and the role, and resolves with the acknowledgement', async () => {
+  const member = idOf(41);
+  const { transport, rooms } = rig(
+    new Map([[OP.ROOM_ROLE_SET, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
+  const reply = await rooms.roleSet(ROOM, member, RoomRole.Moderator);
+
+  assert.equal(sentAt(transport, 0).opcode, OP.ROOM_ROLE_SET);
+  assert.deepEqual(decodeBody(decodeRoomRoleSet, sentAt(transport, 0).body), {
+    roomId: ROOM,
+    member,
+    role: RoomRole.Moderator,
+  });
+  // The reply is a bare acknowledgement; the role change the room hears is a member event, not
+  // this response.
+  assert.deepEqual(reply, { ok: true });
+});
+
+test('rooms: update sends only the settings it was given, each by presence', async () => {
+  const { transport, rooms } = rig(
+    new Map([[OP.ROOM_UPDATE, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
+  await rooms.update(ROOM, { name: 'Espresso Bar Annex', slowModeMs: 30_000 });
+  assert.deepEqual(decodeBody(decodeRoomUpdate, sentAt(transport, 0).body), {
+    roomId: ROOM,
+    name: 'Espresso Bar Annex',
+    slowModeMs: 30_000,
+  });
+
+  // A settings screen that submits every input is the ordinary case, so a call that carries
+  // nothing must leave every field off the wire rather than clear it.
+  await rooms.update(ROOM, {});
+  assert.deepEqual(decodeBody(decodeRoomUpdate, sentAt(transport, 1).body), { roomId: ROOM });
+
+  // A topic is the one field where an empty string is meaningful — a removal — so it rides as
+  // sent rather than being dropped for falseness.
+  await rooms.update(ROOM, { topic: '' });
+  assert.deepEqual(decodeBody(decodeRoomUpdate, sentAt(transport, 2).body), {
+    roomId: ROOM,
+    topic: '',
+  });
+});
+
+test('rooms: archive sends ROOM_ARCHIVE with the room alone, and resolves with the acknowledgement', async () => {
+  const { transport, rooms } = rig(
+    new Map([[OP.ROOM_ARCHIVE, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
+  const reply = await rooms.archive(ROOM);
+
+  assert.equal(sentAt(transport, 0).opcode, OP.ROOM_ARCHIVE);
+  assert.deepEqual(decodeBody(decodeRoomArchive, sentAt(transport, 0).body), { roomId: ROOM });
+  assert.deepEqual(reply, { ok: true });
 });

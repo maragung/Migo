@@ -39,7 +39,7 @@ use crate::model::{Failure, Withheld};
 /// to the protocol and forgotten here loses its series, which
 /// [`kind_index`] turns into a silently dropped count — so the
 /// exhaustive match in that function is what fails the build instead.
-const KINDS: [NotificationKind; 15] = [
+const KINDS: [NotificationKind; 16] = [
     NotificationKind::Unknown,
     NotificationKind::Message,
     NotificationKind::Mention,
@@ -55,6 +55,7 @@ const KINDS: [NotificationKind; 15] = [
     NotificationKind::VoiceNote,
     NotificationKind::MissedCall,
     NotificationKind::IncomingCall,
+    NotificationKind::GroupInvite,
 ];
 
 /// A kind's position in [`KINDS`].
@@ -79,6 +80,7 @@ const fn kind_index(kind: NotificationKind) -> usize {
         NotificationKind::VoiceNote => 12,
         NotificationKind::MissedCall => 13,
         NotificationKind::IncomingCall => 14,
+        NotificationKind::GroupInvite => 15,
     }
 }
 
@@ -100,6 +102,7 @@ const fn kind_label(kind: NotificationKind) -> &'static str {
         NotificationKind::VoiceNote => "voice_note",
         NotificationKind::MissedCall => "missed_call",
         NotificationKind::IncomingCall => "incoming_call",
+        NotificationKind::GroupInvite => "group_invite",
     }
 }
 

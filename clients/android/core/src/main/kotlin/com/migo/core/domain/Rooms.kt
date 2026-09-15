@@ -2,6 +2,7 @@ package com.migo.core.domain
 
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.Op
+import com.migo.core.protocol.RoomArchive
 import com.migo.core.protocol.RoomCreate
 import com.migo.core.protocol.RoomJoinRequest
 import com.migo.core.protocol.RoomJoinResponse
@@ -9,8 +10,10 @@ import com.migo.core.protocol.RoomLeaveRequest
 import com.migo.core.protocol.RoomListRequest
 import com.migo.core.protocol.RoomListResponse
 import com.migo.core.protocol.RoomMemberEvent
+import com.migo.core.protocol.RoomRoleSet
 import com.migo.core.protocol.RoomSanction
 import com.migo.core.protocol.RoomStateEvent
+import com.migo.core.protocol.RoomUpdate
 import com.migo.core.protocol.RoomVoteEvent
 import com.migo.core.protocol.RoomVoteKick
 import com.migo.core.protocol.RoomVoteKickResponse
@@ -57,6 +60,15 @@ import com.migo.core.wire.Id
  * coalesced per room so a UI can show "3/17" beside the target while the vote is open and take the row
  * down when it closes. It is separate for the same reason -- a vote is a rare, targeted thing, and a
  * client that never renders a tally simply never adds a handler for it.
+ *
+ * # Settings
+ *
+ * The room's own shape moves through three more calls, each answered with a bare acknowledgement and
+ * gated by the server on the caller's room rank. [update] patches the name, the topic, or the
+ * slow-mode interval -- a patch, not a snapshot: each field encodes by presence and an absent field is
+ * left alone. [roleSet] moves a member up or down the [com.migo.core.protocol.RoomRole] ladder, which
+ * the server admits only from a caller who outranks both the member and the granted role. [archive]
+ * ends the room for everybody, and the server admits it from the owner alone.
  */
 class RoomsDomain(
     private val rpc: Rpc,
@@ -265,6 +277,67 @@ class RoomsDomain(
         val request = RoomSanction(roomId, targetId, action, reason)
         rpc.call(
             Op.ROOM_SANCTION,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
+        )
+    }
+
+    /**
+     * Changes a member's role in the room.
+     *
+     * The server admits it only from a caller holding the room's manage permission — a Manager or the
+     * Owner by default — acting on a member strictly below their own rank, and refuses a grant of
+     * [com.migo.core.protocol.RoomRole.Owner] outright: ownership moves by transfer, not by a role
+     * change. The reply is a bare acknowledgement; the change the room hears arrives on its own as a
+     * [RoomMemberEvent], and a role the member already holds is acknowledged with no event at all.
+     */
+    suspend fun roleSet(roomId: Id, member: Id, role: com.migo.core.protocol.RoomRole): Acknowledged {
+        val request = RoomRoleSet(roomId, member, role.wire.toLong())
+        return rpc.call(
+            Op.ROOM_ROLE_SET,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
+        )
+    }
+
+    /**
+     * Applies a settings patch to the room: its name, its topic, or its slow-mode interval.
+     *
+     * A patch, not a snapshot — each field encodes by presence, and an absent field is left alone
+     * rather than cleared. The name is trimmed server-side and refused when empty or longer than 64
+     * characters; the topic is trimmed to at most 256, and one that is empty or all whitespace is a
+     * removal. `slowModeMs` is milliseconds on the wire and whole seconds in the store — the division
+     * truncates, so a sub-second interval is slow mode off, and the server refuses anything above an
+     * hour. The reply is a bare acknowledgement: what moved reaches the room as a [RoomStateEvent],
+     * except a rename, which the state event cannot carry and a client learns from the next summary.
+     */
+    suspend fun update(
+        roomId: Id,
+        name: String? = null,
+        topic: String? = null,
+        slowModeMs: Long? = null,
+    ): Acknowledged {
+        val request = RoomUpdate(roomId, name, topic, slowModeMs)
+        return rpc.call(
+            Op.ROOM_UPDATE,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
+        )
+    }
+
+    /**
+     * Archives the room, ending it for everybody in it.
+     *
+     * The server admits this from the room's owner alone — no other rank, however senior, may close
+     * the room on everyone else's behalf. An archived room refuses new joins and further settings
+     * changes while its history stays readable and its links keep resolving, which is why archive
+     * exists instead of delete; there is no unarchive. A second archive of an already-archived room
+     * is acknowledged rather than refused, so a repeated press of the button shows no error.
+     */
+    suspend fun archive(roomId: Id): Acknowledged {
+        val request = RoomArchive(roomId)
+        return rpc.call(
+            Op.ROOM_ARCHIVE,
             { w -> request.encode(w) },
             { r -> Acknowledged.decode(r) },
         )

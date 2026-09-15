@@ -1,6 +1,6 @@
 //! The SOCIAL application opcodes: friendship, blocking, and the relationship list.
 //!
-//! Five opcodes, each one a thin translation from a wire frame onto one
+//! Seven opcodes, each one a thin translation from a wire frame onto one
 //! [`Graph`](migo_social::traits::Graph) method. The service owns every rule — the
 //! symmetric block, the "a pending request is not a friendship" test, the rate charge —
 //! so these handlers only decode, call, and reply. The shape follows the other dispatch
@@ -10,12 +10,14 @@
 //!
 //! # Opcode → method map
 //!
-//! | Opcode            | Wire payload     | Service method            | Response           |
-//! |-------------------|------------------|---------------------------|--------------------|
-//! | `FRIEND_REQUEST`  | `FriendTarget`   | `Graph::request_friend`   | `Acknowledged`     |
-//! | `FRIEND_RESPOND`  | `FriendRespond`  | `Graph::respond_friend`   | `Acknowledged`     |
-//! | `BLOCK_SET`       | `FriendTarget`   | `Graph::block`            | `Acknowledged`     |
-//! | `MUTE_SET`        | `MuteSet`        | `Graph::mute`             | `Acknowledged`     |
+//! | Opcode              | Wire payload     | Service method            | Response           |
+//! |---------------------|------------------|---------------------------|--------------------|
+//! | `FRIEND_REQUEST`    | `FriendTarget`   | `Graph::request_friend`   | `Acknowledged`     |
+//! | `FRIEND_RESPOND`    | `FriendRespond`  | `Graph::respond_friend`   | `Acknowledged`     |
+//! | `FRIEND_REMOVE`     | `FriendTarget`   | `Graph::remove_friend`    | `Acknowledged`     |
+//! | `BLOCK_SET`         | `FriendTarget`   | `Graph::block`            | `Acknowledged`     |
+//! | `BLOCK_CLEAR`       | `FriendTarget`   | `Graph::unblock`          | `Acknowledged`     |
+//! | `MUTE_SET`          | `MuteSet`        | `Graph::mute`             | `Acknowledged`     |
 //! | `RELATIONSHIP_LIST` | `RelationshipListReq` | `Graph::list_relationships` | `RelationshipList` |
 //!
 //! `RELATIONSHIP_LIST` is one read of the whole graph the caller owns: the service
@@ -37,9 +39,12 @@
 //!
 //! * The **other party**, on their own topic, whenever an edge they can observe was
 //!   written or removed. A request and an acceptance arrive with the bell and the
-//!   inbox row (the [`Notice`] the service returns); a decline, a block's teardown,
-//!   and the request-side echo of a request carry the hint alone, because none of
-//!   them is worth waking anybody for.
+//!   inbox row (the [`Notice`] the service returns); a decline, an un-friend, a
+//!   block's teardown, and the request-side echo of a request carry the hint alone,
+//!   because none of them is worth waking anybody for. An unblock publishes nothing
+//!   to the other party at all: it restores no edge they could observe, and a
+//!   "the graph moved" hint over an unmoving graph would tell a formerly blocked
+//!   account exactly who had blocked them.
 //! * The **caller's other devices**, on the caller's own topic, excluding the session
 //!   that performed the mutation (section 156: the fan-out skips the device of
 //!   origin, and the origin was already answered by the `Acknowledged`). Without
@@ -95,6 +100,10 @@ const STATE_REMOVED: &str = "removed";
 /// The caller blocked somebody. Only ever published on the blocker's own topic, where
 /// nobody but the blocker's devices are listening.
 const STATE_BLOCKED: &str = "blocked";
+/// The caller lifted a block. Same audience as [`STATE_BLOCKED`]: the caller's own
+/// devices, and nobody else — the formerly blocked account is told nothing, because
+/// they were never told about the block either.
+const STATE_UNBLOCKED: &str = "unblocked";
 /// The caller muted somebody. Like `blocked`, only ever published on the caller's own
 /// topic — the muted account is not told, because a volume control is not a verdict.
 const STATE_MUTED: &str = "muted";
@@ -308,6 +317,51 @@ pub(crate) async fn handle_friend_respond(
     Ok(())
 }
 
+/// Ends the friendship with `user_id` and acknowledges.
+///
+/// The service tears both sides down in one store transaction — the friendship rows
+/// and any hanging request — so the handler is the forward, the reply, and the fan-out.
+/// No notice, no bell, no inbox row: the service's own contract is that a notification
+/// would turn a quiet exit into a confrontation, so the other party learns of it the
+/// way a decline teaches them, through the bare `removed` hint that carries no verdict.
+///
+/// Removing an account that is not a friend acknowledges without error — "not friends"
+/// is already the truth — and the hint below is published all the same, because the
+/// service's teardown reports no outcome to condition it on: a recipient who was never
+/// a friend re-reads a graph that did not visibly move, and the hint itself carries no
+/// direction and no verdict.
+pub(crate) async fn handle_friend_remove(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedSocial,
+    relay: &Arc<PresenceRelay>,
+) -> Result<(), Error> {
+    let caller = SocialCaller::new(
+        ctx.identity().account_id(),
+        ctx.identity().device_id(),
+        ctx.identity().tier,
+        ctx.now(),
+    );
+    let request: FriendTarget = from_frame(frame).map_err(fault::from_wire)?;
+    svc.remove_friend(&caller, request.user_id).await?;
+    ctx.reply(&Acknowledged { ok: true })?;
+    // The same word a decline or a block's teardown carries. The ex-friend's devices
+    // re-read their list and the friendship is gone from it; the caller's other
+    // devices hold the same stale list and hear the same echo, minus the session
+    // that acted.
+    graph_moved(
+        ctx,
+        relay,
+        request.user_id,
+        caller.account_id,
+        STATE_REMOVED,
+        ctx.now(),
+    )
+    .await;
+    echo_caller(ctx, relay, request.user_id, STATE_REMOVED, ctx.now()).await;
+    Ok(())
+}
+
 /// Blocks `user_id` and acknowledges.
 ///
 /// Blocking is one of the few social writes that is also a read of everything it must undo
@@ -348,6 +402,37 @@ pub(crate) async fn handle_block_set(
     if outcome.moved {
         echo_caller(ctx, relay, request.user_id, STATE_BLOCKED, ctx.now()).await;
     }
+    Ok(())
+}
+
+/// Lifts the caller's own block on `user_id` and acknowledges.
+///
+/// The service restores nothing — the friendship and the follows the block removed stay
+/// gone, and so does the mute the block carried, which is deliberate: clearing it here
+/// would silently drop a mute the caller may have chosen before ever blocking, while
+/// leaving it is visible in the caller's own muted list and reversible with `MUTE_SET`.
+/// The handler therefore publishes nothing to the other party (no edge they could
+/// observe moved, and a hint over an unmoving graph would tell a formerly blocked
+/// account exactly who had blocked them) and echoes the caller's own devices alone,
+/// whose block list is a page of the same graph. Unblocking an account that was never
+/// blocked acknowledges without error — the block list is already in the state asked
+/// for.
+pub(crate) async fn handle_block_clear(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedSocial,
+    relay: &Arc<PresenceRelay>,
+) -> Result<(), Error> {
+    let caller = SocialCaller::new(
+        ctx.identity().account_id(),
+        ctx.identity().device_id(),
+        ctx.identity().tier,
+        ctx.now(),
+    );
+    let request: FriendTarget = from_frame(frame).map_err(fault::from_wire)?;
+    svc.unblock(&caller, request.user_id).await?;
+    ctx.reply(&Acknowledged { ok: true })?;
+    echo_caller(ctx, relay, request.user_id, STATE_UNBLOCKED, ctx.now()).await;
     Ok(())
 }
 

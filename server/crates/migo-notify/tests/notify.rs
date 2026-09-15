@@ -626,6 +626,7 @@ async fn every_alert_is_a_fixed_phrase_chosen_by_kind_alone() {
         NotificationKind::RoomAnnouncement,
         NotificationKind::Event,
         NotificationKind::GameChallenge,
+        NotificationKind::GroupInvite,
         NotificationKind::Unknown,
     ];
     for kind in kinds {

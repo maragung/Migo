@@ -1,7 +1,8 @@
 'use client';
 
 /**
- * A room's details: the roster, the moderation controls, and the way out.
+ * A room's details: the roster, the moderation controls, the settings its staff may change, and the
+ * way out.
  *
  * The roster is paged wire data ({@link RoomsDomain.getRoster}), re-read on open rather than
  * mirrored locally — membership moves with every join and leave, and the room's own events are
@@ -27,10 +28,22 @@
  * whole client-side life ends in the same breath ({@link MigoClient.teardownRoom}): both topics,
  * the crypto state, and the bridge, so a re-join starts fresh chains rather than reusing keys
  * the departed members may still hold.
+ *
+ * # The room's own settings
+ *
+ * Three more controls answer to the room's rank ladder rather than the moderation one, and the panel
+ * gates them on the same defaults the server resolves. A **rename** (the name and the topic) needs the
+ * room's edit permission, which an Administrator and above hold by default. **Role management** — the
+ * per-member "Make …" items in the roster menu — needs the manage permission, a Manager or the Owner,
+ * and the server refuses a grant at or above the actor's own rank, so the items offered are the ranks
+ * strictly below the viewer's. **Archiving** is the owner's alone: no other rank, however senior, may
+ * end the room for everybody in it, and there is no unarchive — the confirmation says exactly that.
+ * A permission granted per-member by an override the roster cannot see is the server's to admit and
+ * the panel's to surface as the refusal it returns.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 
 import { RoomRole, SanctionAction } from '@migo/sdk';
 import type { AdminStanding, Id, RosterEntry } from '@migo/sdk';
@@ -41,7 +54,7 @@ import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
-import { useRooms } from '@/lib/migo/rooms-provider.js';
+import { applyRoomSettings, useRooms } from '@/lib/migo/rooms-provider.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
@@ -133,6 +146,62 @@ export function canSanction(myRole: number, targetRole: number, isGlobalAdmin: b
 }
 
 /**
+ * Whether the rename controls belong in this viewer's panel.
+ *
+ * Pure, so a test pins it. The wire gates a settings change on the room's edit permission, which the
+ * rank defaults give an Administrator and above; the panel cannot see the per-member overrides that
+ * could hand the bit to someone lower, so the server's refusal is the last word and is surfaced as
+ * the error it returns.
+ */
+export function canEditRoom(myRole: number): boolean {
+  return myRole >= ROLE_ADMIN;
+}
+
+/**
+ * Whether the archive control belongs in this viewer's panel.
+ *
+ * Pure, so a test pins it. The server checks the owner column itself and refuses anyone else — even a
+ * Manager, even a global admin — so the gate is the owner's rank alone, not a rank comparison.
+ */
+export function canArchiveRoom(myRole: number): boolean {
+  return myRole === ROLE_OWNER;
+}
+
+/**
+ * Whether the role controls belong on a member's row.
+ *
+ * Pure, so a test pins it. The server demands the room's manage permission — a Manager or the Owner
+ * by default — and that the actor strictly outrank the member; the owner's row is beyond everyone's
+ * reach and the viewer's own row carries no actions. A global admin's elevation does not help here:
+ * unlike a sanction, a role change is resolved from the membership row alone.
+ */
+export function canSetRole(myRole: number, targetRole: number, isSelf: boolean): boolean {
+  return !isSelf && targetRole !== ROLE_OWNER && myRole >= ROLE_MANAGER && myRole > targetRole;
+}
+
+/**
+ * The roles this viewer may grant, as the roster menu's "Make …" items.
+ *
+ * Pure, so a test pins it. The server refuses a grant of Owner outright (ownership moves by transfer)
+ * and any role at or above the actor's own, so the ladder stops one rung below the viewer: an Owner
+ * may grant Manager on down, a Manager Administrator on down, and a Moderator nothing at all. The
+ * roles are the wire's real names — the badge collapses Helper and Moderator into "Admin", but a role
+ * change must name the rank the server will store.
+ */
+export function settableRoles(myRole: number): ReadonlyArray<{ value: number; label: string }> {
+  // Held as numbers, like every other rank comparison in this file: the roster's roles arrive as
+  // plain numbers, and the gate is a ladder position, not an enum identity.
+  const ladder: ReadonlyArray<{ value: number; label: string }> = [
+    { value: RoomRole.Member, label: 'Member' },
+    { value: RoomRole.Helper, label: 'Helper' },
+    { value: RoomRole.Moderator, label: 'Moderator' },
+    { value: RoomRole.Admin, label: 'Administrator' },
+    { value: RoomRole.Manager, label: 'Manager' },
+  ];
+  return ladder.filter((role) => role.value < myRole);
+}
+
+/**
  * One roster row: avatar, name, the role badge — and, on a click, the member menu.
  *
  * The row itself is the entry: tapping it opens the actions this viewer may take against the
@@ -152,6 +221,8 @@ export function RosterRow({
   onViewProfile,
   onGift,
   onVoteKick,
+  onSetRole,
+  settableRoles: settable,
   onRoomMute,
   onKick,
   onBan,
@@ -168,6 +239,13 @@ export function RosterRow({
   /** True while an action on this row is in flight, so its controls disable together. */
   busy?: boolean;
   onVoteKick?: () => void;
+  /**
+   * Grant this member a role. Supplied only with {@link settableRoles} and only when the viewer may
+   * manage roles at all; the member's current role is not among the items.
+   */
+  onSetRole?: (role: number) => void;
+  /** The roles the viewer may grant on this row, as the "Make …" menu items. */
+  settableRoles?: ReadonlyArray<{ value: number; label: string }>;
   onRoomMute?: () => void;
   onKick?: () => void;
   onBan?: () => void;
@@ -180,7 +258,9 @@ export function RosterRow({
   const showVote = canVote && onVoteKick !== undefined;
   const showStaff =
     canModerate && (onRoomMute !== undefined || onKick !== undefined || onBan !== undefined);
-  const hasMenu = onViewProfile !== undefined || onGift !== undefined || showVote || showStaff;
+  const showRoles = onSetRole !== undefined && (settable?.length ?? 0) > 0;
+  const hasMenu =
+    onViewProfile !== undefined || onGift !== undefined || showVote || showRoles || showStaff;
   const close = (): void => setOpen(false);
   return (
     <div className="roster-row-wrap">
@@ -261,6 +341,26 @@ export function RosterRow({
                 Vote kick
               </button>
             ) : null}
+            {/* The role items name the wire's real ranks, not the badge's collapsed labels: a grant
+                must name the rank the server will store. */}
+            {showRoles && settable !== undefined
+              ? settable.map((role) => (
+                  <button
+                    key={role.value}
+                    type="button"
+                    role="menuitem"
+                    className="roster-menu-item"
+                    disabled={busy}
+                    onClick={() => {
+                      close();
+                      onSetRole?.(role.value);
+                    }}
+                    title={`Make this member ${role.label} of the room.`}
+                  >
+                    Make {role.label}
+                  </button>
+                ))
+              : null}
             {showStaff && onRoomMute !== undefined ? (
               <button
                 type="button"
@@ -333,6 +433,7 @@ export function RosterList({
   onViewProfile,
   onGift,
   onVoteKick,
+  onSetRole,
   onRoomMute,
   onKick,
   onBan,
@@ -355,6 +456,12 @@ export function RosterList({
   /** Hand a member to the gift flow; a viewer never gifts themselves. */
   onGift?: (targetId: Id) => void;
   onVoteKick?: (targetId: Id) => void;
+  /**
+   * Grant a member a role, offered where the viewer holds the manage permission and outranks the
+   * member — the items themselves are the ranks strictly below the viewer's own, as plain wire
+   * numbers like the roster carries.
+   */
+  onSetRole?: (targetId: Id, role: number) => void;
   onRoomMute?: (targetId: Id) => void;
   onKick?: (targetId: Id) => void;
   onBan?: (targetId: Id) => void;
@@ -370,6 +477,10 @@ export function RosterList({
         const canVote = onVoteKick !== undefined && canVoteKick(entry.role, isSelf);
         const canModerate =
           !isSelf && hasStaffHandlers && canSanction(viewerRole, entry.role, isGlobalAdmin);
+        const roles =
+          onSetRole !== undefined && canSetRole(viewerRole, entry.role, isSelf)
+            ? settableRoles(viewerRole).filter((role) => role.value !== entry.role)
+            : undefined;
         return (
           <RosterRow
             key={entry.accountId}
@@ -383,6 +494,8 @@ export function RosterList({
             onViewProfile={onViewProfile ? () => onViewProfile(entry.accountId) : undefined}
             onGift={onGift && !isSelf ? () => onGift(entry.accountId) : undefined}
             onVoteKick={onVoteKick ? () => onVoteKick(entry.accountId) : undefined}
+            onSetRole={onSetRole ? (role) => onSetRole(entry.accountId, role) : undefined}
+            settableRoles={roles}
             onRoomMute={onRoomMute ? () => onRoomMute(entry.accountId) : undefined}
             onKick={onKick ? () => onKick(entry.accountId) : undefined}
             onBan={onBan ? () => onBan(entry.accountId) : undefined}
@@ -393,7 +506,119 @@ export function RosterList({
   );
 }
 
-/** The room details drawer: roster, moderation, plus the leave control. */
+/**
+ * The room's settings section: the rename a staff member may apply, and the archive that ends the
+ * room for everybody in it.
+ *
+ * Presentational, so a test pins what each rank sees: a viewer allowed neither control gets nothing
+ * at all, not a disabled husk. The rename covers exactly the fields the settings patch carries that
+ * this panel can seed honestly — the name and the topic, both trimmed server-side, the name required,
+ * the topic clearable to nothing. The archive confirmation states what the server does and no more:
+ * the room stops admitting joins and its settings lock, history stays readable and links keep
+ * resolving, and there is no unarchive.
+ */
+export function RoomSettings({
+  name,
+  topic,
+  canEdit = false,
+  canArchive = false,
+  saving = false,
+  archiving = false,
+  onApply,
+  onArchive,
+}: {
+  /** The room's current name, for the field's starting value. */
+  name: string;
+  /** The room's current topic, when it carries one; the field starts empty without it. */
+  topic?: string;
+  /** Show the rename fields — the viewer holds the room's edit permission. */
+  canEdit?: boolean;
+  /** Show the archive control — the viewer is the room's owner. */
+  canArchive?: boolean;
+  /** True while the settings patch is in flight. */
+  saving?: boolean;
+  /** True while the archive is in flight. */
+  archiving?: boolean;
+  /** Apply the settings; the trimmed name is never empty and at least one field moved. */
+  onApply: (settings: { name: string; topic: string }) => void;
+  /** Archive the room; the owner's confirmation is the opener's to ask for. */
+  onArchive: () => void;
+}): ReactNode {
+  const [nameValue, setNameValue] = useState(name);
+  const [topicValue, setTopicValue] = useState(topic ?? '');
+  if (!canEdit && !canArchive) {
+    return null;
+  }
+  const trimmedName = nameValue.trim();
+  const trimmedTopic = topicValue.trim();
+  const moved = trimmedName !== name || trimmedTopic !== (topic ?? '');
+
+  function submit(event: FormEvent): void {
+    event.preventDefault();
+    if (saving || !moved || trimmedName.length === 0) {
+      return;
+    }
+    onApply({ name: trimmedName, topic: trimmedTopic });
+  }
+
+  return (
+    <>
+      {canEdit ? (
+        <form className="panel-section" onSubmit={submit} aria-label="Room settings">
+          <h3 className="panel-heading">Room Settings</h3>
+          <label className="field-label">
+            Room name
+            <input
+              type="text"
+              className="input"
+              value={nameValue}
+              onChange={(event) => setNameValue(event.target.value)}
+              maxLength={64}
+              aria-label="Room name"
+            />
+          </label>
+          <label className="field-label">
+            Topic
+            <input
+              type="text"
+              className="input"
+              value={topicValue}
+              onChange={(event) => setTopicValue(event.target.value)}
+              maxLength={256}
+              aria-label="Room topic"
+              placeholder="none"
+            />
+          </label>
+          <div className="inline-field">
+            <button
+              type="submit"
+              className="btn"
+              disabled={saving || !moved || trimmedName.length === 0}
+            >
+              {saving ? <Spinner /> : 'Save'}
+            </button>
+          </div>
+        </form>
+      ) : null}
+      {canArchive ? (
+        <div className="panel-section">
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={archiving}
+            onClick={onArchive}
+            aria-label="Archive room"
+            title="Archives the room for everybody: no new joins, and the settings lock. History stays readable and links keep resolving. This cannot be undone."
+          >
+            {archiving ? <Spinner /> : 'Archive Room'}
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** The room details drawer: roster, moderation, the settings, plus the leave control. */
 export function RoomInfoPanel({
   roomId,
   conversationId,
@@ -406,7 +631,7 @@ export function RoomInfoPanel({
 }): ReactNode {
   const { client, accountId } = useMigo();
   const { forgetConversation } = useConversations();
-  const { forgetRoom } = useRooms();
+  const { forgetRoom, liveFor, noteRoom } = useRooms();
 
   const [roster, setRoster] = useState<RosterEntry[] | null>(null);
   const [standing, setStanding] = useState<AdminStanding | null>(null);
@@ -418,6 +643,10 @@ export function RoomInfoPanel({
   const [busyIds, setBusyIds] = useState<ReadonlySet<Id>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
+  // The settings patch and the archive are their own flights, not row actions, so they disable the
+  // section's own controls rather than a roster row.
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   // The member whose profile a row's "View profile" opened, until the modal closes.
   const [profileId, setProfileId] = useState<Id | null>(null);
 
@@ -522,6 +751,17 @@ export function RoomInfoPanel({
       : undefined) ?? 0;
   const isGlobalAdmin = standing?.owner === true || standing?.admin === true;
 
+  // The room's held record — the join's own summary plus every state delta since — seeds the rename
+  // fields. A room this shell does not know (never joined here, never restored) still offers the
+  // controls to a viewer the roster says holds them; the fields start empty and the server remains
+  // the authority on what they say.
+  const roomRecord = liveFor(roomId);
+  // The settings gates, from the rank defaults the server resolves permissions through. A member
+  // holding a bit by an override the roster cannot see is the server's refusal to tell, and it
+  // surfaces as the error it returns.
+  const canEdit = canEditRoom(myRole);
+  const canArchive = canArchiveRoom(myRole);
+
   // The raw tallies become the labels the rows show, through the same pure formatter a test pins.
   const tallyLabels = useMemo<ReadonlyMap<Id, string>>(() => {
     const labels = new Map<Id, string>();
@@ -621,6 +861,63 @@ export function RoomInfoPanel({
     withBusy(targetId, () => active.rooms.sanction({ roomId, targetId, action: ACTION_BAN }));
   }
 
+  // A settings change is a flight of its own, and its echo is this side's to record: the fan-out
+  // excludes the acting socket, and a rename reaches no frame at all — the state event carries a
+  // topic and an interval, nothing else — so the record the shell keeps is moved here, at the one
+  // place that knows the server accepted the change.
+  function applySettings(settings: { name: string; topic: string }): void {
+    const active = client;
+    if (!active) {
+      return;
+    }
+    setSavingSettings(true);
+    setError(null);
+    active.rooms
+      .update(roomId, settings)
+      .then(() => {
+        const held = liveFor(roomId);
+        if (held !== null) {
+          noteRoom(applyRoomSettings(held, settings.name, settings.topic));
+        }
+      })
+      .catch((cause: unknown) => setError(friendlyError(cause)))
+      .finally(() => setSavingSettings(false));
+  }
+
+  // Archiving is the room's end for everybody in it, said plainly before the server acts: joins are
+  // refused and the settings lock from then on, while history stays readable and links keep
+  // resolving — and there is no unarchive, which is the one fact a hesitant owner most needs.
+  function archiveRoom(): void {
+    const active = client;
+    if (!active || archiving) {
+      return;
+    }
+    if (
+      !window.confirm(
+        'Archive this room for everybody? It stops admitting joins and its settings lock; history stays readable and links keep resolving. There is no unarchive.',
+      )
+    ) {
+      return;
+    }
+    setArchiving(true);
+    setError(null);
+    active.rooms
+      .archive(roomId)
+      .catch((cause: unknown) => setError(friendlyError(cause)))
+      .finally(() => setArchiving(false));
+  }
+
+  // A role change is not destructive — whoever may set it may set it back — so it fires without a
+  // confirm, like the room silence. The roster re-read that follows is what moves the badge. The
+  // ladder's numbers are the wire's own discriminants, so they hand straight to the domain.
+  function setRole(targetId: Id, role: number): void {
+    const active = client;
+    if (!active) {
+      return;
+    }
+    withBusy(targetId, () => active.rooms.roleSet(roomId, targetId, role));
+  }
+
   const leave = useCallback((): void => {
     if (!client || leaving) {
       return;
@@ -676,6 +973,16 @@ export function RoomInfoPanel({
               {leaving ? <Spinner /> : 'Leave Room'}
             </button>
           </div>
+          <RoomSettings
+            name={roomRecord?.name ?? ''}
+            topic={roomRecord?.topic}
+            canEdit={canEdit}
+            canArchive={canArchive}
+            saving={savingSettings}
+            archiving={archiving}
+            onApply={applySettings}
+            onArchive={archiveRoom}
+          />
           <RosterList
             entries={roster}
             profiles={profiles}
@@ -687,6 +994,7 @@ export function RoomInfoPanel({
             onViewProfile={setProfileId}
             onGift={onGift}
             onVoteKick={castVote}
+            onSetRole={setRole}
             onRoomMute={silence}
             onKick={kick}
             onBan={ban}

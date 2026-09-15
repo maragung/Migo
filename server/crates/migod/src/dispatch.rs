@@ -77,7 +77,7 @@ use migo_messaging::{
     SharedMessaging,
 };
 use migo_moderation::SharedWarden;
-use migo_notify::SharedNotifier;
+use migo_notify::{Event as NotificationEvent, SharedNotifier};
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
     fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
@@ -86,9 +86,9 @@ use migo_protocol::{
     ConversationRosterRequest, ConversationUpdateRequest, ConversationVoteKickRequest, Encode,
     Frame, GameAction, GameEvent, GroupKeyDistribution, KeyBundle as WireBundle, KeyBundleRequest,
     KeyBundleResponse, KeyPublish, KeyPublishResult, MemberChange, MessageDelete, MessageEdit,
-    MessageKind, MessageReceipt, MessageSend, Opcode, PresenceScope, PresenceUpdate,
-    ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest,
-    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
+    MessageKind, MessageReceipt, MessageSend, NotificationKind, Opcode, PresenceScope,
+    PresenceUpdate, ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest,
+    RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -789,9 +789,47 @@ impl Dispatcher for AppDispatcher {
                 // per person, not per batch.
                 let (summary, fanouts) = self.messaging.invite(&caller, request).await?;
                 context.reply(&summary)?;
+                // One GroupInvite notification per account actually seated. The invite
+                // path is group-only (the service refuses a direct conversation, whose
+                // two members arrive through the create call, and a room, whose
+                // membership belongs to the room service), and the freshly seated are
+                // exactly the Member-Joined fanouts it returns — an already-seated name
+                // the service dropped silently gets no bell for a seat it already holds.
+                // The row follows the FriendRequest notice shape: the actor is the
+                // inviter, the sentence is the client's to write, and the conversation
+                // id is the tap target.
+                let invited: Vec<Id> = fanouts
+                    .iter()
+                    .filter_map(|fanout| match &fanout.event {
+                        MessageBroadcast::Member(ConversationMemberEvent {
+                            change: MemberChange::Joined,
+                            user_id,
+                            ..
+                        }) => Some(*user_id),
+                        _ => None,
+                    })
+                    .collect();
                 for fanout in fanouts {
                     self.publish_messaging(context, caller.account_id, fanout)
                         .await?;
+                }
+                for member in invited {
+                    let notification = NotificationEvent {
+                        account_id: member,
+                        kind: NotificationKind::GroupInvite,
+                        actor_id: Some(caller.account_id),
+                        room_id: None,
+                        subject_id: None,
+                        conversation_id: Some(summary.conversation_id),
+                        at: now,
+                    };
+                    // Best-effort, like every other bell this process rings: the seat
+                    // is already written and the Joined fanout already published, and
+                    // failing the invite over a row in an inbox would un-invite
+                    // somebody the group already holds.
+                    if let Err(error) = self.notify.notify(notification).await {
+                        tracing::warn!(code = error.code(), "group invite notification dropped");
+                    }
                 }
                 Ok(())
             }
@@ -1257,8 +1295,15 @@ impl Dispatcher for AppDispatcher {
                 )
                 .await
             }
+            Opcode::FriendRemove => {
+                social::handle_friend_remove(context, frame, &self.social, &self.presence_relay)
+                    .await
+            }
             Opcode::BlockSet => {
                 social::handle_block_set(context, frame, &self.social, &self.presence_relay).await
+            }
+            Opcode::BlockClear => {
+                social::handle_block_clear(context, frame, &self.social, &self.presence_relay).await
             }
             Opcode::MuteSet => {
                 social::handle_mute_set(context, frame, &self.social, &self.presence_relay).await
@@ -1381,7 +1426,15 @@ impl Dispatcher for AppDispatcher {
                 // handler answers the frame when it does, and the 1:1 handler
                 // takes it otherwise. NOT_FOUND from the group service is the
                 // handoff, not an error the caller sees.
-                match calls::handle_group_end(context, frame, &self.calls).await {
+                match calls::handle_group_end(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.room_relay,
+                    &self.conversation_relay,
+                )
+                .await
+                {
                     Ok(true) => Ok(()),
                     Ok(false) => {
                         calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
@@ -1407,7 +1460,15 @@ impl Dispatcher for AppDispatcher {
             Opcode::CallStats => calls::handle_stats(context, frame).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
             Opcode::CallSfuJoin => {
-                calls::handle_sfu_join(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_sfu_join(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.room_relay,
+                    &self.conversation_relay,
+                )
+                .await
             }
 
             // Every other opcode is one this node speaks the transport for but does not route.
