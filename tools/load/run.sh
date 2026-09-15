@@ -114,7 +114,8 @@ wait_health
 
 echo "==> Load: $LOAD_VUS concurrent sessions for $LOAD_DURATION (error budget $ERROR_BUDGET)"
 # The exit code is the verdict (0 success, 1 nothing connected or fatal,
-# 3 budget exceeded), so the report is captured for the log either way and the
+# 3 error budget exceeded, 4 wire-byte budget exceeded by more than the
+# section-171 headroom), so the report is captured for the log either way and the
 # status decides the script's own exit.
 set +e
 node "$LOADGEN" \
@@ -135,7 +136,7 @@ cat "$REPORT_FILE"
 # auth) is explained there, and a load harness that hides the server's error
 # message cannot be debugged from the CI log alone.
 if [ "$LOAD_STATUS" -ne 0 ]; then
-  echo "==> loadgen exited $LOAD_STATUS (1 nothing connected/fatal, 3 error budget exceeded)" >&2
+  echo "==> loadgen exited $LOAD_STATUS (1 nothing connected/fatal, 3 error budget exceeded, 4 byte budget exceeded)" >&2
   echo "==> tail of the node's log ($NODE_LOG):" >&2
   tail -n 60 "$NODE_LOG" >&2
   exit "$LOAD_STATUS"

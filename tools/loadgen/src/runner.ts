@@ -18,6 +18,7 @@ import { getScenario } from './scenarios.js';
 import type { Workload } from './scenarios.js';
 import { classifyError, describeError, Metrics } from './stats.js';
 import { VirtualUser } from './virtual-user.js';
+import { summarizeWireBytes } from './wire-bytes.js';
 
 /** How often the steady-state hold wakes to notice the deadline or an interrupt. */
 const HOLD_POLL_MS = 200;
@@ -97,7 +98,22 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
     }
 
     log.info('disconnecting...');
+    // Captured before teardown flips `connected`: these are the VUs whose sessions the byte
+    // summary speaks for. A VU that never connected has no transport and nothing to report.
+    const sessionVus = vus.filter((vu) => vu.connected);
     await teardown(vus, config);
+    // Read after teardown so the session close itself is paid for in the counters — those bytes
+    // crossed the wire too. Normalized over the steady-state window, the same window the
+    // throughput figures use, so the per-minute byte rate and the per-second op rate describe
+    // the same run.
+    const wireBytes = summarizeWireBytes(
+      sessionVus.map((vu) => vu.wireBytes()),
+      durationMsActual,
+    );
+    log.info(
+      `wire bytes: ${wireBytes.sentBytes} sent, ${wireBytes.receivedBytes} received` +
+        ` (${Math.round(wireBytes.bytesPerUserPerMinute)} B/user/min across ${wireBytes.users} users)`,
+    );
 
     return {
       config,
@@ -107,6 +123,7 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
       durationMsActual,
       interrupted: ctx.interrupted,
       metrics,
+      wireBytes,
     };
   } finally {
     releaseSignals();
