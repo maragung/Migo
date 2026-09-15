@@ -1652,6 +1652,7 @@ class MigoClient private constructor(
             groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
             groupCallKeys = GroupCallKeysDomain(
                 rpc,
+                accountId,
                 deviceId,
                 scope,
                 callKeys,
