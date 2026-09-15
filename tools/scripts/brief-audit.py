@@ -6,7 +6,17 @@ the schema is worse than no brief at all, because people follow it. This script
 is the mechanical part of that audit: everything it checks is a fact that can be
 verified without reading prose.
 
+The cross-document half of section 178's list lives here too, and it is honest
+about its own reach. Names and numbers can be compared mechanically — limits,
+feature bits, opcode registry entries, backoff and heartbeat figures, budget
+tables, and whether every opcode, error symbol, enum and permission a product
+section relies on actually exists in the protocol section it cites. What no
+script can do is decide whether the prose of section 179 or section 180 still
+means what section 167 or section 165 means; that comparison stays human, and
+the checks below say so where they stop.
+
 Usage: python3 tools/scripts/brief-audit.py [--brief PATH] [--root PATH]
+       python3 tools/scripts/brief-audit.py --selftest
 Exit code 0 = clean, 1 = at least one inconsistency.
 """
 
@@ -15,7 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 SECTION_RE = re.compile(r"^(\d+)\. ([A-Z\"].*)$")
@@ -24,18 +36,21 @@ FROZEN_SECTIONS = 135  # docs/*.md cite "brief §NN" for 1..135; never renumber.
 
 
 class Audit:
-    def __init__(self) -> None:
+    def __init__(self, quiet: bool = False) -> None:
         self.problems: list[str] = []
         self.checks = 0
+        self.quiet = quiet
 
     def ok(self, label: str) -> None:
         self.checks += 1
-        print(f"  ok    {label}")
+        if not self.quiet:
+            print(f"  ok    {label}")
 
     def fail(self, label: str, detail: str) -> None:
         self.checks += 1
         self.problems.append(f"{label}: {detail}")
-        print(f"  FAIL  {label}\n        {detail}")
+        if not self.quiet:
+            print(f"  FAIL  {label}\n        {detail}")
 
     def expect(self, cond: bool, label: str, detail: str) -> bool:
         if cond:
@@ -69,15 +84,13 @@ def load_sections(text: str) -> dict[int, tuple[str, str]]:
     return out
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
-    ap.add_argument("--brief", default=None)
-    args = ap.parse_args()
-    root = Path(args.root)
-    brief_path = Path(args.brief) if args.brief else root / "migo.md"
+def run_audit(root: Path, brief_path: Path, quiet: bool = False) -> Audit:
+    a = Audit(quiet)
 
-    a = Audit()
+    def say(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
     text = brief_path.read_text(encoding="utf-8")
     sections = load_sections(text)
     schema = root / "shared" / "protocol" / "schema"
@@ -94,8 +107,8 @@ def main() -> int:
         shown = brief_path.resolve().relative_to(root.resolve())
     except ValueError:
         shown = brief_path
-    print(f"audit {shown}  ({len(text.splitlines())} lines)\n")
-    print("structure")
+    say(f"audit {shown}  ({len(text.splitlines())} lines)\n")
+    say("structure")
 
     # --- structure -----------------------------------------------------------
     nums = sorted(sections)
@@ -119,7 +132,7 @@ def main() -> int:
     a.expect(not dups, "no duplicate section titles", f"{dups}")
 
     # --- style ---------------------------------------------------------------
-    print("\nstyle")
+    say("\nstyle")
     style = {
         "markdown headings": [i + 1 for i, l in enumerate(text.split("\n")) if l.startswith("#")],
         "bullet lists": [i + 1 for i, l in enumerate(text.split("\n"))
@@ -133,7 +146,7 @@ def main() -> int:
         a.expect(not hits, f"no {label}", f"lines {hits[:8]}")
 
     # --- limits --------------------------------------------------------------
-    print("\nlimits, flags, features")
+    say("\nlimits, flags, features")
     limits = meta["limits"] if isinstance(meta.get("limits"), dict) else {
         l["name"]: l["value"] for l in meta["limits"]}
     missing_named, wrong_value = [], []
@@ -172,7 +185,7 @@ def main() -> int:
              f"missing {missing_feat}")
 
     # --- opcodes -------------------------------------------------------------
-    print("\nopcodes, enums, errors")
+    say("\nopcodes, enums, errors")
     # A name can be both an opcode and a feature bit (TYPING is opcode 39 and
     # feature bit 5), so a bare "5 TYPING" in the feature table is not a wrong
     # opcode number. Accept either reading.
@@ -259,15 +272,20 @@ def main() -> int:
              f"{sorted(unknown)[:10]}")
 
     # --- cross-document ------------------------------------------------------
-    print("\ncross-document")
+    say("\ncross-document")
     docs = root / "docs"
     p02 = (docs / "02-protocol.md").read_text(encoding="utf-8") if (docs / "02-protocol.md").exists() else ""
     p05 = (docs / "05-bandwidth-budget.md").read_text(encoding="utf-8") if (docs / "05-bandwidth-budget.md").exists() else ""
 
-    refs = sorted({int(m) for f in docs.glob("*.md")
+    # Recursive on purpose: docs/adr, docs/design and docs/runbooks carry no
+    # "brief §NN" citations today, which is exactly why a top-level glob would
+    # be the wrong shape -- the first citation someone adds under a
+    # subdirectory would be invisible to the gate, and invisible drift is the
+    # only kind this script exists to prevent.
+    refs = sorted({int(m) for f in docs.rglob("*.md")
                    for m in re.findall(r"brief §(\d+)", f.read_text(encoding="utf-8"))})
     broken = [r for r in refs if r not in sections or r > FROZEN_SECTIONS]
-    a.expect(not broken, f'docs "brief §NN" references resolve (found {refs})',
+    a.expect(not broken, f'docs "brief §NN" references resolve (found {len(refs)} across docs/)',
              f"broken {broken}")
 
     def squash(s: str) -> str:
@@ -284,8 +302,286 @@ def main() -> int:
         a.expect(not missing_m, "metric names agree with docs/05-bandwidth-budget.md",
                  f"missing {missing_m}")
 
+    # --- cross-document: brief vs schema (section 178, items 1-3) ------------
+    say("\ncross-document: brief vs schema")
+
+    # Item 1, the other direction. "limit values match meta.json" above rejects
+    # a wrong number printed beside a name; this rejects the subtler rot, a
+    # limit that survives in the prose while its value quietly disappears,
+    # leaving a claim the reader cannot check against anything.
+    unprinted = []
+    for name, value in limits.items():
+        printed = False
+        for m in re.finditer(re.escape(name) + r"([^\n]{0,90})", text):
+            tail = m.group(1)
+            cut = min((tail.find(o) for o in other_limits
+                       if o != name and tail.find(o) >= 0), default=-1)
+            if cut >= 0:
+                tail = tail[:cut]
+            lits = re.findall(r"\b\d[\d_]*\b", tail)
+            if lits and int(lits[0].replace("_", "")) == int(value):
+                printed = True
+                break
+        if not printed:
+            unprinted.append(name)
+    a.expect(not unprinted,
+             f"each of the {len(limits)} limit values is printed beside its name",
+             f"no mention prints the schema value: {unprinted}")
+
+    # Item 2. Section 72 calls itself the one binding list, so it is compared
+    # entry by entry against meta.json -- a bit that drifted, a name that only
+    # exists on one side, and a bit reassigned to a second name are all
+    # failures, not just a missing mention.
+    bits: dict[str, int] = {}
+    for ln in (sections.get(72, ("", ""))[1]).split("\n"):
+        m = re.match(r"^(\d+) ([A-Z][A-Z0-9_]+)$", ln.strip())
+        if m:
+            bits[m.group(2)] = int(m.group(1))
+    meta_bits = {f["name"]: f["bit"] for f in features}
+    only_bits = sorted(set(bits) - set(meta_bits))
+    only_meta = sorted(set(meta_bits) - set(bits))
+    bit_drift = sorted((n, b, meta_bits[n]) for n, b in bits.items()
+                       if n in meta_bits and meta_bits[n] != b)
+    a.expect(bits and not only_bits and not only_meta and not bit_drift,
+             f"section 72 feature-bit list matches meta.json ({len(meta_bits)} bits)",
+             f"only in section 72: {only_bits}; only in meta.json: {only_meta}; "
+             f"wrong bit: {bit_drift}")
+
+    # Item 3. Every "N NAME, ..." line in the section 145 registry -- the
+    # SCHEMA block and the planned block alike, because the planned opcodes
+    # were implemented and added to opcodes.json as their handlers landed, so
+    # the whole registry must agree with the file in both directions and by
+    # number. A registry line is an entry by its shape ("N NAME, arah, auth,
+    # cost, class"), which the surrounding prose never imitates.
+    registry_lines: dict[str, int] = {}
+    for ln in (sections.get(145, ("", ""))[1]).split("\n"):
+        m = re.match(r"^(\d+) ([A-Z][A-Z0-9_]+), ", ln)
+        if m:
+            registry_lines[m.group(2)] = int(m.group(1))
+    schema_ops = {o["name"]: o["code"] for o in opcode_list}
+    only_reg = sorted(set(registry_lines) - set(schema_ops))
+    only_schema = sorted(set(schema_ops) - set(registry_lines))
+    wrong_code = sorted((n, c, schema_ops[n]) for n, c in registry_lines.items()
+                        if n in schema_ops and schema_ops[n] != c)
+    a.expect(registry_lines and not only_reg and not only_schema and not wrong_code,
+             f"section 145 opcode registry matches opcodes.json ({len(schema_ops)} opcodes)",
+             f"only in registry: {only_reg}; only in opcodes.json: {only_schema}; "
+             f"wrong code: {wrong_code}")
+
+    # --- cross-document: brief vs docs (section 178, items 4-5) --------------
+    say("\ncross-document: brief vs docs")
+
+    if p02:
+        # docs/02 wraps lines mid-sentence ("Missing\n  2 intervals"), so every
+        # extraction below runs on whitespace-collapsed text.
+        p02n = re.sub(r"\s+", " ", p02)
+
+        # The hard-limits table is the one place docs/02 restates meta.json
+        # numbers in bulk; a limit changed in the schema but not here (or vice
+        # versa) leaves two documents that both look normative.
+        hard = {name: int(re.sub(r"\D", "", val)) for name, val in
+                re.findall(r"^\|\s*`([A-Z_]+)`\s*\|\s*([\d\s]+?)\s*\|", p02, re.M)}
+        unknown_hard = sorted(n for n in hard if n not in limits)
+        bad_hard = sorted((n, v, limits[n]) for n, v in hard.items()
+                          if n in limits and limits[n] != v)
+        a.expect(hard and not unknown_hard and not bad_hard,
+                 "docs/02-protocol.md hard-limit table matches meta.json",
+                 f"unknown limits: {unknown_hard}; wrong values: {bad_hard}")
+
+        comp = re.search(r"COMPRESS_MIN_BYTES` \((\d+)\)", p02n)
+        gain = re.search(r"at least (\d+) % smaller", p02n)
+        comp_ok = bool(comp) and int(comp.group(1)) == limits["COMPRESS_MIN_BYTES"]
+        gain_ok = bool(gain) and int(gain.group(1)) == limits["COMPRESS_MIN_GAIN_PERCENT"]
+        a.expect(comp_ok and gain_ok,
+                 "docs/02-protocol.md compression thresholds match meta.json",
+                 f"COMPRESS_MIN_BYTES printed as {comp.group(1) if comp else None} "
+                 f"(schema {limits['COMPRESS_MIN_BYTES']}), gain printed as "
+                 f"{gain.group(1) if gain else None} "
+                 f"(schema {limits['COMPRESS_MIN_GAIN_PERCENT']})")
+
+        linger = re.search(r"≤\s*(\d+)\s*ms\**\s*linger", p02n)
+        a.expect(bool(linger) and int(linger.group(1)) == limits["BATCH_LINGER_MS"],
+                 "docs/02-protocol.md batch linger matches meta.json",
+                 f"printed as {linger.group(1) if linger else None} ms "
+                 f"(schema {limits['BATCH_LINGER_MS']})")
+
+        # Heartbeat and reconnect, the two timing rules a client author reads
+        # from docs/02 first. The resume window is the third timing rule in
+        # section 178's list, but docs/02 deliberately states no numbers for it
+        # ("a small ring buffer ... for a short window"), so there is nothing to
+        # compare there; the brief's RESUME_BUFFER_FRAMES and RESUME_WINDOW_MS
+        # values are held against meta.json by the limit checks above.
+        backoff_doc = re.search(r"backoff `([\d,]+) s`", p02n)
+        doc_seq = [int(x) for x in backoff_doc.group(1).split(",")] if backoff_doc else []
+        s18 = sections.get(18, ("", ""))[1]
+        brief_seq = [int(l.strip().rstrip("s")) for l in s18.split("\n")
+                     if re.match(r"^\d+s$", l.strip())]
+        a.expect(bool(doc_seq) and doc_seq == brief_seq,
+                 "docs/02-protocol.md reconnect backoff matches section 18",
+                 f"docs say {doc_seq}, section 18 says {brief_seq}")
+
+        numerals = {"satu": 1, "dua": 2, "tiga": 3, "empat": 4, "lima": 5, "enam": 6,
+                    "tujuh": 7, "delapan": 8, "sembilan": 9, "sepuluh": 10}
+        miss_doc = re.search(r"Missing (\d+) intervals", p02n)
+        miss_brief = re.search(r"Melewatkan (\w+) interval", s18)
+        brief_miss = numerals.get(miss_brief.group(1)) if miss_brief else None
+        a.expect(bool(miss_doc) and brief_miss is not None
+                 and int(miss_doc.group(1)) == brief_miss,
+                 "docs/02-protocol.md heartbeat miss rule matches section 18",
+                 f"docs close after {miss_doc.group(1) if miss_doc else '?'} missed intervals, "
+                 f"section 18 says {miss_brief.group(1) if miss_brief else '?'} ({brief_miss})")
+
+    if p05:
+        # The budget tables (per-event and per-session, everything before the
+        # rules section) are compared with section 56 in both directions. The
+        # comparison is by number, not by row, because the row labels are
+        # English prose in docs/05 and Indonesian prose in the brief; pairing
+        # them would mean translating, and a translated pairing is exactly the
+        # kind of check that silently stops matching. A number that appears in
+        # one document's budgets and not the other's is still always a drift.
+        budget_tables = p05.split("## 3.")[0]
+        doc_nums: set[int] = set()
+        for row in budget_tables.split("\n"):
+            stripped = row.strip()
+            if not stripped.startswith("|") or set(stripped) <= {"|", "-", " "}:
+                continue
+            cols = [c.strip() for c in stripped.strip("|").split("|")]
+            if len(cols) < 2 or not cols[0] or cols[1] == "Budget":
+                continue
+            doc_nums |= {int(n.replace(",", "")) for n in
+                         re.findall(r"(\d[\d,]*)\s*(?:B|KB|s|%)\b", cols[1])}
+        s56 = sections.get(56, ("", ""))[1]
+        brief_max = {int(m.group(1)) for m in re.finditer(r"Maksimum (\d+) (?:byte|KB)", s56)}
+        fwd = sorted(n for n in doc_nums if str(n) not in s56)
+        rev = sorted(n for n in brief_max if n not in doc_nums)
+        a.expect(doc_nums and not fwd and not rev,
+                 "docs/05-bandwidth-budget.md budget numbers match section 56",
+                 f"docs numbers absent from section 56: {fwd}; "
+                 f"section 56 budgets absent from docs/05: {rev}")
+
+    # --- product sections vs protocol sections (section 178, items 6-7) ------
+    # What follows is the mechanical share of "requirement produk WAJIB
+    # konsisten dengan protokolnya": every identifier and number a product
+    # section relies on must exist where the product section says it lives.
+    # Whether the prose still means the same thing is deliberately not checked
+    # here -- that is the part of items 6 and 7 that stays with a human reader,
+    # because a script can compare names and numbers, not intent.
+    say("\nproduct requirements vs protocol")
+    s48 = sections.get(48, ("", ""))[1]
+    s165 = sections.get(165, ("", ""))[1]
+    s166 = sections.get(166, ("", ""))[1]
+    s167 = sections.get(167, ("", ""))[1]
+    s168 = sections.get(168, ("", ""))[1]
+    s179 = sections.get(179, ("", ""))[1]
+    s180 = sections.get(180, ("", ""))[1]
+    s179n = re.sub(r"\s+", " ", s179)
+    s180n = re.sub(r"\s+", " ", s180)
+    error_syms = {e["symbol"] for e in error_list}
+
+    # Section 180 names the feature bits that gate calls. Section 72 records
+    # that the bit names were renamed once already (CALL_V1 became CALLS), so a
+    # product section resurrecting a dead name is not hypothetical drift.
+    feat_names = {f["name"] for f in features}
+    m = re.search(r"Feature bit yang mengatur ketersediaannya adalah ([^.]+)\.", s180n)
+    claimed = SCREAMING_RE.findall(m.group(1)) if m else []
+    unknown_feat = [t for t in claimed if t not in feat_names]
+    a.expect(m and claimed and not unknown_feat,
+             "section 180 feature-bit claims are real bits in meta.json",
+             f"claimed {claimed or 'nothing'}; not in meta.json: "
+             f"{unknown_feat or 'no claim found'}")
+
+    call_toks = sorted({t for t in SCREAMING_RE.findall(s180) if t.startswith("CALL_")})
+    ungrounded_call = [t for t in call_toks if t not in s165 and t not in s166]
+    a.expect(bool(call_toks) and not ungrounded_call,
+             "section 180 call identifiers appear in sections 165 and 166",
+             f"{ungrounded_call} named in the product requirement but absent from the protocol")
+
+    # The promises "dijawab X" / "ditolak dengan X" name error symbols the
+    # server is said to answer with; those must be real registry symbols,
+    # because a client author will switch on them.
+    answer_tokens: set[str] = set()
+    for sent in re.split(r"[.\n]", s179 + "\n" + s180):
+        if "dijawab" in sent or "ditolak" in sent:
+            answer_tokens |= set(SCREAMING_RE.findall(sent))
+    bad_answers = sorted(t for t in answer_tokens if t not in error_syms)
+    a.expect(not bad_answers,
+             "error symbols promised in sections 179 and 180 exist in errors.json",
+             f"{bad_answers}")
+
+    def participants(s: str):
+        mm = re.search(r"(\d+) peserta audio[^.]*?(\d+) stream video", re.sub(r"\s+", " ", s))
+        return (int(mm.group(1)), int(mm.group(2))) if mm else None
+
+    a.expect(participants(s165) is not None and participants(s165) == participants(s180),
+             "section 180 participant limits match section 165",
+             f"section 165 says {participants(s165)}, "
+             f"section 180 says {participants(s180)}")
+
+    # Wire states must be a subset, not equal: the product section adds
+    # Degraded, which a client derives locally from call quality and which
+    # never rides CallStateEvent.
+    m165 = re.search(r"state yaitu ([A-Za-z, ]+?), ditambah", re.sub(r"\s+", " ", s165))
+    wire_states = set()
+    if m165:
+        for w in m165.group(1).split(","):
+            w = w.strip()
+            if w.startswith("atau "):
+                w = w[5:].strip()
+            if w:
+                wire_states.add(w)
+    m180 = re.search(r"keadaan dan client WAJIB menampilkannya[^\n]*\n\n(.+?)(?:\n\n|$)",
+                     s180, re.S)
+    ui_states = ({ln.split(",")[0].strip() for ln in m180.group(1).split("\n") if ln.strip()}
+                 if m180 else set())
+    a.expect(bool(wire_states) and bool(ui_states) and wire_states <= ui_states,
+             "section 165 wire call states appear in the section 180 state list",
+             f"wire states {sorted(wire_states)}; section 180 lists {sorted(ui_states)}")
+
+    media_toks = sorted({t for t in SCREAMING_RE.findall(s179) if t.startswith("MEDIA_")})
+    ungrounded_media = [t for t in media_toks if t not in s167 and t not in s168]
+    a.expect(bool(media_toks) and not ungrounded_media,
+             "section 179 media opcodes appear in sections 167 and 168",
+             f"{ungrounded_media} named in the product requirement but absent from the protocol")
+
+    variant_map: dict[str, set[str]] = {}
+    for e in enum_list:
+        vs = e.get("variants", e.get("values"))
+        variant_map[e["name"]] = {v["name"] if isinstance(v, dict) else v for v in vs}
+    named_enums = set(re.findall(r"enum ([A-Z]\w+)", s179n))
+    unknown_enums = sorted(n for n in named_enums if n not in variant_map)
+    a.expect(bool(named_enums) and not unknown_enums,
+             "enums named in section 179 exist in enums.json",
+             f"{unknown_enums}")
+
+    value_claims = [(e, v) for e, v in re.findall(r"([A-Z]\w+) bernilai (\w+)", s179n)]
+    value_claims += [(e, v) for v, e in
+                     re.findall(r"\w+ bernilai (\w+) dari enum ([A-Z]\w+)", s179n)]
+    bad_values = sorted({(e, v) for e, v in value_claims
+                         if e in variant_map and v not in variant_map[e]})
+    a.expect(not bad_values,
+             "enum values claimed in section 179 are real variants",
+             f"{bad_values}")
+
+    # Section 167 offers 1x, 1.5x and 2x; section 179 offers those plus 0.5x.
+    # The protocol's offer must fit inside the product's -- the product
+    # promising a speed the protocol never mentions is the drift that matters.
+    sp167 = set(re.findall(r"\d+(?:\.\d+)?x",
+                           next(l for l in s167.split("\n") if "Playback speed" in l)))
+    sp179 = set(re.findall(r"\d+(?:\.\d+)?x", " ".join(
+        ln for ln in s179.split("\n") if "Kecepatan" in ln and "x" in ln)))
+    a.expect(bool(sp167) and sp167 <= sp179,
+             "section 167 playback speeds appear in section 179",
+             f"section 167 offers {sorted(sp167)}, section 179 offers {sorted(sp179)}")
+
+    mperm = re.search(r"melalui permission pada section 48, yaitu ([^.]+)\.", s179n)
+    perms = SCREAMING_RE.findall(mperm.group(1)) if mperm else []
+    not_in_48 = [p2 for p2 in perms if p2 not in s48]
+    a.expect(mperm and perms and not not_in_48,
+             "voice note room permissions named in section 179 exist in section 48",
+             f"{not_in_48 or 'no permission list found'}")
+
     # --- requirement presence ------------------------------------------------
-    print("\nrequirements")
+    say("\nrequirements")
     required_topics = {
         "binary-first mandate": ["Binary-First", "WAJIB"],
         "JSON confined to REST/config/admin": ["REST", "configuration"],
@@ -467,6 +763,167 @@ def main() -> int:
     a.expect(not room_e2e, "no unqualified E2E claim for Public/Managed Room",
              f"{room_e2e[:2]}")
 
+    return a
+
+
+def selftest() -> int:
+    """Break a copy of the documents on purpose and require the audit to say no.
+
+    Section 178 says the script is tested this way, and the principle is the
+    one the section states: a checker that has never failed proves nothing.
+    Every cross-document check gets a mutation that breaks exactly it, applied
+    to a fresh copy of the real documents, and the selftest fails unless the
+    audit reports that specific check. The unmutated copy is audited first and
+    must come back clean, so a mutation that fails for the wrong reason (or a
+    harness bug that fails everything) cannot pass as coverage.
+    """
+    here = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="brief-audit-selftest-") as td:
+        tmp = Path(td)
+        template = tmp / "template"
+        (template / "shared" / "protocol" / "schema").mkdir(parents=True)
+        (template / "docs").mkdir(parents=True)
+        shutil.copy2(here / "migo.md", template / "migo.md")
+        for j in ("meta", "opcodes", "enums", "errors"):
+            shutil.copy2(here / "shared" / "protocol" / "schema" / f"{j}.json",
+                         template / "shared" / "protocol" / "schema" / f"{j}.json")
+        for d in ("02-protocol.md", "05-bandwidth-budget.md"):
+            shutil.copy2(here / "docs" / d, template / "docs" / d)
+
+        control = run_audit(template, template / "migo.md", quiet=True)
+        if control.problems:
+            print("selftest FAIL  the unmutated documents already report problems:")
+            for p in control.problems:
+                print(f"    {p}")
+            return 1
+        print("  ok    the unmutated copy is clean")
+
+        def edit(rel: str, old: str, new: str):
+            def go(root: Path) -> None:
+                target = root / rel
+                t = target.read_text(encoding="utf-8")
+                if t.count(old) != 1:
+                    raise AssertionError(
+                        f"anchor for {old!r} in {rel} found {t.count(old)} times, expected 1")
+                target.write_text(t.replace(old, new), encoding="utf-8")
+            return go
+
+        def add_dangling_brief_ref(root: Path) -> None:
+            # In a subdirectory on purpose: a top-level scan would never see it.
+            d = root / "docs" / "adr"
+            d.mkdir()
+            (d / "selftest-drift.md").write_text("See brief §999.\n", encoding="utf-8")
+
+        cases = [
+            ("a limit loses its printed value",
+             edit("migo.md", "MAX_MAP_ITEMS 1024", "MAX_MAP_ITEMS"),
+             "limit values is printed beside its name"),
+            ("section 72 reassigns a feature bit",
+             edit("migo.md", "17 CALLS", "19 CALLS"),
+             "section 72 feature-bit list matches meta.json"),
+            ("the registry prints a wrong opcode code",
+             edit("migo.md", "2 PING, dua arah", "3 PING, dua arah"),
+             "section 145 opcode registry matches opcodes.json"),
+            ("docs/02 hard limits drift from meta.json",
+             edit("docs/02-protocol.md", "262 144", "262 145"),
+             "hard-limit table matches meta.json"),
+            ("docs/02 compression floor drifts",
+             edit("docs/02-protocol.md", "COMPRESS_MIN_BYTES` (512)", "COMPRESS_MIN_BYTES` (513)"),
+             "compression thresholds match meta.json"),
+            ("docs/02 linger drifts",
+             edit("docs/02-protocol.md", "≤ 15 ms** linger", "≤ 16 ms** linger"),
+             "batch linger matches meta.json"),
+            ("docs/02 backoff drifts from section 18",
+             edit("docs/02-protocol.md", "backoff `1,2,4,8,16,30 s`", "backoff `1,2,4,8,16,60 s`"),
+             "reconnect backoff matches section 18"),
+            ("docs/02 heartbeat miss rule drifts",
+             edit("docs/02-protocol.md", "Missing\n  2 intervals", "Missing\n  3 intervals"),
+             "heartbeat miss rule matches section 18"),
+            ("docs/05 budget drifts from section 56",
+             edit("docs/05-bandwidth-budget.md",
+                  "| Message receipt (delivered/read) | ≤ 24 B",
+                  "| Message receipt (delivered/read) | ≤ 25 B"),
+             "budget numbers match section 56"),
+            ("section 180 resurrects a dead feature-bit name",
+             edit("migo.md",
+                  "adalah CALLS untuk 1-on-1 dan GROUP_CALL untuk group",
+                  "adalah CALL_V1 untuk 1-on-1 dan GROUP_CALL_SFU_V1 untuk group"),
+             "feature-bit claims are real bits in meta.json"),
+            ("section 180 invents a call identifier",
+             edit("migo.md",
+                  "memicu re-keying melalui CALL_KEY_UPDATE",
+                  "memicu re-keying melalui CALL_MEDIA_UPDATE"),
+             "call identifiers appear in sections 165 and 166"),
+            ("section 180 promises an unknown error",
+             edit("migo.md", "Melewati batas dijawab QUOTA_EXCEEDED",
+                  "Melewati batas dijawab QUOTA_EXCEEDED_V2"),
+             "error symbols promised in sections 179 and 180 exist in errors.json"),
+            ("section 180 participant limits drift",
+             edit("migo.md", "32 peserta audio, dan paling banyak 8 stream video",
+                  "30 peserta audio, dan paling banyak 8 stream video"),
+             "participant limits match section 165"),
+            ("section 180 drops a wire call state",
+             edit("migo.md", "Connected\nReconnecting\nDegraded", "Connected\nDegraded"),
+             "wire call states appear in the section 180 state list"),
+            ("section 179 invents a media opcode",
+             edit("migo.md", "melalui MEDIA_UPLOAD_STATUS", "melalui MEDIA_UPLOAD_PROGRESS"),
+             "media opcodes appear in sections 167 and 168"),
+            ("section 179 names an unknown enum",
+             edit("migo.md", "mengikuti enum BandwidthMode pada section 75 supaya",
+                  "mengikuti enum BandwidthModeV2 pada section 75 supaya"),
+             "enums named in section 179 exist in enums.json"),
+            ("section 179 claims a variant that does not exist",
+             edit("migo.md", "ReceiptKind bernilai Delivered", "ReceiptKind bernilai Played"),
+             "enum values claimed in section 179 are real variants"),
+            ("section 179 drops a protocol playback speed",
+             edit("migo.md", "Kecepatan 0.5x, 1x, 1.5x, dan 2x", "Kecepatan 0.5x, 1x, dan 2x"),
+             "playback speeds appear in section 179"),
+            ("section 179 invents a room permission",
+             edit("migo.md", "dan VOICE_NOTE_PLAY", "dan VOICE_NOTE_TRANSCRIBE"),
+             "voice note room permissions named in section 179 exist in section 48"),
+            ("a docs subdirectory cites a nonexistent section",
+             add_dangling_brief_ref,
+             'references resolve'),
+        ]
+
+        failures = []
+        for i, (name, mutate, label) in enumerate(cases):
+            root = tmp / f"case-{i:02d}"
+            shutil.copytree(template, root)
+            try:
+                mutate(root)
+            except AssertionError as exc:
+                failures.append(f"{name}: {exc}")
+                print(f"  FAIL  {name}")
+                continue
+            result = run_audit(root, root / "migo.md", quiet=True)
+            hit = [p for p in result.problems if label in p]
+            if not result.problems:
+                failures.append(f"{name}: the audit stayed clean, the check never fired")
+            elif not hit:
+                failures.append(f"{name}: failed for other reasons: {result.problems[:2]}")
+            print(f"  {'ok  ' if hit else 'FAIL'}  {name}")
+
+        print(f"brief-audit selftest: {len(cases)} case(s), {len(failures)} failure(s)")
+        for f in failures:
+            print(f"  - {f}")
+        return 1 if failures else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
+    ap.add_argument("--brief", default=None)
+    ap.add_argument("--selftest", action="store_true",
+                    help="break a copy of the documents on purpose and require "
+                         "the audit to reject it")
+    args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+
+    root = Path(args.root)
+    brief_path = Path(args.brief) if args.brief else root / "migo.md"
+    a = run_audit(root, brief_path)
     print(f"\n{a.checks} checks, {len(a.problems)} problem(s)")
     if a.problems:
         print("\nPROBLEMS")
