@@ -697,6 +697,10 @@ test('repeated network switches reconnect immediately without a reconnect storm'
       node.pushMessageEvent(3 + 2 * switchCount);
       await node.drain();
     }
+    // One more event in steady state, on the network that never went away, so the switch
+    // loop's exactly-once count ends at 12 where the outage section picks up.
+    node.pushMessageEvent(12);
+    await node.drain();
     assert.deepEqual(
       seen,
       [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
