@@ -349,6 +349,78 @@ test('reconnectNow pulls a pending backoff forward instead of waiting out the ti
   transport.close();
 });
 
+test('a backoff that already fired is not pending, so reconnectNow leaves the reconnected socket alone', async () => {
+  // The backoff timer nulls its handle when it fires. If it did not, the spent handle would make
+  // reconnectNow's guard pass after the attempt had already succeeded — the web client calls it on
+  // visibility change — and the transport would tear down its own live connection for nothing.
+  const sockets: FakeSocket[] = [];
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    webSocketFactory: (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+
+  try {
+    const ready = transport.connect();
+    const first = sockets[0];
+    assert.ok(first !== undefined, 'the transport did not build a socket synchronously');
+    first.fireOpen();
+    await tick();
+    first.deliver(welcomeFrame());
+    await ready;
+
+    // The network drops the socket; the backoff (base 500 ms, jitter 0.5–1.0) is left to fire on
+    // its own — this test must catch the timer firing, not pull it forward.
+    first.close(1006, 'network drop');
+    assert.equal(transport.state, 'reconnecting');
+    const deadline = Date.now() + 2_000;
+    while (sockets[1] === undefined && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = sockets[1];
+    assert.ok(second !== undefined, 'the backoff timer never fired within two seconds');
+    second.fireOpen();
+    await tick();
+    second.deliver(welcomeFrame());
+    await tick();
+    assert.equal(transport.state, 'ready', 'the natural backoff attempt did not reach Ready');
+
+    // The connection is live and no backoff is pending: reconnectNow must not touch it.
+    transport.reconnectNow();
+    await tick();
+    assert.equal(transport.state, 'ready', 'reconnectNow disturbed a ready transport');
+    assert.equal(
+      sockets.length,
+      2,
+      'reconnectNow opened a new socket even though the backoff had already fired',
+    );
+    assert.equal(second.readyState, FakeSocket.OPEN, 'reconnectNow disturbed the live socket');
+  } finally {
+    transport.close();
+  }
+});
+
 test('reconnectNow leaves a live connection and a shut-down transport alone', async () => {
   const { transport, socket } = await connectReady();
   try {

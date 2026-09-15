@@ -830,6 +830,9 @@ export class GatewayTransport {
     const jittered = capped * (0.5 + Math.random() * 0.5);
     this.#reconnectAttempt += 1;
     this.#reconnectTimer = setTimeout(() => {
+      // The backoff is no longer pending once it fires: leaving the spent handle behind makes
+      // `reconnectNow` mistake a live connection for a waiting backoff and tear it down.
+      this.#reconnectTimer = null;
       this.#open().catch(() => {
         // A failed reconnect closes the socket, whose onclose schedules the next attempt; unless
         // the failure was a terminal handshake rejection, which cleared #shouldReconnect.
