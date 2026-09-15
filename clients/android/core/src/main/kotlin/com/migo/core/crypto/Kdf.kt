@@ -19,6 +19,19 @@ object Kdf {
     const val LABEL_BACKUP = "migo-backup-v1"
     const val LABEL_RECOVERY = "migo-recovery-v1"
 
+    /**
+     * A call's media key, derived from the pairwise session secret (section 163). The call id is the
+     * salt, so one session cannot produce the same media key for two different calls.
+     */
+    const val LABEL_CALL_KEY = "migo-call-key-v1"
+
+    /**
+     * The wrapper key that carries a mid-call joiner's first call key: derived from the pairwise
+     * secret the distributor shares with *that* joiner, under its own label so it is never the same
+     * material as the call key itself.
+     */
+    const val LABEL_CALL_JOIN = "migo-call-join-v1"
+
     /** Derives [length] bytes from [secret] under a UTF-8 [label], with an optional [salt]. */
     fun derive(secret: ByteArray, salt: ByteArray?, label: String, length: Int): ByteArray =
         derive(secret, salt, label.toByteArray(Charsets.UTF_8), length)

@@ -5433,19 +5433,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         // A departure from a room this shell bridges kills the room's outbound chain: the member
         // who left may still hold its key, and the one thing a chain must not do after a member
-        // leaves is keep sealing. The next send builds a fresh chain and distributes it to
-        // everyone remaining -- the same rule the group's own membership churn follows above,
-        // and the desktop client applies to rooms. A member *joining* needs no rotation: the
-        // chain key they are handed starts at the current position, so history stays sealed to
-        // them. A `Disconnected` rotates too, the way the desktop's reference does, because a
-        // disconnect starts the grace period that ends in the member's removal.
+        // leaves is keep sealing. A fresh chain is rotated and distributed to everyone remaining
+        // immediately -- the same rule the group's own membership churn follows in the core, minus
+        // the generation number, because a room's member movement predates the field and carries
+        // none. A member *joining* needs no rotation: the chain key they are handed starts at the
+        // current position, so history stays sealed to them. A `Disconnected` rotates too, the way
+        // the desktop's reference does, because a disconnect starts the grace period that ends in
+        // the member's removal.
         if (change == MemberChange.Left ||
             change == MemberChange.Disconnected ||
             change == MemberChange.Kicked ||
             change == MemberChange.Banned
         ) {
             roomOf.entries.firstOrNull { it.value == event.roomId }?.let { (conversationId, _) ->
-                live.client.messaging.rotateSenderKey(conversationId)
+                viewModelScope.launch {
+                    try {
+                        live.client.messaging.redistributeOnMembership(conversationId, null)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // The rotation itself is done; a distribution that could not be sent is
+                        // re-sent by the next send's own distribution pass, which reaches
+                        // whoever is still reachable.
+                    }
+                }
             }
         }
 
@@ -5620,11 +5631,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             refreshConversations()
             return
         }
-        // Membership churn is a crypto event before it is a UI one: the outbound sender-key chain
-        // this device holds must stop being the chain that seals anything, so the next send
-        // re-distributes a fresh one to whoever belongs now -- a removed member cannot read what
-        // is sealed after their departure.
-        live.client.messaging.rotateSenderKey(event.conversationId)
+        // Membership churn is a crypto event before it is a UI one, and the core owns the trigger
+        // now: the client's own member-event handling rotates the outbound chain to the generation
+        // the event stamps and re-distributes it over the dedicated relay (section 163), so this
+        // screen's job is only the notice -- a removed member cannot read what is sealed after
+        // their departure, whoever sealed it.
         // The name is the one this shell has learned, or the short id -- a notice that resolved its
         // name at draw time would fetch on every scroll frame.
         val who = names[event.userId] ?: shortId(event.userId)
