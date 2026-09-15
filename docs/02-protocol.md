@@ -244,5 +244,6 @@ can never invent a code the server does not know.
 
 `MWP/1` is frozen once the first public client ships. Additive change (new opcodes, new
 optional fields, new enum variants, new feature bits) happens **inside** v1. Breaking
-change means `MWP/2`, and servers speak both for at least one full client-deprecation
-window. A server must never crash or hang because an old client connected (brief §71).
+change means `MWP/2` — none exists today — and, when one is ever made, servers speak
+both for at least one full client-deprecation window. A server must never crash or
+hang because an old client connected (brief §71).

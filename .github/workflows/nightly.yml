@@ -299,6 +299,35 @@ jobs:
       - name: Security — negative wire tests against the real TCP listener
         run: make test-security
 
+  # Section 172's contract line: bounded fuzz in CI, "dan dijalankan lebih
+  # panjang pada jadwal harian" — the longer half. The hardening job above
+  # re-proves the CI budget on the same seed; this one multiplies the seeded
+  # case counts (FUZZ_CASES, read by both fuzz suites) and rotates the seed by
+  # date, so every night explores inputs no CI run has seen while a finding
+  # still reproduces exactly: re-run with that date's SIM_SEED and FUZZ_CASES.
+  # Unbounded continuous fuzz stays SPEC — it needs the nightly toolchain and
+  # deliberately lives outside every gate.
+  fuzz-long:
+    name: Longer seeded fuzz (brief section 172, the daily run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: server-fuzz-long
+
+      - name: Seeded fuzz suites at the nightly budget
+        run: |
+          echo "SIM_SEED=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "FUZZ_CASES=20000" >> "$GITHUB_ENV"
+          make test-fuzz
+
   load:
     name: Load — concurrent sessions against one node
     runs-on: ubuntu-latest

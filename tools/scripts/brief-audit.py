@@ -755,6 +755,32 @@ def run_audit(root: Path, brief_path: Path, quiet: bool = False) -> Audit:
                  "no crate listed as untested actually has tests",
                  f"tests exist, so move these to BUILT: {premature}")
 
+    # The waveform bucket count is one number everywhere it is stated. The
+    # brief pins it (section 167) and all three clients encode it as a
+    # constant — but the count rides inside E2E ciphertext, where no schema
+    # or vector can check it, so a client drifting from the brief is silent
+    # on every existing gate. Section 171's 64 is a ceiling, not the count,
+    # and is deliberately not pinned here.
+    waveform_sites = {
+        "web": root / "clients/web/src/lib/migo/voice.ts",
+        "android": root / "clients/android/app/src/main/kotlin/com/migo/app/media/Media.kt",
+        "desktop": root / "clients/desktop/src/net/media.rs",
+    }
+    waveform_counts = {}
+    for name, path in waveform_sites.items():
+        if path.exists():
+            found = re.search(r"WAVEFORM_BARS[^=\n]*=\s*(\d+)",
+                              path.read_text(encoding="utf-8"))
+            if found:
+                waveform_counts[name] = int(found.group(1))
+    brief_167 = re.search(r"jumlah bucket tetap, yaitu (\d+) bucket",
+                          sections.get(167, ("", ""))[1])
+    brief_count = int(brief_167.group(1)) if brief_167 else None
+    a.expect(brief_count is not None and len(waveform_counts) == len(waveform_sites)
+             and all(c == brief_count for c in waveform_counts.values()),
+             "the waveform bucket count is one number in the brief and all three clients",
+             f"brief section 167 says {brief_count}; clients say {waveform_counts}")
+
     # Public/Managed Room must never be described as end-to-end encrypted.
     room_e2e = [ln for ln in text.split("\n")
                 if re.search(r"(Public Room|Managed Room)", ln)
@@ -789,6 +815,15 @@ def selftest() -> int:
                          template / "shared" / "protocol" / "schema" / f"{j}.json")
         for d in ("02-protocol.md", "05-bandwidth-budget.md"):
             shutil.copy2(here / "docs" / d, template / "docs" / d)
+        # The waveform bucket-count check reads the three client constants, so
+        # the selftest template needs those files too — a mutation case below
+        # breaks exactly one of them.
+        for rel in ("clients/web/src/lib/migo/voice.ts",
+                    "clients/android/app/src/main/kotlin/com/migo/app/media/Media.kt",
+                    "clients/desktop/src/net/media.rs"):
+            dest = template / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(here / rel, dest)
 
         control = run_audit(template, template / "migo.md", quiet=True)
         if control.problems:
@@ -881,6 +916,9 @@ def selftest() -> int:
             ("section 179 invents a room permission",
              edit("migo.md", "dan VOICE_NOTE_PLAY", "dan VOICE_NOTE_TRANSCRIBE"),
              "voice note room permissions named in section 179 exist in section 48"),
+            ("a client drifts its waveform bucket count from the brief",
+             edit("clients/web/src/lib/migo/voice.ts", "WAVEFORM_BARS = 50", "WAVEFORM_BARS = 51"),
+             "waveform bucket count is one number"),
             ("a docs subdirectory cites a nonexistent section",
              add_dangling_brief_ref,
              'references resolve'),
