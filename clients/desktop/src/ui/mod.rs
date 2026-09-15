@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection};
 use crate::net::Command;
+use crate::settings::VoiceSpeed;
 use crate::theme::Theme;
 
 /// Which screen is showing.
@@ -222,6 +223,13 @@ pub struct Context<'a> {
     /// hands the choice back through [`Context::navigation_choice`] — the same one-way street
     /// every other shell-owned fact here travels.
     pub navigation_mode: NavigationMode,
+    /// The voice-note playback speed this frame (§179): 1x, 1.5x, or 2x.
+    ///
+    /// Read-only, like [`Context::navigation_mode`]: the choice lives in the settings record
+    /// and the worker's pump, so the player draws the pace that stands and hands a change
+    /// back through [`Context::commands`] as a `SetVoiceSpeed` — the shell persists it after
+    /// the frame, the same seam every other settings write takes.
+    pub voice_speed: VoiceSpeed,
     /// A navigation-mode change requested from a screen, applied after the frame.
     ///
     /// Same reasoning as [`Context::theme_choice`]: the mode decides how the whole chat area is

@@ -132,6 +132,11 @@ impl App {
         cc.egui_ctx.set_zoom_factor(settings.zoom());
 
         let net = Net::spawn(cc.egui_ctx.clone(), vault_path);
+        // The saved playback speed reaches the worker before the first note of the session
+        // plays: the pump is what acts on it, and the shell only holds the record.
+        net.send(Command::SetVoiceSpeed {
+            speed: settings.voice_speed(),
+        });
         // The server address is the one field the caller decides; everything else on the auth form
         // starts empty, and a passphrase field pre-filled from anywhere would be a bug.
         // The server is the same endpoint the user just set; the auth form's own
@@ -1254,6 +1259,18 @@ impl App {
                         self.chat.media.playing = None;
                     }
                 }
+                // The listened marks for the account that just signed in, read back from
+                // this device's store: the whole set replaces whatever stood, because the
+                // marks are the account's own and a second account over the same window
+                // inherits nothing.
+                Event::VoiceNotesListened { media_ids } => {
+                    self.chat.media.listened = media_ids.into_iter().collect();
+                }
+                // One note was heard to (near) its end — the worker's own mark, filed the
+                // same way a hand mark files itself.
+                Event::VoiceNoteListened { media_id } => {
+                    self.chat.media.listened.insert(media_id);
+                }
                 Event::Toast { text, kind } => self.toasts.push(match kind {
                     ToastKind::Info => Toast::info(text),
                     ToastKind::Success => Toast::success(text),
@@ -1700,6 +1717,7 @@ impl App {
                 chat_log_auto_save: self.settings.auto_save_chat_logs,
                 chat_log: &mut self.chat_log_actions,
                 navigation_mode: self.settings.navigation_mode,
+                voice_speed: self.settings.voice_speed(),
                 navigate,
                 theme_choice,
                 zoom_choice,
@@ -1748,6 +1766,7 @@ impl App {
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut self.chat_log_actions,
             navigation_mode: self.settings.navigation_mode,
+            voice_speed: self.settings.voice_speed(),
             navigate: &mut *navigate,
             theme_choice: &mut *theme_choice,
             zoom_choice: &mut *zoom_choice,
@@ -1820,6 +1839,7 @@ impl App {
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut self.chat_log_actions,
             navigation_mode: self.settings.navigation_mode,
+            voice_speed: self.settings.voice_speed(),
             navigate,
             theme_choice,
             zoom_choice,
@@ -1907,6 +1927,7 @@ impl App {
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut chat_log_actions,
             navigation_mode: self.settings.navigation_mode,
+            voice_speed: self.settings.voice_speed(),
             navigate: &mut navigate,
             theme_choice: &mut theme_choice,
             zoom_choice: &mut zoom_choice,
@@ -2223,6 +2244,7 @@ impl eframe::App for App {
                         chat_log_auto_save: self.settings.auto_save_chat_logs,
                         chat_log: &mut self.chat_log_actions,
                         navigation_mode: self.settings.navigation_mode,
+                        voice_speed: self.settings.voice_speed(),
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
                         zoom_choice: &mut zoom_choice,
@@ -2444,7 +2466,17 @@ impl eframe::App for App {
             self.start_server_probe(ctx.clone());
         }
 
-        for command in self.commands.drain(..) {
+        // Drained into a local first: the speed below writes settings through `self`, and a
+        // drain iterated in place would hold the borrow of the buffer across the loop body.
+        let commands = std::mem::take(&mut self.commands);
+        for command in commands {
+            // The playback speed is a live command and a setting at once: the shell owns the
+            // record, so the choice is persisted here — the same after-the-frame seam every
+            // other settings write takes — before the worker hears it.
+            if let Command::SetVoiceSpeed { speed } = command {
+                self.settings.voice_speed = Some(speed);
+                self.persist_settings();
+            }
             self.net.send(command);
         }
     }

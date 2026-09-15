@@ -425,6 +425,11 @@ pub struct MediaState {
     pub failures: HashMap<Id, String>,
     /// The voice note currently playing, if one is.
     pub playing: Option<Id>,
+    /// Voice notes this account has listened to, by media id — heard to (near) the end or
+    /// marked by hand (§179). The receiver's own local state: nothing here is ever sent, the
+    /// worker seeds it from this device's store at sign-in, and the rows dim against it so
+    /// the unheard ones stand out.
+    pub listened: HashSet<Id>,
     /// Save destinations typed against a document bubble, kept between frames so a retry of
     /// a failed save does not cost the path.
     pub save_paths: HashMap<Id, String>,
@@ -2757,6 +2762,7 @@ fn message_row(
                 }
                 reaction_chips(ui, context, message, reactions);
                 own_message_actions(ui, context, message, edits);
+                voice_note_actions(ui, context, message, media);
             },
         );
     });
@@ -2873,6 +2879,62 @@ fn own_message_actions(
             context.issue(Command::DeleteMessage {
                 conversation_id: message.conversation_id,
                 message_id: message.message_id,
+            });
+        }
+    });
+}
+
+/// The listened toggle on a received voice note (§179): one quiet action under the bubble,
+/// hand-set in either direction, local to this device. The mark is the receiver's own
+/// memory — nothing is sent, the sender is never told, and marking unlistened does not
+/// unsay a receipt that already went. Own notes get no toggle: the sender is not the
+/// listener, and a "played" the sender could read is a wire status this client must not
+/// pretend to.
+fn voice_note_actions(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    message: &Message,
+    media: &mut MediaState,
+) {
+    let Body::VoiceNote { media_id, .. } = &message.body else {
+        return;
+    };
+    if message.outgoing {
+        return;
+    }
+    let colors = palette(context.theme);
+    let listened = media.listened.contains(media_id);
+    let label = if listened {
+        "Mark unlistened"
+    } else {
+        "Mark listened"
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(label)
+                        .font(egui::FontId::proportional(font::TINY))
+                        .color(colors.text_muted),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE),
+            )
+            .on_hover_text("Kept on this device only — the sender is not told")
+            .clicked()
+        {
+            // The optimistic flip is the same trade a reaction's own chip makes: the row
+            // answers its own click now, and the worker's store is what makes it survive
+            // the restart.
+            if listened {
+                media.listened.remove(media_id);
+            } else {
+                media.listened.insert(*media_id);
+            }
+            context.issue(Command::SetVoiceNoteListened {
+                media_id: *media_id,
+                listened: !listened,
             });
         }
     });
@@ -3058,6 +3120,12 @@ pub struct VoiceNoteView {
 /// The button is the bubble's neighbour rather than the bubble itself: the bubble carries the
 /// waveform, whose whole point is to be *seen* — a row that shows the shape of what was said
 /// answers "is this the part I missed?" before it is pressed.
+///
+/// A note this account has listened to (§179) draws dimmed — the quiet play button, the muted
+/// bars — so the unheard ones stand out in a thread of heard ones. Own notes never dim: the
+/// listened marks are the receiver's own state, and the sender is not the listener. While a
+/// note plays, the speed control rides it: one small button cycling 1x, 1.5x, and 2x, applied
+/// by the pump without the media ever being asked for again.
 fn voice_bubble(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -3068,6 +3136,9 @@ fn voice_bubble(
 ) {
     let colors = palette(context.theme);
     let playing = media.playing == Some(note.media_id);
+    // The dimming's own fact: heard to (near) the end or marked by hand, and received —
+    // never the sender's own row.
+    let listened = !outgoing && media.listened.contains(&note.media_id);
     if let Some(reason) = media.failures.get(&note.media_id) {
         widgets::bubble(
             ui,
@@ -3085,14 +3156,27 @@ fn voice_bubble(
     }
     ui.horizontal(|ui| {
         let glyph = if playing { "\u{23F9}" } else { "\u{25B6}" };
+        // The button takes the accented circle while the note is unheard (or the sender's
+        // own), and the quiet bordered surface once it has been listened to — the one shade
+        // change that lets an unheard note stand out.
+        let (button_fill, glyph_color, button_stroke) = if listened {
+            (
+                colors.surface_raised,
+                colors.text_muted,
+                egui::Stroke::new(1.0, colors.border),
+            )
+        } else {
+            (colors.accent, colors.text_on_accent, egui::Stroke::NONE)
+        };
         if ui
             .add(
                 egui::Button::new(
                     RichText::new(glyph)
                         .font(egui::FontId::proportional(font::BODY))
-                        .color(colors.text_on_accent),
+                        .color(glyph_color),
                 )
-                .fill(colors.accent)
+                .fill(button_fill)
+                .stroke(button_stroke)
                 .min_size(egui::vec2(30.0, 30.0)),
             )
             .on_hover_text(if playing { "Stop" } else { "Play" })
@@ -3109,13 +3193,42 @@ fn voice_bubble(
                 });
             }
         }
+        if playing {
+            // The speed control, on the player and only there (§179): one press steps
+            // through 1x, 1.5x, and 2x, the pump keeps its place and changes pace, and the
+            // choice is persisted by the shell so the next note starts at it.
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(context.voice_speed.label())
+                            .font(egui::FontId::proportional(font::TINY))
+                            .color(colors.text_muted),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
+                )
+                .on_hover_text("Playback speed — the note keeps its place")
+                .clicked()
+            {
+                context.issue(Command::SetVoiceSpeed {
+                    speed: context.voice_speed.next(),
+                });
+            }
+        }
         ui.add_space(space::XS);
         // The bubble itself, in the same two tones a text bubble takes — and carrying the
         // note's own shape when the message brought one. A note with no waveform (an older
         // client's send, or a wire that never described it) still says what it is and how
-        // long, the same words the row has always used.
+        // long, the same words the row has always used. A listened note mutes its bars and
+        // its time with them, the same dimming the play button takes.
         let (fill, foreground, stroke) = if outgoing {
             (colors.accent, colors.text_on_accent, egui::Stroke::NONE)
+        } else if listened {
+            (
+                colors.surface_raised,
+                colors.text_muted,
+                egui::Stroke::new(1.0, colors.border),
+            )
         } else {
             (
                 colors.surface_raised,
