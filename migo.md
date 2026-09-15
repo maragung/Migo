@@ -5724,7 +5724,7 @@ Ketiga blok yang namanya memuat TEST BELUM DITULIS bukan kelonggaran atas aturan
 
 178. DOCUMENT AUDIT AND CONSISTENCY RULES
 
-STATUS: BUILT untuk pemeriksaan otomatis di tools/scripts/brief-audit.py, yang dijalankan lewat make brief-check dan menjadi bagian dari make ci. STATUS: SPEC untuk pemeriksaan yang masih dilakukan manusia.
+STATUS: BUILT untuk pemeriksaan otomatis di tools/scripts/brief-audit.py, yang dijalankan lewat make brief-check dan menjadi bagian dari make ci, kini termasuk pemeriksaan lintas dokumen yang mekanis: angka limit dan daftar feature bit terhadap meta.json, daftar opcode registry terhadap opcodes.json, angka limit, backoff, dan heartbeat terhadap docs/02-protocol.md, angka budget terhadap docs/05-bandwidth-budget.md, penelusuran nama opcode, error, enum, feature bit, dan permission yang dipakai section 179 dan section 180 ke section protokolnya, serta referensi brief §NN di seluruh direktori docs. STATUS: SPEC untuk pemeriksaan yang masih dilakukan manusia, terutama apakah makna prosa requirement produk pada section 179 dan section 180 masih sejalan dengan maksud protokolnya, karena mesin hanya dapat membandingkan nama dan angka, bukan niat.
 
 Dokumen ini WAJIB diaudit setiap kali arsitektur berubah. Audit berikut dijalankan dan hasilnya harus bersih.
 
@@ -5755,7 +5755,7 @@ Pemeriksaan konsistensi lintas dokumen:
 
 Angka limit di dokumen ini WAJIB sama dengan meta.json
 Daftar feature bit WAJIB sama dengan meta.json
-Daftar opcode yang bertanda SCHEMA WAJIB sama dengan opcodes.json
+Setiap baris opcode pada registry section 145 WAJIB sama dengan opcodes.json pada nama dan nomornya, dan setiap opcode yang bertanda SCHEMA WAJIB ada di opcodes.json
 Backoff, heartbeat, dan jendela resume WAJIB sama dengan docs/02-protocol.md
 Budget bandwidth WAJIB sama dengan docs/05-bandwidth-budget.md
 Requirement produk call pada section 180 WAJIB konsisten dengan protokolnya pada section 165 dan section 166
@@ -5979,7 +5979,7 @@ STATUS: SPEC. Protokol signaling ada di section 165, arsitektur media di section
 
 Model dasar Migo untuk panggilan adalah P2P ditambah E2E sebagai default. Keduanya bukan alternatif dan sering tertukar: P2P menentukan jalur yang dilewati media, E2E menentukan siapa yang dapat membacanya. Panggilan yang P2P tanpa E2E tetap dapat dibaca pihak yang menyisipkan diri di jalur, dan panggilan yang E2E tanpa P2P tetap membebani server dengan seluruh bandwidth media. Migo memakai keduanya, sehingga server Migo tidak pernah menjadi pihak yang dapat mendengar atau melihat panggilan private.
 
-Feature bit yang mengatur ketersediaannya adalah CALL_V1 untuk 1-on-1 dan GROUP_CALL_SFU_V1 untuk group, keduanya pada section 72. Ketika bit tidak dinegosiasikan, tombol call tidak ditampilkan dan permintaan dijawab FEATURE_NOT_NEGOTIATED.
+Feature bit yang mengatur ketersediaannya adalah CALLS untuk 1-on-1 dan GROUP_CALL untuk group, keduanya pada section 72. Ketika bit tidak dinegosiasikan, tombol call tidak ditampilkan dan permintaan dijawab FEATURE_NOT_NEGOTIATED.
 
 Voice call, kemampuan yang WAJIB ada:
 
