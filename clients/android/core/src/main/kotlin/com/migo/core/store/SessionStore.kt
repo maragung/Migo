@@ -8,12 +8,14 @@ import com.migo.core.crypto.Aead
 import com.migo.core.crypto.FINGERPRINT_LEN
 import com.migo.core.crypto.RatchetSession
 import com.migo.core.crypto.ReceiverKeyState
+import com.migo.core.crypto.SHARED_SECRET_LEN
 import com.migo.core.crypto.SenderKeyState
 import com.migo.core.crypto.SymmetricKey
 import com.migo.core.crypto.hexOf
 import com.migo.core.session.GroupPersistence
 import com.migo.core.session.SessionPersistence
 import com.migo.core.session.StoredSending
+import com.migo.core.session.StoredSession
 import com.migo.core.wire.Id
 import com.migo.core.wire.Reader
 import com.migo.core.wire.Writer
@@ -80,13 +82,12 @@ import kotlin.concurrent.withLock
  *
  * # What cannot be persisted through this interface
  *
- * [SessionPersistence.save] receives a [RatchetSession] and nothing else, so the pending X3DH
- * preamble that `SessionCrypto` keeps beside a freshly-initiated session is not saved. A client that
- * restarts after initiating a session the peer never answered will send its next message as an
- * established ratchet message with no preamble, and the peer -- which never derived the session --
- * cannot open it. Recovery is the ordinary one: the peer's decrypt fails, the session is re-initiated.
- * Fixing it properly means widening the interface, which is a change to the shared session layer and
- * not something this store can do on its own.
+ * [SessionPersistence.save] receives a [RatchetSession] and its retained X3DH shared secret, so
+ * the pending X3DH preamble that `SessionCrypto` keeps beside a freshly-initiated session is still
+ * the one thing not saved. A client that restarts after initiating a session the peer never
+ * answered will send its next message as an established ratchet message with no preamble, and the
+ * peer -- which never derived the session -- cannot open it. Recovery is the ordinary one: the
+ * peer's decrypt fails, the session is re-initiated.
  *
  * # Threading
  *
@@ -104,14 +105,19 @@ class SessionStore private constructor(
 
     // -- SessionPersistence: the pairwise Double Ratchet ------------------------------------------
 
-    override fun load(conversationId: Id, deviceId: Id): RatchetSession? {
+    override fun load(conversationId: Id, deviceId: Id): StoredSession? {
         val name = nameFor(PREFIX_PAIRWISE, conversationId, deviceId)
-        return lock.withLock { rebuild(name) { RatchetSession.restore(it) } }
+        return lock.withLock { rebuild(name, ::decodePairwise) }
     }
 
-    override fun save(conversationId: Id, deviceId: Id, session: RatchetSession) {
+    override fun save(
+        conversationId: Id,
+        deviceId: Id,
+        session: RatchetSession,
+        sharedSecret: ByteArray?,
+    ) {
         val name = nameFor(PREFIX_PAIRWISE, conversationId, deviceId)
-        lock.withLock { writeEntry(name, session.snapshot()) }
+        lock.withLock { writeEntry(name, encodePairwise(session, sharedSecret)) }
     }
 
     override fun delete(conversationId: Id, deviceId: Id) {
@@ -320,6 +326,67 @@ class SessionStore private constructor(
         return StoredSending(state, epoch, distributed)
     }
 
+    // -- The pairwise entry's body -------------------------------------------------------------------
+
+    /**
+     * Encodes a pairwise ratchet beside the X3DH shared secret it retains.
+     *
+     * Before the secret was retained the entry's body was the bare snapshot, and an old record must
+     * still load -- so the new body leads with a version byte no ratchet snapshot can begin with
+     * (a snapshot opens with its own version byte, which is 1) and carries the snapshot and the
+     * optional secret in the same MSE container shape [encodeSending] uses, for the reason that
+     * comment gives: the wire codec is the one encoder here that is length-checked and
+     * depth-bounded. The trailing `u32` is the optional-field count, and the secret is field 1.
+     */
+    private fun encodePairwise(session: RatchetSession, sharedSecret: ByteArray?): ByteArray {
+        val snapshot = session.snapshot()
+        val w = Writer()
+        w.push(PAIRWISE_ENTRY_VERSION)
+        w.enter()
+        w.bytes(snapshot)
+        w.u32(if (sharedSecret != null) 1 else 0)
+        sharedSecret?.let { v -> w.optional(1) { sub -> sub.bytes(v) } }
+        w.leave()
+        // Zeroes this copy. The writer's own buffer still holds one until it is collected, and the
+        // secret handed in is the session layer's live copy, which this store must not zero.
+        snapshot.fill(0)
+        return w.finish()
+    }
+
+    /**
+     * Parses what [encodePairwise] wrote -- or the bare snapshot an older build wrote, which loads
+     * with no secret beside it. Any inconsistency throws, and the caller drops the file.
+     */
+    private fun decodePairwise(stored: ByteArray): StoredSession {
+        if (stored.isEmpty()) throw SessionStoreError.Unreadable
+        if (stored[0].toInt() != PAIRWISE_ENTRY_VERSION) {
+            // A record from before the secret was retained: the whole body is the snapshot, and
+            // `restore` enforces the snapshot's own version byte.
+            return StoredSession(RatchetSession.restore(stored), null)
+        }
+        val r = Reader(stored.copyOfRange(1, stored.size))
+        r.enter()
+        val snapshot = r.bytes()
+        val session = try {
+            RatchetSession.restore(snapshot)
+        } finally {
+            snapshot.fill(0)
+        }
+        var sharedSecret: ByteArray? = null
+        var optionalCount = r.u32()
+        while (optionalCount > 0) {
+            val (fieldId, sub) = r.optional()
+            if (fieldId == 1L) {
+                val secret = sub.bytes()
+                if (secret.size != SHARED_SECRET_LEN) throw SessionStoreError.Unreadable
+                sharedSecret = secret
+            }
+            optionalCount -= 1
+        }
+        r.leave()
+        return StoredSession(session, sharedSecret)
+    }
+
     // -- Files ------------------------------------------------------------------------------------
 
     /**
@@ -519,6 +586,13 @@ class SessionStore private constructor(
 
         /** One pairwise ratchet, keyed by conversation and peer device. */
         private const val PREFIX_PAIRWISE = "p_"
+
+        /**
+         * The version byte a pairwise entry's body opens with. Distinct from the ratchet snapshot's
+         * own version byte, so the container this build writes (snapshot plus the retained X3DH
+         * secret) and the bare snapshot an older build wrote cannot be read as one another.
+         */
+        private const val PAIRWISE_ENTRY_VERSION = 2
 
         /** This device's sending chain for a conversation. One per conversation. */
         private const val PREFIX_SENDING = "g_"

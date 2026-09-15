@@ -3,6 +3,8 @@ package com.migo.core.domain
 import com.goterl.lazysodium.LazySodiumJava
 import com.goterl.lazysodium.SodiumJava
 import com.migo.core.crypto.CALL_KEY_LEN
+import com.migo.core.crypto.CallKeyState
+import com.migo.core.crypto.Content
 import com.migo.core.crypto.CryptoError
 import com.migo.core.crypto.IdentityPublic
 import com.migo.core.crypto.OneTimePrekey
@@ -27,6 +29,8 @@ import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.Reader
 import com.migo.core.wire.Writer
 import com.migo.core.wire.frameHeader
+import com.migo.core.wire.idFromBytes
+import com.migo.core.wire.idToBytes
 import com.migo.core.wire.parseId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,9 +64,9 @@ import org.junit.Test
  *      pre-answer window), and a replayed announcement is the no-op the replay guard makes it.
  *   3. **A mid-call joiner asks for the running key.** The ask rides a `CALL_RENEGOTIATE` that the
  *      relay projects to a `CALL_SDP` for the asked seat; that seat rotates, announces the
- *      rotation to the roster, and answers with the new key sealed under the wrapper the ask's
- *      secret derives; the joiner installs it as a baseline and rides the next rotation like any
- *      other seat.
+ *      rotation to the roster, and answers with the new key sealed under the wrapper the pairwise
+ *      session's X3DH secret derives; the joiner installs it as a baseline and rides the next
+ *      rotation like any other seat.
  *
  * The fixture is two whole devices — key stores, pairwise ratchets, group and call crypto —
  * bridged by an in-memory bundle source that serves the other side's published material, so every
@@ -285,7 +289,7 @@ class KeyDistributionTriggersTest {
         val roster = joinerRoster()
         runBlocking {
             f.me.groupCallKeys.requestJoinKey(roster)
-            // A second ask while the first stands: the joiner mints no second secret.
+            // A second ask while the first stands: the joiner sends no second ask.
             f.me.groupCallKeys.requestJoinKey(roster)
         }
         val asks = framesOf(f.me, Op.CALL_RENEGOTIATE)
@@ -332,7 +336,7 @@ class KeyDistributionTriggersTest {
     }
 
     @Test
-    fun `the ask carries the wrapper secret and nothing else`() {
+    fun `the ask is the unified content event carrying the joiner's account id`() {
         // Its own fixture, because an envelope opens exactly once: the ratchet deletes the message
         // key on use, so the open that pins the ask's shape cannot also be the open the holder's
         // answer path performs. Here the test *is* the holder's one open.
@@ -343,9 +347,113 @@ class KeyDistributionTriggersTest {
 
         runBlocking { f.me.groupCallKeys.requestJoinKey(joinerRoster()) }
         val ask = CallRenegotiate.decode(Reader(framesOf(f.me, Op.CALL_RENEGOTIATE).single()))
-        val secret = runBlocking { f.ada.sessionCrypto.open(CONVERSATION, ME, ME_DEVICE, ask.sealedSdp) }
-        assertEquals("the ask carries the wrapper secret and nothing else", CALL_KEY_LEN, secret.size)
+        val plaintext = runBlocking {
+            f.ada.sessionCrypto.open(CONVERSATION, ME, ME_DEVICE, ask.sealedSdp)
+        }
+        // Byte for byte what the SDK and desktop encode: the `call-key-ask` control event, the
+        // joiner's account id as `data`, and the content codec's default bucket padding. Pinning
+        // the whole payload rather than its shape is what makes a padding or field-order drift on
+        // any side a failing test here rather than a mixed-client call that cannot re-key.
+        val expected = Content.ControlEvent("call-key-ask", idToBytes(ME)).encode()
+        assertTrue("the ask is the unified content event, bytes pinned", plaintext.contentEquals(expected))
+        val decoded = Content.decode(plaintext)
+        assertTrue("the ask decodes as a control event", decoded is Content.ControlEvent)
+        if (decoded !is Content.ControlEvent) return
+        assertEquals("call-key-ask", decoded.event)
+        assertEquals("the ask names the joiner's account", ME, idFromBytes(decoded.data!!))
         assertTrue("the holder's open drew no error", f.ada.sink.isEmpty())
+    }
+
+    @Test
+    fun `a holder answers a unified ask under the session-derived wrapper and the joiner opens it`() {
+        // The end-to-end test above drives both halves through the domains; this one pins the
+        // *wrapper's* input: the answer must open under the X3DH secret of the pairwise session
+        // the ask itself established, which is the unified contract the SDK and desktop answer by.
+        val f = Fixture()
+        f.ada.directory.devices += DeviceAddress(ME, ME_DEVICE)
+        f.ada.groupCallKeys.seated(CALL, CONVERSATION, ByteArray(CALL_KEY_LEN) { 0x44 })
+        f.ada.groupCallKeys.start()
+
+        runBlocking { f.me.groupCallKeys.requestJoinKey(joinerRoster()) }
+        deliver(f.ada, Op.CALL_SDP to framesOf(f.me, Op.CALL_RENEGOTIATE).single())
+
+        val reply = CallSdp.decode(Reader(framesOf(f.ada, Op.CALL_SDP).single()))
+        assertEquals("the answer is addressed to the joiner", ME_DEVICE, reply.toDevice)
+        // The joiner's own view of the session secret -- the copy its SessionCrypto retained when
+        // it sealed the ask -- is what the sealed distribution must open under.
+        val joinerSecret = runBlocking { f.me.sessionCrypto.sessionSecret(CONVERSATION, ADA_LAPTOP) }
+        val holderSecret = runBlocking { f.ada.sessionCrypto.sessionSecret(CONVERSATION, ME_DEVICE) }
+        assertTrue("both halves retained the session secret", joinerSecret != null && holderSecret != null)
+        assertTrue(
+            "initiator and responder hold the same X3DH secret",
+            joinerSecret!!.contentEquals(holderSecret!!),
+        )
+        val installed = CallKeyState.fromJoinDistribution(joinerSecret!!, CALL, reply.sealedSdp)
+        assertEquals("the joiner receives the post-rotation epoch", 1L, installed.epoch())
+        // And a stranger's secret -- a device that never ran the handshake -- cannot open it.
+        try {
+            CallKeyState.fromJoinDistribution(ByteArray(CALL_KEY_LEN) { 0x41 }, CALL, reply.sealedSdp)
+            fail("the join distribution opened under a stranger's secret")
+        } catch (_: CryptoError) {
+            // The wrapper is anchored to the pairwise session, which is its whole point.
+        }
+        assertTrue("the unified answer drew no error", f.ada.sink.isEmpty())
+    }
+
+    @Test
+    fun `a legacy raw-secret ask is still answered under those bytes`() {
+        val f = Fixture()
+        f.ada.directory.devices += DeviceAddress(ME, ME_DEVICE)
+        f.ada.groupCallKeys.seated(CALL, CONVERSATION, ByteArray(CALL_KEY_LEN) { 0x55 })
+        f.ada.groupCallKeys.start()
+
+        // An older Android build sealed a freshly minted 32-byte secret as the whole ask payload,
+        // riding the same pairwise envelope. Bytes chosen with a first byte no content type uses,
+        // so this is unambiguously the legacy shape.
+        val legacySecret = ByteArray(CALL_KEY_LEN) { 0x7F }
+        val sealed = runBlocking {
+            f.me.sessionCrypto.seal(CONVERSATION, ADA, ADA_LAPTOP, legacySecret)
+        }
+        val ask = encodeOf {
+            CallRenegotiate(
+                callId = CALL,
+                fromDevice = ME_DEVICE,
+                toDevice = ADA_LAPTOP,
+                sealedSdp = sealed.envelope,
+            ).encode(it)
+        }
+        deliver(f.ada, Op.CALL_SDP to ask)
+
+        val reply = CallSdp.decode(Reader(framesOf(f.ada, Op.CALL_SDP).single()))
+        assertEquals(ME_DEVICE, reply.toDevice)
+        assertEquals("the holder still rotated on the join", 1L, CallKeyUpdate.decode(Reader(framesOf(f.ada, Op.CALL_KEY_UPDATE).single())).epoch)
+        // The join distribution opens under the very bytes the legacy ask carried: that joiner
+        // holds no session secret to derive a wrapper from, so those bytes are its only key.
+        val installed = CallKeyState.fromJoinDistribution(legacySecret, CALL, reply.sealedSdp)
+        assertEquals("the legacy joiner receives the running epoch", 1L, installed.epoch())
+        assertTrue("the legacy answer drew no error", f.ada.sink.isEmpty())
+    }
+
+    @Test
+    fun `a joiner with no retained session secret declines the answer without touching state`() {
+        val f = Fixture()
+        f.ada.directory.devices += DeviceAddress(ME, ME_DEVICE)
+        f.me.directory.devices += DeviceAddress(ADA, ADA_LAPTOP)
+        f.ada.groupCallKeys.seated(CALL, CONVERSATION, ByteArray(CALL_KEY_LEN) { 0x66 })
+        f.ada.groupCallKeys.start()
+        f.me.groupCallKeys.start()
+
+        runBlocking { f.me.groupCallKeys.requestJoinKey(joinerRoster()) }
+        deliver(f.ada, Op.CALL_SDP to framesOf(f.me, Op.CALL_RENEGOTIATE).single())
+        val reply = framesOf(f.ada, Op.CALL_SDP).single()
+
+        // The joiner's session dies (a peer identity change forgets it, for instance): the answer
+        // that comes back finds no secret to open under, and must decline quietly -- no key
+        // installed, no error surfaced, the ask standing as it was.
+        runBlocking { f.me.sessionCrypto.forget(CONVERSATION) }
+        deliver(f.me, Op.CALL_SDP to reply)
+        assertTrue("a declined answer installs no key", !f.me.groupCallKeys.holdsKey(CALL))
+        assertTrue("the decline was quiet", f.me.sink.isEmpty())
     }
 
     /**
@@ -434,6 +542,7 @@ private class Fixture {
         val callKeys = CallKeyStore()
         val groupCallKeys = GroupCallKeysDomain(
             rpc,
+            account,
             device,
             scope,
             callKeys,

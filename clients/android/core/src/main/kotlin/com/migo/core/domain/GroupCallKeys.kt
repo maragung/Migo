@@ -2,16 +2,20 @@ package com.migo.core.domain
 
 import com.migo.core.crypto.CALL_KEY_LEN
 import com.migo.core.crypto.CallKeyState
+import com.migo.core.crypto.Content
 import com.migo.core.crypto.CryptoError
 import com.migo.core.crypto.CryptoErrorKind
-import com.migo.core.crypto.Csprng
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.CallKeyUpdate
 import com.migo.core.protocol.CallRenegotiate
 import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.Op
 import com.migo.core.session.SessionCrypto
+import com.migo.core.wire.ID_BYTE_LEN
 import com.migo.core.wire.Id
+import com.migo.core.wire.WireError
+import com.migo.core.wire.idFromBytes
+import com.migo.core.wire.idToBytes
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlinx.coroutines.CancellationException
@@ -20,6 +24,14 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/**
+ * The control-event name a mid-call joiner's key ask carries inside its pairwise envelope.
+ *
+ * A client-to-client constant, sealed before it leaves the device, so the server never sees it --
+ * the same name the SDK's `CALL_KEY_ASK_EVENT` and the desktop's `KEY_ASK_EVENT` pin.
+ */
+private const val CALL_KEY_ASK_EVENT = "call-key-ask"
 
 /**
  * The frame keys of the group calls this device is seated in, and the section 163 triggers that
@@ -41,8 +53,8 @@ import kotlinx.coroutines.sync.withLock
  *    asks a seated participant for the current key ([requestJoinKey]); the seated participant
  *    rotates — so the key the joiner receives did not exist while they were outside — announces
  *    that rotation to the rest of the roster as a `CALL_KEY_UPDATE`, and answers the joiner with
- *    the current epoch and key sealed under a wrapper key derived from the ask's secret
- *    ([CallKeyState.sealedJoinDistribution]). The joiner installs it as its baseline
+ *    the current epoch and key sealed under a wrapper key derived from the pairwise session's
+ *    X3DH secret ([CallKeyState.sealedJoinDistribution]). The joiner installs it as its baseline
  *    ([CallKeyState.fromJoinDistribution]) and rides the same rotations as everyone else after
  *    that.
  *
@@ -54,19 +66,33 @@ import kotlinx.coroutines.sync.withLock
  * — and the group relay *projects* that renegotiation to a `CALL_SDP` for the target device, so
  * the seated participant receives the ask as a `CALL_SDP` and answers on the same opcode.
  *
- * # The wrapper key's secret, and this build's reading of it
+ * # The wrapper key's secret, and the unified reading of it
  *
- * The Rust reference derives the wrapper key from "the pairwise session secret the distributor
- * shares with the joiner". This client's Double Ratchet exposes no such stable secret by design —
- * the root key advances asymmetrically and the X3DH seed is destroyed when the ratchet is built —
- * so this build establishes one for the purpose: the joiner mints a fresh 32-byte secret, carries
- * it to the seated participant inside the pairwise Double Ratchet as the ask's payload, and both
- * sides derive the wrapper key from it under `migo-call-join-v1` with the call id as salt, exactly
- * the derivation the reference's join distribution specifies. The wrapper is therefore anchored to
- * the pairwise channel (only the two devices can read the secret) without inventing an export the
- * ratchet deliberately does not offer. Cross-client agreement on this reading is pending the
- * central reconciliation of the same section; the derivation and the sealed-distribution layout
- * themselves are byte-for-byte the reference's.
+ * The wrapper key is derived from the X3DH shared secret of the pairwise session the joiner and
+ * the holder share -- the same bytes the SDK's `SessionCrypto.sessionSecret` and the desktop
+ * store's `pairwise_secret` return, and which this client's session layer now retains per session
+ * the same way. It once destroyed the X3DH seed as soon as the ratchet was built, which is why an
+ * earlier build of this domain minted a fresh 32-byte secret and carried it inside the ask; that
+ * shape is still answered, as a legacy branch documented below.
+ *
+ * The ask itself is the unified content event: a `call-key-ask` control event whose `data` is the
+ * joiner's account id, encoded by the content codec with its default bucket padding -- byte for
+ * byte what the desktop sends and what the SDK's encoder produces -- and sealed under the pairwise
+ * Double Ratchet, whose envelope establishes the session when none exists yet, so both ends hold
+ * the secret by the time the answer is sealed. The answer is the join distribution sealed under
+ * `migo-call-join-v1` with the call id as salt, byte-for-byte the reference's derivation.
+ *
+ * Two honest limits, documented rather than papered over:
+ *
+ *  - **The legacy ask.** A joiner on an older Android build asks with a freshly minted 32-byte
+ *    secret as the raw payload. It is still answered, under those very bytes, because that is the
+ *    only wrapper the joiner can open; the shape is recognised as "not content, exactly 32 bytes".
+ *  - **The session that predates the secret.** A pairwise session established before this build
+ *    retained the X3DH secret -- restored from a record written by an older build -- has no secret
+ *    to derive the wrapper from, on either half. The holder declines to answer a unified ask and
+ *    the joiner declines to install an answer, both quietly; that session never gains a secret,
+ *    and recovery is a fresh session, which a peer identity change or a conversation leave and
+ *    rejoin produces.
  */
 
 /**
@@ -87,10 +113,13 @@ class CallKeyStore {
     /** One seated call: the conversation it belongs to, and this device's frame-key state. */
     private class CallEntry(val conversationId: Id, val state: CallKeyState)
 
-    /** One outstanding join ask: the secret only this device and the asked holder share. */
+    /**
+     * One outstanding join ask: the conversation it belongs to and the holder it was sent to. The
+     * secret the answer opens under is not kept here -- it is the pairwise session's own X3DH
+     * secret, which the session layer holds for as long as the session lives.
+     */
     private class PendingJoinAsk(
         val conversationId: Id,
-        val secret: ByteArray,
         val holderDevice: Id,
     )
 
@@ -155,45 +184,45 @@ class CallKeyStore {
 
     /**
      * Records a join ask before its frame is sent, so an answer that outruns the send still finds
-     * the secret it was sealed under.
+     * the conversation and the holder it belongs to.
      */
-    fun beginJoinAsk(callId: Id, conversationId: Id, secret: ByteArray, holderDevice: Id) {
-        lock.withLock { asks[callId] = PendingJoinAsk(conversationId, secret.copyOf(), holderDevice) }
+    fun beginJoinAsk(callId: Id, conversationId: Id, holderDevice: Id) {
+        lock.withLock { asks[callId] = PendingJoinAsk(conversationId, holderDevice) }
     }
 
-    /** Drops a join ask that never got answered — a retry mints a fresh secret and a fresh ask. */
+    /** Drops a join ask that never got answered -- a retry sends a fresh ask. */
     fun clearJoinAsk(callId: Id) {
-        lock.withLock {
-            asks.remove(callId)?.secret?.fill(0)
-        }
+        lock.withLock { asks.remove(callId) }
     }
 
     /**
      * Tries to complete a pending ask with the sealed answer that just arrived.
      *
-     * The answer must open under the ask's own secret and be bound to the call; a blob that does
-     * not is not the answer (a future shape this build does not know), the ask stands, and false
-     * comes back so the caller can fall through to its other handling.
+     * The answer must open under [sessionSecret] -- the pairwise session's X3DH secret, the same
+     * bytes the holder derived its wrapper key from, handed in by the domain because fetching it
+     * suspends and these methods do not -- and be bound to the call; a blob that does not is not
+     * the answer (a future shape this build does not know), the ask stands, and false comes back
+     * so the caller can fall through to its other handling.
      */
-    fun completeJoinAsk(callId: Id, sealedAnswer: ByteArray): Boolean = lock.withLock {
-        val ask = asks[callId] ?: return false
-        val state = try {
-            CallKeyState.fromJoinDistribution(ask.secret, callId, sealedAnswer)
-        } catch (_: CryptoError) {
-            return false
+    fun completeJoinAsk(callId: Id, sessionSecret: ByteArray, sealedAnswer: ByteArray): Boolean =
+        lock.withLock {
+            val ask = asks[callId] ?: return false
+            val state = try {
+                CallKeyState.fromJoinDistribution(sessionSecret, callId, sealedAnswer)
+            } catch (_: CryptoError) {
+                return false
+            }
+            asks.remove(callId)
+            // The joiner's first key is a baseline constructor, so it only installs where no state
+            // stands: a device that already holds a key for the call was never the joiner this answer
+            // is for, and its state is ahead of nothing the answer carries.
+            if (calls[callId] == null) {
+                calls[callId] = CallEntry(ask.conversationId, state)
+            } else {
+                state.destroy()
+            }
+            true
         }
-        asks.remove(callId)
-        ask.secret.fill(0)
-        // The joiner's first key is a baseline constructor, so it only installs where no state
-        // stands: a device that already holds a key for the call was never the joiner this answer
-        // is for, and its state is ahead of nothing the answer carries.
-        if (calls[callId] == null) {
-            calls[callId] = CallEntry(ask.conversationId, state)
-        } else {
-            state.destroy()
-        }
-        true
-    }
 
     /**
      * The holder's half of a join: rotates on the join and returns the rotation's two sealed
@@ -202,8 +231,9 @@ class CallKeyStore {
      *
      * One rotation, two seals: the *update* is sealed under the pre-rotation key for the rest of
      * the roster (the `CALL_KEY_UPDATE` every seat must adopt to stay in step), and the *join
-     * distribution* is sealed under the wrapper key the ask's secret derives, for the joiner
-     * alone. One rotation, not two, because two would leave the roster an epoch behind the joiner
+     * distribution* is sealed under the wrapper key [joinSecret] derives -- the pairwise session's
+     * X3DH secret for a unified ask, the raw bytes a legacy ask carried -- for the joiner alone.
+     * One rotation, not two, because two would leave the roster an epoch behind the joiner
      * — the joiner would hold a key no announcement ever carried.
      *
      * Rotating *before* distributing is what makes the joiner's first key one that did not exist
@@ -221,7 +251,7 @@ class CallKeyStore {
     fun forget(callId: Id) {
         lock.withLock {
             calls.remove(callId)?.state?.destroy()
-            asks.remove(callId)?.secret?.fill(0)
+            asks.remove(callId)
         }
     }
 }
@@ -245,6 +275,7 @@ class JoinAnswer(
  */
 class GroupCallKeysDomain(
     private val rpc: Rpc,
+    private val accountId: Id,
     private val deviceId: Id,
     private val scope: CoroutineScope,
     private val store: CallKeyStore,
@@ -327,25 +358,19 @@ class GroupCallKeysDomain(
      * no frame-key state for this seat and could not answer. First-in-order rather than any other
      * tie-break because the earliest seat is the one least likely to be mid-departure.
      *
-     * The ask's payload is the fresh 32-byte secret the wrapper key derives from, carried to the
-     * holder inside the pairwise Double Ratchet (see the module note: the ratchet exposes no stable
-     * session secret, so one is established for the purpose). It rides a `CALL_RENEGOTIATE`, which
-     * the relay projects to a `CALL_SDP` on the holder's side.
+     * The ask's payload is the unified content event — a `call-key-ask` control event carrying
+     * this account's id in `data`, encoded by the content codec with its default bucket padding so
+     * the bytes are identical to the SDK's and desktop's asks — sealed under the pairwise Double
+     * Ratchet, whose envelope establishes the session when none exists yet. It rides a
+     * `CALL_RENEGOTIATE`, which the relay projects to a `CALL_SDP` on the holder's side.
      */
     suspend fun requestJoinKey(roster: GroupCallRoster) {
         if (store.holdsKey(roster.callId) || store.pendingAskHolder(roster.callId) != null) return
         val holder = roster.participants.firstOrNull { it.userId != roster.userId } ?: return
-        val secret = Csprng.bytes(CALL_KEY_LEN)
-        store.beginJoinAsk(roster.callId, roster.conversationId, secret, holder.deviceId)
+        store.beginJoinAsk(roster.callId, roster.conversationId, holder.deviceId)
         try {
-            // A copy for the seal, zeroed after — the store's copy is the one that must survive
-            // until the answer opens it.
-            val ask = secret.copyOf()
-            val sealed = try {
-                sessionCrypto.seal(roster.conversationId, holder.userId, holder.deviceId, ask)
-            } finally {
-                ask.fill(0)
-            }
+            val ask = Content.ControlEvent(CALL_KEY_ASK_EVENT, idToBytes(accountId)).encode()
+            val sealed = sessionCrypto.seal(roster.conversationId, holder.userId, holder.deviceId, ask)
             val request = CallRenegotiate(
                 callId = roster.callId,
                 fromDevice = deviceId,
@@ -357,7 +382,7 @@ class GroupCallKeysDomain(
             store.clearJoinAsk(roster.callId)
             throw cancelled
         } catch (_: Exception) {
-            // The ask never left; dropping it lets a later roster or retry mint a fresh one rather
+            // The ask never left; dropping it lets a later roster or retry send a fresh one rather
             // than waiting on an answer that cannot come.
             store.clearJoinAsk(roster.callId)
         }
@@ -409,7 +434,20 @@ class GroupCallKeysDomain(
     private suspend fun handleCallSdp(event: CallSdp) {
         eventLock.withLock {
             if (store.pendingAskHolder(event.callId) == event.fromDevice) {
-                store.completeJoinAsk(event.callId, event.sealedSdp)
+                // The answer opens under the pairwise session's X3DH secret — the same bytes the
+                // holder derived its wrapper key from. Fetched here rather than inside the store
+                // because the lookup suspends and the store's methods do not. A null secret is a
+                // session whose establishment predates this build's retention of it: there is
+                // nothing honest to open the answer with, so it is declined quietly and the ask
+                // stands — that session never gains a secret (see the module note).
+                val conversationId = store.conversationOf(event.callId) ?: return@withLock
+                val sessionSecret =
+                    sessionCrypto.sessionSecret(conversationId, event.fromDevice) ?: return@withLock
+                try {
+                    store.completeJoinAsk(event.callId, sessionSecret, event.sealedSdp)
+                } finally {
+                    sessionSecret.fill(0)
+                }
                 return@withLock
             }
             if (store.holdsKey(event.callId)) {
@@ -422,28 +460,111 @@ class GroupCallKeysDomain(
      * The holder's half of a mid-call join: opens the joiner's ask, rotates on the join, and
      * answers with the running key sealed for that joiner.
      *
+     * The ask opens under the pairwise session this device shares with the joiner — the envelope
+     * establishes that session when none exists, which is the point of sending the ask as one —
+     * and then dispatches on what the plaintext is:
+     *
+     *  - the **unified ask**: a `call-key-ask` content event. The answer is sealed under the
+     *    wrapper key the *session's* X3DH secret derives.
+     *  - the **legacy ask**: exactly [CALL_KEY_LEN] bytes that are not content — a joiner on an
+     *    older Android build carrying a freshly minted secret. Answered under those very bytes,
+     *    the only wrapper that joiner can open.
+     *  - anything else — another shape this build did not send, or content that is not the ask —
+     *    is dropped quietly with the state untouched.
+     *
      * The rotation is announced to the rest of the roster as a `CALL_KEY_UPDATE` before the joiner
      * gets its answer, because the server fans an update to every seat and a seat that missed the
      * join rotation is a seat stranded an epoch behind the joiner it was meant to stay in step
-     * with. The ask opens under the pairwise session this device shares with the joiner — the
-     * account half of that open is bookkeeping only, the same as every pairwise open here — and a
-     * fresh 32-byte secret is all the payload is, so anything that opens to another width is a
-     * shape this build did not send and is dropped with the state untouched.
+     * with. The account half of the open is bookkeeping only, the same as every pairwise open
+     * here — the unified ask names the joiner's account in its own body.
      */
     private suspend fun answerJoinAsk(event: CallSdp) {
         val conversationId = store.conversationOf(event.callId) ?: return
-        val joinerAccount = directory.accountOfDevice(conversationId, event.fromDevice) ?: return
-        val secret = try {
-            sessionCrypto.open(conversationId, joinerAccount, event.fromDevice, event.sealedSdp)
+        // The directory's account — or its absence — cannot gate the open (the parameter is
+        // bookkeeping only), so a device the directory does not know yet still has its ask opened;
+        // the unified ask carries the joiner's account itself.
+        val knownAccount = directory.accountOfDevice(conversationId, event.fromDevice)
+        val plaintext = try {
+            sessionCrypto.open(
+                conversationId,
+                knownAccount ?: event.fromDevice,
+                event.fromDevice,
+                event.sealedSdp,
+            )
         } catch (_: Throwable) {
             return
         }
-        if (secret.size != CALL_KEY_LEN) {
-            secret.fill(0)
-            return
-        }
         try {
-            val answer = store.rotateForJoin(event.callId, secret) ?: return
+            // Content first: the unified ask is a content event, and a random 32-byte legacy
+            // secret decodes as one only by astronomical accident — an accident that still lands
+            // in the quiet drop below rather than anywhere state moves. `Content.decode` parks an
+            // unknown type byte as `Unsupported` rather than throwing, so "not content" covers
+            // both the refusal and the park.
+            val content = try {
+                Content.decode(plaintext)
+            } catch (_: WireError) {
+                null
+            }
+            when {
+                content is Content.ControlEvent && content.event == CALL_KEY_ASK_EVENT ->
+                    answerUnifiedAsk(event, conversationId, content, knownAccount)
+                plaintext.size == CALL_KEY_LEN && (content == null || content is Content.Unsupported) ->
+                    answerWithRunningKey(event, plaintext)
+                // Anything else — content that is not the ask, or a shape this build did not
+                // send — is dropped quietly, the state untouched.
+            }
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    /**
+     * Answers the unified ask: identifies the joiner, fetches the pairwise session's secret, and
+     * hands the running key over sealed under the wrapper it derives.
+     */
+    private suspend fun answerUnifiedAsk(
+        event: CallSdp,
+        conversationId: Id,
+        ask: Content.ControlEvent,
+        directoryAccount: Id?,
+    ) {
+        // The joiner's account, identified or the ask is not answered — the same line the
+        // pre-unified build drew on the directory alone.
+        joinerAccountOf(ask, directoryAccount) ?: return
+        // The open above established the session when none existed, so a null here is a session
+        // restored from a record that predates the secret's retention: decline quietly, the ask
+        // is the joiner's to retry (see the module note for why that session never recovers).
+        val wrapperSecret = sessionCrypto.sessionSecret(conversationId, event.fromDevice) ?: return
+        try {
+            answerWithRunningKey(event, wrapperSecret)
+        } finally {
+            wrapperSecret.fill(0)
+        }
+    }
+
+    /**
+     * The joiner's account off a unified ask: the ask's own `data` when it carries one, the
+     * directory's answer when an older peer's ask carried none (the SDK's asks predate the field).
+     *
+     * The desktop's designated-rotator rule reads this fact off the ask to pick who rotates; this
+     * build's rotations are roster-driven in the call manager, so the account's whole duty here is
+     * attribution — a holder that cannot attribute an ask to any account is not one that can
+     * answer it, which is the pre-unified build's own gate.
+     */
+    private fun joinerAccountOf(ask: Content.ControlEvent, directoryAccount: Id?): Id? {
+        val data = ask.data ?: return directoryAccount
+        if (data.size != ID_BYTE_LEN) return null
+        return idFromBytes(data)
+    }
+
+    /**
+     * The answer itself: one rotation, announced to the roster, then handed to the joiner sealed
+     * under the wrapper key [joinSecret] derives — the pairwise session's X3DH secret for a
+     * unified ask, the raw bytes a legacy ask carried.
+     */
+    private suspend fun answerWithRunningKey(event: CallSdp, joinSecret: ByteArray) {
+        try {
+            val answer = store.rotateForJoin(event.callId, joinSecret) ?: return
             try {
                 val update = CallKeyUpdate(
                     callId = event.callId,
@@ -471,7 +592,7 @@ class GroupCallKeysDomain(
                 // the roster between two epochs.
             }
         } finally {
-            secret.fill(0)
+            joinSecret.fill(0)
         }
     }
 }
