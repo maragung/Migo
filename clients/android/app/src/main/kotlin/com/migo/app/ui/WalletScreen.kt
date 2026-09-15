@@ -431,7 +431,7 @@ private fun LedgerLine(entry: LedgerEntryWire) {
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                text = "balance " + entry.balanceAfter,
+                text = "balance " + entry.balanceAfter + " \$MIG",
                 style = MaterialTheme.typography.labelSmall,
                 color = LocalMigoExtra.current.faint,
             )
@@ -456,9 +456,9 @@ fun ledgerCredits(reason: String): Boolean =
 /** The server's Kick Point packs: (kp, price in coins) — the bulk discount is the point. */
 val KICK_POINT_PACKS: List<Pair<Long, Long>> = listOf(1L to 1L, 10L to 9L, 50L to 40L)
 
-/** The signed amount a statement line shows, from the reason's direction. */
+/** The signed amount a statement line shows, from the reason's direction, in the coin's unit. */
 fun ledgerAmount(entry: LedgerEntryWire): String =
-    (if (ledgerCredits(entry.reason)) "+" else "-") + entry.amount
+    (if (ledgerCredits(entry.reason)) "+" else "-") + entry.amount + " \$MIG"
 
 /** The XP bar's filled fraction, clamped into 0..1 — an unfilled bar is honest, NaN% is not. */
 fun xpFraction(into: Long, total: Long): Float =
