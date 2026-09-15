@@ -1585,7 +1585,10 @@ fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement>
 /// conversation's subscribers and every messaging event names its own
 /// conversation. This is the one placement both routes share, which is what
 /// keeps a subscriber who follows a conversation across nodes seeing the
-/// frame the origin's subscribers saw, whichever envelope it rode.
+/// frame the origin's subscribers saw, whichever envelope it rode. A group
+/// call's membership announcements ride the same two envelopes for the same
+/// reason — their audience is a conversation's subscribers too — so their
+/// placement lives here beside the chat they interrupt.
 fn messaging_placement_of(opcode: Opcode, inner: &Frame) -> Result<Placement> {
     match opcode {
         Opcode::MessageEvent => Ok(Placement {
@@ -1654,6 +1657,28 @@ fn messaging_placement_of(opcode: Opcode, inner: &Frame) -> Result<Placement> {
             Ok(Placement {
                 topic: conversation_topic(event.conversation_id),
                 coalesce: Some(crate::dispatch::coalesce_key_of(&event.conversation_id)),
+                also: None,
+            })
+        }
+        // A group call's membership announcement, the one call frame that
+        // belongs on a conversation topic: the roster-to-user-topic frames
+        // ride the user-topic tier instead, so this arm is the only way an
+        // announcement crosses. It names its own conversation, and it is
+        // never coalesced — the same rule every announcement's origin
+        // publish keeps, because no two membership facts may collapse into
+        // one, whatever the opcode's class allows.
+        Opcode::CallSfuEvent => {
+            let event: migo_protocol::CallStateEvent =
+                from_frame(inner).map_err(fault::from_wire)?;
+            let conversation_id = event.conversation_id.ok_or_else(|| {
+                fault::validation(
+                    "conversation_id",
+                    "an announcement names the conversation it belongs to",
+                )
+            })?;
+            Ok(Placement {
+                topic: conversation_topic(conversation_id),
+                coalesce: None,
                 also: None,
             })
         }

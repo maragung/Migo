@@ -1426,7 +1426,15 @@ impl Dispatcher for AppDispatcher {
                 // handler answers the frame when it does, and the 1:1 handler
                 // takes it otherwise. NOT_FOUND from the group service is the
                 // handoff, not an error the caller sees.
-                match calls::handle_group_end(context, frame, &self.calls).await {
+                match calls::handle_group_end(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.room_relay,
+                    &self.conversation_relay,
+                )
+                .await
+                {
                     Ok(true) => Ok(()),
                     Ok(false) => {
                         calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
@@ -1452,7 +1460,15 @@ impl Dispatcher for AppDispatcher {
             Opcode::CallStats => calls::handle_stats(context, frame).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
             Opcode::CallSfuJoin => {
-                calls::handle_sfu_join(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_sfu_join(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.room_relay,
+                    &self.conversation_relay,
+                )
+                .await
             }
 
             // Every other opcode is one this node speaks the transport for but does not route.
