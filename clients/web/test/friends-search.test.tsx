@@ -113,7 +113,8 @@ test('the revealed field arrives focused, in the icon’s place, with its way ou
   );
 
   assert.ok(open.includes('type="search"'), 'the revealed control must be the field');
-  assert.ok(open.includes('autoFocus=""'), 'the field must arrive ready to type in');
+  // The server renderer spells the prop in markup lowercase — `autofocus`, the HTML attribute.
+  assert.ok(open.includes('autofocus=""'), 'the field must arrive ready to type in');
   assert.ok(open.includes('value="reason"'), 'the field must hold the query it was given');
   assert.ok(
     open.includes('aria-label="Close search"'),
