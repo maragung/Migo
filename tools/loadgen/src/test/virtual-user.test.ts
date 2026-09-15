@@ -38,7 +38,8 @@ const CONFIG: Config = {
 function buildWithStubbedClient(
   index: number,
   config: Config,
-): { vu: VirtualUser; created: Record<string, unknown> } {
+  client: Record<string, unknown> = {},
+): { vu: VirtualUser; created: Record<string, unknown>; client: Record<string, unknown> } {
   // Bound so the restored factory keeps its class as `this`, exactly as the original did.
   const original = MigoClient.create.bind(MigoClient);
   let created: Record<string, unknown> = {};
@@ -46,7 +47,7 @@ function buildWithStubbedClient(
     options: unknown,
   ) => {
     created = options as Record<string, unknown>;
-    return {};
+    return client;
   };
   try {
     const vu = new VirtualUser(index, {
@@ -55,7 +56,7 @@ function buildWithStubbedClient(
       runTag: 'tag42',
       onEventError: () => {},
     });
-    return { vu, created };
+    return { vu, created, client };
   } finally {
     (MigoClient as unknown as { create: unknown }).create = original;
   }
@@ -113,4 +114,17 @@ test('the client hello identifies the tool as a load test on the configured vers
   assert.equal(hello['appVersion'], '9.9.9');
   assert.equal(hello['locale'], 'en-GB');
   assert.equal(hello['bandwidthMode'], BandwidthMode.Normal);
+});
+
+test('wireBytes is the client transport counters, snapshotted at call time', () => {
+  // The VU owns exactly one client for its whole life, so the reading it hands the runner is the
+  // §171 session: whatever the SDK transport has counted so far, both directions, unchanged. The
+  // stub carries a mutable counter object to prove the method reads through rather than caching —
+  // the reading taken after teardown must include bytes that arrived after an earlier call.
+  const counters = { sent: 7, received: 9 };
+  const { vu } = buildWithStubbedClient(0, CONFIG, { wireBytes: counters });
+  assert.deepEqual(vu.wireBytes(), { sent: 7, received: 9 });
+  counters.sent += 500;
+  counters.received += 900;
+  assert.deepEqual(vu.wireBytes(), { sent: 507, received: 909 });
 });
