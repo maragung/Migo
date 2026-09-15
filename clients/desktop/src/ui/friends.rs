@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use egui::{Align, Color32, CornerRadius, Layout, Response, RichText, Sense, Ui};
 use migo_core::Id;
 
-use crate::model::{Presence, Relationship, RelationshipKind};
+use crate::model::{PersonRow, Presence, Relationship, RelationshipKind};
 use crate::net::Command;
 use crate::theme::{font, palette, space, text_style, Palette, Theme};
 use crate::ui::widgets;
@@ -41,6 +41,19 @@ pub struct FriendsState {
     pub presence: HashMap<Id, Presence>,
     /// The search field's contents.
     pub search: String,
+    /// The people answer the pane's own server search last returned, or `None` before the
+    /// first submit. Kept apart from the local filter because the two answer different
+    /// questions: the filter narrows the graph this pane already holds, the search asks the
+    /// server who else exists.
+    pub people: Option<Vec<PersonRow>>,
+    /// The query the standing people answer answers, trimmed as it was submitted. The answer
+    /// outlives the field's own text (a person may type on without submitting), so the section
+    /// is labelled by what was asked, not by what is typed.
+    pub people_query: String,
+    /// True while the pane's people search is in flight.
+    pub people_busy: bool,
+    /// The people answer from the graph's own suggestions, shown before the first submit.
+    pub suggestions: Vec<PersonRow>,
     /// Whether the search field is showing. The field lives behind the search icon in the
     /// header row until the icon is asked for — the header's room belongs to the two
     /// conversation doors, and the graph is searched rarely enough that a standing field
@@ -83,6 +96,30 @@ impl FriendsState {
                 self.names.insert(id, name);
             }
         }
+    }
+
+    /// Begins the pane's own people search: the query stands as the answer's label, the old
+    /// answer is dropped (it answered a different question), and the busy mark goes up until
+    /// the new answer lands. Pure state, so the submit path and its tests share one idea of
+    /// what a new search does to an old one.
+    pub fn begin_people_search(&mut self, query: &str) {
+        self.people = None;
+        self.people_query = query.trim().to_owned();
+        self.people_busy = true;
+    }
+
+    /// Clears the pane's people answer — the field's × and an empty submit both reach this,
+    /// because the section lives and dies with the words that asked for it.
+    pub fn clear_people_search(&mut self) {
+        self.people = None;
+        self.people_query.clear();
+        self.people_busy = false;
+    }
+
+    /// Whether a people answer is standing: a query was submitted and its section — the
+    /// answer, or the spinner waiting for it — belongs on screen.
+    pub fn people_standing(&self) -> bool {
+        !self.people_query.trim().is_empty()
     }
 }
 
@@ -183,12 +220,48 @@ pub fn show(
                     add_row(ui, context, state);
                     ui.add_space(space::LG);
 
+                    // The server's half of the search, above the graph's own sections: the
+                    // strangers a submit found, each with the two doors a stranger is offered.
+                    // Drawn before the empty state below so a pane that found nobody still
+                    // says so, and skipped entirely when no query stands.
+                    if state.people_standing() {
+                        people_section(ui, context, state);
+                        ui.add_space(space::LG);
+                    }
+
                     if state.entries.is_empty() {
+                        // The empty graph still answers the standing query honestly: a
+                        // search that returned nothing says so, rather than falling through
+                        // to an empty-state that would imply the search never ran.
+                        if state.people_standing()
+                            && state.people.as_ref().is_some_and(Vec::is_empty)
+                        {
+                            widgets::empty_state(
+                                ui,
+                                context.theme,
+                                &format!(
+                                    "Nothing found for \u{201C}{}\u{201D}",
+                                    state.people_query
+                                ),
+                                "Try another name, or paste their account id above.",
+                            );
+                            return;
+                        }
+                        // The pre-query state: the graph's own suggestions, offered as
+                        // doors the same way the Search place offers them.
+                        if !state.suggestions.is_empty() {
+                            widgets::subheader(ui, context.theme, "PEOPLE TO MEET");
+                            for person in &state.suggestions {
+                                crate::ui::search::person_row(ui, context, person);
+                            }
+                            ui.add_space(space::SM);
+                            return;
+                        }
                         widgets::empty_state(
                             ui,
                             context.theme,
                             "No friends yet",
-                            "Paste someone's account id above to send a request.",
+                            "Search for a name above, or paste someone's account id.",
                         );
                         return;
                     }
@@ -264,6 +337,47 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
     });
 }
 
+/// The server's people answer: the strangers a submitted query found, each drawn with the
+/// same row — and the same two doors — the Search place offers a stranger. The section stands
+/// while its query stands: the spinner while the answer is in flight, the rows once it lands,
+/// and an honest "nobody" when it lands empty. The rows are cloned out because the row's
+/// buttons issue commands through the context, which cannot borrow the state the loop reads.
+fn people_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
+    let colors = palette(context.theme);
+    ui.horizontal(|ui| {
+        widgets::subheader(ui, context.theme, "PEOPLE");
+        if state.people_busy {
+            ui.spinner();
+        } else {
+            widgets::pill(
+                ui,
+                &format!("\u{201C}{}\u{201D}", state.people_query),
+                colors.text_muted,
+                colors.surface_raised,
+            );
+        }
+    });
+    ui.add_space(space::XS);
+    let people = state.people.clone().unwrap_or_default();
+    if people.is_empty() {
+        if !state.people_busy {
+            ui.label(
+                RichText::new(format!(
+                    "Nobody on the server matches \u{201C}{}\u{201D}.",
+                    state.people_query
+                ))
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+            );
+        }
+        return;
+    }
+    for person in &people {
+        crate::ui::search::person_row(ui, context, person);
+        ui.add_space(space::XS);
+    }
+}
+
 /// The pane's header row: the pane's name at the left edge, and its search behind the search
 /// icon inline with the two conversation doors at the right — the icon left of the new-chat
 /// buttons, the field where the icon stood once it is asked for.
@@ -273,8 +387,10 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
 /// only when the icon is clicked — focused, because the click asked to type — and folds away
 /// when the search is *finished*: the × beside the field clears a query that stands and folds
 /// a field that has nothing left to clear, and losing focus with nothing asked folds it too
-/// (see [`search_done`]). The filtering is unchanged: every section below still answers the
-/// same needle, drawn from the same `state.search` the field writes.
+/// (see [`search_done`]). The local filtering is unchanged: every section below still answers
+/// the same needle, drawn from the same `state.search` the field writes. What the submit adds
+/// is the other half — the server's people answer, drawn from `state.people` (see
+/// [`people_section`]) and asked for only by the Enter the Search place also uses.
 fn header_row(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -318,6 +434,21 @@ fn header_row(
                     response.request_focus();
                     state.search_focus = false;
                 }
+                // The submit is Enter, the same trigger the Search place uses: the field is
+                // the graph's instant filter while it is typed into, and only a submit turns
+                // it into a question the server is asked — a people search against a
+                // rate-limited endpoint is not something every keystroke should buy.
+                let submitted =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if submitted {
+                    let query = state.search.trim().to_owned();
+                    if query.is_empty() {
+                        state.clear_people_search();
+                    } else {
+                        state.begin_people_search(&query);
+                        context.issue(Command::SearchPeopleForFriends { query });
+                    }
+                }
                 // Whether the field folds for losing focus is decided before the × below
                 // runs: the × clears the query, and a query that was standing when the focus
                 // left is not a finished search — the fold rule must not read the field the
@@ -341,6 +472,10 @@ fn header_row(
                     } else {
                         state.search.clear();
                     }
+                    // The server's answer goes with the query that asked for it: a results
+                    // section outliving its own words would answer a question nobody is
+                    // asking any more.
+                    state.clear_people_search();
                 }
                 if fold_on_blur {
                     state.search_open = false;
@@ -792,6 +927,33 @@ mod tests {
         assert!(!search_done("rina", true));
         assert!(!search_done("", false));
         assert!(!search_done("rina", false));
+    }
+
+    /// A new people search drops the old answer and stands its own label; a clear takes both
+    /// away. Pinned so the submit path and the × path cannot drift into two different ideas of
+    /// what a standing answer is.
+    #[test]
+    fn a_people_search_stands_by_its_own_query_and_falls_with_the_field() {
+        let mut state = FriendsState::default();
+        assert!(!state.people_standing());
+        state.begin_people_search("  rina  ");
+        // The query is trimmed as it was submitted: the label is what was asked.
+        assert_eq!(state.people_query, "rina");
+        assert!(state.people_standing());
+        assert!(state.people.is_none());
+        assert!(state.people_busy);
+        // The answer landing is the app's doing; the state only stops being busy.
+        state.people_busy = false;
+        state.begin_people_search("jo");
+        assert_eq!(state.people_query, "jo");
+        // The clear — the × or an empty submit — takes the whole section away.
+        state.clear_people_search();
+        assert!(!state.people_standing());
+        assert!(state.people_query.is_empty());
+        assert!(!state.people_busy);
+        // An empty query never stands a section up.
+        state.begin_people_search("   ");
+        assert!(!state.people_standing());
     }
 
     #[test]
