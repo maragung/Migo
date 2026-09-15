@@ -301,7 +301,7 @@ export function MobileHome({
               <CoinMark size={14} />
               {/* An unread balance says nothing rather than zero: a wallet that failed to load is
                   not an empty one, and the difference matters to whoever is about to spend. */}
-              <span>{balance !== null ? `$MIG ${balance.toLocaleString()}` : '$MIG'}</span>
+              <span>{balance !== null ? `${balance.toLocaleString()} $MIG` : '$MIG'}</span>
             </span>
             <div className="me-chip-row">
               <button

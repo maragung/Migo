@@ -96,14 +96,14 @@ test('the Kick Point shelf states every pack with its price, and the pricing rul
   const markup = renderToStaticMarkup(<KickPointsShelf onBuy={() => {}} busy={false} />);
   // Every pack button states its size and its coin price, so the spend is agreed before the
   // press — the same rule the gift picker follows.
-  for (const expect of ['1 KP', '10 KP', '50 KP', '$MIG 1', '$MIG 9', '$MIG 40']) {
+  for (const expect of ['1 KP', '10 KP', '50 KP', '1 $MIG', '9 $MIG', '40 $MIG']) {
     assert.ok(markup.includes(expect), `the shelf lost its "${expect}" line`);
   }
   assert.equal((markup.match(/<button/g) ?? []).length, KP_PACKS.length, 'one button per pack');
   assert.ok(!markup.includes('disabled'), 'an idle shelf must not be disabled');
   // The rule itself is stated beside the packs: KP first, coin fallback, votes free.
   assert.ok(markup.includes('Votes are always free'), 'the free-vote rule is missing');
-  assert.ok(markup.includes('$MIG 1'), 'the coin fallback price is missing');
+  assert.ok(markup.includes('1 $MIG'), 'the coin fallback price is missing');
   // And a busy shelf disables its buttons rather than hiding them.
   const busy = renderToStaticMarkup(<KickPointsShelf onBuy={() => {}} busy={true} />);
   assert.ok(busy.includes('disabled'), 'a buy in flight must disable the pack buttons');
@@ -120,7 +120,7 @@ test('the gift grid renders every catalogue entry with its price, category, and 
       disabled={false}
     />,
   );
-  for (const expect of ['Rose', 'Cake', '$MIG 10', '$MIG 75', 'flora', 'food']) {
+  for (const expect of ['Rose', 'Cake', '10 $MIG', '75 $MIG', 'flora', 'food']) {
     assert.ok(markup.includes(expect), `the catalogue card lost its "${expect}" line`);
   }
   // One Send control per gift, and each is clickable while no flow is in flight.
@@ -223,7 +223,7 @@ test('the recipient picker shows the price, the friends, and the username search
     />,
   );
   assert.ok(markup.includes('Send Rose'), 'the picker must name the gift being sent');
-  assert.ok(markup.includes('$MIG 10'), 'the picker must state the price before the recipient');
+  assert.ok(markup.includes('10 $MIG'), 'the picker must state the price before the recipient');
   // Friends by their display names, each with their own send control.
   assert.ok(markup.includes('Ada'));
   assert.ok(markup.includes('Grace'));

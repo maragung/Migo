@@ -270,7 +270,7 @@ export function GroupRosterRow({
                   close();
                   onKick();
                 }}
-                title="Remove this person outright, no vote — a founder's call. Costs 1 Kick Point, or $MIG 1 if you have none."
+                title="Remove this person outright, no vote — a founder's call. Costs 1 Kick Point, or 1 $MIG if you have none."
               >
                 Kick
               </button>
@@ -549,7 +549,7 @@ export function GroupInfoPanel({
   }
 
   // A founder's kick removes a person outright and carries a price, so the member is named and the
-  // cost stated before the server acts: a Kick Point when there is one to spend, otherwise $MIG 1.
+  // cost stated before the server acts: a Kick Point when there is one to spend, otherwise 1 $MIG.
   // The server's answer is the authority — a refusal (no KP and no coin) arrives as its own error
   // message and is surfaced through the panel's error line, not swallowed.
   function kickPerson(targetId: Id): void {
@@ -559,7 +559,7 @@ export function GroupInfoPanel({
     }
     if (
       !window.confirm(
-        `Kick ${nameOf(targetId)} from the group? A founder's call, no vote — it costs 1 Kick Point, or $MIG 1 if you have none.`,
+        `Kick ${nameOf(targetId)} from the group? A founder's call, no vote — it costs 1 Kick Point, or 1 $MIG if you have none.`,
       )
     ) {
       return;
