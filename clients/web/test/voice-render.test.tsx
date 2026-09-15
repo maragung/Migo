@@ -13,6 +13,11 @@
  *   4. **Without a URL resolver the bubble stays the text placeholder** — the same no-client
  *      fallback media references have, which is also what keeps the recorded placeholder contract
  *      (`🎤 Voice note (Ns)`) true wherever the player cannot run.
+ *   5. **The receiver-local state stays receiver-local (section 179)** — a received note carries
+ *      the heard mark and the row's listened/unlistened toggle, our own recordings carry neither,
+ *      and no markup may read as a sender-visible "played" confirmation.
+ *   6. **The speed control is client-side only** — a `1×` control on the player, labelled with the
+ *      rate it holds and the rate a tap moves to, never a re-fetch of the media.
  */
 
 import assert from 'node:assert/strict';
@@ -123,4 +128,48 @@ test('without a resolver the voice note stays the text placeholder', () => {
   const markup = render([voiceNote({ waveform: new Uint8Array([5]) })]);
   assert.ok(markup.includes('🎤 Voice note (34s)'), 'the placeholder fallback was lost');
   assert.ok(!markup.includes('voice-bar'), 'a player rendered with no way to resolve media');
+});
+
+test('a received note carries the receiver-local heard mark, unread by default', () => {
+  const markup = render([voiceNote({ waveform: new Uint8Array([5]) })], () =>
+    Promise.resolve('https://media.example.test/v'),
+  );
+  assert.ok(markup.includes('class="voice-note unlistened"'), 'the unheard default was lost');
+  assert.ok(markup.includes('voice-heard'), 'the heard badge is missing');
+});
+
+test('the receiver can hand-mark the note from the row, and it stays receiver-local', () => {
+  const markup = render([voiceNote({})], () => Promise.resolve('https://media.example.test/v'));
+  assert.ok(
+    markup.includes('aria-label="Mark voice note as listened"'),
+    'the row toggle is missing',
+  );
+  // The state is the receiver's own memory: nothing in the markup may read as a sender-visible
+  // played/read confirmation (ReceiptKind has no played variant, and none may be implied).
+  assert.ok(!markup.includes('Played'), 'a sender-side played status leaked into the row');
+});
+
+test('the player offers the client-side speed control at the 1× default', () => {
+  const markup = render([voiceNote({})], () => Promise.resolve('https://media.example.test/v'));
+  assert.ok(
+    markup.includes('aria-label="Playback speed 1×, tap for 1.5×"'),
+    'the speed control lost its label',
+  );
+  assert.ok(markup.includes('>1×</button>'), 'the speed control lost its current-rate label');
+});
+
+test('our own recordings carry neither the heard mark nor the row toggle', () => {
+  const mine = {
+    ...voiceNote({ waveform: new Uint8Array([5]) }),
+    senderId: 'me' as Id,
+  };
+  const markup = render([mine], () => Promise.resolve('https://media.example.test/v'));
+  assert.ok(!markup.includes('voice-heard'), "our own note is not the receiver's to track");
+  assert.ok(
+    !markup.includes('Mark voice note as listened'),
+    "the receiver-local toggle appeared on the sender's own row",
+  );
+  assert.ok(!markup.includes('voice-note unlistened'), 'our own note is not marked unheard');
+  // The speed control is a player feature, not listen state — our own notes keep it.
+  assert.ok(markup.includes('>1×</button>'), 'the speed control must not depend on the sender');
 });
