@@ -359,7 +359,7 @@ class SessionStore private constructor(
      */
     private fun decodePairwise(stored: ByteArray): StoredSession {
         if (stored.isEmpty()) throw SessionStoreError.Unreadable
-        if (stored[0] != PAIRWISE_ENTRY_VERSION) {
+        if (stored[0].toInt() != PAIRWISE_ENTRY_VERSION) {
             // A record from before the secret was retained: the whole body is the snapshot, and
             // `restore` enforces the snapshot's own version byte.
             return StoredSession(RatchetSession.restore(stored), null)
