@@ -833,6 +833,37 @@ pub fn conversation_row(ui: &mut Ui, theme: Theme, content: RowContent<'_>) -> R
     response
 }
 
+/// A text label that fits the width it is given, even when the text carries a token no
+/// space can break — a URL, a pasted key, a base64 run.
+///
+/// `ui.label` wraps rows on whitespace only, so a single token wider than the available
+/// width overruns it — egui's own layout says "found no place to break, so we have to
+/// overrun wrap_width" — and then the galley grows past the width the caller set, the
+/// bubble grows with the galley, and the overrun runs past the pane's edge where the
+/// window clips it. Laying the job out by hand with `break_anywhere` set keeps every row
+/// inside the width: a too-long token breaks mid-token, the way a pasted URL breaks in
+/// every chat client, while ordinary prose still wraps at its spaces exactly as before,
+/// because a mid-word break is only ever the row's last resort.
+pub fn fitting_label(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
+    let width = ui.available_width();
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+    job.wrap.break_anywhere = true;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.add(egui::Label::new(galley))
+}
+
+/// The widest a message bubble may grow: 68% of the pane it sits in, floored at 140px.
+///
+/// A pure function because two bubbles ask the same question — the text bubble below, and
+/// the voice note's bubble in [`crate::ui::chat`] — and a cap stated twice is a cap that
+/// drifts. Full-width bubbles on a maximised window produce lines too long to track back to
+/// the start of, and they erase the alignment cue entirely; the floor keeps a bubble
+/// readable on a window too narrow for 68% of it to mean anything.
+#[must_use]
+pub fn bubble_width_cap(available: f32) -> f32 {
+    (available * 0.68).max(140.0)
+}
+
 /// A message bubble.
 ///
 /// Outgoing bubbles are accent-filled and right-aligned, incoming ones white surface-filled with
@@ -863,9 +894,13 @@ pub fn bubble(ui: &mut Ui, theme: Theme, text: &str, meta: &str, outgoing: bool,
         Layout::left_to_right(Align::Min)
     };
     ui.with_layout(layout, |ui| {
-        // Bubbles stop at 68% of the pane. Full-width bubbles on a maximised window produce lines too
-        // long to track back to the start of, and they erase the alignment cue entirely.
-        let max = (ui.available_width() * 0.68).max(140.0);
+        // Bubbles stop at 68% of the pane, floored for narrow windows (see
+        // [`bubble_width_cap`] for why). The cap constrains the frame's inner ui, and the
+        // label inside wraps at that width in either direction: egui's `set_max_width`
+        // anchors the strip at the right edge under a `right_to_left` layout and at the
+        // left under a `left_to_right` one, so the outgoing and incoming bubbles wrap at
+        // the same width, each on its own side.
+        let max = bubble_width_cap(ui.available_width());
         egui::Frame::new()
             .fill(fill)
             .stroke(stroke)
@@ -874,11 +909,7 @@ pub fn bubble(ui: &mut Ui, theme: Theme, text: &str, meta: &str, outgoing: bool,
             .show(ui, |ui| {
                 ui.set_max_width(max);
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(text)
-                            .font(FontId::proportional(font::BODY))
-                            .color(foreground),
-                    );
+                    fitting_label(ui, text, FontId::proportional(font::BODY), foreground);
                     ui.add_space(space::XS * 0.5);
                     ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
                         ui.label(
@@ -991,4 +1022,21 @@ pub fn elide(text: &str, max_chars: usize) -> String {
         out.push(character);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cap is two thirds of the pane, and never narrower than a readable bubble: pinned so
+    /// neither bound can drift while nobody is looking — a 100% cap erases the alignment cue
+    /// that tells the eye whose message a row is, and a floorless one makes bubbles unreadable
+    /// slivers on windows too narrow for 68% to mean anything.
+    #[test]
+    fn the_bubble_cap_takes_two_thirds_and_floors_at_140() {
+        assert!((bubble_width_cap(1000.0) - 680.0).abs() < f32::EPSILON);
+        assert!((bubble_width_cap(500.0) - 340.0).abs() < f32::EPSILON);
+        assert!((bubble_width_cap(100.0) - 140.0).abs() < f32::EPSILON);
+        assert!((bubble_width_cap(0.0) - 140.0).abs() < f32::EPSILON);
+    }
 }

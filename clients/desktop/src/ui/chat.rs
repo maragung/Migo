@@ -2816,9 +2816,35 @@ fn edit_in_place(
     message: &Message,
     draft: &mut EditDraft,
 ) -> bool {
+    // The field wraps the way the bubble it replaces does. egui's own field layout breaks rows
+    // on whitespace only, so a correction carrying a token no space can break — a URL, a pasted
+    // key — overruns the field's width and the window clips it. The job below mirrors the
+    // default layouter in every other respect (same font and colour, trailing whitespace kept
+    // for the same "typing feels weird without it" reason egui gives, the same row height) so
+    // the editor reads exactly as a field, except that a too-long token breaks mid-token
+    // instead of running past the edge.
+    let colors = palette(context.theme);
+    let mut fitting = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let font_id = egui::FontId::proportional(font::BODY);
+        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+        let mut job = egui::text::LayoutJob::simple(
+            text.as_str().to_owned(),
+            font_id,
+            colors.text,
+            wrap_width,
+        );
+        job.wrap.break_anywhere = true;
+        job.keep_trailing_whitespace = true;
+        let line_height = row_height + ui.spacing().extra_text_line_spacing;
+        for section in &mut job.sections {
+            section.format.line_height = Some(line_height);
+        }
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
     let field = egui::TextEdit::multiline(&mut draft.text)
         .hint_text("the corrected message")
-        .desired_width((ui.available_width() - space::LG * 2.0).max(120.0));
+        .desired_width((ui.available_width() - space::LG * 2.0).max(120.0))
+        .layouter(&mut fitting);
     let response = ui.add(field);
     if draft.claim_focus {
         response.request_focus();
@@ -3078,17 +3104,23 @@ fn image_bubble(
         let scale = (available / w as f32).min(cap / h as f32).min(1.0);
         let size = egui::vec2(w as f32 * scale, h as f32 * scale);
         ui.image((texture.id(), size));
+        // The caption and the stamp wrap like every other text in the window: a plain label
+        // breaks rows on whitespace only, so a caption carrying a token no space can break —
+        // a URL pasted under a screenshot — overruns the column and the window clips it.
+        // [`widgets::fitting_label`] keeps both inside the width the row already set.
         if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
-            ui.label(
-                RichText::new(caption)
-                    .font(egui::FontId::proportional(font::SMALL))
-                    .color(colors.text),
+            widgets::fitting_label(
+                ui,
+                caption,
+                egui::FontId::proportional(font::SMALL),
+                colors.text,
             );
         }
-        ui.label(
-            RichText::new(meta)
-                .font(egui::FontId::proportional(font::TINY))
-                .color(colors.text_muted),
+        widgets::fitting_label(
+            ui,
+            meta,
+            egui::FontId::proportional(font::TINY),
+            colors.text_muted,
         );
         return;
     }
@@ -3270,7 +3302,9 @@ fn voice_bubble(
             .corner_radius(egui::CornerRadius::same(radius::MD))
             .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
             .show(ui, |ui| {
-                ui.set_max_width((ui.available_width() * 0.68).max(140.0));
+                // The same cap a text bubble takes — 68% of the pane, floored — so the two
+                // bubbles beside each other in a thread agree on what a bubble is.
+                ui.set_max_width(widgets::bubble_width_cap(ui.available_width()));
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         let bars = note.waveform.as_deref().unwrap_or(&[]);
