@@ -50,6 +50,13 @@ pub struct ChatState {
     /// per account. The header's button reads this — Join when the conversation has no seat,
     /// Leave with the count when it has — and the net worker's own seat events keep it true.
     pub group_calls: HashMap<Id, u32>,
+    /// Group calls running in conversations this device holds no seat in, as the
+    /// conversation topic's announcements reported them: the running call's id (what a
+    /// join-in-progress press passes back to the worker, so it seats the running call
+    /// rather than minting a second beside it) and the roster's size (the button's
+    /// label). The net worker's spectator events keep it true; an entry dies when the
+    /// roster empties or this device takes a seat of its own.
+    pub calls_in_progress: HashMap<Id, (Id, u32)>,
     /// When each typing entry expires, keyed by `(conversation, typer)`.
     ///
     /// The local timeout brief section 15 demands: a `Start` that is never
@@ -2421,14 +2428,35 @@ fn thread_header(
                             context.issue(Command::LeaveGroupCall { conversation_id });
                         }
                     }
-                    None => {
-                        if header_control(ui, context.theme, "\u{1F3A4}")
-                            .on_hover_text("Join group call")
-                            .clicked()
-                        {
-                            context.issue(Command::JoinGroupCall { conversation_id });
+                    None => match state.calls_in_progress.get(&conversation_id) {
+                        // A call this device is not in may still be running: the
+                        // conversation topic's announcements reach every member, seated or
+                        // not, and the spectator map is what they built. Joining it passes
+                        // the running call's id — the join seats the call everyone else is
+                        // in — where a fresh mint would start a second call beside it.
+                        Some((call_id, count)) => {
+                            if header_control(ui, context.theme, "\u{1F3A4}")
+                                .on_hover_text(format!("Join call in progress ({count})"))
+                                .clicked()
+                            {
+                                context.issue(Command::JoinGroupCall {
+                                    conversation_id,
+                                    call_id: Some(*call_id),
+                                });
+                            }
                         }
-                    }
+                        None => {
+                            if header_control(ui, context.theme, "\u{1F3A4}")
+                                .on_hover_text("Join group call")
+                                .clicked()
+                            {
+                                context.issue(Command::JoinGroupCall {
+                                    conversation_id,
+                                    call_id: None,
+                                });
+                            }
+                        }
+                    },
                 }
                 ui.add_space(space::XS);
             }

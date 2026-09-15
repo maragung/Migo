@@ -935,8 +935,11 @@ impl App {
                     // The seat of a conversation this account has left goes with the thread:
                     // forget_group already ended it worker-side (the GroupCallEnded arm above
                     // is what usually clears this), and the removal here is the belt to that
-                    // braces for an event raced past the teardown.
+                    // braces for an event raced past the teardown. The spectator's ledger
+                    // entry goes the same way — a conversation this account is no longer in
+                    // is not one whose calls it will be offered.
                     self.chat.group_calls.remove(&conversation_id);
+                    self.chat.calls_in_progress.remove(&conversation_id);
                     self.chat
                         .conversations
                         .retain(|c| c.conversation_id != conversation_id);
@@ -1143,9 +1146,30 @@ impl App {
                     self.chat
                         .group_calls
                         .insert(conversation_id, participant_count);
+                    // Seating is also the end of spectating: the conversation's running call
+                    // is the one this device just joined, and the join-in-progress offer
+                    // must not outlive the seat it offered to.
+                    self.chat.calls_in_progress.remove(&conversation_id);
                 }
                 Event::GroupCallEnded { conversation_id } => {
                     self.chat.group_calls.remove(&conversation_id);
+                }
+                // The spectator's twin of the seat map: a call running in a conversation
+                // this device holds no seat in, as the conversation topic's announcements
+                // reported it. The header's join button reads it as "join what is running",
+                // and the entry dies when the roster empties or a seat of this device's own
+                // takes its place.
+                Event::GroupCallInProgress {
+                    conversation_id,
+                    call_id,
+                    count,
+                } => {
+                    self.chat
+                        .calls_in_progress
+                        .insert(conversation_id, (call_id, count));
+                }
+                Event::GroupCallInProgressEnded { conversation_id } => {
+                    self.chat.calls_in_progress.remove(&conversation_id);
                 }
                 Event::MediaImage {
                     media_id,

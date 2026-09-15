@@ -561,8 +561,14 @@ pub enum Command {
     DismissCall,
     /// Join the group call of one conversation — or re-send a join already in flight, because
     /// the call id the join carries is its idempotency key and a press that lands twice must
-    /// seat the same call, not a second one.
-    JoinGroupCall { conversation_id: Id },
+    /// seat the same call, not a second one. `call_id` names a call already running in the
+    /// conversation when the caller knows of one (the header's join-in-progress offer passes
+    /// it, so the press seats the running call); `None` lets the worker mint, starting the
+    /// conversation's call.
+    JoinGroupCall {
+        conversation_id: Id,
+        call_id: Option<Id>,
+    },
     /// Leave the group call of one conversation, seated or still joining.
     LeaveGroupCall { conversation_id: Id },
     /// Attach a local file to a conversation. The worker reads the bytes and judges them the
@@ -1097,6 +1103,21 @@ pub enum Event {
     /// The group call of one conversation is over for this device: left, ended, dropped with
     /// the gateway, or torn down with the conversation itself.
     GroupCallEnded { conversation_id: Id },
+    /// A group call is running in a conversation this device holds no seat in — news the
+    /// conversation topic's announcements carry to every member, seated or not. The header's
+    /// join button reads this as "join what is running", passing `call_id` back to the join
+    /// so the press seats the running call rather than minting a second one beside it.
+    GroupCallInProgress {
+        conversation_id: Id,
+        call_id: Id,
+        /// The roster's size after the change the announcement named.
+        count: u32,
+    },
+    /// The running call of one conversation is over — its last seat left — so the header's
+    /// join-in-progress offer goes with it. The spectator's twin of
+    /// [`Event::GroupCallEnded`], kept separate because the seated and spectated calls of
+    /// one conversation are different facts with different lifetimes.
+    GroupCallInProgressEnded { conversation_id: Id },
     /// A fetched image decoded: the pixels the bubble's texture wants, at their own size.
     ///
     /// Decoding happens in the worker — before the ask the bytes are sealed, and after it
@@ -2539,8 +2560,11 @@ impl Worker {
             Command::EndCall => self.end_call().await,
             Command::ToggleCallMute => self.toggle_call_mute(),
             Command::DismissCall => self.dismiss_call(),
-            Command::JoinGroupCall { conversation_id } => {
-                self.join_group_call(conversation_id).await;
+            Command::JoinGroupCall {
+                conversation_id,
+                call_id,
+            } => {
+                self.join_group_call(conversation_id, call_id).await;
             }
             Command::LeaveGroupCall { conversation_id } => {
                 self.leave_group_call(conversation_id).await;
