@@ -87,9 +87,20 @@
 //! inviting side publishes, but their own `CALL_ANSWER` or `CALL_DECLINE`
 //! reaches the other node's store and finds no row — the completion paths
 //! are the flagged remainder, not a silence to paper over.
+//!
+//! A group call's *announcements* are the one call frames whose audience is
+//! a conversation rather than an account, so they cross on the conversation
+//! tier instead: whichever of the two fan-out tiers owns the conversation
+//! (the room envelope for a room's conversation, the conversation envelope
+//! for a group chat's) carries the join and departure frames a local
+//! publication put on the conversation's topic, one copy per watching node,
+//! with the sealed offer inside read by nobody on the way — see
+//! [`forward_announcement`]. The roster-to-user-topic frames above are a
+//! different audience on a different topic, so a joiner's device hears each
+//! frame once no matter how many tiers carry the call.
 
 use migo_calls::{roster_wire, Caller as CallCaller, SharedCallkeeper};
-use migo_core::Error;
+use migo_core::{Error, Timestamp};
 use migo_gateway::ClientContext;
 use migo_notify::{Event as NotificationEvent, SharedNotifier};
 use migo_protocol::{
@@ -98,7 +109,9 @@ use migo_protocol::{
     CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic, TopicKind,
 };
 
+use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
+use crate::room_relay::RoomRelay;
 
 /// Invites a callee and rings them.
 ///
@@ -533,6 +546,49 @@ pub(crate) async fn handle_turn_fetch(
     ctx.reply(&CallTurnResponse { servers })
 }
 
+/// Carries one group-call announcement to whichever tier owns its
+/// conversation's fan-out.
+///
+/// The audience question every announcement asks is the one
+/// `publish_messaging` already answers for a chat: a conversation's
+/// subscribers, whichever nodes they sit on, with the envelope chosen by who
+/// owns the conversation — a room's conversation rides the room tier
+/// (`FED_ROOM_EVENT`), a direct or group chat's rides the conversation tier
+/// (`FED_CONVERSATION_EVENT`). Each relay answers the ownership question for
+/// itself against the store and no-ops when the conversation is not its own,
+/// so one call here is the whole of the routing: one federated copy per
+/// watching node, the sealed offer inside the event read by nobody on the
+/// way.
+///
+/// Warn-not-fail, exactly as every other federated half this module sends:
+/// the local publish already happened, and refusing the request over the far
+/// copy would only cost the roster its far members without undoing anything.
+/// Public to the crate because the call sweeper owes the same crossing for
+/// the departures it publishes out of band.
+pub(crate) async fn forward_announcement(
+    rooms: &RoomRelay,
+    conversations: &ConversationRelay,
+    conversation_id: migo_core::Id,
+    event: &migo_protocol::CallStateEvent,
+    now: Timestamp,
+) {
+    if let Err(error) = rooms.forward_call_event(conversation_id, event, now).await {
+        tracing::warn!(
+            %error,
+            "cannot enqueue the federated half of a group-call announcement"
+        );
+    }
+    if let Err(error) = conversations
+        .forward_call_event(conversation_id, event, now)
+        .await
+    {
+        tracing::warn!(
+            %error,
+            "cannot enqueue the federated half of a group-call announcement"
+        );
+    }
+}
+
 /// Joins (or re-joins) a group call on this node.
 ///
 /// The payload is a `CallInvite` — the same frame a 1:1 ring carries, read
@@ -554,6 +610,8 @@ pub(crate) async fn handle_sfu_join(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    rooms: &RoomRelay,
+    conversations: &ConversationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallInvite = from_frame(frame).map_err(fault::from_wire)?;
@@ -598,9 +656,10 @@ pub(crate) async fn handle_sfu_join(
     // The roster's federated half: the joiner's *other* devices may sit on
     // another node, and the roster is the one frame that builds their call
     // screen — the same audience question every call frame here asks, over
-    // the same watch table. The conversation-topic announcements below are
-    // another matter: they ride the conversation tier or nothing, and today
-    // they ride nothing — the flag the spec-status carries.
+    // the same watch table. The conversation-topic announcements below ride
+    // the conversation's own tier instead, one copy per watching node,
+    // because their audience is the conversation's subscribers rather than
+    // one account's devices.
     if let Err(error) = relay
         .forward_call(caller.account_id, Opcode::CallSfuEvent, &roster, caller.now)
         .await
@@ -620,6 +679,18 @@ pub(crate) async fn handle_sfu_join(
         if let Err(error) = ctx.publish_excluding_self(&topic, Opcode::CallSfuEvent, &event, None) {
             tracing::warn!(%error, "group-call join announcement failed");
         }
+        // And the announcement's own federated half, so a member whose socket
+        // sits on another node learns the call is running exactly as a local
+        // subscriber would — the crossing the conversation tier was widened
+        // to carry.
+        forward_announcement(
+            rooms,
+            conversations,
+            call.conversation_id,
+            &event,
+            caller.now,
+        )
+        .await;
     }
     let _ = outcome;
     Ok(())
@@ -634,6 +705,8 @@ pub(crate) async fn handle_group_end(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    rooms: &RoomRelay,
+    conversations: &ConversationRelay,
 ) -> Result<bool, Error> {
     let caller = caller_of(ctx);
     let request: CallEnd = from_frame(frame).map_err(fault::from_wire)?;
@@ -651,13 +724,18 @@ pub(crate) async fn handle_group_end(
         return Ok(true);
     };
     ctx.reply(&Acknowledged { ok: true })?;
+    let conversation_id = event.conversation_id.unwrap_or_default();
     let topic = Topic {
         kind: TopicKind::Conversation,
-        id: event.conversation_id.unwrap_or_default(),
+        id: conversation_id,
     };
     if let Err(error) = ctx.publish_excluding_self(&topic, Opcode::CallSfuEvent, &event, None) {
         tracing::warn!(%error, "group-call departure publication failed");
     }
+    // The departure's federated half, over the same tier the join crossed: a
+    // roster on another node must hear the seat empty, or it renders a
+    // participant who is gone.
+    forward_announcement(rooms, conversations, conversation_id, &event, caller.now).await;
     Ok(true)
 }
 

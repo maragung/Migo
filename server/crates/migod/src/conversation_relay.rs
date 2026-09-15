@@ -20,7 +20,9 @@
 //! - the **forward half**: every publish path a direct or group conversation
 //!   has — send, edit, receipt, typing, invite, leave, vote, state — funnels
 //!   through `publish_messaging`, which hands the fanout here when the store
-//!   says the conversation is not a room's. The node that homes the
+//!   says the conversation is not a room's, and the call plane's group-call
+//!   membership announcements reach the same half through
+//!   [`forward_call_event`](Self::forward_call_event). The node that homes the
 //!   conversation enqueues one `FED_CONVERSATION_EVENT` per watching node, the
 //!   inner event frame sealed exactly as a local session would have received
 //!   it; the receiving node's ingest path (`mesh::route_conversation_event`)
@@ -294,6 +296,48 @@ impl ConversationRelay {
             // No row, so nothing names a home node. The event was published
             // to this node's hub regardless.
             None => Ok(()),
+        }
+    }
+
+    /// The forward half's second producer: a group call's membership
+    /// announcements, the frames the dispatcher publishes to a
+    /// conversation's topic so every subscribed member learns a call is
+    /// running.
+    ///
+    /// The same two hops `forward` rides, over the same watch table, because
+    /// the audience question is identical: a conversation's subscribers,
+    /// whichever nodes they sit on. The event is encoded whole — the joiner's
+    /// sealed offer rides inside it, read by nobody on the way through, the
+    /// same mail-slot rule every sealed blob the tier carries keeps.
+    ///
+    /// A conversation a *room* owns is a skip rather than a route: its events
+    /// ride the room's own tier (`FED_ROOM_EVENT`), and a second envelope
+    /// here would deliver the room's members two copies of every
+    /// announcement. A conversation with no row stays local, exactly as a
+    /// messaging fanout does — the publish already reached this node's hub.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an encode or outbox failure. The caller logs rather than
+    /// fails, for the same reason `forward`'s caller does: the local publish
+    /// already happened, and refusing the join over the federated half would
+    /// only cost the roster its far members without undoing anything.
+    pub(crate) async fn forward_call_event(
+        &self,
+        conversation_id: Id,
+        event: &migo_protocol::CallStateEvent,
+        now: Timestamp,
+    ) -> Result<()> {
+        let inner = to_frame(Opcode::CallSfuEvent.to_wire(), 0, event).map_err(fault::from_wire)?;
+        match self.store.conversation(conversation_id).await? {
+            Some(conversation) if conversation.room_id.is_none() => {
+                self.to_owner(&conversation, inner, now).await
+            }
+            // A room's conversation rides the room's own tier, and a row that
+            // names no home at all has nobody to forward to. Either way the
+            // local publish that already happened is the whole of what this
+            // tier owes.
+            _ => Ok(()),
         }
     }
 
