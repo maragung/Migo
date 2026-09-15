@@ -533,8 +533,9 @@ impl Calls {
 }
 
 impl Worker {
-    /// This device's own id, for the relay filter a sealed blob is not ours without.
-    fn device_id(&self) -> Option<Id> {
+    /// This device's own id, for the relay filter a sealed blob is not ours without. Shared
+    /// with the group-call seat, whose relays filter the same way.
+    pub(super) fn device_id(&self) -> Option<Id> {
         self.signed.as_ref().map(|signed| signed.account.device_id)
     }
 
@@ -1406,6 +1407,13 @@ impl Worker {
     /// addresses; for a callee the offer arrived inside the invite, so an SDP relay that names
     /// this device and is not the answer is a renegotiation this build does not speak and
     /// ignores rather than guesses at.
+    ///
+    /// Group relays are tried first: the server projects a mid-call joiner's
+    /// `CALL_RENEGOTIATE` at its target as the `CALL_SDP` frame relayed here, so both halves
+    /// of section 163's join flow — the key ask and the sealed answer — arrive in this arm,
+    /// and the group seat decides whether a frame is its business before the 1:1 engine ever
+    /// looks at it. The two engines never share a call id: a group call's id lives in the
+    /// SFU's own store, a 1:1 call's in the dispatch one.
     pub(super) async fn on_call_sdp(&mut self, frame: &migo_protocol::Frame) {
         let Ok(relay) = super::gateway::decode::<migo_protocol::CallSdp>(frame) else {
             return;
@@ -1416,6 +1424,9 @@ impl Worker {
         // A relay is addressed to one device; one sealed for another of this account's devices
         // is not ours to open.
         if relay.to_device != my_device {
+            return;
+        }
+        if self.on_group_call_relay(&relay).await {
             return;
         }
         let context = {

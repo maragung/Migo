@@ -233,6 +233,14 @@ impl DeviceKeys {
 /// One live session with one remote device.
 struct Entry {
     session: RatchetSession,
+    /// The X3DH shared secret that started the session, so a later protocol that derives a
+    /// second key from the *same* handshake — the group-call join wrapper of section 163, whose
+    /// HKDF label "migo-call-join-v1" salts the pairwise secret with the call id — can do so
+    /// without re-running the handshake. Both devices hold these identical bytes, whichever of
+    /// them initiated, because X3DH's `respond` derives the same secret from the other three
+    /// inputs. Zeroed when the entry is dropped: a secret that outlives its session is a copy
+    /// nothing audits.
+    secret: [u8; 32],
     /// The preamble we send on every message until this device replies. `None` once it has, and for
     /// sessions we answered rather than started.
     outgoing_preamble: Option<Preamble>,
@@ -242,6 +250,12 @@ struct Entry {
     /// still be in flight — is recognised as belonging to the session we already built rather than
     /// silently replacing it, which would throw away every key derived since.
     origin: Option<Preamble>,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.secret.fill(0);
+    }
 }
 
 /// Every session this device holds, keyed by conversation and remote device id.
@@ -306,6 +320,19 @@ impl SessionStore {
         &self.keys.identity
     }
 
+    /// The X3DH shared secret of the session with one device in one conversation, if any.
+    ///
+    /// The caller is a protocol that derives a second key from the same handshake — the
+    /// group-call join wrapper, whose HKDF label "migo-call-join-v1" salts these bytes with the
+    /// call id. The secret is returned by value, not by reference, so no borrow of it can outlive
+    /// the session it belongs to; the store's own copy is zeroed with the entry.
+    #[must_use]
+    pub fn pairwise_secret(&self, conversation: Id, device: Id) -> Option<[u8; 32]> {
+        self.sessions
+            .get(&(conversation, device))
+            .map(|entry| entry.secret)
+    }
+
     /// Seals `plaintext` for one device in one conversation, starting a session from `bundle` if
     /// there is none.
     ///
@@ -335,6 +362,7 @@ impl SessionStore {
                 key,
                 Entry {
                     session,
+                    secret: seed.shared_secret,
                     outgoing_preamble: Some(preamble_of(&initial)),
                     origin: None,
                 },
@@ -371,11 +399,12 @@ impl SessionStore {
                 .get(&key)
                 .is_some_and(|entry| entry.origin.as_ref() == Some(preamble));
             if !already {
-                let session = self.answer(preamble)?;
+                let (session, secret) = self.answer(preamble)?;
                 self.sessions.insert(
                     key,
                     Entry {
                         session,
+                        secret,
                         outgoing_preamble: None,
                         origin: Some(preamble.clone()),
                     },
@@ -397,7 +426,7 @@ impl SessionStore {
     /// The one-time prekey is removed whether or not the session goes on to decrypt anything. That
     /// is the point of it being one-time: reusing it would give two sessions the same fourth DH
     /// input, and an attacker who recorded both would only have to break one.
-    fn answer(&mut self, preamble: &Preamble) -> Result<RatchetSession, CryptoError> {
+    fn answer(&mut self, preamble: &Preamble) -> Result<(RatchetSession, [u8; 32]), CryptoError> {
         if preamble.signed_prekey_id != self.keys.signed_prekey_id {
             return Err(CryptoError::UnknownPrekey);
         }
@@ -427,7 +456,8 @@ impl SessionStore {
         // `Clone` — a key that copies itself silently is a key that ends up in two places — so the
         // pair is rebuilt from its seed, which is the same key by construction.
         let pair = KeyPair::from_seed(self.keys.signed_prekey.expose_seed());
-        Ok(RatchetSession::responder(&seed, pair))
+        let secret = seed.shared_secret;
+        Ok((RatchetSession::responder(&seed, pair), secret))
     }
 
     /// How many unused one-time prekeys remain.
@@ -612,5 +642,84 @@ mod tests {
                 .expect("a seed is a key")
                 .public_key()
         );
+    }
+
+    /// The bundle a peer would fetch from the gateway, in the store's own shape: identity, signed
+    /// prekey with its signature, and the first one-time prekey.
+    fn published_bundle(keys: &DeviceKeys) -> PrekeyBundle {
+        let signed = keys.signed_prekey_signed();
+        let one_time = keys.one_time_public().into_iter().next();
+        bundle_from_wire(
+            &keys.identity_public().to_bytes(),
+            signed.key_id,
+            &signed.public_key,
+            &signed.signature,
+            one_time.as_ref().map(|(id, key)| (*id, key.as_slice())),
+        )
+        .expect("the store's own halves parse")
+    }
+
+    /// Both sides of a session hold the same X3DH shared secret, whichever of them initiated —
+    /// the property the group-call join wrapper of section 163 turns on, because its HKDF label
+    /// "migo-call-join-v1" must derive the same wrapping key on the joiner and on the seated
+    /// participant answering it. A session whose two ends disagreed would seal a key the other
+    /// end could never open, and the disagreement would be silent.
+    #[test]
+    fn both_ends_of_a_session_hold_the_same_secret() {
+        let alice_keys = DeviceKeys::additional();
+        let bob_keys = DeviceKeys::additional();
+        let alice_device = Id::generate(0, &mut OsRandom);
+        let bob_device = Id::generate(0, &mut OsRandom);
+        let conversation = Id::generate(0, &mut OsRandom);
+        let mut alice = SessionStore::new(alice_keys);
+        let mut bob = SessionStore::new(bob_keys);
+
+        // Alice initiates: her first seal runs X3DH against Bob's bundle.
+        let envelope = alice
+            .seal(
+                conversation,
+                bob_device,
+                Some(&published_bundle(bob.keys())),
+                b"the first word",
+            )
+            .expect("seals against the bundle");
+        bob.open(conversation, alice_device, &envelope)
+            .expect("Bob answers the session");
+
+        let alice_secret = alice
+            .pairwise_secret(conversation, bob_device)
+            .expect("Alice recorded the handshake's secret");
+        assert_eq!(
+            bob.pairwise_secret(conversation, alice_device),
+            Some(alice_secret)
+        );
+
+        // And a session Bob initiates lands on the same property: the secret is a function of the
+        // handshake's inputs, not of who ran `initiate`.
+        let reply = bob
+            .seal(conversation, alice_device, None, b"the answer")
+            .expect("the established session seals without a bundle");
+        assert!(reply.preamble.is_none());
+        let other = Id::generate(0, &mut OsRandom);
+        let first = bob
+            .seal(
+                other,
+                alice_device,
+                Some(&published_bundle(alice.keys())),
+                b"bob speaks first here",
+            )
+            .expect("Bob initiates elsewhere");
+        alice
+            .open(other, bob_device, &first)
+            .expect("Alice answers");
+        let bob_secret = bob
+            .pairwise_secret(other, alice_device)
+            .expect("Bob recorded the handshake's secret");
+        assert_eq!(alice.pairwise_secret(other, bob_device), Some(bob_secret));
+
+        // No session, no secret: the accessor reports absence rather than guessing.
+        assert!(alice.pairwise_secret(other, bob_device).is_some());
+        let stranger = Id::generate(0, &mut OsRandom);
+        assert!(alice.pairwise_secret(other, stranger).is_none());
     }
 }

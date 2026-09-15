@@ -31,6 +31,7 @@ pub(crate) mod call_signal;
 pub(crate) mod call_video;
 pub mod chain;
 pub mod gateway;
+pub(crate) mod group_call;
 pub(crate) mod media;
 pub mod quic;
 pub mod rest;
@@ -556,6 +557,12 @@ pub enum Command {
     /// Put an ended call's overlay away. The call is over on the wire; this only clears the
     /// screen.
     DismissCall,
+    /// Join the group call of one conversation — or re-send a join already in flight, because
+    /// the call id the join carries is its idempotency key and a press that lands twice must
+    /// seat the same call, not a second one.
+    JoinGroupCall { conversation_id: Id },
+    /// Leave the group call of one conversation, seated or still joining.
+    LeaveGroupCall { conversation_id: Id },
     /// Attach a local file to a conversation. The worker reads the bytes and judges them the
     /// way the server will: an image the bytes prove is one, anything else is a document.
     ///
@@ -1065,6 +1072,16 @@ pub enum Event {
     /// this device's to show anymore). Separate from [`Event::Call`] because "no call" is not a
     /// view, and an `Option` in every event would tax every other reader of the enum.
     CallGone,
+    /// This device was seated in a group call — the roster snapshot answered its join — or the
+    /// roster moved and the count changed. `participant_count` is seats, one per account, so
+    /// the UI's badge is the number of people in the call, not devices.
+    GroupCallSeated {
+        conversation_id: Id,
+        participant_count: u32,
+    },
+    /// The group call of one conversation is over for this device: left, ended, dropped with
+    /// the gateway, or torn down with the conversation itself.
+    GroupCallEnded { conversation_id: Id },
     /// A fetched image decoded: the pixels the bubble's texture wants, at their own size.
     ///
     /// Decoding happens in the worker — before the ask the bytes are sealed, and after it
@@ -1986,6 +2003,10 @@ struct Worker {
     /// keys that unseal them. Lives on the worker because a call is a network session with its
     /// own timers, and the loop below owns every other timed thing the same way.
     calls: call::Calls,
+    /// The group-call seat beside the 1:1 engine: the SFU roster this device holds, the frame
+    /// key it shares with the roster, and a join still waiting on its roster snapshot. One at
+    /// a time, like the engine's own call.
+    group_calls: group_call::GroupCalls,
     /// Attachment uploads between their BEGIN and the ticket's arrival, keyed by correlation.
     /// More than one may be in flight: an attach and a voice note can overlap, and the wire's
     /// reply names nothing but the correlation it answers.
@@ -2083,6 +2104,7 @@ impl Worker {
             heartbeat: None,
             chain_http: reqwest::Client::new(),
             calls: call::Calls::new(),
+            group_calls: group_call::GroupCalls::new(),
             attachment_begins: HashMap::new(),
             attachment_commits: HashMap::new(),
             media_wants: HashMap::new(),
@@ -2476,6 +2498,12 @@ impl Worker {
             Command::EndCall => self.end_call().await,
             Command::ToggleCallMute => self.toggle_call_mute(),
             Command::DismissCall => self.dismiss_call(),
+            Command::JoinGroupCall { conversation_id } => {
+                self.join_group_call(conversation_id).await;
+            }
+            Command::LeaveGroupCall { conversation_id } => {
+                self.leave_group_call(conversation_id).await;
+            }
             Command::SendAttachment {
                 conversation_id,
                 path,
@@ -2946,7 +2974,9 @@ impl Worker {
             // WELCOME put the bit in the intersection. CALLS, ROOMS, and ECONOMY are honoured
             // because the client speaks those families' opcodes (the call signal path, the rooms
             // screens, the wallet and gifting) and the server now refuses a family's frames on a
-            // session that did not announce its bit — the mask is the switch's own key.
+            // session that did not announce its bit — the mask is the switch's own key. GROUP_CALL
+            // is honoured for the seat this build takes: the SFU join, the roster it answers, and
+            // the call-key rotation the roster's own movement triggers.
             features: features::E2E_V1
                 | features::PRESENCE
                 | features::TYPING
@@ -2954,6 +2984,7 @@ impl Worker {
                 | features::BATCHING
                 | features::RICH_PRESENCE
                 | features::CALLS
+                | features::GROUP_CALL
                 | features::ROOMS
                 | features::ECONOMY,
             locale: "en".to_owned(),
@@ -7063,7 +7094,7 @@ impl Worker {
     /// `room_conversations`. What it always carries is the one fact the send audience is built
     /// from, so the membership cache is patched here, exactly the way the SDK's
     /// `applyMemberEvent` patches its own.
-    fn on_conversation_member(&mut self, frame: &migo_protocol::Frame) {
+    async fn on_conversation_member(&mut self, frame: &migo_protocol::Frame) {
         let Ok(event) = gateway::decode::<migo_protocol::ConversationMemberEvent>(frame) else {
             return;
         };
@@ -7072,28 +7103,38 @@ impl Worker {
                 cached.apply(&event);
             }
         }
-        // A departure from a group this session is in must also kill the group's outbound
-        // chain, for the same reason the room path rotates: the member who left may still hold
-        // the key. The conversation id itself is the key the group state lives under, so no
-        // room mapping is needed here.
-        if matches!(
-            event.change,
-            migo_protocol::MemberChange::Left
-                | migo_protocol::MemberChange::Kicked
-                | migo_protocol::MemberChange::Banned
-        ) {
-            if let Some(signed) = self.signed.as_mut() {
-                signed.groups.rotate(event.conversation_id);
-            }
+        // Section 163's first trigger: a membership change is a change of audience, and the
+        // audience is exactly what a sender key is sealed for. The chain rotates to the event's
+        // own `group_key_epoch` — the generation the server's own membership operation produced,
+        // so every member that rotates on the same event names the same epoch — and the new
+        // chain goes out to every member device, one pairwise distribution each, before the
+        // next message of the conversation could be sealed under a key its new audience lacks.
+        if is_membership_change(event.change) {
             // This account's own departure ends the group for this device the way a leave's
             // ack does: the keys go, the window's copy of the thread goes, and the member
-            // event stops arriving the moment the subscription dies with the membership.
-            if let Some(signed) = self.signed.as_ref() {
-                if event.user_id == signed.account.account_id {
-                    let conversation_id = event.conversation_id;
-                    self.forget_group(conversation_id);
-                    self.sink.send(Event::GroupLeft { conversation_id });
-                }
+            // event stops arriving the moment the subscription dies with the membership. The
+            // rotation still happens — the held chain belongs to an audience this account has
+            // left, and a group state must not survive its membership — but there is no one
+            // this device may distribute to anymore, so the redistribution is skipped.
+            let own_departure = self.signed.as_ref().is_some_and(|signed| {
+                matches!(
+                    event.change,
+                    migo_protocol::MemberChange::Left
+                        | migo_protocol::MemberChange::Kicked
+                        | migo_protocol::MemberChange::Banned
+                ) && event.user_id == signed.account.account_id
+            });
+            if let Some(signed) = self.signed.as_mut() {
+                signed
+                    .groups
+                    .rotate_on_membership(event.conversation_id, event.group_key_epoch);
+            }
+            if own_departure {
+                let conversation_id = event.conversation_id;
+                self.forget_group(conversation_id);
+                self.sink.send(Event::GroupLeft { conversation_id });
+            } else {
+                self.redistribute_group_key(event.conversation_id).await;
             }
         }
         self.sink.send(Event::GroupMember {
@@ -7101,6 +7142,151 @@ impl Worker {
             user_id: event.user_id,
             change: event.change,
         });
+    }
+
+    /// One member's sealed copy of the group's rotated sender-key chain, addressed to one
+    /// device of one account: section 163's redistribution frame. The server forwards it to
+    /// the target account's user topic, where the target account's every device — the named
+    /// one included — can see it, but only the named device can open it.
+    async fn redistribute_group_key(&mut self, conversation_id: Id) {
+        // The audience is read under one borrow and then let go, because the sends below need
+        // the worker back — the same re-take discipline `envelope_for` follows for the same
+        // reason.
+        let plan = {
+            let Some(signed) = self.signed.as_ref() else {
+                return;
+            };
+            let Some(cached) = signed.members.get(&conversation_id) else {
+                return;
+            };
+            // An incomplete roster is the preview the conversation list seeded; a
+            // redistribution built on it would reach a prefix of the group and the rest would
+            // keep sealing under the chain that just died. This event's redistribution is
+            // skipped rather than half-made — the honest limit of a preview — and the full
+            // roster is requested below so the *next* membership change finds it complete
+            // (and the next send's own distribution pass reaches anyone this one missed,
+            // because the rotation cleared `distributed`).
+            if !cached.complete {
+                None
+            } else {
+                let my_device = signed.account.device_id;
+                // The audience of `envelope_for`: members ∪ this account (a distribution is
+                // also this account's own sync), devices of each, minus this sending device.
+                let mut audience: Vec<Id> = cached.ids.clone();
+                let my_account = signed.account.account_id;
+                if !audience.contains(&my_account) {
+                    audience.push(my_account);
+                }
+                let mut targets: Vec<(Id, Id)> = Vec::new();
+                let mut missing: Vec<Id> = Vec::new();
+                for user in &audience {
+                    match signed.devices.get(user) {
+                        Some(devices) => {
+                            targets.extend(
+                                devices
+                                    .iter()
+                                    .copied()
+                                    .filter(|id| *id != my_device)
+                                    .map(|device| (*user, device)),
+                            );
+                        }
+                        None => missing.push(*user),
+                    }
+                }
+                Some((my_device, targets, missing))
+            }
+        };
+        let Some((my_device, targets, missing)) = plan else {
+            let roster = migo_protocol::ConversationRosterRequest { conversation_id };
+            self.request(Opcode::ConversationRoster, &roster).await;
+            return;
+        };
+        if !missing.is_empty() {
+            // Same patience as the send path, minus the toast: this is a background
+            // redistribution the person never asked for, and its retry is the next event's
+            // own redistribution rather than a press they would have to make again.
+            for user in missing {
+                let request = migo_protocol::KeyBundleRequest {
+                    user_id: user,
+                    device_id: None,
+                };
+                self.request(Opcode::KeyBundleFetch, &request).await;
+            }
+            return;
+        }
+        // The distribution is taken once, as of now, and every device gets the same bytes.
+        let Some(distribution) = self
+            .signed
+            .as_mut()
+            .map(|signed| signed.groups.distribution(conversation_id))
+        else {
+            return;
+        };
+        for (to_account, to_device) in targets {
+            let Some(sealed) = self
+                .seal_group_distribution(conversation_id, to_account, to_device, &distribution)
+                .await
+            else {
+                continue;
+            };
+            let frame = migo_protocol::GroupKeyDistribution {
+                conversation_id,
+                from_device: my_device,
+                to_account,
+                to_device,
+                sealed_distribution: sealed,
+            };
+            self.request(Opcode::GroupKeyDistribute, &frame).await;
+        }
+    }
+
+    /// Seals one member device's copy of a sender-key distribution over the pairwise session,
+    /// marking it distributed when the seal succeeds. Returns the sealed bytes, or `None` when
+    /// this device cannot seal for that target yet — a bundle that has not arrived, which the
+    /// next membership event or send retries once the fetch answers.
+    async fn seal_group_distribution(
+        &mut self,
+        conversation_id: Id,
+        to_account: Id,
+        device: Id,
+        distribution: &[u8],
+    ) -> Option<Vec<u8>> {
+        let signed = self.signed.as_mut()?;
+        if !signed.groups.needs_distribution(conversation_id, device) {
+            return None;
+        }
+        let bundle = signed.bundles.get(&device).cloned();
+        let control = content::encode(
+            &Content::ControlEvent {
+                event: "sender-key".to_owned(),
+                data: Some(distribution.to_vec()),
+            },
+            true,
+        );
+        let Ok(control) = control else {
+            return None;
+        };
+        let envelope = signed
+            .sessions
+            .seal(conversation_id, device, bundle.as_ref(), &control);
+        let Ok(envelope) = envelope else {
+            // No session and no bundle for this device: fetch the bundle so the next event's
+            // redistribution can reach it. This one is skipped, not fatal — the same
+            // patience `envelope_for` shows, and for the same reason.
+            let request = migo_protocol::KeyBundleRequest {
+                user_id: to_account,
+                device_id: Some(device),
+            };
+            self.request(Opcode::KeyBundleFetch, &request).await;
+            return None;
+        };
+        let Ok(bytes) = envelope.encode() else {
+            return None;
+        };
+        if let Some(signed) = self.signed.as_mut() {
+            signed.groups.mark_distributed(conversation_id, device);
+        }
+        Some(bytes)
     }
 
     /// A group's metadata moved as a delta: the only field on this wire today is the title,
@@ -7203,6 +7389,12 @@ impl Worker {
         self.group_rosters.remove(&conversation_id);
         if self.group_leave == Some(conversation_id) {
             self.group_leave = None;
+        }
+        // The group's call seat goes with its keys: the membership that authorised the seat
+        // is gone, and a call about a conversation this device no longer belongs to has no
+        // reason to keep ringing in the header.
+        if self.forget_group_call(conversation_id) {
+            self.sink.send(Event::GroupCallEnded { conversation_id });
         }
         if let Some(signed) = self.signed.as_mut() {
             signed.groups.forget(conversation_id);
@@ -7517,6 +7709,9 @@ impl Worker {
         // all end now, without a wire message — the gateway is already gone above, and the
         // server tears the session down on its own.
         self.calls_sign_out();
+        // The group-call seat is the same story with more seats: the frame key it shares with
+        // the roster was sealed under keys this session minted.
+        self.group_calls_sign_out();
         // Media cannot survive them either: uploads in flight have no session to commit
         // under, fetches no keys to open with, and a recording no conversation to land in.
         // The abandoned tickets die on their own expiry; the pumps stop with their handles.
@@ -7647,9 +7842,11 @@ impl Worker {
             // panel's ask when one is waiting — one wire, two askers, one frame.
             Opcode::ConversationRoster => self.on_roster(&frame),
             // A group's membership moved. Patched onto the cache the next audience is built
-            // from, the way `on_room_member` feeds the rooms pane — and the same rotation on
-            // a departure, so a key a departed member may still hold stops sealing.
-            Opcode::ConversationMemberEvent => self.on_conversation_member(&frame),
+            // from, the way `on_room_member` feeds the rooms pane — and section 163's own
+            // trigger: the chain rotates to the event's generation and the new one is
+            // redistributed, so a key a departed member may still hold stops sealing and a
+            // joined one is handed the chain before the next message of the group.
+            Opcode::ConversationMemberEvent => self.on_conversation_member(&frame).await,
             // The group plane's own replies and pushes: a leave's ack, a rename's delta, and
             // a kick vote's tally from both sides of it (the voter's own reply, and the
             // fan-out everyone else hears).
@@ -7659,7 +7856,7 @@ impl Worker {
             Opcode::ConversationVoteKick => self.on_group_vote_reply(&frame),
             Opcode::ConversationVoteEvent => self.on_group_vote_event(&frame),
             Opcode::Sync => self.on_history(&frame).await,
-            Opcode::KeyBundleFetch => self.on_bundles(&frame),
+            Opcode::KeyBundleFetch => self.on_bundles(&frame).await,
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
             Opcode::ProfileUpdate => self.on_profile_saved(&frame),
@@ -7739,6 +7936,15 @@ impl Worker {
             Opcode::CallIce => self.on_call_ice(&frame).await,
             Opcode::CallStateEvent => self.on_call_state(&frame).await,
             Opcode::CallTurnFetch => self.on_call_turn(&frame).await,
+            // The group call's own pushes: roster movement off the SFU and the sealed frame
+            // key a rotating peer fanned out. The mid-call join's ask and answer ride the
+            // `CallSdp` arm above, because that is the frame the server projects both into.
+            Opcode::CallSfuEvent => self.on_sfu_event(&frame).await,
+            Opcode::CallKeyUpdate => self.on_group_key_update(&frame),
+            // A member device's copy of a rotated sender-key chain, sealed pairwise for this
+            // device and forwarded to this account's user topic. The receiving half of the
+            // membership trigger — the sending half lives in `on_conversation_member`.
+            Opcode::GroupKeyDistribute => self.on_group_key_distribute(&frame),
             // Everything else is either an acknowledgement with nothing to show or a feature this
             // client did not negotiate.
             _ => {}
@@ -7810,6 +8016,55 @@ impl Worker {
             .and_then(|signed| signed.sequences.get(&conversation_id))
             .map(|account| account.watermark)
             .unwrap_or(0)
+    }
+
+    /// Handles one `GROUP_KEY_DISTRIBUTE`: a member's copy of the rotated sender-key chain,
+    /// sealed pairwise for one device of this account and forwarded to the account's user
+    /// topic. The receiving half of section 163's membership trigger — `on_conversation_member`
+    /// is the sending half.
+    ///
+    /// A distribution sealed for a sibling device reaches this one too and cannot open, which
+    /// is expected for the same reason the message layer's fan-out noise is: only the named
+    /// device can open it. One that does open is adopted — the receiving store's own refusal
+    /// of a non-advancing epoch is the whole defence against a stale or replayed copy — and
+    /// the pending messages held for that sender are drained, because the distribution that
+    /// unlocks them just arrived.
+    fn on_group_key_distribute(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::GroupKeyDistribution>(frame) else {
+            return;
+        };
+        let plaintext = {
+            let Some(signed) = self.signed.as_mut() else {
+                return;
+            };
+            match Envelope::decode(&event.sealed_distribution).and_then(|envelope| {
+                signed
+                    .sessions
+                    .open(event.conversation_id, event.from_device, &envelope)
+            }) {
+                Ok(plaintext) => plaintext,
+                // Sealed for another device of this account, or a session this store cannot
+                // answer. Expected either way.
+                Err(_) => return,
+            }
+        };
+        let Ok(content) = content::decode(&plaintext) else {
+            return;
+        };
+        let Content::ControlEvent { event: name, data } = content else {
+            // A control event over the pairwise channel that is not a sender-key distribution.
+            return;
+        };
+        if name != "sender-key" {
+            return;
+        }
+        let Some(data) = data else { return };
+        if let Some(signed) = self.signed.as_mut() {
+            signed
+                .groups
+                .accept(event.conversation_id, event.from_device, &data);
+        }
+        self.drain_pending(event.conversation_id, event.from_device);
     }
 
     /// Handles one KeyExchange event: a sender-key distribution, or fan-out noise sealed for
@@ -8198,7 +8453,7 @@ impl Worker {
         });
     }
 
-    fn on_bundles(&mut self, frame: &migo_protocol::Frame) {
+    async fn on_bundles(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::KeyBundleResponse>(frame) else {
             return;
         };
@@ -8273,6 +8528,9 @@ impl Worker {
                 });
             }
         }
+        // A group-call key ask that was waiting on exactly this fetch — the ask's participant
+        // had no pairwise session and no bundle — retries now, while the bundle is fresh.
+        self.retry_group_key_ask().await;
     }
 
     fn on_typing(&mut self, frame: &migo_protocol::Frame) {
@@ -8650,6 +8908,10 @@ impl Worker {
         // the Network reason; a ring is deliberately left standing, because the invite that
         // caused it is a durable server-side fact and may outlive this reconnect.
         self.calls_offline();
+        // The group-call seat is the same story: the roster it held is gone server-side with
+        // the session, and a join still waiting on its roster snapshot waits on a socket that
+        // will never answer.
+        self.group_calls_offline();
         if self.signed.is_none() {
             self.retry = None;
             self.sink.send(Event::Connection(Connection::Offline));
@@ -8757,6 +9019,25 @@ fn peer_fingerprint_changed(
         Some(previous) => previous != fingerprint,
         None => false,
     }
+}
+
+/// Whether a member change moves the group's membership — the audience a sender key is sealed
+/// for — as opposed to a presence flicker inside an unchanged audience.
+///
+/// Section 163's first trigger keys on this: a join, a leave, a kick, and a ban all change who
+/// may read what follows, so the chain rotates and the new one is redistributed. A
+/// disconnect/reconnect pair does not — the member's devices keep the key across the gap, and
+/// a rotation on a flicker would spend an epoch to protect against nobody. The wire has no
+/// separate invite change: a member's acceptance of an invite surfaces here as `Joined`, which
+/// is the moment their account first enters the audience.
+fn is_membership_change(change: migo_protocol::MemberChange) -> bool {
+    matches!(
+        change,
+        migo_protocol::MemberChange::Joined
+            | migo_protocol::MemberChange::Left
+            | migo_protocol::MemberChange::Kicked
+            | migo_protocol::MemberChange::Banned
+    )
 }
 
 /// Projects decrypted [`Content`] onto the UI's [`Body`] — and the sealed disappearing
@@ -9258,6 +9539,37 @@ mod tests {
         cache.apply(&member_event(21, migo_protocol::MemberChange::Kicked));
         cache.apply(&member_event(22, migo_protocol::MemberChange::Banned));
         assert_eq!(cache.ids, vec![id_of(29)]);
+    }
+
+    /// Only an audience change is a membership change: section 163's rotation trigger fires
+    /// for the four changes that move the group's membership, and pointedly not for the
+    /// presence pair — a disconnect keeps the key across the gap, and a rotation spent on a
+    /// flicker would protect the chain against nobody.
+    #[test]
+    fn membership_changes_are_the_audience_changes() {
+        use migo_protocol::MemberChange;
+
+        for change in [
+            MemberChange::Joined,
+            MemberChange::Left,
+            MemberChange::Kicked,
+            MemberChange::Banned,
+        ] {
+            assert!(
+                is_membership_change(change),
+                "{change:?} moves the audience and must rotate"
+            );
+        }
+        for change in [
+            MemberChange::Unknown,
+            MemberChange::Disconnected,
+            MemberChange::Reconnected,
+        ] {
+            assert!(
+                !is_membership_change(change),
+                "{change:?} leaves the audience standing"
+            );
+        }
     }
 
     /// An empty roster answer is not a promotion: a conversation the roster says has nobody in

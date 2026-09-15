@@ -46,6 +46,10 @@ pub struct ChatState {
     pub names: HashMap<Id, String>,
     /// Who is currently typing, per conversation.
     pub typing: HashMap<Id, Vec<Id>>,
+    /// Group calls this device is seated in, per conversation: the participant count, one seat
+    /// per account. The header's button reads this — Join when the conversation has no seat,
+    /// Leave with the count when it has — and the net worker's own seat events keep it true.
+    pub group_calls: HashMap<Id, u32>,
     /// When each typing entry expires, keyed by `(conversation, typer)`.
     ///
     /// The local timeout brief section 15 demands: a `Start` that is never
@@ -2373,11 +2377,12 @@ fn thread_header(
             ui.add_space(space::XS);
             // The call button, on an encrypted two-member conversation only — the same gate the
             // web and Android headers use. A call is sealed with the conversation's own E2EE
-            // group layer, so an unencrypted conversation has no key to seal with, and a group
-            // call is a different protocol this build does not speak. Busy is the worker's word:
-            // a second call while one runs is refused there with a toast, not hidden here,
-            // because the button's target (the one other member) does not change with call
-            // state and re-deriving that gate in the UI would be two opinions about one rule.
+            // group layer, so an unencrypted conversation has no key to seal with. Busy is the
+            // worker's word: a second call while one runs is refused there with a toast, not
+            // hidden here, because the button's target (the one other member) does not change
+            // with call state and re-deriving that gate in the UI would be two opinions about
+            // one rule. A group conversation's call is the seat button below, a different
+            // protocol from this 1:1 invite.
             if conversation.encrypted && conversation.members.len() == 2 {
                 if let Some(me) = context.account.map(|account| account.account_id) {
                     if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
@@ -2393,6 +2398,34 @@ fn thread_header(
                         ui.add_space(space::XS);
                     }
                 }
+            }
+            // The group-call seat, on an encrypted group only — the SFU call of section 163,
+            // where joining means taking a seat the roster counts and leaving means the one
+            // end frame the group service answers for its own ids. The same E2EE gate as the
+            // 1:1 button (the join's offer is sealed with the conversation's own call seal),
+            // and the button reads the seat map rather than deriving anything about the call:
+            // seated or not is the worker's single opinion, delivered as seat events, and the
+            // count beside Leave is the roster's, not a member list re-counted here.
+            if conversation.encrypted && conversation.is_group() {
+                match state.group_calls.get(&conversation_id) {
+                    Some(count) => {
+                        if header_control(ui, context.theme, "\u{1F3A4}")
+                            .on_hover_text(format!("Leave group call ({count} in call)"))
+                            .clicked()
+                        {
+                            context.issue(Command::LeaveGroupCall { conversation_id });
+                        }
+                    }
+                    None => {
+                        if header_control(ui, context.theme, "\u{1F3A4}")
+                            .on_hover_text("Join group call")
+                            .clicked()
+                        {
+                            context.issue(Command::JoinGroupCall { conversation_id });
+                        }
+                    }
+                }
+                ui.add_space(space::XS);
             }
             // The peer's own row of verdicts, on a direct chat only: the personal mute the
             // web profile modal offers, and the block that ends the conversation. The mute
