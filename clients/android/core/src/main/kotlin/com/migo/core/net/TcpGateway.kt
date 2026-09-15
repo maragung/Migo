@@ -71,8 +71,14 @@ import kotlinx.coroutines.withTimeout
  * that has been quiet for twice the heartbeat it advertised in WELCOME. A TCP keep-alive probes
  * the *path*; a real `PING` opcode answers the *session* deadline. The PING runs on the interval
  * derived from WELCOME — the same derivation and the same halving as [Gateway]'s, for the same
- * deadline arithmetic — and the socket-level keep-alive is left on because the two solve different
- * problems: one keeps NAT mappings warm, the other keeps the session alive.
+ * deadline arithmetic — and the socket-level keep-alive is turned on explicitly because the two
+ * solve different problems: one keeps NAT mappings warm, the other keeps the session alive.
+ *
+ * A socket quiet past two beats is a dead one, whatever the beats say: the read pump runs under a
+ * read timeout that [startHeartbeat] arms from the same interval, so a half-open connection (a NAT
+ * mapping retired, a peer vanished without a FIN) surfaces as the transport failure the reconnect
+ * ladder answers, instead of sitting silent until the user's next action happens to flush an
+ * error.
  *
  * # TLS
  *
@@ -195,9 +201,22 @@ class TcpGateway private constructor(
     /**
      * Starts the MWP heartbeat, on the interval WELCOME advertised — the same derivation and the
      * same halving as [Gateway.startHeartbeat], for the same deadline arithmetic.
+     *
+     * The same call arms the read timeout: the server answers every PING with a PONG, so a healthy
+     * session is never quiet for even one full advertised interval, and two of the client's own
+     * beats is the earliest a silent socket can honestly be called dead. Without it a half-open
+     * connection never errors a write and never returns a read — the [SocketTimeoutException] the
+     * timeout raises is what the pump's failure path turns into the transport error the reconnect
+     * ladder answers.
      */
     internal fun startHeartbeat(intervalMs: Long) {
         val period = (intervalMs / 2).coerceAtLeast(MIN_HEARTBEAT_MS)
+        try {
+            socket.soTimeout = (period * 2).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+        } catch (_: Exception) {
+            // A socket that refuses the option still has the PING/PONG beats; the timeout is the
+            // witness for the silent case, not the only one.
+        }
         heartbeat = scope.launch {
             while (isActive) {
                 delay(period)
@@ -268,6 +287,11 @@ class TcpGateway private constructor(
                 try {
                     Socket().apply {
                         tcpNoDelay = true
+                        // The kernel's own keep-alive: probes the *path*, keeping NAT mappings
+                        // warm while the user reads a thread — a different problem from the
+                        // session PING below, which answers the server's liveness deadline.
+                        // Java sockets default this off, so it is said out loud.
+                        keepAlive = true
                         connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
                     }
                 } catch (_: Exception) {
