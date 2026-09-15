@@ -39,7 +39,11 @@
  * envelope over a `call-key-ask` control event (not a bare AEAD blob under the join wrapper key):
  * a mid-call joiner may share no session with the participant it asks yet, and the ratchet
  * envelope carries the X3DH material that establishes one — after which both ends hold the same
- * session secret, which is the input the join wrapper key derives from. The *answer* is the bare
+ * session secret, which is the input the join wrapper key derives from. The control event inside
+ * the envelope carries the joiner's account id as its `data`: the frame's own `fromDevice` names a
+ * device, not an account, and the desktop holder's designated-rotator rule needs the account to
+ * place the joiner in the roster's join order — an ask without it is silently ignored there. The
+ * *answer* is the bare
  * sealed join distribution the crypto layer defines ({@link CallKeyState.sealedJoinDistribution}),
  * byte-compatible with every other client's, so a mixed-client call agrees on the reply even
  * where it disagrees on the ask.
@@ -52,6 +56,7 @@
  * which is what makes a group call's key distributed rather than derived.
  */
 
+import { idToBytes } from '@migo/wire';
 import type { Id } from '@migo/wire';
 import {
   OP,
@@ -240,14 +245,26 @@ export class GroupCallKeysDomain {
     this.#sendAsk(roster.callId, entry, distributor);
   }
 
-  /** Sends the joiner's sealed key request to the participant the snapshot's order chose. */
+  /**
+   * Sends the joiner's sealed key request to the participant the snapshot's order chose.
+   *
+   * The request carries the joiner's account id as the control event's `data` — the one fact the
+   * frame's own `fromDevice` cannot say (an id names a device, not an account), and the one the
+   * desktop holder's designated-rotator rule needs to place the joiner in the roster's join order.
+   * Desktop's holder requires the field (`let bytes = data?`), so an ask without it is silently
+   * ignored there — byte-identical shapes keep a mixed-client call answering.
+   */
   #sendAsk(callId: Id, entry: TrackedCall, distributor: Seat): void {
     void this.#sessionCrypto
       .seal(
         entry.conversationId,
         distributor.userId,
         distributor.deviceId,
-        encodeContent({ type: ContentType.ControlEvent, event: CALL_KEY_ASK_EVENT }),
+        encodeContent({
+          type: ContentType.ControlEvent,
+          event: CALL_KEY_ASK_EVENT,
+          data: idToBytes(this.#accountId),
+        }),
       )
       .then((sealed) =>
         // The ask rides the renegotiation frame the call's relay already owns: from the server's
