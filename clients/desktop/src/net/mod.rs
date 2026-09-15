@@ -1824,6 +1824,19 @@ fn heartbeat_interval(advertised_ms: u32) -> Duration {
     half.max(MIN_HEARTBEAT)
 }
 
+/// How long the session's reads may sit quiet before the connection is declared dead, from the
+/// `heartbeat_ms` a WELCOME advertised.
+///
+/// The client beats at [`heartbeat_interval`] — half the advertisement — and the server answers
+/// every beat with a PONG, so a healthy session is never quiet for even one full advertised
+/// interval; two of the client's own beats is therefore a deadline no healthy session can meet,
+/// with a full beat of slack for a timer that fires late. The floor keeps the deadline at least
+/// twice the transports' fixed handshake budget, so a pathological advertisement cannot tighten
+/// it into the idle churn a too-short fixed budget caused in the first place.
+fn read_deadline(advertised_ms: u32) -> Duration {
+    (heartbeat_interval(advertised_ms) * 2).max(Duration::from_secs(16))
+}
+
 impl Retry {
     /// Attempts before giving up and telling the user to check the address.
     const LIMIT: u32 = 8;
@@ -1884,6 +1897,18 @@ impl Realtime {
             Self::Tcp(gateway) => gateway.correlate(),
             Self::WebSocket(gateway) => gateway.correlate(),
             Self::Quic(gateway) => gateway.correlate(),
+        }
+    }
+
+    /// Arms the quiet-read deadline on the live transport, from the WELCOME's advertised
+    /// heartbeat. All three bindings handshake on the same fixed budget; none of them reads a
+    /// session on it, because a budget shorter than the heartbeat period tears a healthy but
+    /// idle session down between two punctual beats — the idle-churn bug this closes.
+    fn set_read_deadline(&mut self, deadline: Duration) {
+        match self {
+            Self::Tcp(gateway) => gateway.set_read_deadline(deadline),
+            Self::WebSocket(gateway) => gateway.set_read_deadline(deadline),
+            Self::Quic(gateway) => gateway.set_read_deadline(deadline),
         }
     }
 
@@ -3145,7 +3170,11 @@ impl Worker {
         };
         let asked_to_resume = self.session.is_some();
         match connected {
-            Ok((realtime, welcome)) => {
+            Ok((mut realtime, welcome)) => {
+                // Arm the quiet-read deadline from the same advertisement: the fixed budget the
+                // transports handshake on is shorter than a heartbeat period, and a deadline
+                // that expires between two punctual beats is the idle churn this closes.
+                realtime.set_read_deadline(read_deadline(welcome.limits.heartbeat_ms));
                 self.gateway = Some(realtime);
                 self.retry = None;
                 // Arm the heartbeat from what this node advertised: half the interval, floored
@@ -9475,6 +9504,29 @@ mod tests {
             heartbeat_interval(0),
             MIN_HEARTBEAT,
             "a zero advertisement arms the floor, not a spin"
+        );
+    }
+
+    /// The quiet-read derivation is the keep-alive contract's other client half: a healthy
+    /// session answers every beat with a PONG, so two of the client's own beats is the
+    /// earliest a quiet socket can honestly be called dead — never shorter than the beat
+    /// itself, and never tighter than the floor that keeps the deadline saner than the fixed
+    /// handshake budget the idle-churn bug ran reads on.
+    #[test]
+    fn the_read_deadline_outlasts_two_beats_and_never_tightens_below_the_floor() {
+        assert_eq!(
+            read_deadline(30_000),
+            Duration::from_secs(30),
+            "the production advertisement allows two 15s beats and not a beat less"
+        );
+        assert_eq!(
+            read_deadline(0),
+            Duration::from_secs(16),
+            "a pathological advertisement cannot tighten the deadline past the floor"
+        );
+        assert!(
+            read_deadline(60_000) > heartbeat_interval(60_000),
+            "the deadline must outlast the beat itself, whatever the advertisement"
         );
     }
 

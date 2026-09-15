@@ -22,12 +22,21 @@
 //! something that is not MWP, and brief section 178 forbids a JSON realtime path outright; accepting
 //! one "just in case" is how a second, undocumented protocol gets born.
 
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use migo_protocol::{from_frame, to_frame, Decode, Encode, Frame, Opcode};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
+/// How long the handshake's read for the WELCOME may take before the attempt is declared
+/// failed. The session that follows does not read on this budget: the WELCOME advertises a
+/// heartbeat, and the worker arms [`Gateway::set_read_deadline`] from it, because a half-open
+/// WebSocket (NAT mapping retired, peer vanished without a close) never errors a send and
+/// never returns a read — time is the only honest witness.
+const HANDSHAKE_STEP: Duration = Duration::from_secs(8);
 
 /// A gateway failure.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +69,9 @@ pub struct Gateway {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     /// Correlation ids for request frames. Zero means "not a reply to anything", so ids start at one.
     next_correlation: u32,
+    /// How long one read may sit quiet before the connection is declared dead.
+    /// [`HANDSHAKE_STEP`] until the worker re-arms it from the WELCOME's advertised heartbeat.
+    read_deadline: Duration,
 }
 
 impl Gateway {
@@ -77,6 +89,7 @@ impl Gateway {
         let mut gateway = Self {
             socket,
             next_correlation: 1,
+            read_deadline: HANDSHAKE_STEP,
         };
 
         let correlation = gateway.correlate();
@@ -110,6 +123,18 @@ impl Gateway {
         id
     }
 
+    /// Arms the quiet-read deadline the session's reads run on.
+    ///
+    /// A WebSocket that has gone half-open never errors a send — the bytes land in the kernel's
+    /// buffer and are silently forgotten — and never returns a read, so without a deadline the
+    /// session sits quiet until the user does something that happens to flush an error. The
+    /// deadline must be longer than the heartbeat period, because the session's own PING/PONG
+    /// beats keep a healthy socket from ever being quiet that long; the worker arms it from the
+    /// WELCOME's advertised heartbeat for exactly that reason.
+    pub fn set_read_deadline(&mut self, deadline: Duration) {
+        self.read_deadline = deadline;
+    }
+
     /// Encodes and sends one message as one binary WebSocket frame.
     pub async fn send<T: Encode>(
         &mut self,
@@ -128,12 +153,19 @@ impl Gateway {
     }
 
     /// Reads the next protocol frame, transparently answering pings and skipping non-frames.
+    ///
+    /// The read runs under the quiet-read deadline (see [`Self::set_read_deadline`]); the
+    /// elapse is reported as a transport error, because the caller's answer to it is the same
+    /// reconnect ladder any broken-socket error takes.
     pub async fn next_frame(&mut self) -> Result<Frame, GatewayError> {
         loop {
-            let message = match self.socket.next().await {
-                Some(Ok(message)) => message,
-                Some(Err(_)) => return Err(GatewayError::Transport),
-                None => return Err(GatewayError::Closed),
+            let message = match tokio::time::timeout(self.read_deadline, self.socket.next()).await {
+                // The deadline elapsed: a socket quiet past every beat the session sent is a
+                // dead connection, not a patient one.
+                Err(_) => return Err(GatewayError::Transport),
+                Ok(Some(Ok(message))) => message,
+                Ok(Some(Err(_))) => return Err(GatewayError::Transport),
+                Ok(None) => return Err(GatewayError::Closed),
             };
             match message {
                 Message::Binary(bytes) => {

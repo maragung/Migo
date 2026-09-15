@@ -35,6 +35,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 
@@ -969,7 +970,10 @@ impl App {
         // (section 138). The WebSocket route on the HTTP listener remains the web client's
         // transport with or without this. Binding here (rather than at serve time) is what keeps
         // the advertised `QUIC` bit honest: a node that cannot bind the listener refuses to
-        // start rather than promising a transport it is not serving.
+        // start rather than promising a transport it is not serving. The heartbeat handed in is
+        // the advertised `heartbeat_ms`: the listener sizes its transport keep-alive pair from
+        // it, so a quiet session is not torn down by quinn's defaults between two punctual
+        // heartbeats.
         let quic_bind = match config.quic.bind.as_deref() {
             Some(bind) => {
                 let bound = crate::quic::spawn_listener(
@@ -977,6 +981,7 @@ impl App {
                     Arc::clone(&clock),
                     shutdown.clone(),
                     bind,
+                    Duration::from_millis(config.gateway.heartbeat_ms),
                 )
                 .await
                 .context("cannot bind the QUIC listener")?;

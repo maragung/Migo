@@ -41,9 +41,12 @@ use migo_protocol::{from_frame, to_frame, Frame, Opcode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// How long any single handshake or read step may take before the attempt is declared failed
-/// rather than waiting on the caller's patience. Generous for a path that crosses the open
-/// internet, short enough that a fallback happens in seconds, not minutes.
+/// How long any single handshake step may take before the attempt is declared failed rather
+/// than waiting on the caller's patience. Generous for a path that crosses the open internet,
+/// short enough that a fallback happens in seconds, not minutes. The session that follows the
+/// handshake does not read on this budget: the WELCOME advertises a heartbeat, and the worker
+/// arms [`TcpGateway::set_read_deadline`] from it, because a fixed step shorter than the
+/// heartbeat period tears a healthy but idle session down between two punctual beats.
 const STEP: Duration = Duration::from_secs(8);
 
 /// A live TCP realtime connection: one socket carrying length-prefixed frames.
@@ -52,6 +55,9 @@ pub struct TcpGateway {
     buf: BytesMut,
     /// Correlation ids for request frames. Zero means "not a reply to anything", so ids start at one.
     next_correlation: u32,
+    /// How long one read may sit quiet before the connection is declared dead. [`STEP`] until
+    /// the worker re-arms it from the WELCOME's advertised heartbeat.
+    read_deadline: Duration,
 }
 
 /// Resolves the endpoint's host, preferring a literal address and falling back to the OS
@@ -94,6 +100,7 @@ pub async fn connect(
         stream,
         buf: BytesMut::new(),
         next_correlation: 1,
+        read_deadline: STEP,
     };
 
     // HELLO rides the connection framing: length prefix, then the frame. The HELLO carries the
@@ -132,6 +139,17 @@ impl TcpGateway {
         id
     }
 
+    /// Arms the quiet-read deadline the session's reads run on.
+    ///
+    /// A half-open connection (NAT mapping retired, peer vanished without a FIN) never errors a
+    /// send and never returns a read; the only honest witness is time. The deadline must be
+    /// longer than the heartbeat period — the session's own PING/PONG beats keep a healthy
+    /// socket from ever being quiet that long — which is why the worker arms it from the
+    /// WELCOME's advertised heartbeat instead of leaving the fixed handshake budget in place.
+    pub fn set_read_deadline(&mut self, deadline: Duration) {
+        self.read_deadline = deadline;
+    }
+
     /// Encodes and sends one frame as one length-prefixed record.
     pub async fn send<T: migo_protocol::Encode>(
         &mut self,
@@ -166,7 +184,7 @@ impl TcpGateway {
             if let Some(frame) = take_frame(&mut self.buf)? {
                 return Ok(frame);
             }
-            let read = tokio::time::timeout(STEP, self.stream.read(&mut scratch))
+            let read = tokio::time::timeout(self.read_deadline, self.stream.read(&mut scratch))
                 .await
                 .map_err(|_| TcpError::Timeout)?
                 .map_err(|_| TcpError::Transport)?;

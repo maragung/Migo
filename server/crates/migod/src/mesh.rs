@@ -82,6 +82,7 @@ use migo_federation::{PeerView, SharedMesh};
 use migo_gateway::Gateway;
 use migo_protocol::{fault, from_frame, to_frame, Encode, Frame, Opcode};
 use migo_wire::limits::MAX_FRAME_BYTES;
+use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::{interval, timeout, MissedTickBehavior};
@@ -90,6 +91,37 @@ use tokio::time::{interval, timeout, MissedTickBehavior};
 /// reschedules the batch. A link that cannot ack five seconds' worth of frames is not a
 /// link this node should be holding a queue against.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an inbound delivery session may sit with no frame before the listener gives
+/// up on it and tears the link down. A dialer that is working sends its batch back to
+/// back and leaves as soon as its watermark is covered, so a quiet stretch this long
+/// means the peer died without a close — a power loss or a partition — and the socket is
+/// half-open: the read would otherwise park forever, holding the task and the connection
+/// for as long as this process lives. A minute is far past any legitimate inter-frame
+/// gap a healthy dialer produces, and far below the cost of a leak that only a restart
+/// reclaims.
+const SESSION_IDLE: Duration = Duration::from_secs(60);
+
+/// How long an outbound dial may take before the attempt is declared failed. A peer
+/// whose address is blackholed — the firewall that drops the SYN rather than refusing
+/// it — otherwise parks the dial on the kernel's own retry ladder for the better part of
+/// two minutes, and the drain is sequential: every peer sharing the pass waits behind
+/// it. The budget matches the handshake budget's default, a window generous for a dial
+/// across the open internet and short enough that the rest of the outbox is not held
+/// hostage to one silent address.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a liveness probe waits for its pong before giving up on the peer. The same
+/// budget an ack wait gets: a link that cannot answer one small frame in five seconds is
+/// not a link this node should believe in.
+const PROBE_PONG_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the runner probes one peer it has nothing to send. Idle pairs exchange no
+/// traffic at all — the outbox only dials when it owes a peer something — so without a
+/// probe a dead peer stays "reachable" until the next federated write tries it, and a
+/// peer that recovered after a failure stays "down" just as long. One dial a minute per
+/// peer is a rounding error next to the handshake it reuses.
+const PROBE_INTERVAL_MS: i64 = 60_000;
 
 /// The most bytes one direction of the mesh will read before refusing. A length prefix
 /// that names more than a legal MWP frame is either corruption or an attack; both are the
@@ -1723,7 +1755,20 @@ async fn serve_reads<S: AsyncRead + AsyncWrite + Unpin + Send>(
     watermark: &mut u64,
 ) -> Result<()> {
     loop {
-        let Some(frame) = read_frame(io).await? else {
+        // The read is bounded by the idle deadline so a peer that died without closing
+        // the socket — power loss, partition — costs this listener one bounded wait
+        // rather than a task and a connection parked forever on a half-open link. A
+        // clean close still reads as `Ok(None)` inside the budget; only silence runs the
+        // clock out, and the session's teardown (in `serve_session`) resets the link.
+        let frame = match timeout(SESSION_IDLE, read_frame(io)).await {
+            Ok(read) => read?,
+            Err(_) => {
+                return Err(fault::internal(
+                    "the mesh session sat quiet past the idle deadline; tearing the link down",
+                ));
+            }
+        };
+        let Some(frame) = frame else {
             // The peer hung up with a clean close: a delivery session ending the way
             // delivery sessions end. The link state reset happens in `serve_session`.
             return Ok(());
@@ -1956,6 +2001,10 @@ pub struct MeshTransport {
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
     budget: HandshakeBudget,
+    /// When each peer is next due a liveness probe, in unix milliseconds. The outbox
+    /// only dials a peer it owes something to, so an idle pair exchanges no traffic at
+    /// all — this schedule is what keeps "reachable" honest between federated writes.
+    probe_schedule: Mutex<HashMap<Id, Timestamp>>,
 }
 
 impl MeshTransport {
@@ -1991,6 +2040,7 @@ impl MeshTransport {
             mesh,
             clock,
             budget,
+            probe_schedule: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2085,6 +2135,11 @@ impl MeshTransport {
                         consecutive_failures = consecutive_failures.saturating_add(1);
                     }
                 }
+                // The probes ride the same task as the drain on purpose: two outbound
+                // sessions to one peer at once would interleave their sequence numbers,
+                // and the peer's replay window would judge the second session's packets
+                // by the first's. Sequenced here, a probe never overlaps a delivery.
+                transport.probe_once(clock.now()).await;
             }
         });
     }
@@ -2217,8 +2272,10 @@ impl MeshTransport {
     /// by the caller rather than absorbed here. An unreachable dial is also the one place a
     /// partition is discovered, so the link is marked down here for the read-only rule of
     /// section 170 to run on; a delivered batch or an inbound handshake lifts the mark.
-    /// The session runs under the transport's handshake budget, so a peer that accepts the
-    /// connection and never speaks costs one bounded wait rather than a parked drain.
+    /// The dial runs under its own budget — a peer whose address blackholes the SYN costs
+    /// one bounded wait, never the kernel's two-minute retry ladder — and the session runs
+    /// under the transport's handshake budget, so a peer that accepts the connection and
+    /// never speaks costs one bounded wait rather than a parked drain.
     async fn deliver_to(
         &self,
         endpoint: &str,
@@ -2226,9 +2283,10 @@ impl MeshTransport {
         events: &[PendingEvent],
         now: Timestamp,
     ) -> std::result::Result<Vec<Id>, SessionFailure> {
-        let stream = match tokio::net::TcpStream::connect(endpoint).await {
-            Ok(stream) => stream,
-            Err(error) => {
+        let stream = match timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(endpoint)).await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
                 // The one place a partition is discovered: the peer's address does not
                 // answer. The mark is what the read-only rule of section 170 runs on —
                 // a room homed on this peer is refused further writes from this node
@@ -2237,6 +2295,15 @@ impl MeshTransport {
                 return Err(SessionFailure::Failed(fault::internal(format!(
                     "cannot reach the peer: {error}"
                 ))));
+            }
+            Err(_) => {
+                // A blackholed address is the same partition a refused dial is — the
+                // SYN simply never comes back — so it takes the same mark, without
+                // parking the drain on the kernel's retry ladder to learn it.
+                self.mesh.note_link_down(peer.node_id);
+                return Err(SessionFailure::Failed(fault::internal(
+                    "cannot reach the peer: the dial timed out",
+                )));
             }
         };
         deliver_batch(
@@ -2259,6 +2326,143 @@ impl MeshTransport {
     async fn observe_lag(&self, target: Id) {
         if let Err(error) = self.mesh.observe_peer_lag(target).await {
             tracing::warn!(%error, "cannot observe the mesh peer's backlog");
+        }
+    }
+
+    /// One pass of liveness probing: every peer whose probe is due gets one dial, one
+    /// handshake, one `FED_PING`, and one pong's worth of patience.
+    ///
+    /// Public for the same reason [`Self::drain_once`] is: an operations primitive the
+    /// tests drive by hand rather than waiting out a timer. The outbox dials a peer only
+    /// when it owes one something, so an idle pair exchanges nothing at all — and the
+    /// reachability a room's read-only rule runs on (section 170) would go stale in both
+    /// directions: a peer that died stays "reachable", and a peer that recovered after a
+    /// failed delivery stays "down", each until the next federated write happens to try
+    /// the link. The probe closes both gaps on a fixed cadence, reusing the delivery
+    /// session's own machinery — dial, handshake, `FED_PING` — so no new wire shape is
+    /// involved.
+    pub async fn probe_once(&self, now: Timestamp) {
+        let peers = match self.mesh.peers(256).await {
+            Ok(peers) => peers,
+            Err(error) => {
+                tracing::warn!(%error, "cannot read the mesh allow-list for probing");
+                return;
+            }
+        };
+        for peer in peers {
+            // Paused and blocked peers are the operator's to leave alone, and a node
+            // never probes itself — the same exclusions the drain applies.
+            if !peer.status.is_allowed() || peer.node_id == self.mesh.node_id() {
+                continue;
+            }
+            if !self.probe_due(peer.node_id, now) {
+                continue;
+            }
+            if let Err(why) = self.probe_peer(&peer, now).await {
+                tracing::warn!(
+                    node = %peer.node_id.to_text(),
+                    %why,
+                    "the mesh liveness probe failed"
+                );
+            }
+        }
+    }
+
+    /// Whether `node`'s probe is due at `now`, claiming the next slot if it is.
+    ///
+    /// The first sight of a peer probes immediately — establishing the link's state at
+    /// startup is exactly when the answer is worth a dial — and every claim pushes the
+    /// next one a full interval out, successful or not, so a dead peer costs one dial
+    /// a minute rather than a retry loop.
+    fn probe_due(&self, node: Id, now: Timestamp) -> bool {
+        let mut schedule = self.probe_schedule.lock();
+        let next = schedule.entry(node).or_insert(now);
+        if now.as_unix_ms() >= next.as_unix_ms() {
+            *next = now.saturating_add_millis(PROBE_INTERVAL_MS);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Probes one peer: dial, handshake, `FED_PING`, and the pong that answers it.
+    ///
+    /// A probe that connects and completes the handshake has already proven more than a
+    /// dial alone — the peer's process is alive and speaking the mesh — and the pong
+    /// closes the loop. Only a dial that cannot complete marks the link down, the same
+    /// evidence the drain's own failed connect is; a probe that connects but stumbles
+    /// later is logged and leaves the mark alone, because a wedged-but-accepting peer
+    /// is a condition the next real delivery will confirm or contradict, and the
+    /// read-only rule should not flap on one odd answer.
+    async fn probe_peer(&self, peer: &PeerView, now: Timestamp) -> std::result::Result<(), String> {
+        let endpoint = endpoint_of(&peer.base_url).map_err(|error| error.to_string())?;
+        let stream = match timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(&endpoint)).await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                self.mesh.note_link_down(peer.node_id);
+                return Err(format!("cannot reach the peer: {error}"));
+            }
+            Err(_) => {
+                self.mesh.note_link_down(peer.node_id);
+                return Err("the dial to the peer timed out".to_owned());
+            }
+        };
+        let mut io = stream;
+        handshake(&mut io, &self.mesh, self.mesh.region(), now, &self.budget)
+            .await
+            .map_err(|failure| format!("the probe handshake failed: {failure}"))?;
+
+        // The nonce is the probe's whole identity: the pong that echoes it is the one
+        // this probe asked for, not a stray frame from an overlapping session. The
+        // dialing clock stamps it, so no two probes a millisecond apart can share one.
+        let nonce = now.as_unix_ms().to_be_bytes().to_vec();
+        let ping = framed(
+            Opcode::FedPing,
+            0,
+            &migo_protocol::FedPing {
+                node_id: self.mesh.region().to_string(),
+                nonce: nonce.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        write_frame(&mut io, &ping)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let pong = timeout(PROBE_PONG_TIMEOUT, async {
+            let frame = match read_frame(&mut io).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    return Err("the peer closed the link before answering the probe".to_owned())
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            match Opcode::from_wire(frame.header.opcode) {
+                // The heartbeat reuses the PING opcode for both directions (section
+                // 145); the FedPong body is what says this is an answer.
+                Some(Opcode::Ping) => {
+                    let pong: migo_protocol::FedPong =
+                        from_frame(&frame).map_err(|error| error.to_string())?;
+                    if pong.nonce == nonce {
+                        Ok(())
+                    } else {
+                        Err("the probe's pong came back with the wrong nonce".to_owned())
+                    }
+                }
+                _ => Err("unexpected mesh frame while awaiting the probe's pong".to_owned()),
+            }
+        })
+        .await;
+        match pong {
+            Ok(Ok(())) => {
+                // The round trip is the same proof a delivered batch is: the peer is
+                // there and speaking, so the rooms it homes are writable from here.
+                self.mesh.note_link_up(peer.node_id);
+                Ok(())
+            }
+            Ok(Err(why)) => Err(why),
+            Err(_) => Err("the peer never answered the probe".to_owned()),
         }
     }
 
@@ -2452,6 +2656,62 @@ mod tests {
         assert_eq!(backoff(1_000), RUNNER_TICK_MAX);
         // A pathological failure count neither overflows the shift nor exceeds the ceiling.
         assert_eq!(backoff(u32::MAX), RUNNER_TICK_MAX);
+    }
+
+    /// The inbound idle deadline must outlast the ack wait a working dialer is allowed:
+    /// a sender still inside its `ACK_TIMEOUT` is a session mid-batch, not a dead one,
+    /// and the listener must not tear the link out from under it.
+    #[test]
+    fn the_session_idle_deadline_outlasts_the_ack_wait() {
+        assert!(
+            SESSION_IDLE > ACK_TIMEOUT,
+            "a session the dialer is still working inside its ack budget is not idle"
+        );
+    }
+
+    /// The probe schedule: due on first sight, then once per interval, whatever became of
+    /// the probe before it — a dead peer costs one dial a minute, never a retry loop, and
+    /// a live one is not re-dialled between intervals either.
+    #[tokio::test]
+    async fn a_probe_is_due_on_first_sight_and_once_per_interval() {
+        let (mesh_a, _mesh_b, _a_id, b_id) = pair().await;
+        let registry = registry();
+        let transport = MeshTransport::new(
+            mesh_a,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        );
+        let now = Timestamp::from_millis(NOW);
+
+        // First sight is due immediately, and the claim pushes the next slot a full
+        // interval out.
+        assert!(
+            transport.probe_due(b_id, now),
+            "a peer the runner has never probed is due now"
+        );
+        assert!(
+            !transport.probe_due(b_id, now.saturating_add_millis(PROBE_INTERVAL_MS - 1)),
+            "the slot a probe claimed is not due again before the interval"
+        );
+        assert!(
+            transport.probe_due(b_id, now.saturating_add_millis(PROBE_INTERVAL_MS)),
+            "the slot opens again exactly one interval after it was claimed"
+        );
+
+        // A second peer's slot is independent of the first's: one peer's probe cadence
+        // must never gate another's.
+        let other = Id::from(0x0303);
+        assert!(
+            transport.probe_due(other, now),
+            "an unrelated peer is due on its own first sight"
+        );
     }
 
     /// The whole product, over one duplex: node A delivers an outbox event to node B, and
