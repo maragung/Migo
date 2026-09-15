@@ -411,7 +411,6 @@ impl Worker {
                 }
                 self.sink.send(Event::GroupCallSeated {
                     conversation_id: seat.conversation_id,
-                    call_id: seat.call_id,
                     participant_count: seat.seats.len() as u32,
                 });
             }
