@@ -738,7 +738,22 @@ export class GatewayTransport {
       return;
     }
     this.#handshake = null;
-    this.#shouldReconnect = false;
+    // A link failure during a *reconnect* is another backoff round, not a shutdown: the retry
+    // loop that scheduled this attempt owns the recovery, and its catch reschedules exactly once
+    // while #shouldReconnect holds. Clearing the flag here — the old behaviour — made that catch
+    // dead code and the transport permanently Closed after a single attempt that fired while the
+    // network was still down, which is the ordinary case for any outage longer than the first
+    // backoff window: the socket drops, the backoff fires into a still-dead network, the attempt
+    // fails at the link layer, and the client never connects again on its own. Two failures stay
+    // terminal: a first connect (its caller is waiting on connect() and must hear the refusal),
+    // and a RemoteError (a node that answered and refused — every node would repeat it, so
+    // retrying only spreads the refusal around; the app's answer is a fresh connect or a
+    // reauthenticate, not another backoff round).
+    const linkFailureDuringReconnect =
+      this.#isReconnect && this.#shouldReconnect && !(error instanceof RemoteError);
+    if (!linkFailureDuringReconnect) {
+      this.#shouldReconnect = false;
+    }
     if (this.#ws !== null) {
       try {
         this.#ws.close();
@@ -747,7 +762,7 @@ export class GatewayTransport {
       }
       this.#ws = null;
     }
-    this.#setState('closed');
+    this.#setState(linkFailureDuringReconnect ? 'reconnecting' : 'closed');
     settle?.reject(error);
   }
 
