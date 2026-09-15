@@ -16,8 +16,11 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -776,6 +779,7 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatHeader(
     chat: ChatState,
@@ -798,7 +802,7 @@ private fun ChatHeader(
     val supportsGames = chat.kind == ConversationKind.Room || chat.kind == ConversationKind.Group
     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // No back control: the window strip above is the chat's own way back, the mobile
@@ -806,105 +810,115 @@ private fun ChatHeader(
             // strip's tab already names the thread, and the counts and the encryption label the
             // header once carried were facts a person could not act on from where they read them.
             // What stays is the avatar — a direct chat's picture of the peer, a room's own mark —
-            // and the controls, every one the composer's send button's own measure.
+            // and the controls, each a 48dp square -- the platform's own minimum touch target,
+            // one notch under the composer send button's 52, because six of them beside the
+            // avatar must still fit a 360dp screen.
             Avatar(name = chat.title, bytes = chat.peerId?.let { avatarBytes[it] }, size = 36.dp)
-            Spacer(modifier = Modifier.weight(1f))
-            // Gifting is a thread-level act — it picks a person and spends balance — so its control
-            // lives with the thread's other actions in the header, immediately left of games, not
-            // in the row the composer keeps exclusively for chat. Offered in every conversation
-            // kind, exactly as the web client's own header button is.
-            HeaderGlyphButton(glyph = "🎁", description = "Send a gift", onClick = onOpenGift)
-            if (supportsGames) {
-                HeaderGlyphButton(glyph = "🎮", description = "Games", onClick = onOpenGames)
-            }
-            // A direct chat's one header extra: the door to its safety numbers. It is the room
-            // chat's Members control in reverse — the room's security surface is who is in it, the
-            // direct chat's is who the other side turned out to be. Gated on the peer id rather
-            // than the room's absence, because the safety read itself needs that id: a chat with
-            // no peer to read offers no door.
-            if (chat.peerId != null && onOpenSafety != null) {
-                HeaderGlyphButton(glyph = "🛡", description = "Safety numbers", onClick = onOpenSafety)
-            }
-            // The direct chat's other extras: the two calls, the conversation's other halves.
-            // Same peer-id gate as Safety -- the call buttons dial the peer, and a chat with no
-            // peer has no number to dial. Voice and video are two buttons, as on the web client,
-            // because the two calls are two intents -- a person who means to talk is not asked to
-            // confirm a camera they never wanted. The glyphs are emoji characters, not an icon
-            // font, the app's own rule (and the web client's, whose buttons these are a port of).
-            if (chat.peerId != null && onStartCall != null) {
-                val peer = chat.peerId
-                HeaderGlyphButton(
-                    glyph = "📞",
-                    description = "Voice call",
-                    onClick = { onStartCall(peer, false) },
-                )
-                HeaderGlyphButton(
-                    glyph = "🎥",
-                    description = "Video call",
-                    onClick = { onStartCall(peer, true) },
-                )
-            }
-            // The thread's own search, before the Log control as on the web. Offered in every
-            // conversation kind — the filter runs on what the thread already holds, so there is no
-            // conversation feature for it to depend on. The description is the toggle's own
-            // sentence: tapping it again closes the field, and the toggle clears the query either
-            // way.
-            HeaderGlyphButton(
-                glyph = "🔍",
-                description = if (chat.searchOpen) "Close search" else "Search",
-                onClick = onToggleSearch,
-            )
-            // The conversation's own record: the transcript this device holds, handed to whatever
-            // the system shares text with. Offered in every conversation kind — a log is a log
-            // whether the room is encrypted or not — and stated as plaintext by the share sheet
-            // it opens into.
-            if (onExportLog != null) {
-                HeaderGlyphButton(glyph = "⬇", description = "Log", onClick = onExportLog)
-            }
-            if (chat.roomId != null && onOpenMembers != null) {
-                HeaderGlyphButton(glyph = "👥", description = "Members", onClick = onOpenMembers)
-            }
-            // The group's call door: one button, joining the roster, exactly the web client's own
-            // single control. The glyph is the direct chat's own phone -- the web button's glyph --
-            // and the kind gate keeps the two controls from ever sharing a header, because the
-            // direct chat dials a person and the group joins a conversation. When a call is already
-            // running in the group and this device holds no seat in it, the same door says so --
-            // the description names the size the server last announced, and the join it launches
-            // carries the running call's own id, landing this device in the conversation that is
-            // already talking rather than a fresh call beside it.
-            if (chat.kind == ConversationKind.Group && onJoinGroupCall != null) {
-                HeaderGlyphButton(
-                    glyph = "📞",
-                    description = if (groupCallInProgress != null) {
-                        "Join group call in progress (${groupCallInProgress.participantCount})"
-                    } else {
-                        "Join group call"
-                    },
-                    onClick = onJoinGroupCall,
-                )
-            }
-            // The group's member-sheet door: the same glyph the room's control uses, because the
-            // question it answers -- who is in here -- is the same question. Gated on the kind
-            // rather than the roster's presence, so a group the sheet has not read yet still
-            // offers the door that reads it.
-            if (chat.kind == ConversationKind.Group && onOpenGroupMembers != null) {
-                HeaderGlyphButton(
-                    glyph = "👥",
-                    description = "Members",
-                    onClick = onOpenGroupMembers,
-                )
-            }
-            // Leave stays a word rather than a glyph, and the danger red: it is the one control in
-            // the row that ends the conversation rather than using it, and a word that says so is
-            // cheaper to read than a glyph that would have to be guessed.
-            if (chat.roomId != null && onLeave != null) {
-                TextButton(onClick = onLeave) {
-                    Text("Leave", color = MaterialTheme.colorScheme.error)
+            // The controls wrap rather than clip: a group's worst header carries seven of them,
+            // and a screen too narrow for that one row is a screen the header must still serve
+            // whole. Aligned to the end so a row that fits reads exactly where the spacer's
+            // weight once pushed it.
+            FlowRow(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                // Gifting is a thread-level act — it picks a person and spends balance — so its control
+                // lives with the thread's other actions in the header, immediately left of games, not
+                // in the row the composer keeps exclusively for chat. Offered in every conversation
+                // kind, exactly as the web client's own header button is.
+                HeaderGlyphButton(glyph = "🎁", description = "Send a gift", onClick = onOpenGift)
+                if (supportsGames) {
+                    HeaderGlyphButton(glyph = "🎮", description = "Games", onClick = onOpenGames)
                 }
-            }
-            if (chat.kind == ConversationKind.Group && onLeaveGroup != null) {
-                TextButton(onClick = onLeaveGroup) {
-                    Text("Leave", color = MaterialTheme.colorScheme.error)
+                // A direct chat's one header extra: the door to its safety numbers. It is the room
+                // chat's Members control in reverse — the room's security surface is who is in it, the
+                // direct chat's is who the other side turned out to be. Gated on the peer id rather
+                // than the room's absence, because the safety read itself needs that id: a chat with
+                // no peer to read offers no door.
+                if (chat.peerId != null && onOpenSafety != null) {
+                    HeaderGlyphButton(glyph = "🛡", description = "Safety numbers", onClick = onOpenSafety)
+                }
+                // The direct chat's other extras: the two calls, the conversation's other halves.
+                // Same peer-id gate as Safety -- the call buttons dial the peer, and a chat with no
+                // peer has no number to dial. Voice and video are two buttons, as on the web client,
+                // because the two calls are two intents -- a person who means to talk is not asked to
+                // confirm a camera they never wanted. The glyphs are emoji characters, not an icon
+                // font, the app's own rule (and the web client's, whose buttons these are a port of).
+                if (chat.peerId != null && onStartCall != null) {
+                    val peer = chat.peerId
+                    HeaderGlyphButton(
+                        glyph = "📞",
+                        description = "Voice call",
+                        onClick = { onStartCall(peer, false) },
+                    )
+                    HeaderGlyphButton(
+                        glyph = "🎥",
+                        description = "Video call",
+                        onClick = { onStartCall(peer, true) },
+                    )
+                }
+                // The thread's own search, before the Log control as on the web. Offered in every
+                // conversation kind — the filter runs on what the thread already holds, so there is no
+                // conversation feature for it to depend on. The description is the toggle's own
+                // sentence: tapping it again closes the field, and the toggle clears the query either
+                // way.
+                HeaderGlyphButton(
+                    glyph = "🔍",
+                    description = if (chat.searchOpen) "Close search" else "Search",
+                    onClick = onToggleSearch,
+                )
+                // The conversation's own record: the transcript this device holds, handed to whatever
+                // the system shares text with. Offered in every conversation kind — a log is a log
+                // whether the room is encrypted or not — and stated as plaintext by the share sheet
+                // it opens into.
+                if (onExportLog != null) {
+                    HeaderGlyphButton(glyph = "⬇", description = "Log", onClick = onExportLog)
+                }
+                if (chat.roomId != null && onOpenMembers != null) {
+                    HeaderGlyphButton(glyph = "👥", description = "Members", onClick = onOpenMembers)
+                }
+                // The group's call door: one button, joining the roster, exactly the web client's own
+                // single control. The glyph is the direct chat's own phone -- the web button's glyph --
+                // and the kind gate keeps the two controls from ever sharing a header, because the
+                // direct chat dials a person and the group joins a conversation. When a call is already
+                // running in the group and this device holds no seat in it, the same door says so --
+                // the description names the size the server last announced, and the join it launches
+                // carries the running call's own id, landing this device in the conversation that is
+                // already talking rather than a fresh call beside it.
+                if (chat.kind == ConversationKind.Group && onJoinGroupCall != null) {
+                    HeaderGlyphButton(
+                        glyph = "📞",
+                        description = if (groupCallInProgress != null) {
+                            "Join group call in progress (${groupCallInProgress.participantCount})"
+                        } else {
+                            "Join group call"
+                        },
+                        onClick = onJoinGroupCall,
+                    )
+                }
+                // The group's member-sheet door: the same glyph the room's control uses, because the
+                // question it answers -- who is in here -- is the same question. Gated on the kind
+                // rather than the roster's presence, so a group the sheet has not read yet still
+                // offers the door that reads it.
+                if (chat.kind == ConversationKind.Group && onOpenGroupMembers != null) {
+                    HeaderGlyphButton(
+                        glyph = "👥",
+                        description = "Members",
+                        onClick = onOpenGroupMembers,
+                    )
+                }
+                // Leave stays a word rather than a glyph, and the danger red: it is the one control in
+                // the row that ends the conversation rather than using it, and a word that says so is
+                // cheaper to read than a glyph that would have to be guessed.
+                if (chat.roomId != null && onLeave != null) {
+                    TextButton(onClick = onLeave) {
+                        Text("Leave", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                if (chat.kind == ConversationKind.Group && onLeaveGroup != null) {
+                    TextButton(onClick = onLeaveGroup) {
+                        Text("Leave", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }
@@ -912,14 +926,16 @@ private fun ChatHeader(
 }
 
 /**
- * One header control, drawn to the composer's send button's own measure.
+ * One header control, a fixed square the header's whole row shares.
  *
- * The send button is a fixed 52dp square, so every control beside it is too: a row of controls
- * that each took the width of their own label would be a row that breathes as the labels
- * translate, and a header that changes shape between conversations is a header a person has to
- * re-find. The glyphs are emoji characters — the app's own icon convention, the same rule the
- * composer's attach and mic buttons keep — and the description carries the word the label once
- * did, because a control that only a picture names is a control a screen reader cannot name.
+ * The square is 48dp — the platform's own minimum touch target, one notch under the composer send
+ * button's 52, because six of them beside the avatar must still fit a 360dp screen — and fixed
+ * rather than label-width for the same reason the send button is: a row of controls that each took
+ * the width of their own label would be a row that breathes as the labels translate, and a header
+ * that changes shape between conversations is a header a person has to re-find. The glyphs are
+ * emoji characters — the app's own icon convention, the same rule the composer's attach and mic
+ * buttons keep — and the description carries the word the label once did, because a control that
+ * only a picture names is a control a screen reader cannot name.
  */
 @Composable
 private fun HeaderGlyphButton(
@@ -930,7 +946,7 @@ private fun HeaderGlyphButton(
     TextButton(
         onClick = onClick,
         modifier = Modifier
-            .size(52.dp)
+            .size(48.dp)
             .semantics { contentDescription = description },
     ) {
         Text(text = glyph, fontSize = 18.sp)
@@ -1479,8 +1495,9 @@ private fun AttachmentBlock(
 /**
  * An image, inline in the transcript. Resolved on first display (the same moment the reader asks
  * to see it), laid out at the sender's claimed dimensions when it supplied them so the line's
- * height is reserved before a single byte arrives, and capped at 220dp wide -- a photo that
- * commandeered the whole thread width would be the transcript serving the image.
+ * height is reserved before a single byte arrives, and capped at 220dp wide and 320dp tall -- a
+ * photo that commandeered the thread's whole width, or ran its full height down the screen, would
+ * be the transcript serving the image.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1529,6 +1546,7 @@ private fun ImageBubble(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .widthIn(max = 220.dp)
+                    .heightIn(max = 320.dp)
                     .let { base ->
                         val w = attachment.width
                         val h = attachment.height
@@ -1561,6 +1579,7 @@ private fun ImageBubble(
                 shape = shape,
                 modifier = Modifier
                     .widthIn(max = 220.dp)
+                    .heightIn(max = 320.dp)
                     .let { base ->
                         val w = attachment.width
                         val h = attachment.height
