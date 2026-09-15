@@ -22,6 +22,7 @@ import com.migo.app.media.VOICE_NOTE_MAX_MS
 import com.migo.app.media.VOICE_SEAL_DOMAIN
 import com.migo.app.media.VoiceNoteDraft
 import com.migo.app.media.VoiceNoteDrafts
+import com.migo.app.media.VoiceNoteListenedStore
 import com.migo.app.media.VoiceNoteRecorder
 import com.migo.app.media.WAVEFORM_BARS
 import com.migo.app.media.amplitudeToBar
@@ -133,6 +134,7 @@ import com.migo.core.store.Settings
 import com.migo.core.store.ThemeChoice
 import com.migo.core.store.TxRecord
 import com.migo.core.store.VaultError
+import com.migo.core.store.VoiceNoteSpeed
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
@@ -354,6 +356,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * closing must not forget bytes a reopen would refetch.
      */
     val mediaObjects: StateFlow<Map<Id, MediaObject>> = _mediaObjects.asStateFlow()
+
+    /**
+     * The voice-note messages this account has listened to, by message id — the receiver-local
+     * half of brief section 179's mark rule. A stable flow of its own for the same reason
+     * [mediaObjects] is one: the marks are session facts that outlive any one chat's
+     * recomposition, and a bubble that recomposes reads the set back rather than losing its dim.
+     *
+     * Nothing here ever leaves the device. The wire has no Played receipt and this model never
+     * sends one; marking a note unlistened changes this set alone, never a receipt that already
+     * went out.
+     */
+    private val _listenedVoiceNotes = MutableStateFlow<Set<Id>>(emptySet())
+
+    /** Which voice-note messages are marked heard, for the bubble's dim and the row's toggle. */
+    val listenedVoiceNotes: StateFlow<Set<Id>> = _listenedVoiceNotes.asStateFlow()
 
     /** Which media ids have a fetch in flight, so concurrent bubbles share one download. */
     private val mediaInFlight = HashSet<Id>()
@@ -974,6 +991,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (_: Exception) {
                 // Best effort, like the log directory below it.
+            }
+            // The listened marks are the same inheritance question in miniature: which voice
+            // notes this account heard is a map of who talks to them, and the store is scoped
+            // to the account — the copy goes with the session, in memory and on disk, or the
+            // next account's first session would inherit this one's hearing.
+            _listenedVoiceNotes.value = emptySet()
+            try {
+                withContext(Dispatchers.IO) {
+                    VoiceNoteListenedStore.clear(getApplication<Application>().filesDir)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Best effort, like the room record above it.
             }
             // The auto-saved chat logs are the same conversations in plaintext on disk, written
             // by this device at its owner's ask — the keys going does not make them private
@@ -2250,6 +2281,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Sets when an attachment is fetched without being asked to. */
     fun setMediaAutoDownload(choice: MediaAutoDownload) = setPreference { it.copy(mediaAutoDownload = choice) }
+
+    /**
+     * Sets the rate a received voice note plays at. A preference write and nothing more: the
+     * rate is applied to the bytes a bubble already holds, per brief section 167's rule, and no
+     * server or sender is told.
+     */
+    fun setVoiceNoteSpeed(speed: VoiceNoteSpeed) = setPreference { it.copy(voiceNoteSpeed = speed) }
+
+    /**
+     * Marks one voice-note message heard or unheard on this device — brief section 179's local
+     * receiver state.
+     *
+     * The in-memory set moves first so the row answers the press at once; the store write is a
+     * full-file rewrite on a background dispatcher, the same shape the room record keeps. An
+     * `unlistened` mark only ever removes from the set: it sends nothing and cancels nothing,
+     * because a receipt that already left cannot be unsent and this method never tries.
+     */
+    fun setVoiceNoteListened(messageId: Id, listened: Boolean) {
+        val accountId = (_state.value as? AppState.SignedIn)?.accountId ?: return
+        val current = _listenedVoiceNotes.value
+        val next = if (listened) current + messageId else current - messageId
+        if (next == current) return
+        _listenedVoiceNotes.value = next
+        val baseDir = getApplication<Application>().filesDir
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { VoiceNoteListenedStore.save(baseDir, accountId, next) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The in-memory mark stands and the session keeps it; only a restart in spite of
+                // the failed write loses it, which costs one note drawn unheard.
+            }
+        }
+    }
 
     /** Sets whether closing a conversation writes its transcript to disk as plaintext. */
     fun setAutoSaveChatLogs(enabled: Boolean) = setPreference { it.copy(autoSaveChatLogs = enabled) }
@@ -4853,6 +4919,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // stops receiving the room's own events. Runs on its own coroutine because the list's
         // re-read is on one too — the two converge, whichever lands first.
         rehydrateRooms()
+        // The listened marks restore beside the rooms: the wire will not name them again — the
+        // marks are this device's own facts about what it heard — so a restarted app is the
+        // transcript it was before the restart.
+        rehydrateListenedVoiceNotes()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
         loadWallet()
@@ -5325,6 +5395,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     },
                 )
             }
+        }
+    }
+
+    /**
+     * Restores the receiver-local listened marks once per session.
+     *
+     * The marks exist nowhere but this device — the wire has no Played state to ask for — so the
+     * persisted record is the only source a restart has, read here the same way the rooms are.
+     * The record is scoped to the account, and a copy naming a different account is discarded
+     * rather than merged, for the same reason the room record's is: which voice notes a person
+     * heard is a map of who talks to them, and the next account on this device inherits nothing
+     * of it.
+     */
+    private fun rehydrateListenedVoiceNotes() {
+        val live = session ?: return
+        viewModelScope.launch {
+            val baseDir = getApplication<Application>().filesDir
+            val stored = try {
+                withContext(Dispatchers.IO) { VoiceNoteListenedStore.load(baseDir) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Unreadable or absent storage: the session starts with every note unheard,
+                // which is the safe floor — a note drawn unheard is a note played again.
+                null
+            } ?: return@launch
+            if (stored.accountId != live.client.accountId) {
+                try {
+                    withContext(Dispatchers.IO) { VoiceNoteListenedStore.clear(baseDir) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // The copy is inert either way; a file that will not delete is one the next
+                    // sign-in of the owning account can still read.
+                }
+                return@launch
+            }
+            _listenedVoiceNotes.value = stored.listened
         }
     }
 

@@ -90,6 +90,10 @@ internal fun ChatPane(
     }
     val mediaObjects by model.mediaObjects.collectAsState()
     val avatarBytes by model.avatarBytes.collectAsState()
+    // The receiver-local listened marks, beside the media objects they describe: the set is the
+    // model's (it survives the chat's recompositions and the restart), while the dim and the
+    // toggle that read it belong to the row.
+    val listenedVoiceNotes by model.listenedVoiceNotes.collectAsState()
     // The member profile sheet's state, collected here for the same reason the avatars are: the
     // read is the model's, while the surface belongs to whichever member sheet named the person.
     val memberProfile by model.memberProfile.collectAsState()
@@ -222,6 +226,13 @@ internal fun ChatPane(
         },
         mediaObjects = mediaObjects,
         avatarBytes = avatarBytes,
+        // The voice-note player's two receiver-side facts: which notes this account has heard,
+        // and the rate the next note plays at. Both are local — no mark and no rate ever rides
+        // the wire — so both are handed straight from the model's own state.
+        listenedVoiceNotes = listenedVoiceNotes,
+        onSetVoiceNoteListened = model::setVoiceNoteListened,
+        voiceNoteSpeed = preferences.voiceNoteSpeed,
+        onVoiceNoteSpeed = model::setVoiceNoteSpeed,
         // The member menu's two doors: the profile sheet's read and the gift picker's send, both
         // the model's because both are round trips the sheet cannot make for itself. The gift
         // catalogue is the wallet's own — the session loads it at sign-in for the banner's

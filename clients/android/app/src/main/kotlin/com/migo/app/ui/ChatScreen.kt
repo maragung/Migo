@@ -43,6 +43,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -54,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -118,6 +120,7 @@ import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RelationshipKind
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.SanctionAction
+import com.migo.core.store.VoiceNoteSpeed
 import com.migo.core.wire.Id
 import java.io.File
 import kotlinx.coroutines.delay
@@ -288,6 +291,22 @@ fun ChatScreen(
      * from. Absent keys render as the monogram, which is the avatar's loading state.
      */
     avatarBytes: Map<Id, ByteArray> = emptyMap(),
+    /**
+     * The voice-note messages this account has marked heard, by message id — the receiver-local
+     * state brief section 179 names. A bubble reads it to dim what has been heard, and nothing
+     * about it ever rides the wire: the sender is not told, because the wire has no status to
+     * tell them with.
+     */
+    listenedVoiceNotes: Set<Id> = emptySet(),
+    /** Marks one voice-note message heard or unheard on this device; never sends anything. */
+    onSetVoiceNoteListened: (Id, Boolean) -> Unit = { _, _ -> },
+    /**
+     * The rate the voice-note player plays at — a local preference, so the note already on this
+     * device is retuned rather than refetched when it changes (brief section 167).
+     */
+    voiceNoteSpeed: VoiceNoteSpeed = VoiceNoteSpeed.Speed1x,
+    /** Sets the playback rate, from the player's own speed control. */
+    onVoiceNoteSpeed: (VoiceNoteSpeed) -> Unit = {},
     /**
      * Opens the member profile sheet for the given account, handed the id and the name the roster
      * row already knew, from a member menu's View profile.
@@ -512,6 +531,10 @@ fun ChatScreen(
                                     onSaveDocument = onSaveDocument,
                                     autoFetchMedia = autoFetchMedia,
                                     mediaObject = mediaObjects[item.message.attachment?.mediaId],
+                                    voiceListened = item.message.messageId in listenedVoiceNotes,
+                                    onSetVoiceNoteListened = onSetVoiceNoteListened,
+                                    voiceNoteSpeed = voiceNoteSpeed,
+                                    onVoiceNoteSpeed = onVoiceNoteSpeed,
                                 )
                                 is TimelineItem.Notice -> SystemNotice(text = item.notice.text)
                             }
@@ -1186,6 +1209,14 @@ private fun MessageLine(
     onSaveDocument: (Attachment) -> Unit,
     autoFetchMedia: Boolean,
     mediaObject: MediaObject?,
+    /** Whether this message's voice note is marked heard on this device; receiver-local only. */
+    voiceListened: Boolean,
+    /** Marks this message's voice note heard or unheard on this device; never sends anything. */
+    onSetVoiceNoteListened: (Id, Boolean) -> Unit,
+    /** The rate the voice player plays at, if this line carries a voice note. */
+    voiceNoteSpeed: VoiceNoteSpeed,
+    /** Sets the playback rate, from the player's own speed control. */
+    onVoiceNoteSpeed: (VoiceNoteSpeed) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     // The dark scheme's surfaces are too deep for the light ink the reference's name colours were
@@ -1203,6 +1234,10 @@ private fun MessageLine(
     // A text line this device sent, and so the one line Edit may be offered on: the server only
     // permits the sender to edit, and only a text body has a text to replace.
     val editable = message.mine && message.attachment == null && !message.unsupported
+    // A voice note somebody else sent, the one line the heard-mark toggle may be offered on.
+    // Listened is the *receiver's* state (brief section 179), so the toggle is not offered on
+    // this device's own notes: a sender has no mark to keep about hearing their own words.
+    val receivedVoiceNote = message.attachment?.kind == AttachmentKind.Voice && !message.mine
     val line = buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -1272,6 +1307,10 @@ private fun MessageLine(
                         onResolve = onResolveMedia,
                         onSave = onSaveDocument,
                         autoFetchMedia = autoFetchMedia,
+                        onMarkListened = { heard -> onSetVoiceNoteListened(message.messageId, heard) },
+                        listened = voiceListened,
+                        speed = voiceNoteSpeed,
+                        onSpeedChange = onVoiceNoteSpeed,
                     )
                 }
                 if (reactionBarOpen.value) {
@@ -1289,6 +1328,15 @@ private fun MessageLine(
                             reactionBarOpen.value = false
                             onDelete(message.messageId)
                         },
+                        onToggleVoiceListened = if (receivedVoiceNote) {
+                            {
+                                reactionBarOpen.value = false
+                                onSetVoiceNoteListened(message.messageId, !voiceListened)
+                            }
+                        } else {
+                            null
+                        },
+                        voiceListened = voiceListened,
                     )
                 }
             }
@@ -1297,10 +1345,16 @@ private fun MessageLine(
 }
 
 /**
- * The long-press bar's own rows, beneath the quick reactions: the two acts a sender has on their
- * own line. Edit appears only on a text line this device sent (the server refuses anyone else's,
- * and an attachment or an unsupported body has no text to edit); Delete appears on any own line,
- * because withdrawing is not text-shaped -- a photo can be unsent as surely as a sentence.
+ * The long-press bar's own rows, beneath the quick reactions: the acts a sender has on their own
+ * line, and the one act a receiver has on somebody else's voice note. Edit appears only on a text
+ * line this device sent (the server refuses anyone else's, and an attachment or an unsupported
+ * body has no text to edit); Delete appears on any own line, because withdrawing is not
+ * text-shaped -- a photo can be unsent as surely as a sentence.
+ *
+ * The heard toggle appears only on a received voice note, because listened is the receiver's own
+ * state (brief section 179): it marks this device's dim, it is never sent, and unmarking cancels
+ * no receipt that already left -- which is why the button is a plain word rather than anything
+ * that reads like a delivery status.
  */
 @Composable
 private fun LineActions(
@@ -1308,6 +1362,8 @@ private fun LineActions(
     onReact: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onToggleVoiceListened: (() -> Unit)? = null,
+    voiceListened: Boolean = false,
 ) {
     Column(modifier = Modifier.padding(top = 2.dp)) {
         Row {
@@ -1320,6 +1376,11 @@ private fun LineActions(
         Row {
             if (editable) {
                 TextButton(onClick = onEdit) { Text("Edit") }
+            }
+            if (onToggleVoiceListened != null) {
+                TextButton(onClick = onToggleVoiceListened) {
+                    Text(if (voiceListened) "Mark as unlistened" else "Mark as listened")
+                }
             }
             TextButton(onClick = onDelete) { Text("Delete") }
         }
@@ -1370,11 +1431,24 @@ private fun AttachmentBlock(
     onResolve: (Attachment) -> Unit,
     onSave: (Attachment) -> Unit,
     autoFetchMedia: Boolean,
+    onMarkListened: (Boolean) -> Unit = {},
+    listened: Boolean = false,
+    speed: VoiceNoteSpeed = VoiceNoteSpeed.Speed1x,
+    onSpeedChange: (VoiceNoteSpeed) -> Unit = {},
 ) {
     when (attachment.kind) {
         AttachmentKind.Image -> ImageBubble(attachment, mediaObject, onResolve, autoFetchMedia)
         AttachmentKind.Document -> DocumentRow(attachment, mediaObject, onResolve, onSave, autoFetchMedia)
-        AttachmentKind.Voice -> VoiceBubble(attachment, mediaObject, onResolve, autoFetchMedia)
+        AttachmentKind.Voice -> VoiceBubble(
+            attachment = attachment,
+            mediaObject = mediaObject,
+            onResolve = onResolve,
+            autoFetchMedia = autoFetchMedia,
+            onListenedChange = onMarkListened,
+            listened = listened,
+            speed = speed,
+            onSpeedChange = onSpeedChange,
+        )
     }
 }
 
@@ -1573,10 +1647,26 @@ private fun DocumentRow(
 }
 
 /**
- * The voice player: a play/pause glyph, the duration label, and a progress line that walks while
- * it plays. Playback is the platform's [MediaPlayer] over a temp file in this app's own cache --
- * the only handle it accepts -- deleted and the player released the moment the bubble leaves the
- * composition, so an opened note outlives its bubble by no longer than the scroll that took it away.
+ * The voice player: a play/pause glyph, the duration label, a progress line that walks while it
+ * plays, and the speed control beside both. Playback is the platform's [MediaPlayer] over a temp
+ * file in this app's own cache -- the only handle it accepts -- deleted and the player released
+ * the moment the bubble leaves the composition, so an opened note outlives its bubble by no longer
+ * than the scroll that took it away.
+ *
+ * # The speed control
+ *
+ * The three rates of brief section 167 are applied to the player this bubble already holds: no
+ * rate asks for the media again, and the position the note is at is the position it stays at,
+ * because a playback-params change retunes the live player rather than restarting it. The rate is
+ * a preference rather than bubble state, so the choice made on one note is the rate the next one
+ * starts at.
+ *
+ * # The heard mark
+ *
+ * Listened is this device's own fact about the note (brief section 179): a note played to near
+ * its end marks itself heard, the row's long-press bar can mark it either way, and a heard note
+ * draws dimmed so the unheard ones stand out. Nothing about the mark is sent -- the wire has no
+ * Played status, and a sender shown one would be shown a status that never existed.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1585,6 +1675,10 @@ private fun VoiceBubble(
     mediaObject: MediaObject?,
     onResolve: (Attachment) -> Unit,
     autoFetchMedia: Boolean,
+    onListenedChange: (Boolean) -> Unit,
+    listened: Boolean,
+    speed: VoiceNoteSpeed,
+    onSpeedChange: (VoiceNoteSpeed) -> Unit,
 ) {
     LaunchedEffect(attachment.mediaId, autoFetchMedia) {
         if (autoFetchMedia) onResolve(attachment)
@@ -1608,18 +1702,41 @@ private fun VoiceBubble(
             file.delete()
         }
     }
+    // The mark's own state, read through the indirection because the poll loop below outlives the
+    // recompositions that change it: a note marked unlistened by hand while it plays must not be
+    // re-marked by a threshold check still holding the older value.
+    val heardNow by rememberUpdatedState(listened)
+    val markHeardNow by rememberUpdatedState(onListenedChange)
     // The progress read is a poll rather than a listener because the listener answers in callbacks
     // the composition would have to marshal anyway; a tenth of a second is finer than a progress
-    // line can show.
+    // line can show. The same tick carries the automatic mark: a note heard to nine tenths of its
+    // length is heard -- the last tenth is usually the tail of the last word, and a mark that
+    // waited for the completion event would never fire on a note the reader paused at the end of.
     LaunchedEffect(playing) {
         while (playing) {
             player.value?.let { live ->
-                if (live.isPlaying) positionMs = live.currentPosition.toLong()
+                if (live.isPlaying) {
+                    positionMs = live.currentPosition.toLong()
+                    val total = totalMs
+                    if (!heardNow && total > 0 && positionMs * 10 >= total * 9) markHeardNow(true)
+                }
             }
             delay(100)
         }
     }
+    // The rate reaches the player whenever the preference names a new one, so a change made on
+    // one bubble retunes a note already playing on another, and a player created before the
+    // preference settled picks the rate up the moment it exists.
+    LaunchedEffect(attachment.mediaId, speed) {
+        player.value?.let { live -> applyPlaybackSpeed(live, speed) }
+    }
 
+    // The dim is the heard mark made visible: everything that names the note -- its glyph, its
+    // clock -- goes faint once it has been heard, so the notes still unheard keep the full ink
+    // and stand out in a run of them. A note being replayed drops the dim while it plays, because
+    // the reader is looking at *this* one now.
+    val heardInk = LocalMigoExtra.current.faint
+    val heard = listened && !playing
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
@@ -1648,8 +1765,14 @@ private fun VoiceBubble(
                                     setOnCompletionListener {
                                         playing = false
                                         positionMs = 0
+                                        // The note ran to its end, whatever it was marked: heard
+                                        // in full is the one mark completion can set by itself.
+                                        onListenedChange(true)
                                         seekTo(0)
                                     }
+                                    // The persisted rate is the note's rate from its first
+                                    // moment, so a 2x listener hears 2x without a second press.
+                                    playbackParams = playbackParams.setSpeed(speed.rate)
                                     totalMs = duration.toLong()
                                 }.also { player.value = it }
                             } catch (_: Exception) {
@@ -1679,6 +1802,7 @@ private fun VoiceBubble(
                     else -> "▶"
                 },
                 fontSize = 16.sp,
+                color = if (heard) heardInk else LocalContentColor.current,
             )
             Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -1690,10 +1814,10 @@ private fun VoiceBubble(
                         else -> "${formatDuration(positionMs)} / ${formatDuration(total)}"
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (failed || mediaObject is MediaObject.Failed) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
+                    color = when {
+                        failed || mediaObject is MediaObject.Failed -> MaterialTheme.colorScheme.error
+                        heard -> heardInk
+                        else -> MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
                 )
@@ -1704,14 +1828,44 @@ private fun VoiceBubble(
                         modifier = Modifier.fillMaxWidth().height(3.dp),
                     ) {
                         Surface(
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (heard) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
                             modifier = Modifier.fillMaxWidth(played).height(3.dp),
                         ) {}
                     }
                 }
             }
+            // The speed control: one chip that steps through the three rates, naming the one it
+            // holds. Its press reaches the player through the preference, not the click handler,
+            // so the rate change and the mark of it are the same fact in one place.
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = speed.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (heard) heardInk else MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onSpeedChange(speed.next()) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .semantics { contentDescription = "Playback speed ${speed.label}" },
+            )
         }
     }
+}
+
+/**
+ * Retunes a live player to the given rate without moving the note: the position the player is at
+ * is the position it keeps, which is the mid-playback rule the speed control owes. The
+ * was-playing guard is for the platform's own quirk -- on some versions a paused player treats a
+ * playback-params change as a resume -- so a rate chosen while paused leaves the note paused.
+ */
+private fun applyPlaybackSpeed(player: MediaPlayer, speed: VoiceNoteSpeed) {
+    val wasPlaying = player.isPlaying
+    player.playbackParams = player.playbackParams.setSpeed(speed.rate)
+    if (!wasPlaying && player.isPlaying) player.pause()
 }
 
 /**
