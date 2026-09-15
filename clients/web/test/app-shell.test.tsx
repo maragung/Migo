@@ -15,9 +15,10 @@
  *      button kept with the pale dot, the connection chip stating the transport in the footer
  *      band's own vocabulary, and the dock toggle that names the edge it will move to.
  *   4. **The phone's strip.** Friends, Rooms, Feed in the reference order with only Feed
- *      closable; the "+" that reopens a closed tab; one closable tab per window with its unread
- *      badge capped at "9+". No Main tab in either navigation mode — Chat List Mode's list is
- *      the home screen, and the view header's back control (not a tab) returns to it.
+ *      closable; Chat List Mode's strip leads with Main above those three — Main permanent like
+ *      Friends and Rooms; the "+" that reopens a closed tab; one closable tab per window with its
+ *      unread badge capped at "9+". The view header's back control still returns from the tabbed
+ *      views to the list, one step shorter than the Main tab.
  *   5. **The vocabulary.** Every window kind has a label and an icon, and a chat window's id is
  *      its conversation's, so a thread can never open twice.
  *   6. **The contacts window.** A titled, pill-navigated window whose close control asks to log
@@ -51,6 +52,7 @@ import {
   MobileTabBar,
   MOBILE_NAV_META,
   MOBILE_NAV_ORDER,
+  TABBED_NAV_ORDER,
 } from '../src/components/mobile-tab-bar.js';
 import type { MobileNavTab } from '../src/components/mobile-tab-bar.js';
 import { RetroWindow } from '../src/components/retro-window.js';
@@ -334,6 +336,8 @@ function strip(fields?: {
   navTab?: MobileNavTab;
   hiddenNavs?: readonly MobileNavTab[];
   navUnread?: Readonly<Record<MobileNavTab, number>>;
+  /** Chat List Mode's strip carries Main; the tabbed default keeps the three it always has. */
+  chatList?: boolean;
 }): string {
   return renderToStaticMarkup(
     <MobileTabBar
@@ -343,6 +347,7 @@ function strip(fields?: {
       navTab={fields?.navTab ?? 'feed'}
       hiddenNavs={fields?.hiddenNavs ?? []}
       navUnread={fields?.navUnread ?? { main: 0, friends: 0, rooms: 0, feed: 0 }}
+      chatList={fields?.chatList ?? false}
       onSelectNav={NOOP}
       onCloseNav={NOOP}
       onReopenNav={NOOP}
@@ -352,11 +357,11 @@ function strip(fields?: {
   );
 }
 
-test('the strip offers the home tabs in the reference order, and only Feed closes', () => {
+test('the tabbed strip offers its three home tabs in the reference order, and only Feed closes', () => {
   const markup = strip();
 
   let at = -1;
-  for (const label of MOBILE_NAV_ORDER.map((tab) => MOBILE_NAV_META[tab].label)) {
+  for (const label of TABBED_NAV_ORDER.map((tab) => MOBILE_NAV_META[tab].label)) {
     const found = markup.indexOf(`>${label}</button>`);
     assert.ok(found !== -1, `the "${label}" home tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
@@ -367,8 +372,38 @@ test('the strip offers the home tabs in the reference order, and only Feed close
   assert.ok(markup.includes('aria-label="Close Feed tab"'), 'the Feed tab must be closable');
   assert.ok(!markup.includes('Close Friends'), 'the Friends tab must not be closable');
   assert.ok(!markup.includes('Close Rooms'), 'the Rooms tab must not be closable');
+  // The tabbed layout keeps no conversation list, so its strip keeps no Main tab either.
+  assert.ok(!markup.includes('>Main</button>'), 'the tabbed strip has no screen for a Main tab');
   assert.ok(!markup.includes('Reopen closed tabs'), 'no "+" while every home tab is open');
   assert.ok(markup.includes('mtab-divider'), 'the divider between home and window tabs is missing');
+});
+
+test('Chat List Mode’s strip leads with Main — all four home tabs, Main permanent', () => {
+  const markup = strip({ chatList: true, navTab: 'main' });
+
+  // The mode's four, in the reference order, so the conversation list is a tab the strip always
+  // carries rather than a screen only the view header's back control reaches.
+  let at = -1;
+  for (const label of MOBILE_NAV_ORDER.map((tab) => MOBILE_NAV_META[tab].label)) {
+    const found = markup.indexOf(`>${label}</button>`);
+    assert.ok(found !== -1, `the "${label}" home tab is missing from the mode’s strip`);
+    assert.ok(found > at, `the "${label}" tab is out of the reference order`);
+    at = found;
+  }
+  // Main is the mode's home itself: like Friends and Rooms it ships without an X.
+  assert.ok(!markup.includes('Close Main'), 'the Main tab must not be closable');
+  // At home on the list, the Main tab is the active one — the only tab carrying the mark.
+  const mainAt = markup.indexOf('>Main</button>');
+  const activeAt = markup.indexOf('data-tab-active="true"');
+  assert.ok(
+    activeAt !== -1 && activeAt < mainAt,
+    'the Main tab must carry the active mark at home',
+  );
+  assert.equal(
+    (markup.match(/data-tab-active="true"/g) ?? []).length,
+    1,
+    'exactly one tab may carry the active mark',
+  );
 });
 
 test('a closed home tab comes back through the "+"', () => {
@@ -381,17 +416,7 @@ test('a closed home tab comes back through the "+"', () => {
   );
 });
 
-test('the strip never offers a Main tab — the chat list is the home screen, not a tab', () => {
-  const markup = strip();
-
-  // Chat List Mode gives its conversation list no tab of its own: the list is the screen the
-  // strip's three tabs navigate away from, and the view header's back control returns to it, so
-  // the strip is exactly the three it has always been in either mode.
-  assert.ok(!markup.includes('>Main</button>'), 'the home strip is the three it has always been');
-  assert.ok(!markup.includes('Close Main'), 'no Main tab exists to be closable');
-});
-
-test('Chat List Mode returns to the list through the view header’s back, not a tab', () => {
+test('Chat List Mode keeps the view header’s back to the list, and the list owes none', () => {
   const home = (nav: MobileNavTab): string =>
     sessionShell(
       <MobileHome
@@ -405,8 +430,8 @@ test('Chat List Mode returns to the list through the view header’s back, not a
       />,
     );
 
-  // The mode's way back: the three tabbed views carry a back control in the view header, and
-  // the list itself owes no way back to itself.
+  // The mode's quick way back: the three tabbed views carry a back control in the view header,
+  // one step shorter than the strip's Main tab. The list itself owes no way back to itself.
   const friends = home('friends');
   assert.ok(
     friends.includes('aria-label="Back to chats"'),

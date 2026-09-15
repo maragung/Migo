@@ -102,7 +102,7 @@ export function GiftPicker({
         {gifts.map((gift) => (
           <div key={gift.sku} className="gift-card">
             <div className="gift-name">{gift.name}</div>
-            <div className="gift-price">$MIG {gift.price}</div>
+            <div className="gift-price">{gift.price} $MIG</div>
             <button
               type="button"
               className="btn btn-primary"

@@ -147,7 +147,7 @@ export function KickPointsShelf({
   return (
     <div className="kp-shelf" role="group" aria-label="Buy Kick Points">
       <p className="muted">
-        A founder's kick costs 1 Kick Point, or $MIG 1 when you have none. Votes are always free.
+        A founder's kick costs 1 Kick Point, or 1 $MIG when you have none. Votes are always free.
       </p>
       <div className="kp-packs">
         {KP_PACKS.map((pack) => (
@@ -159,7 +159,7 @@ export function KickPointsShelf({
             onClick={() => onBuy(pack)}
             title={`Add ${pack.kp} Kick Point${pack.kp === 1 ? '' : 's'} to this account`}
           >
-            {pack.kp} KP — $MIG {pack.price}
+            {pack.kp} KP — {pack.price} $MIG
           </button>
         ))}
       </div>
@@ -243,7 +243,7 @@ export function GiftCard({
     <div className="gift-card">
       <div className="gift-name">{gift.name}</div>
       <div className="gift-category">{gift.category}</div>
-      <div className="gift-price">$MIG {gift.price}</div>
+      <div className="gift-price">{gift.price} $MIG</div>
       <button
         type="button"
         className="btn btn-primary"
@@ -436,7 +436,7 @@ export function RecipientPicker({
   return (
     <div className="recipient-picker" role="group" aria-label={`Send ${gift.name}`}>
       <p className="gift-price-line">
-        {gift.name} · <span className="gift-price">$MIG {gift.price}</span>
+        {gift.name} · <span className="gift-price">{gift.price} $MIG</span>
       </p>
       {error != null ? <p className="form-error">{error}</p> : null}
       <form
@@ -646,7 +646,7 @@ export function WalletPanel(): ReactNode {
           setNotice(
             res.duplicate
               ? `That ${pack.kp} KP pack was already bought — nothing charged twice.`
-              : `Bought ${pack.kp} Kick Point${pack.kp === 1 ? '' : 's'} for $MIG ${pack.price}.`,
+              : `Bought ${pack.kp} Kick Point${pack.kp === 1 ? '' : 's'} for ${pack.price} $MIG.`,
           );
           return reload();
         })

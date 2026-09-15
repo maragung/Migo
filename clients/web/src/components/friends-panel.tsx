@@ -76,6 +76,9 @@ export function FriendsPanel({
   const [suggestions, setSuggestions] = useState<SuggestedUser[]>([]);
   const [results, setResults] = useState<SuggestedUser[] | null>(null);
   const [query, setQuery] = useState('');
+  // The header's search is collapsed until its icon is tapped: the field takes the icon's place
+  // only while a search is actually being made, and leaves again when it is finished.
+  const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
   // The person whose profile modal is open, if any.
@@ -184,8 +187,8 @@ export function FriendsPanel({
     if (!client) {
       return;
     }
-    // An emptied field is a return to the list, not a search for nothing: the header's field is
-    // always present, so clearing it is how a person says "show me my friends again".
+    // An emptied field is a return to the list, not a search for nothing: clearing the words and
+    // submitting is how a person says "show me my friends again" from the revealed field.
     if (text.length === 0) {
       setResults(null);
       setView('friends');
@@ -198,6 +201,18 @@ export function FriendsPanel({
       setError(friendlyError(cause));
     }
   }
+
+  // The search is finished when its field is dismissed — the field's own close control, or a
+  // blur while the query is empty — and finishing puts the list back: a dismissed search leaves
+  // no results on screen with no field left to change them.
+  const dismissSearch = useCallback((): void => {
+    setSearchOpen(false);
+    setQuery('');
+    if (view === 'search') {
+      setResults(null);
+      setView('friends');
+    }
+  }, [view]);
 
   const { friends, incoming, outgoing } = useMemo(() => {
     const list = entries ?? [];
@@ -262,27 +277,23 @@ export function FriendsPanel({
   return (
     <div className="panel panel-flush">
       {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
-          the search field sits in the header itself (left of the new-conversation control, not
-          an icon that opens a field somewhere below), the right-aligned icons switch between
-          the views, and each view icon carries its count when there is something to count, so
-          a pending request is visible without visiting it. */}
+          the search hides behind its icon until the icon is tapped (the field then takes the
+          icon's place in the header, focused, with the new-conversation control staying
+          visible beside it), the right-aligned icons switch between the views, and each view
+          icon carries its count when there is something to count, so a pending request is
+          visible without visiting it. */}
       <div className="panel-head">
         <h1 className="panel-title">Friends</h1>
         <div className="panel-head-icons" role="group" aria-label="Friend lists">
-          <form
-            className="panel-head-search"
-            role="search"
+          <FriendsSearch
+            open={searchOpen}
+            active={view === 'search'}
+            query={query}
+            onQueryChange={setQuery}
             onSubmit={(event) => void onSearch(event)}
-          >
-            <input
-              type="search"
-              className="input"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search by username"
-              aria-label="Search people by username"
-            />
-          </form>
+            onReveal={() => setSearchOpen(true)}
+            onDismiss={dismissSearch}
+          />
           <button
             type="button"
             className={`panel-head-icon${view === 'requests' ? ' chosen' : ''}`}
@@ -374,8 +385,8 @@ export function FriendsPanel({
         </>
       ) : view === 'search' ? (
         <>
-          {/* The results of the header's search field: the field itself lives in the panel
-              head now, so this view is what it finds, not where it lives. */}
+          {/* The results of the header's search field: the field reveals from its icon and
+              lives in the panel head, so this view is what it finds, not where it lives. */}
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
               <h2 className="panel-heading">Search results</h2>
@@ -513,6 +524,87 @@ export function FriendsPanel({
 /** The mutual-friends line under a suggested person, omitted when the count is zero. */
 function mutualNote(person: SuggestedUser): string | undefined {
   return person.mutualFriends > 0 ? `${person.mutualFriends} mutual friends` : undefined;
+}
+
+/**
+ * The Friends header's search, collapsed to an icon until it is asked for.
+ *
+ * The header's right-hand row is narrow and the field is idle most of the time, so the icon
+ * stands in for it: a tap reveals the field in the icon's place, focused and ready, and the
+ * field leaves again the moment the search is finished — its own close control, or a blur
+ * while the query is empty, collapses it back to the icon. What the query *does* (the search
+ * itself, the results view) is the panel's and is untouched by the field's visibility.
+ *
+ * Exported presentational over plain props, so the two states — the icon that offers the
+ * search, the focused field with its way out — are testable without a live client, the same
+ * bargain {@link BlockedSection} and {@link MutedSection} make.
+ */
+export function FriendsSearch({
+  open,
+  active,
+  query,
+  onQueryChange,
+  onSubmit,
+  onReveal,
+  onDismiss,
+}: {
+  /** Whether the field is revealed; the icon stands in for it until someone wants it. */
+  open: boolean;
+  /** Whether the search results are the view on screen — the icon's chosen state when closed. */
+  active: boolean;
+  query: string;
+  onQueryChange: (query: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  /** The icon's tap: the field takes the icon's place, focused. */
+  onReveal: () => void;
+  /** The search is finished: the field leaves, empty, and the icon returns. */
+  onDismiss: () => void;
+}): ReactNode {
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className={`panel-head-icon${active ? ' chosen' : ''}`}
+        aria-pressed={active}
+        onClick={onReveal}
+        aria-label="Search people by username"
+        title="Search people by username"
+      >
+        <Icon name="search" size={16} />
+      </button>
+    );
+  }
+  return (
+    <form className="panel-head-search" role="search" onSubmit={onSubmit}>
+      <input
+        type="search"
+        className="input"
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+        /* The field arrived because someone asked for it, so it arrives ready to type in. */
+        autoFocus
+        onBlur={() => {
+          // A blur on an empty field is the search ending without starting: collapse quietly.
+          // A blur on words worth searching keeps the field — the search is still being made.
+          if (query.trim().length === 0) {
+            onDismiss();
+          }
+        }}
+        placeholder="Search by username"
+        aria-label="Search people by username"
+      />
+      {/* The explicit way out: the close finishes the search whatever the query holds. */}
+      <button
+        type="button"
+        className="panel-head-search-x"
+        onClick={onDismiss}
+        aria-label="Close search"
+        title="Close search"
+      >
+        <Icon name="close" size={13} />
+      </button>
+    </form>
+  );
 }
 
 /**
