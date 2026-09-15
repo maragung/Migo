@@ -312,6 +312,43 @@ impl RoomRelay {
         self.to_owner(room, inner, now).await
     }
 
+    /// The forward half's third producer: a group call's membership
+    /// announcements, for the conversations a room owns.
+    ///
+    /// A room's conversation is the one the conversation tier refuses to
+    /// watch — two envelopes would deliver every member two copies of
+    /// everything — so its announcements ride the room's own envelope here,
+    /// the same way its chat does. The conversation id is looked up rather
+    /// than passed as a row because the caller cannot know which tier owns
+    /// the conversation without asking this same question: a `None` row is
+    /// the conversation tier's turn and a plain no-op here.
+    ///
+    /// The event is encoded whole and never read: the joiner's sealed offer
+    /// rides inside it, the same mail-slot rule every sealed blob the tier
+    /// carries keeps.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an encode or outbox failure. The caller logs rather than
+    /// fails, for the same reason `forward_message`'s caller does.
+    pub(crate) async fn forward_call_event(
+        &self,
+        conversation_id: Id,
+        event: &migo_protocol::CallStateEvent,
+        now: Timestamp,
+    ) -> Result<()> {
+        match self.store.room_by_conversation(conversation_id).await? {
+            Some(room) => {
+                let inner =
+                    to_frame(Opcode::CallSfuEvent.to_wire(), 0, event).map_err(fault::from_wire)?;
+                self.to_owner(&room, inner, now).await
+            }
+            // Not a room's conversation: the conversation tier carries it,
+            // and this call is the cheaper half of asking both.
+            None => Ok(()),
+        }
+    }
+
     /// One copy of an *ingested* event to every watching node but the one it
     /// arrived from.
     ///

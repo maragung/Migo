@@ -28,8 +28,10 @@
 //! the same `CallSfuEvent` an explicit leave publishes — this task then sends
 //! it to the conversation's topic, where the remaining roster hears it and
 //! stops rendering a participant whose session is dead (section 166, audit
-//! area 6). No coalescing key, for the same reason the explicit-leave handler
-//! passes none: no two membership facts may collapse into one.
+//! area 6), and across the mesh on the same fan-out tier an explicit leave's
+//! departure rides, so the rosters on far nodes hear the retirement too. No
+//! coalescing key, for the same reason the explicit-leave handler passes none:
+//! no two membership facts may collapse into one.
 //!
 //! `migo-calls` itself owns no timer (see that crate's docs): the sweep also
 //! runs opportunistically inside `invite`, which keeps a quiet node's rows
@@ -73,6 +75,8 @@ impl App {
             self.calls.clone(),
             self.gateway.clone(),
             self.presence_relay.clone(),
+            Arc::clone(&self.room_relay),
+            Arc::clone(&self.conversation_relay),
             self.clock.clone(),
             self.shutdown.clone(),
         )
@@ -84,6 +88,8 @@ fn spawn(
     calls: SharedCallkeeper,
     gateway: Arc<Gateway>,
     relay: Arc<PresenceRelay>,
+    rooms: Arc<crate::room_relay::RoomRelay>,
+    conversations: Arc<crate::conversation_relay::ConversationRelay>,
     clock: Arc<dyn Clock>,
     shutdown: Shutdown,
 ) -> tokio::task::JoinHandle<()> {
@@ -92,7 +98,7 @@ fn spawn(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(SWEEP_INTERVAL) => {
-                    sweep_once(&calls, &gateway, &relay, clock.as_ref()).await;
+                    sweep_once(&calls, &gateway, &relay, &rooms, &conversations, clock.as_ref()).await;
                 }
             }
         }
@@ -105,6 +111,8 @@ async fn sweep_once(
     calls: &SharedCallkeeper,
     gateway: &Gateway,
     relay: &PresenceRelay,
+    rooms: &crate::room_relay::RoomRelay,
+    conversations: &crate::conversation_relay::ConversationRelay,
     clock: &dyn Clock,
 ) {
     let now = clock.now();
@@ -162,6 +170,19 @@ async fn sweep_once(
                 // explicit-leave handler keeps: membership facts never
                 // collapse, whatever the opcode's class allows.
                 gateway.broadcast_to_topic(&topic, Opcode::CallSfuEvent, &event, now);
+                // And the same federated half the explicit leave sends, over
+                // the same tier, because a dead seat's roster on another node
+                // must hear the retirement or it renders a ghost — the
+                // crossing is the sweeper's to owe too, not only the request
+                // path's.
+                crate::dispatch::calls::forward_announcement(
+                    rooms,
+                    conversations,
+                    event.conversation_id.unwrap_or_default(),
+                    &event,
+                    now,
+                )
+                .await;
                 tracing::info!(call_id = %event.call_id, "a dead group seat retired; the roster told");
             }
         }
