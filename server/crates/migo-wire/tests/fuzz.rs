@@ -261,8 +261,17 @@ fn a_metadata_block_claiming_more_than_the_frame_is_carried_not_acted_on() {
 
 /// How many random buffers each size class contributes. Fixed, not a duration:
 /// a fuzz budget stated in seconds is a test that runs longer on a slow runner
-/// and "terminates" only until the runner is slower than the budget.
-const RANDOM_CASES_PER_SIZE: u64 = 32;
+/// and "terminates" only until the runner is slower than the budget. The count
+/// reads `FUZZ_CASES` from the environment (default 32, the CI budget) so the
+/// nightly schedule can run the same suites at a larger budget while staying
+/// deterministic — a finding reproduces by re-running with the same SIM_SEED
+/// and FUZZ_CASES, exactly like the seed itself.
+fn random_cases_per_size() -> u64 {
+    std::env::var("FUZZ_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(32)
+}
 
 #[test]
 fn seeded_random_buffers_never_panic_the_decoder() {
@@ -273,7 +282,7 @@ fn seeded_random_buffers_never_panic_the_decoder() {
     for size in [
         0usize, 1, 2, 3, 4, 5, 9, 10, 11, 64, 511, 512, 513, 4096, 65_536,
     ] {
-        for _ in 0..RANDOM_CASES_PER_SIZE {
+        for _ in 0..random_cases_per_size() {
             let mut buffer = vec![0u8; size];
             rng.fill_bytes(&mut buffer);
             // Bare and length-prefixed both: they are the two entry points
@@ -301,7 +310,7 @@ fn seeded_random_buffers_with_a_valid_header_prefix_never_panic_the_decoder() {
         0x40,   // METADATA
         0x80,   // reserved, refused at the header
     ] {
-        for _ in 0..RANDOM_CASES_PER_SIZE {
+        for _ in 0..random_cases_per_size() {
             let mut buffer = header_bytes(flag_bits, &[0x01], &[0x01]);
             let tail = (rng.next_u64() % 512) as usize;
             let mut noise = vec![0u8; tail];

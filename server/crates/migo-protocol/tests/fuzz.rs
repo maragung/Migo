@@ -86,8 +86,17 @@ fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
 
 // --- the pre-auth decoders ---------------------------------------------------
 
-/// Fixed iteration count, not a duration: see the wire crate's fuzz suite.
-const RANDOM_CASES: u64 = 256;
+/// Iteration count, not a duration: see the wire crate's fuzz suite. The count
+/// reads `FUZZ_CASES` from the environment (default 256, the CI budget) so the
+/// nightly schedule can run the same suite at a larger budget while staying
+/// deterministic — a finding reproduces by re-running with the same SIM_SEED
+/// and FUZZ_CASES.
+fn random_cases() -> u64 {
+    std::env::var("FUZZ_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256)
+}
 
 /// One hostile payload against one decoder, with the stronger half of the
 /// contract attached: success and failure are both acceptable answers, but
@@ -117,7 +126,7 @@ where
 #[test]
 fn seeded_random_payloads_never_panic_the_pre_auth_decoders() {
     let mut rng = SeededRandom::from_env();
-    for _ in 0..RANDOM_CASES {
+    for _ in 0..random_cases() {
         let len = (rng.next_u64() % 512) as usize;
         let mut buffer = vec![0u8; len];
         rng.fill_bytes(&mut buffer);

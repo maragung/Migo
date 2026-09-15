@@ -51,9 +51,10 @@ const HEARTBEAT_MS: u64 = 30_000;
 /// Any 174-character string measures identically; this one just reads like one.
 const TOKEN_LEN: usize = 174;
 
-/// A voice-note waveform is 64 buckets (brief section 167, "misalnya 64
-/// bucket") — one byte per bucket, so the waveform is 64 bytes inside the
-/// sealed envelope.
+/// The envelope is budgeted at its ceiling: brief section 171 caps the
+/// waveform at 64 bytes (one byte per bucket), while every client sends 50
+/// buckets (brief section 167) — so this worst case keeps headroom the
+/// clients do not use.
 const WAVEFORM_BUCKETS: usize = 64;
 
 // Sample media sizes for the call-signaling budget. These are the honest
