@@ -108,6 +108,7 @@ import com.migo.app.model.ownedEmoticons
 import com.migo.app.model.ownedStickerPacks
 import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
+import com.migo.core.domain.GroupCallInProgress
 import com.migo.core.domain.canFounderAct
 import com.migo.core.domain.canVoteKickGroup
 import com.migo.core.domain.filterChatSearch
@@ -218,6 +219,12 @@ fun ChatScreen(
      * gate, its single button's -- and null when the shell cannot join group calls.
      */
     onJoinGroupCall: (() -> Unit)? = null,
+    /**
+     * The group call already running in this conversation, when this device holds no seat in one:
+     * the header's call button becomes the join-in-progress affordance, naming the size the
+     * server last announced. Null is a conversation with no call to join -- the button starts one.
+     */
+    groupCallInProgress: GroupCallInProgress? = null,
     /**
      * Shares this conversation's transcript as a log, from the header. Null when the shell has no
      * share route; the transcript itself is the model's to build, because the log is the same
@@ -467,6 +474,7 @@ fun ChatScreen(
                 },
                 onStartCall = onStartCall,
                 onJoinGroupCall = onJoinGroupCall,
+                groupCallInProgress = groupCallInProgress,
                 onExportLog = onExportLog,
                 onToggleSearch = onToggleSearch,
                 onOpenGroupMembers = onOpenGroupMembers,
@@ -777,6 +785,7 @@ private fun ChatHeader(
     onOpenSafety: (() -> Unit)? = null,
     onStartCall: ((Id, Boolean) -> Unit)? = null,
     onJoinGroupCall: (() -> Unit)? = null,
+    groupCallInProgress: GroupCallInProgress? = null,
     onExportLog: (() -> Unit)? = null,
     onToggleSearch: () -> Unit = {},
     onOpenGroupMembers: (() -> Unit)? = null,
@@ -856,11 +865,19 @@ private fun ChatHeader(
             // The group's call door: one button, joining the roster, exactly the web client's own
             // single control. The glyph is the direct chat's own phone -- the web button's glyph --
             // and the kind gate keeps the two controls from ever sharing a header, because the
-            // direct chat dials a person and the group joins a conversation.
+            // direct chat dials a person and the group joins a conversation. When a call is already
+            // running in the group and this device holds no seat in it, the same door says so --
+            // the description names the size the server last announced, and the join it launches
+            // carries the running call's own id, landing this device in the conversation that is
+            // already talking rather than a fresh call beside it.
             if (chat.kind == ConversationKind.Group && onJoinGroupCall != null) {
                 HeaderGlyphButton(
                     glyph = "📞",
-                    description = "Join group call",
+                    description = if (groupCallInProgress != null) {
+                        "Join group call in progress (${groupCallInProgress.participantCount})"
+                    } else {
+                        "Join group call"
+                    },
                     onClick = onJoinGroupCall,
                 )
             }

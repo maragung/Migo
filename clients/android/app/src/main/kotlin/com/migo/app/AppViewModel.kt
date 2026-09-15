@@ -1149,10 +1149,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Joins the conversation's group call: the roster overlay comes up and the seat is requested
-     * with the sealed placeholder offer, exactly the web client's own flow.
+     * with the sealed placeholder offer, exactly the web client's own flow. A null [callId] starts
+     * a fresh call; the id of one already running -- the header's "join call in progress" entry,
+     * from [groupCallState] -- joins that call where it stands.
      */
-    fun joinGroupCall(conversationId: Id) {
-        groupCallManager?.joinGroupCall(conversationId)
+    fun joinGroupCall(conversationId: Id, callId: Id? = null) {
+        groupCallManager?.joinGroupCall(conversationId, callId)
     }
 
     /** Leaves the tracked group call, turning its screen to the "left" note. */
