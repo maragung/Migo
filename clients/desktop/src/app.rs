@@ -813,6 +813,7 @@ impl App {
                     // a room this account has just left to list its members.
                     let self_change = self
                         .account
+                        .as_ref()
                         .is_some_and(|account| account.account_id == user_id);
                     let panel_open_on_room = self
                         .rooms
