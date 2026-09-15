@@ -2263,6 +2263,59 @@ main {
   color: var(--danger);
   flex-shrink: 0;
 }
+/* The receiver-local heard mark (§179): a mic badge on a note this browser received. Bright and
+ * tinted while the note is unheard, dim and bare once it is listened — the receiver's own memory
+ * of which notes to play, never a receipt the sender could see. */
+.voice-heard {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.voice-note.listened .voice-heard {
+  color: var(--text-dim);
+  background: transparent;
+}
+/* A heard note dims its whole strip too, so the difference survives even where the badge is
+ * easy to miss: the waveform (or the fallback track) reads quieter once the note is listened. */
+.voice-note.listened .voice-bar {
+  opacity: 0.18;
+}
+.voice-note.listened .voice-bar.played {
+  opacity: 0.55;
+}
+.voice-note.listened .voice-progress-fill {
+  opacity: 0.55;
+}
+/* The client-side speed control (§167): 1× → 1.5× → 2×, applied to the element in hand — no
+ * re-fetch, no restart. Tabular digits keep the label from jumping as it cycles. */
+.voice-speed-btn {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--input);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.voice-speed-btn:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+/* The row's listened toggle mirrors the badge: accent mic while unheard, dim once marked. */
+.row-action-btn.voice-listen {
+  color: var(--accent);
+}
+.row-action-btn.voice-listen.listened {
+  color: var(--text-dim);
+}
 
 /* --- empty / centered states --- */
 

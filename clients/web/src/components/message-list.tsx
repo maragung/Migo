@@ -22,7 +22,7 @@ import { Avatar } from './avatar.js';
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { TokenText } from './token-reference.js';
-import { VoiceNoteBubble } from './voice-player.js';
+import { VoiceListenToggle, VoiceNoteBubble } from './voice-player.js';
 
 /** How much of a quoted message the reply snippet above a bubble shows. */
 const QUOTE_CHARS = 60;
@@ -209,11 +209,16 @@ function MediaAttachment({
  * note becomes the playback bar ({@link VoiceNoteBubble}). Without a resolver both stay their text
  * placeholders, which is also their loading and failed state — that is how a context with no client
  * renders, and the safe fallback if resolving ever stops working.
+ *
+ * `listenMessageId` is the receiver-local listen hook-up (section 179): the message's id, passed
+ * only for a *received* voice note, so the bubble can show the heard mark and auto-mark a play
+ * that reaches the end. It is never a receipt and never sender-visible.
  */
 function renderBody(
   content: MessageContent,
   mediaObjectFor: MediaObjectResolver | undefined,
   onOpenWallet: (() => void) | undefined,
+  listenMessageId?: Id,
 ): { node: ReactNode; placeholder: boolean } {
   switch (content.type) {
     case ContentType.Text:
@@ -250,7 +255,13 @@ function renderBody(
             placeholder: true,
           }
         : {
-            node: <VoiceNoteBubble content={content} resolveUrl={mediaObjectFor} />,
+            node: (
+              <VoiceNoteBubble
+                content={content}
+                resolveUrl={mediaObjectFor}
+                listenMessageId={listenMessageId}
+              />
+            ),
             placeholder: false,
           };
     case ContentType.Reaction:
@@ -589,7 +600,17 @@ export function MessageList({
         const quoted = message.replyTo ? (byId.get(message.replyTo) ?? null) : null;
         const quoteText =
           quoted && !quoted.deleted ? messagePreview(quoted.content, QUOTE_CHARS) : '[deleted]';
-        const { node, placeholder } = renderBody(message.content, mediaObjectFor, onOpenWallet);
+        // The receiver-local listen state tracks only notes this browser received: our own
+        // recordings are heard by construction, and the state is a receiver's memory, never a
+        // sender-visible status (section 179).
+        const trackListen =
+          !mine && !message.deleted && message.content.type === ContentType.VoiceNoteRef;
+        const { node, placeholder } = renderBody(
+          message.content,
+          mediaObjectFor,
+          onOpenWallet,
+          trackListen ? message.messageId : undefined,
+        );
         const editable = mine && message.content.type === ContentType.Text && onEdit !== undefined;
         const editing = editingId === message.messageId && editable;
 
@@ -657,6 +678,7 @@ export function MessageList({
                         editable={editable}
                         onEdit={() => setEditingId(message.messageId)}
                         onReact={onReact}
+                        canToggleListen={trackListen}
                       />
                     )}
                   </>
@@ -779,6 +801,7 @@ function BubbleLine({
   editable,
   onEdit,
   onReact,
+  canToggleListen,
 }: {
   message: ThreadMessage;
   mine: boolean;
@@ -794,6 +817,11 @@ function BubbleLine({
   onEdit: () => void;
   /** Sends a quick reaction; absent means the bar is not rendered. */
   onReact?: (message: ThreadMessage, emoji: string) => void;
+  /**
+   * Whether the row offers the listened/unlistened toggle: a received voice note only. The state
+   * itself is receiver-local (section 179) and never reaches the sender.
+   */
+  canToggleListen: boolean;
 }): ReactNode {
   return (
     <div className="bubble-line">
@@ -817,6 +845,7 @@ function BubbleLine({
         >
           ↩
         </button>
+        {canToggleListen ? <VoiceListenToggle messageId={message.messageId} /> : null}
         {onReact !== undefined ? (
           <ReactionBar targetName={senderName} onReact={(emoji) => onReact(message, emoji)} />
         ) : null}

@@ -28,15 +28,34 @@
  * MediaRecorder-produced webm reports `duration: Infinity` in Chrome until it is remuxed, so the
  * progress denominator falls back to the message's claimed `durationMs` — the sender's own clock —
  * whenever the element has no finite duration to offer.
+ *
+ * # Receiver-local state (section 179)
+ *
+ * The speed control cycles 1× → 1.5× → 2× client-side only: the rate is set on the `Audio` element
+ * already holding the decrypted bytes, never by fetching the media again, and a switch mid-playback
+ * keeps `currentTime` — `playbackRate` resets nothing. The listened mark is likewise
+ * receiver-local: a play that reaches {@link LISTENED_THRESHOLD} of the duration (or ends) marks
+ * the note heard, and the row's toggle can mark it heard or unheard by hand. Both live in
+ * `voice-note-state.ts`, never on the wire — the sender learns neither, and "unlistened" cancels
+ * no receipt.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { VoiceNoteRefContent } from '@migo/sdk';
+import type { Id, VoiceNoteRefContent } from '@migo/sdk';
 
 import { WAVEFORM_BARS, downsampleWaveform, formatDuration } from '@/lib/migo/voice.js';
+import {
+  LISTENED_THRESHOLD,
+  formatPlaybackSpeed,
+  markVoiceNoteListened,
+  nextPlaybackSpeed,
+  useVoiceNoteListened,
+  useVoicePlaybackSpeed,
+} from '@/lib/migo/voice-note-state.js';
 
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import type { MediaObjectResolver } from './message-list.js';
 
@@ -49,11 +68,25 @@ interface VoiceNoteBubbleProps {
    * pass through for a legacy one — to an object URL; `null` means the object cannot be resolved.
    */
   resolveUrl: MediaObjectResolver;
+  /**
+   * The message's id, present only for a *received* note whose listen state this receiver tracks.
+   * Our own recordings render without the heard indicator and never auto-mark — the sender has
+   * heard their own note by construction, and this state is receiver-local by design.
+   */
+  listenMessageId?: Id;
 }
 
-export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): ReactNode {
+export function VoiceNoteBubble({
+  content,
+  resolveUrl,
+  listenMessageId,
+}: VoiceNoteBubbleProps): ReactNode {
   const [status, setStatus] = useState<PlaybackStatus>('idle');
   const [progress, setProgress] = useState(0);
+
+  const [speed, setSpeed] = useVoicePlaybackSpeed();
+  const listen = useVoiceNoteListened(listenMessageId);
+  const listened = listen !== null && listen[0];
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   /** The playback position as of the last timeupdate, so a retried fetch resumes where it left off. */
@@ -64,6 +97,14 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
   const playTokenRef = useRef(0);
   /** The latest `playFresh`, so an error handler defined before it can still start a retry. */
   const playFreshRef = useRef<(resumeAtMs: number) => Promise<void>>(() => Promise.resolve());
+  /** The current speed, so a closure built once per playback session always sets the latest rate. */
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
+  /** The tracked message id and its current mark, for the timeupdate/ended listeners above. */
+  const listenIdRef = useRef(listenMessageId);
+  listenIdRef.current = listenMessageId;
+  const listenedRef = useRef(listened);
+  listenedRef.current = listened;
 
   /**
    * The progress denominator: the element's own duration when it has a finite one, the message's
@@ -93,6 +134,16 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
     audio.load();
   }, []);
 
+  /** Marks the note heard when it is a tracked one and not already marked: the auto path. */
+  const markListenedNow = useCallback((): void => {
+    const id = listenIdRef.current;
+    if (id !== undefined && !listenedRef.current) {
+      // Receiver-local only (see the module doc): a store write and an announcement, never a
+      // receipt — the sender's transcript cannot learn this happened.
+      markVoiceNoteListened(id, true);
+    }
+  }, []);
+
   /** Resolves the URL, builds a fresh audio element on it, and plays — resuming if asked to. */
   const playFresh = useCallback(
     async (resumeAtMs: number): Promise<void> => {
@@ -116,6 +167,10 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
       }
 
       const audio = new Audio(url);
+      // The persisted rate rides every fresh element, so a note started after a speed change
+      // already plays at the listener's choice. Setting it here moves nothing else: no load, no
+      // position reset, and the bytes are the ones already in hand.
+      audio.playbackRate = speedRef.current;
       const attach = (): void => {
         audio.ontimeupdate = () => {
           if (playTokenRef.current !== token || audioRef.current !== audio) {
@@ -123,12 +178,21 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
           }
           positionRef.current = audio.currentTime * 1000;
           const total = totalSecondsOf(audio);
-          setProgress(total > 0 ? Math.min(1, audio.currentTime / total) : 0);
+          const ratio = total > 0 ? Math.min(1, audio.currentTime / total) : 0;
+          setProgress(ratio);
+          // Near the end is heard (module doc): the threshold check runs on the ratio the bar
+          // already computes, so the mark costs nothing extra per tick.
+          if (ratio >= LISTENED_THRESHOLD) {
+            markListenedNow();
+          }
         };
         audio.onended = () => {
           if (playTokenRef.current !== token || audioRef.current !== audio) {
             return;
           }
+          // The end event is heard even when the duration denominator was the sender's claim —
+          // completion is a fact about playback, not an estimate.
+          markListenedNow();
           teardownAudio();
           positionRef.current = 0;
           setProgress(0);
@@ -171,9 +235,19 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
         }
       }
     },
-    [content, resolveUrl, teardownAudio, totalSecondsOf],
+    [content, resolveUrl, teardownAudio, totalSecondsOf, markListenedNow],
   );
   playFreshRef.current = playFresh;
+
+  // A speed change under live playback is applied in place: `playbackRate` on an existing element
+  // keeps `currentTime` (the spec resets nothing), so the switch never restarts the note and never
+  // asks the network for the bytes again — the §167 rule that speed is purely client-side.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio !== null) {
+      audio.playbackRate = speed;
+    }
+  }, [speed]);
 
   /** Play/pause toggle: resumes a paused element, otherwise starts a fresh playback session. */
   const toggle = useCallback((): void => {
@@ -228,9 +302,24 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
   const playing = status === 'playing';
   const loading = status === 'loading';
   const playedBars = bars === null ? 0 : Math.floor(progress * bars.length);
+  const speedLabel = formatPlaybackSpeed(speed);
 
   return (
-    <span className="voice-note">
+    <span
+      className={`voice-note${listen !== null ? (listened ? ' listened' : ' unlistened') : ''}`}
+    >
+      {listen !== null ? (
+        // The heard mark is the receiver's own memory, drawn as a mic that empties once the note
+        // is heard — bright while unheard, dim after. It is not a receipt: no sender ever sees it.
+        <span
+          className="voice-heard"
+          role="img"
+          aria-label={listened ? 'Listened' : 'Not listened yet'}
+          title={listened ? 'Listened' : 'Not listened yet'}
+        >
+          <Icon name="mic" size={10} />
+        </span>
+      ) : null}
       <button
         type="button"
         className="voice-play-btn"
@@ -258,8 +347,45 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
           />
         </span>
       )}
+      <button
+        type="button"
+        className="voice-speed-btn"
+        onClick={() => setSpeed(nextPlaybackSpeed(speed))}
+        aria-label={`Playback speed ${speedLabel}, tap for ${formatPlaybackSpeed(nextPlaybackSpeed(speed))}`}
+        title="Playback speed"
+      >
+        {speedLabel}
+      </button>
       <span className="voice-duration">{formatDuration(content.durationMs)}</span>
       {status === 'failed' ? <span className="voice-failed">Unavailable</span> : null}
     </span>
+  );
+}
+
+/**
+ * The row action for one received voice note: marks it listened or unlistened by hand.
+ *
+ * The mic reads bright while the note is unheard and dims once it is marked, so the hover bar and
+ * the bubble's own heard mark tell one story. The flip is a purely local write (see the bubble's
+ * module doc): marking a note unlistened hides nothing the sender was told — it only restores the
+ * receiver's own "not heard yet" reminder. Rendered only for received notes, so it can never be
+ * mistaken for the sender-side read ticks our own messages carry.
+ */
+export function VoiceListenToggle({ messageId }: { messageId: Id }): ReactNode {
+  const listen = useVoiceNoteListened(messageId);
+  if (listen === null) {
+    return null;
+  }
+  const [listened, mark] = listen;
+  return (
+    <button
+      type="button"
+      className={`row-action-btn voice-listen${listened ? ' listened' : ''}`}
+      onClick={() => mark(!listened)}
+      aria-label={listened ? 'Mark voice note as unlistened' : 'Mark voice note as listened'}
+      title={listened ? 'Mark as unlistened' : 'Mark as listened'}
+    >
+      <Icon name="mic" size={14} />
+    </button>
   );
 }
