@@ -147,7 +147,7 @@ internal fun ChatPane(
             null
         },
         onCloseGroupMembers = { model.closeMembers(open.conversationId) },
-        onInvite = { userId -> model.inviteToGroup(open.conversationId, userId) },
+        onInvite = { userIds -> model.inviteToGroup(open.conversationId, userIds) },
         onGroupVoteKick = { target -> model.groupVoteKick(open.conversationId, target) },
         onGroupMute = { target, term -> model.groupMute(open.conversationId, target, term) },
         onGroupKick = { target -> model.groupKick(open.conversationId, target) },

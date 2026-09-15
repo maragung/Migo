@@ -39,6 +39,7 @@ import com.migo.app.ui.SettingsScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
+import com.migo.core.protocol.RelationshipKind
 import com.migo.core.store.NavigationMode
 import com.migo.core.store.ThemeChoice
 
@@ -233,6 +234,11 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                 onReopenNav = model::reopenNav,
                 onSelectWindow = { model.open(it.conversationId, it.title) },
                 onCloseWindow = model::closeWindow,
+                // The Friends tab wears the graph's own incoming count; the number is read from
+                // the state the shell already holds, never fetched for the badge.
+                friendRequests = state.friends.entries.count {
+                    it.kind == RelationshipKind.PendingIncoming.wire.toLong()
+                }.toLong(),
             )
             // The banner rides on top of the chat too: a failure raised while reading (a send that
             // did not go, a room event the server refused) is news the reader should get where

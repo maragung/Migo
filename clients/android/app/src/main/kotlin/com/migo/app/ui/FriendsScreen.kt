@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -34,9 +35,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -140,6 +143,13 @@ fun FriendsScreen(
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
+            // The incoming count as a badge beside the title, so a waiting invitation is stated at
+            // a glance from anywhere in the view — not only once the Requests section has scrolled
+            // into sight.
+            if (incoming.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(8.dp))
+                RequestsBadge(count = incoming.size)
+            }
             Spacer(modifier = Modifier.width(12.dp))
             if (searchOpen) {
                 OutlinedTextField(
@@ -355,6 +365,31 @@ private fun RequestRow(
         }
         TextButton(onClick = onDecline, enabled = !busy) { Text("Decline") }
         Button(onClick = onAccept, enabled = !busy) { Text("Accept") }
+    }
+}
+
+/**
+ * The pending-requests badge: the incoming count as the me card's mail badge wears unread — the
+ * same red pill, capped at "9+" — so a waiting invitation is visible without scrolling to the
+ * Requests section. The count is the graph's own incoming set, read where it already lives; no
+ * fetch is made for a badge.
+ */
+@Composable
+private fun RequestsBadge(count: Int) {
+    Surface(
+        color = Color(0xFFE5503C),
+        contentColor = Color.White,
+        shape = RoundedCornerShape(999.dp),
+        modifier = Modifier.semantics {
+            contentDescription = "$count pending friend requests"
+        },
+    ) {
+        Text(
+            text = if (count > 9) "9+" else count.toString(),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.dp),
+        )
     }
 }
 
