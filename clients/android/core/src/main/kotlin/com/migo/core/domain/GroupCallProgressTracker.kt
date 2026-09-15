@@ -54,13 +54,17 @@ class GroupCallProgressTracker {
      * everything the affordance needs, so the mid-call arrival is discovered rather than missed.
      *
      * A departure naming a *different* call than the one held is a stale fact about a call that has
-     * already been replaced, and is ignored -- it must not retire or resize the live entry.
+     * already been replaced, and is ignored -- it must not retire or resize the live entry, not
+     * even when its count is the retirement signal, because that count is about the other call.
      */
     fun onLeft(event: GroupCallLeftEvent) {
         val held = calls[event.conversationId]
+        if (held != null && held.callId != event.callId) {
+            return
+        }
         if (isCallRetired(event.participantCount)) {
             calls.remove(event.conversationId)
-        } else if (held == null || held.callId == event.callId) {
+        } else {
             calls[event.conversationId] = GroupCallInProgress(
                 callId = event.callId,
                 participantCount = event.participantCount,
