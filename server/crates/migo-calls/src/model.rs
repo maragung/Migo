@@ -136,6 +136,26 @@ impl CallState {
         }
     }
 
+    /// Inverse of [`CallState::to_wire`]. `None` for `Reconnecting` — the
+    /// value three this build reserves for the SFU — and for any number a
+    /// newer build invented.
+    ///
+    /// The inverse exists for the row-replication tier (section 170): a call
+    /// row that crossed the mesh from another node is read back into the
+    /// state machine here, and a value this build cannot name is a row it
+    /// must not seat, because a call in a state no match arm covers is a call
+    /// no handler can answer.
+    #[must_use]
+    pub const fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Ringing),
+            1 => Some(Self::Connecting),
+            2 => Some(Self::Connected),
+            4 => Some(Self::Ended),
+            _ => None,
+        }
+    }
+
     /// Whether the call still exists as far as signalling is concerned.
     #[must_use]
     pub const fn is_live(self) -> bool {

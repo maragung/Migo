@@ -948,6 +948,25 @@ impl IngestRouter {
                 }
                 Ok(())
             }
+            Opcode::FedCallQuery => {
+                let query: migo_protocol::FedCallQuery =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                self.route_call_query(peer, query).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                Ok(())
+            }
+            Opcode::FedCallRows => {
+                let rows: migo_protocol::FedCallRows =
+                    from_frame(&inner).map_err(fault::from_wire)?;
+                let applied = self.route_call_rows(peer, rows).await?;
+                self.note(inner.header.opcode, inner.payload.len());
+                self.meters.ingested();
+                if applied {
+                    self.meters.replicated();
+                }
+                Ok(())
+            }
             Opcode::FedUserEvent => {
                 let event: migo_protocol::FedUserEvent =
                     from_frame(&inner).map_err(fault::from_wire)?;
@@ -1336,6 +1355,46 @@ impl IngestRouter {
             conversation = %conversation_id.to_text(),
             applied,
             "conversation rows ingested from the mesh"
+        );
+        Ok(applied)
+    }
+
+    /// Answers a call-routing query: the tier's third ask half, for the 1:1
+    /// call row a lifecycle frame named and this node does not hold.
+    async fn route_call_query(&self, peer: Id, query: migo_protocol::FedCallQuery) -> Result<()> {
+        let now = self.clock.now();
+        // The same capture-before-move as the two queries above.
+        let call = query.call_id;
+        if let Some(relay) = &self.replication {
+            relay.answer_call(peer, query, now).await?;
+        }
+        tracing::debug!(
+            from = %peer.to_text(),
+            call = %call.to_text(),
+            "call routing query ingested from the mesh"
+        );
+        Ok(())
+    }
+
+    /// Applies a call row a peer sent, returning whether it was written.
+    ///
+    /// One route serves both halves of this tier, because one frame does: the
+    /// answer to a query, and the mirror of a row a peer just changed. Which
+    /// one it is is not something the envelope says — it does not have to be,
+    /// because the relay decides on what it holds rather than on what arrived
+    /// (a row it asked for, or a row it already has; never an unsolicited one
+    /// it never had), and that is a question only the local store can answer.
+    async fn route_call_rows(&self, peer: Id, rows: migo_protocol::FedCallRows) -> Result<bool> {
+        let call_id = rows.call_id;
+        let applied = match &self.replication {
+            Some(relay) => relay.apply_call_rows(rows).await?,
+            None => false,
+        };
+        tracing::debug!(
+            from = %peer.to_text(),
+            call = %call_id.to_text(),
+            applied,
+            "call rows ingested from the mesh"
         );
         Ok(applied)
     }

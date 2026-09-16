@@ -1279,6 +1279,30 @@
    "doc": "The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream."
   },
   {
+   "name": "FED_CALL_QUERY",
+   "code": 248,
+   "direction": "both",
+   "payload": "FedCallQuery",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 2,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "A node asks which peer holds a call row it cannot resolve, so a callee whose node never accepted the invite can answer a ring the caller's node recorded. Broadcast, and answered only by the peer that holds the row: the rest stay silent."
+  },
+  {
+   "name": "FED_CALL_ROWS",
+   "code": 249,
+   "direction": "both",
+   "payload": "FedCallRows",
+   "response": "Acknowledged",
+   "auth": "Server",
+   "cost": 0,
+   "class": "Critical",
+   "feature": "FEDERATION",
+   "doc": "The owning peer's answer: the call row verbatim, so the asker can resolve the frames that arrive for a call whose invite it never saw. Applied only by a node that asked and only where it held nothing, so a peer can feed a miss but never overwrite local truth."
+  },
+  {
    "name": "CALL_INVITE",
    "code": 224,
    "direction": "client_to_server",

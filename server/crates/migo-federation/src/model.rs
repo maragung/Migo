@@ -43,6 +43,20 @@ pub const ROW_OPCODE_MIN: i32 = 243;
 /// [`ROW_OPCODE_MIN`].
 pub const ROW_OPCODE_MAX: i32 = 246;
 
+/// The lowest opcode of the fourth federation band, the call-row tier's carve-out from
+/// the same head (section 145's precedent once more: 239-240, 241-242, then 243-246).
+/// The call-row question and its answer take this pair (248/249); see
+/// [`CALL_OPCODE_MAX`].
+///
+/// The number between the two bands, 247, is deliberately *not* here: it is
+/// `CALL_LIST`, a client opcode that enumerates calls, and a client opcode may no more
+/// ride the mesh than a mesh frame may arrive at a socket.
+pub const CALL_OPCODE_MIN: i32 = 248;
+
+/// The highest opcode of the fourth federation band, inclusive. See
+/// [`CALL_OPCODE_MIN`].
+pub const CALL_OPCODE_MAX: i32 = 249;
+
 /// Whether an opcode belongs to any federation band, i.e. may ride the mesh.
 ///
 /// A frame on the mesh must never be mistaken for a client frame, and equally a client
@@ -53,6 +67,7 @@ pub const fn is_federation_opcode(opcode: i32) -> bool {
     (opcode >= FEDERATION_OPCODE_MIN && opcode <= FEDERATION_OPCODE_MAX)
         || (opcode >= CONVERSATION_OPCODE_MIN && opcode <= CONVERSATION_OPCODE_MAX)
         || (opcode >= ROW_OPCODE_MIN && opcode <= ROW_OPCODE_MAX)
+        || (opcode >= CALL_OPCODE_MIN && opcode <= CALL_OPCODE_MAX)
 }
 
 /// How long a handshake nonce is remembered, in milliseconds.
@@ -259,8 +274,9 @@ pub struct PeerIdentity {
 ///
 /// The payload is an already-encoded MWP frame body: opaque bytes here, and a private
 /// message inside one is a sealed envelope this layer never opens (section 169). The opcode
-/// must fall in one of the three federation bands, 208-223, the conversation tier's
-/// 241-242, or the row-replication tier's 243-246 (see [`is_federation_opcode`]).
+/// must fall in one of the four federation bands, 208-223, the conversation tier's
+/// 241-242, the row-replication tier's 243-246, or the call-row tier's 248-249
+/// (see [`is_federation_opcode`]).
 #[derive(Clone, Debug)]
 pub struct FederatedEvent {
     /// The node id to deliver to.

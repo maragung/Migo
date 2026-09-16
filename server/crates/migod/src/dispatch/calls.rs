@@ -81,12 +81,16 @@
 //! the local one is: the reply already went out, and a retried invite would
 //! ring twice, exactly what the idempotency exists to prevent.
 //!
-//! What the far node can *do* with the frame is bounded by where the call
-//! row lives: 1:1 calls sit in the inviting node's in-process call store,
-//! so a callee on another node hears the ring and every state event the
-//! inviting side publishes, but their own `CALL_ANSWER` or `CALL_DECLINE`
-//! reaches the other node's store and finds no row — the completion paths
-//! are the flagged remainder, not a silence to paper over.
+//! What the far node can *do* with the frame used to be bounded by where the
+//! call row lives: 1:1 calls sat in the inviting node's in-process call store,
+//! so a callee on another node heard the ring and every state event the
+//! inviting side published, but their own `CALL_ANSWER` or `CALL_DECLINE`
+//! reached the other node's store and found no row. That half is built now, by
+//! the third row tier of section 170 — see [`hold_call`] and [`mirror_call`]
+//! below, which are the two calls every 1:1 lifecycle handler makes around the
+//! service: the row is asked for before the service reads it, and the row this
+//! node just changed is mirrored to the peers after the client's frame has
+//! already succeeded.
 //!
 //! A group call's *announcements* are the one call frames whose audience is
 //! a conversation rather than an account, so they cross on the conversation
@@ -112,7 +116,59 @@ use migo_protocol::{
 
 use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
+use crate::replication::ReplicationRelay;
 use crate::room_relay::RoomRelay;
+
+/// Makes sure this node holds the call row a 1:1 lifecycle frame is about
+/// before the service is asked to read it, and says nothing either way.
+///
+/// The row is minted on whichever node accepted the invite, which is the
+/// caller's node — so every frame the *callee's* device sends arrives at a node
+/// that has never seen the id, and every frame either device sends after the
+/// answer arrives at a node that may be holding a row the other node has since
+/// moved on from. This is where section 165's owed half starts: the miss is a
+/// question for the fleet (section 170's third row tier), and the answer is
+/// adopted before the service reads, so the handler that follows answers the
+/// same call the other node is answering.
+///
+/// A `false` is not an error and is not reported as one: it means no peer holds
+/// the row either, and the service's own `NOT_FOUND` — the answer this path
+/// gave before the tier existed — is the honest reply to a frame about a call
+/// that does not exist. Logged at debug, because a client that sends garbage is
+/// not an operator's incident.
+async fn hold_call(
+    replication: &ReplicationRelay,
+    ctx: &ClientContext<'_>,
+    call_id: migo_core::Id,
+) {
+    if call_id.is_nil() {
+        // The service's own field check owns this refusal; asking the fleet
+        // about the nil id would be a broadcast about nothing.
+        return;
+    }
+    if !replication.ensure_call(call_id, ctx.now()).await {
+        tracing::debug!(
+            call = %call_id.to_text(),
+            "the call row is neither here nor on a peer; the service will answer NOT_FOUND"
+        );
+    }
+}
+
+/// Mirrors the row this node just changed to every peer, after the client's own
+/// frame has already succeeded.
+///
+/// The push half of the tier, and the reason it exists: the node that mints a
+/// call row is not the node that answers it, so without this the inviting node
+/// would hold a `Ringing` row forever and refuse the caller's own SDP for a
+/// call that is already up. Called only where the service reported a change —
+/// never on a read, and never on the relays that change nothing.
+async fn mirror_call(
+    replication: &ReplicationRelay,
+    ctx: &ClientContext<'_>,
+    call_id: migo_core::Id,
+) {
+    replication.publish_call(call_id, ctx.now()).await;
+}
 
 /// Invites a callee and rings them.
 ///
@@ -184,15 +240,21 @@ pub(crate) async fn handle_answer(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallAnswer = from_frame(frame).map_err(fault::from_wire)?;
+    hold_call(replication, ctx, request.call_id).await;
     let event = svc
         .answer(&caller, request.call_id, ctx.identity().device_id())
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
         publish_to_both_parties(ctx, svc, relay, &caller, request.call_id, &event).await;
+        // The answer is the write the inviting node cannot make and cannot
+        // guess: it carries the answering device, which is the id the caller's
+        // SDP will name as its target.
+        mirror_call(replication, ctx, request.call_id).await;
     }
     Ok(())
 }
@@ -205,15 +267,18 @@ pub(crate) async fn handle_decline(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallDecline = from_frame(frame).map_err(fault::from_wire)?;
+    hold_call(replication, ctx, request.call_id).await;
     let event = svc
         .decline(&caller, request.call_id, request.reason)
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
         publish_to_caller_of(ctx, svc, relay, &caller, request.call_id, &event).await;
+        mirror_call(replication, ctx, request.call_id).await;
     }
     Ok(())
 }
@@ -225,13 +290,16 @@ pub(crate) async fn handle_cancel(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallCancel = from_frame(frame).map_err(fault::from_wire)?;
+    hold_call(replication, ctx, request.call_id).await;
     let event = svc.cancel(&caller, request.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
         publish_to_callee_of(ctx, svc, relay, &caller, request.call_id, &event).await;
+        mirror_call(replication, ctx, request.call_id).await;
     }
     Ok(())
 }
@@ -246,13 +314,16 @@ pub(crate) async fn handle_end(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallEnd = from_frame(frame).map_err(fault::from_wire)?;
+    hold_call(replication, ctx, request.call_id).await;
     let event = svc.end(&caller, request.call_id, request.reason).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
         publish_to_other_party(ctx, svc, relay, &caller, request.call_id, &event).await;
+        mirror_call(replication, ctx, request.call_id).await;
     }
     Ok(())
 }
@@ -270,10 +341,20 @@ pub(crate) async fn handle_sdp(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallSdp = from_frame(frame).map_err(fault::from_wire)?;
-    relay_sdp(ctx, svc, relay, &caller, Opcode::CallSdp, request).await
+    relay_sdp(
+        ctx,
+        svc,
+        relay,
+        replication,
+        &caller,
+        Opcode::CallSdp,
+        request,
+    )
+    .await
 }
 
 /// Relays a mid-call renegotiation. `CallRenegotiate` and `CallSdp` are the
@@ -284,6 +365,7 @@ pub(crate) async fn handle_renegotiate(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallRenegotiate = from_frame(frame).map_err(fault::from_wire)?;
@@ -291,6 +373,7 @@ pub(crate) async fn handle_renegotiate(
         ctx,
         svc,
         relay,
+        replication,
         &caller,
         Opcode::CallRenegotiate,
         CallSdp {
@@ -375,6 +458,7 @@ async fn relay_sdp(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
     caller: &CallCaller,
     opcode: Opcode,
     request: CallSdp,
@@ -406,11 +490,25 @@ async fn relay_sdp(
         .await;
         return Ok(());
     }
+    // The group store's `NOT_FOUND` above was the fact that this id belongs to
+    // the other kind of call, so from here on the frame is a 1:1 relay and the
+    // row may live on the node that minted it. Asked only on this path: a
+    // question to the fleet about an id that turns out to name a group call
+    // would be a broadcast about somebody else's call, and the wait that
+    // follows a fleet which holds nothing is three seconds a ringing client
+    // does not have. The ask is the half section 165 recorded as owed — a
+    // relay from the callee's side arriving at a node that never minted the
+    // row — and after the first frame lands it costs one local read.
+    hold_call(replication, ctx, request.call_id).await;
     let (relayed, connected) = svc.relay_sdp(caller, request).await?;
     let call = svc.call(caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = connected {
         publish_to_both_parties(ctx, svc, relay, caller, relayed.call_id, &event).await;
+        // The one write a relay makes, and the one the other node cannot
+        // infer: `Connected` is set here because this is the node that saw the
+        // callee's sealed answer go past.
+        mirror_call(replication, ctx, relayed.call_id).await;
     }
     // The relay succeeded, so `to_device` is one of the call's two devices;
     // the row says which account's topic reaches it.
@@ -430,6 +528,7 @@ pub(crate) async fn handle_ice(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallIce = from_frame(frame).map_err(fault::from_wire)?;
@@ -456,6 +555,10 @@ pub(crate) async fn handle_ice(
         .await;
         return Ok(());
     }
+    // The 1:1 path only, for the reason the SDP relay asks there: the group
+    // store's `NOT_FOUND` above was the fact that this id names the other
+    // kind. Candidates change nothing, so nothing is mirrored back.
+    hold_call(replication, ctx, request.call_id).await;
     let relayed = svc.relay_ice(&caller, request).await?;
     let call = svc.call(&caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
@@ -488,6 +591,7 @@ pub(crate) async fn handle_key_update(
     frame: &Frame,
     svc: &SharedCallkeeper,
     relay: &PresenceRelay,
+    replication: &ReplicationRelay,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallKeyUpdate = from_frame(frame).map_err(fault::from_wire)?;
@@ -507,6 +611,10 @@ pub(crate) async fn handle_key_update(
         Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {}
         Err(error) => return Err(error),
     }
+    // The 1:1 read below is the participant check, and it is the only reason
+    // this path needs the row at all: a rotation changes no call state, so the
+    // ask is here and no mirror is.
+    hold_call(replication, ctx, request.call_id).await;
     let call = svc.call(&caller, request.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     // A key update for a call that is over reaches nobody who cares, and

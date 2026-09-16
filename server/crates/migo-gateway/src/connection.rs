@@ -1072,10 +1072,12 @@ impl<T: Transport> Connection<'_, T> {
     /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
     /// `ENTITLEMENTS` (240) out of its head, the conversation-federation tier later
     /// carved `FED_CONVERSATION_SUBSCRIBE` (241) and `FED_CONVERSATION_EVENT` (242),
-    /// the row-replication tier carved 243-246, and the call block's last free
-    /// question, the call listing, carved 247 — each carve-out per the written
-    /// decisions section 145 records — so the
-    /// never-allocated span this gate polices is 248-255. A client speaking one is
+    /// the row-replication tier carved `FED_ACCOUNT_QUERY` and `FED_ACCOUNT_ROWS` (243,
+    /// 244) and `FED_CONVERSATION_QUERY` and `FED_CONVERSATION_ROWS` (245, 246), the
+    /// call enumeration carved `CALL_LIST` (247), and the call-row replication tier
+    /// carved `FED_CALL_QUERY` and `FED_CALL_ROWS` (248, 249) — each carve-out per the
+    /// written decisions section 145 records — so the
+    /// never-allocated span this gate polices is 250-255. A client speaking one is
     /// speaking a dialect this node promised
     /// not to know — and unlike a merely unknown opcode (a newer client, answered and
     /// kept going), a reserved number is one this build has sworn an opinion about, so
@@ -1091,7 +1093,7 @@ impl<T: Transport> Connection<'_, T> {
     ) -> FrameOutcome {
         let error = fault::error(
             codes::UNKNOWN_OPCODE,
-            "reserved opcode range 248-255 is refused until a written decision allocates it",
+            "reserved opcode range 250-255 is refused until a written decision allocates it",
         )
         .public("reserved opcode");
         push_error(
@@ -1171,7 +1173,7 @@ impl<T: Transport> Connection<'_, T> {
 
         // Section 146: a number inside the never-allocated span of the reserved range
         // is refused before the opcode is even resolved — terminal, not answered.
-        if (248..=255).contains(&opcode_raw) {
+        if (250..=255).contains(&opcode_raw) {
             return self.refuse_reserved_range(outbound, opcode_raw, correlation, now);
         }
 
