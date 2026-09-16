@@ -233,7 +233,7 @@ async fn a_meshed_pair_delivers_events_over_a_channel_that_negotiates_tls_1_3() 
             .client_config(key32(1))
             .expect("the client config mints from the node identity"),
     );
-    let mut channel = connector
+    let channel = connector
         .connect(
             rustls::pki_types::ServerName::IpAddress(bound.ip().into()),
             tcp,
@@ -327,7 +327,8 @@ async fn a_plaintext_client_cannot_speak_to_the_listener() {
     let mut answered = Vec::new();
     tokio::time::timeout(WAIT_LIMIT, plain.read_to_end(&mut answered))
         .await
-        .expect("the gate settles the connection promptly, not by holding it open");
+        .expect("the gate settles the connection promptly, not by holding it open")
+        .expect("the connection ends as a close, not an error the client could read");
     // A TLS alert is at most a few bytes; a mesh frame is a length-prefixed body. Either
     // way the client never receives anything it could mistake for MWP.
     assert!(
