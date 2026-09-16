@@ -788,8 +788,9 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized, H: Herald +
 ///
 /// The herald is the fourth of those and the only one that faces a *user* rather than a
 /// store: it is how a ruling reaches the person who filed the report. A deployment that
-/// passes [`NoHerald`] still records every ruling — what it gives up is the reporter
-/// finding out, which is the whole of what this crate can do for them without one.
+/// passes [`NoHerald`](crate::traits::NoHerald) still records every ruling — what it gives up
+/// is the reporter finding out, which is the whole of what this crate can do for them
+/// without one.
 #[must_use]
 pub fn open(
     store: SharedStore,
