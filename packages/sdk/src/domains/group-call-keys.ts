@@ -72,6 +72,8 @@ import type { CallKeyUpdate, CallRenegotiate, CallSdp } from '@migo/protocol';
 import { CallKeyState } from '../call-crypto.js';
 import { ContentType, encodeContent, decodeContent } from '../content.js';
 import { SdkError } from '../errors.js';
+import { ListenerSet } from './listeners.js';
+import type { Listener } from './listeners.js';
 import type { SessionCrypto } from '../session-crypto.js';
 import type { GroupCallDomain } from './group-calls.js';
 import type { EventErrorHandler, Rpc } from './rpc.js';
@@ -115,8 +117,10 @@ interface TrackedCall {
  *
  * One instance per client, constructed alongside the signaling domain it listens to and started
  * with the others. It owns no UI state and touches no media: the frames it seals and opens are
- * the media plane's ({@link sealFrame} / {@link openFrame}), and everything else it does is the
- * key distribution section 163 makes the client's own obligation.
+ * the media plane's ({@link sealFrame} / {@link openFrame}), the key-state changes that tell the
+ * media plane when sealing is possible and when a rotation has invalidated a negotiation in
+ * flight are its {@link onKeyChanged}, and everything else it does is the key distribution
+ * section 163 makes the client's own obligation.
  */
 export class GroupCallKeysDomain {
   readonly #rpc: Rpc;
@@ -127,6 +131,7 @@ export class GroupCallKeysDomain {
   readonly #onEventError: EventErrorHandler | undefined;
 
   readonly #calls = new Map<Id, TrackedCall>();
+  readonly #keyListeners: ListenerSet<Id>;
   #unsubscribes: Array<() => void> = [];
 
   constructor(
@@ -143,6 +148,9 @@ export class GroupCallKeysDomain {
     this.#accountId = accountId;
     this.#deviceId = deviceId;
     this.#onEventError = onEventError;
+    // The opcode here only labels a failing handler in the error sink; the events this set carries
+    // are this domain's own key-state changes, not wire frames.
+    this.#keyListeners = new ListenerSet<Id>(OP.CALL_KEY_UPDATE, onEventError);
   }
 
   /** Begins tracking the seated calls' keys. Idempotent. */
@@ -168,7 +176,27 @@ export class GroupCallKeysDomain {
     this.#calls.clear();
   }
 
+  /** Announces a call's key-state change to the registered listeners. */
+  #announceKey(callId: Id): void {
+    this.#keyListeners.deliver(callId);
+  }
+
   // --- the media plane's surface ---
+
+  /**
+   * Registers a handler for this device's frame-key state changing. Returns its unsubscribe.
+   *
+   * Fires when a call's key first becomes held — the first seat's mint, or a joiner installing a
+   * distributor's answer — and on every epoch advance after that, whether the advance was this
+   * device's own rotation or an update it adopted. The media plane is the customer: it cannot
+   * seal or open a call's signaling until a key is held, and a rotation invalidates the sealing
+   * of anything still mid-negotiation — the epoch is the AEAD's associated data, so an offer
+   * sealed under the old epoch no longer opens once the roster moved. This listener is how it
+   * learns both moments without polling.
+   */
+  onKeyChanged(handler: Listener<Id>): () => void {
+    return this.#keyListeners.add(handler);
+  }
 
   /** Whether this device holds a frame key for the call. */
   hasKey(callId: Id): boolean {
@@ -239,6 +267,7 @@ export class GroupCallKeysDomain {
       // share one with), so the key is minted and every later participant receives it by the ask
       // path below. See the class doc for why the 1:1 derivation cannot serve a group's first key.
       entry.state = CallKeyState.create(roster.callId);
+      this.#announceKey(roster.callId);
       return;
     }
     entry.distributor = distributor.deviceId;
@@ -343,6 +372,7 @@ export class GroupCallKeysDomain {
     }
     const sealed = entry.state.rotate();
     const epoch = entry.state.epoch();
+    this.#announceKey(callId);
     void this.#rpc
       .call(OP.CALL_KEY_UPDATE, encodeCallKeyUpdate, decodeAcknowledged, {
         callId,
@@ -381,6 +411,7 @@ export class GroupCallKeysDomain {
     }
     try {
       entry.state.adopt(event.epoch, event.sealedKeyMaterial);
+      this.#announceKey(event.callId);
     } catch (cause) {
       this.#onEventError?.(OP.CALL_KEY_UPDATE, cause);
     }
@@ -503,6 +534,7 @@ export class GroupCallKeysDomain {
       return;
     }
     entry.state = received;
+    this.#announceKey(event.callId);
   }
 
   /** The held key for a call, or a thrown error naming the call when none is held. */
