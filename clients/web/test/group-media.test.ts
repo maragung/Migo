@@ -519,11 +519,16 @@ class VirtualMesh {
 
   sendSdp = async (from: Id, to: Id, sealed: Uint8Array): Promise<void> => {
     this.relayed.push({ from, to, kind: 'sdp', sealed });
+    // The connection this send belongs to, captured now: a plane builds a connection and sends in
+    // the same turn, so the newest one for `from` is this link's. Reading it at delivery time would
+    // be wrong whenever two sends are in flight together — a held wire delivers them interleaved,
+    // and the newest connection then belongs to whichever link was built last.
+    const sender = this.lastPc.get(from);
     if (this.hold) {
-      this.queue.push(() => void this.deliverSdp(from, to, sealed));
+      this.queue.push(() => void this.deliverSdp(from, to, sealed, sender));
       return;
     }
-    await this.deliverSdp(from, to, sealed);
+    await this.deliverSdp(from, to, sealed, sender);
   };
 
   sendIce = (from: Id, to: Id, sealed: Uint8Array): Promise<void> => {
@@ -536,8 +541,13 @@ class VirtualMesh {
     return Promise.resolve();
   };
 
-  /** Delivers everything a hold queued, in the order it was sent. */
+  /**
+   * Lifts the hold and delivers everything it queued, in the order it was sent. Lifting it first is
+   * the point: the deliveries answer each other, and an answer that stayed held would never reach
+   * the dialer waiting for it.
+   */
   unpause(): void {
+    this.hold = false;
     while (this.queue.length > 0) {
       const deliver = this.queue.shift();
       deliver?.();
@@ -548,7 +558,17 @@ class VirtualMesh {
     return [a as string, b as string].sort().join('|');
   }
 
-  private deliverSdp = async (from: Id, to: Id, sealed: Uint8Array): Promise<void> => {
+  /**
+   * Delivers one description to its target. `sender` is the connection the sender built for this
+   * link, captured when the send left — the wire cannot re-derive it here, because two sends to the
+   * same device can be in flight at once and the newest connection then belongs to the other link.
+   */
+  private deliverSdp = async (
+    from: Id,
+    to: Id,
+    sealed: Uint8Array,
+    sender: FakePeerConnection | undefined,
+  ): Promise<void> => {
     const target = this.planes.get(to);
     if (target === undefined) {
       return;
@@ -556,33 +576,30 @@ class VirtualMesh {
     const key = this.pairKey(from, to);
     let link = this.links.get(key);
     if (link === undefined) {
-      const dialer = this.lastPc.get(from);
-      assert.ok(dialer !== undefined, 'an offer implies the offerer just built a peer connection');
-      link = { dialerDevice: from, dialer, answerer: null, connected: false };
+      // The first frame of a link is its offer, so the sender is the dialer.
+      assert.ok(sender !== undefined, 'an offer implies the offerer just built a peer connection');
+      link = { dialerDevice: from, dialer: sender, answerer: null, connected: false };
       this.links.set(key, link);
-      dialer.link = link;
+      sender.link = link;
     } else if (link.dialerDevice === from) {
       // A re-dial after a reset: the offerer's fresh peer connection replaces the stranded one. Only
       // the dialer's own device may take the seat — an answer arriving from the other end also brings a
       // peer connection this wire has never seen, and letting it claim the dialer would strand the link
       // one description short of connecting.
-      const current = this.lastPc.get(from);
-      if (current !== undefined && current !== link.dialer && current.link === null) {
-        link.dialer = current;
-        current.link = link;
+      if (sender !== undefined && sender !== link.dialer && sender.link === null) {
+        link.dialer = sender;
+        sender.link = link;
         if (link.answerer?.connectionState === 'closed') {
           link.answerer = null;
         }
       }
+    } else if (link.answerer === null && sender !== undefined && sender.link === null) {
+      // The other end's first frame is its answer, and the connection it built to answer is this
+      // link's answerer.
+      link.answerer = sender;
+      sender.link = link;
     }
     await target.onSdp({ callId: CALL, fromDevice: from, toDevice: to, sealedSdp: sealed });
-    if (link.answerer === null) {
-      const answerer = this.lastPc.get(to);
-      if (answerer !== undefined && answerer.link === null) {
-        link.answerer = answerer;
-        answerer.link = link;
-      }
-    }
     this.maybeConnect(link);
   };
 

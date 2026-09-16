@@ -871,13 +871,17 @@ export class GroupMediaPlane {
     for (const link of this.#links.values()) {
       this.#closeLink(link);
     }
+    // One last projection, said as a fact before the plane goes quiet: every link this seat held is
+    // closed. The stopped guard silences every later emit and this is deliberately the exception —
+    // a host that renders from onLinks would otherwise be left showing seats that are gone, because
+    // the links are about to leave the projection entirely.
+    this.#deps.onLinks?.(this.links());
     this.#links.clear();
     for (const track of this.#localStream?.getTracks() ?? []) {
       track.stop();
     }
     this.#localStream = null;
     this.#localVideoTrack = null;
-    this.#emit();
   }
 
   // --- the internals -------------------------------------------------------------------------
