@@ -624,9 +624,16 @@ function makeParticipant(
   opts: {
     mediaKind?: CallMediaKind;
     counterScript?: RawLinkCounters[];
+    /**
+     * The frame-key state this seat's plane seals and opens through. It is handed in because the
+     * plane captures it when the plane is built: a state installed in `mesh.keys` afterwards is a
+     * *different* key from the one the closures hold, and two seats wired that way cannot open
+     * each other's frames — the negotiation dies silently and no link ever connects.
+     */
+    keys?: CallKeyState;
   } = {},
 ): { plane: GroupMediaPlane; keys: CallKeyState; links: GroupMediaLink[] } {
-  const keys = mesh.keys.get(device) ?? CallKeyState.create(CALL);
+  const keys = opts.keys ?? mesh.keys.get(device) ?? CallKeyState.create(CALL);
   mesh.keys.set(device, keys);
   const mediaKind = opts.mediaKind ?? CallMediaKind.Audio;
   const seen: GroupMediaLink[] = [];
@@ -695,10 +702,8 @@ async function twoParties(opts: { syncIce?: boolean } = {}): Promise<{
     CALL,
     aKeys.sealedJoinDistribution(sessionSecret),
   );
-  const a = makeParticipant(mesh, DEV_A, ACC_A);
-  const b = makeParticipant(mesh, DEV_B, ACC_B);
-  mesh.keys.set(DEV_A, aKeys);
-  mesh.keys.set(DEV_B, bKeys);
+  const a = makeParticipant(mesh, DEV_A, ACC_A, { keys: aKeys });
+  const b = makeParticipant(mesh, DEV_B, ACC_B, { keys: bKeys });
   await a.plane.begin([SEAT_A]);
   a.plane.seatsChanged([SEAT_A, SEAT_B]);
   await b.plane.begin([SEAT_A, SEAT_B]);
@@ -771,10 +776,14 @@ test('mute touches the microphone everywhere; the camera toggle exists only wher
     CALL,
     aKeys.sealedJoinDistribution(secret),
   );
-  const a = makeParticipant(mesh, DEV_A, ACC_A, { mediaKind: CallMediaKind.Video });
-  const b = makeParticipant(mesh, DEV_B, ACC_B, { mediaKind: CallMediaKind.Video });
-  mesh.keys.set(DEV_A, aKeys);
-  mesh.keys.set(DEV_B, bKeys);
+  const a = makeParticipant(mesh, DEV_A, ACC_A, {
+    mediaKind: CallMediaKind.Video,
+    keys: aKeys,
+  });
+  const b = makeParticipant(mesh, DEV_B, ACC_B, {
+    mediaKind: CallMediaKind.Video,
+    keys: bKeys,
+  });
   await a.plane.begin([SEAT_A]);
   a.plane.seatsChanged([SEAT_A, SEAT_B]);
   await b.plane.begin([SEAT_A, SEAT_B]);
@@ -807,10 +816,8 @@ test('mute touches the microphone everywhere; the camera toggle exists only wher
     CALL,
     cKeys.sealedJoinDistribution(secret),
   );
-  const c = makeParticipant(meshAudio, 'dev-c2' as Id, 'acc-c2' as Id);
-  const d = makeParticipant(meshAudio, 'dev-d2' as Id, 'acc-d2' as Id);
-  meshAudio.keys.set('dev-c2' as Id, cKeys);
-  meshAudio.keys.set('dev-d2' as Id, dKeys);
+  const c = makeParticipant(meshAudio, 'dev-c2' as Id, 'acc-c2' as Id, { keys: cKeys });
+  const d = makeParticipant(meshAudio, 'dev-d2' as Id, 'acc-d2' as Id, { keys: dKeys });
   const SEAT_C2 = { userId: 'acc-c2' as Id, deviceId: 'dev-c2' as Id };
   const SEAT_D2 = { userId: 'acc-d2' as Id, deviceId: 'dev-d2' as Id };
   await c.plane.begin([SEAT_C2]);
@@ -885,8 +892,7 @@ test('leave closes every link and stops every local track; a departure closes ex
     CALL,
     mesh.keys.get(DEV_A)!.sealedJoinDistribution(secret),
   );
-  const c = makeParticipant(mesh, DEV_C, ACC_C);
-  mesh.keys.set(DEV_C, cKeys);
+  const c = makeParticipant(mesh, DEV_C, ACC_C, { keys: cKeys });
   a.plane.seatsChanged([SEAT_A, SEAT_B, SEAT_C]);
   b.plane.seatsChanged([SEAT_A, SEAT_B, SEAT_C]);
   await c.plane.begin([SEAT_A, SEAT_B, SEAT_C]);
@@ -943,8 +949,7 @@ test('a rotation strands in-flight negotiations; the dialer re-dials under the f
     CALL,
     mesh.keys.get(DEV_A)!.sealedJoinDistribution(secret),
   );
-  const c = makeParticipant(mesh, DEV_C, ACC_C);
-  mesh.keys.set(DEV_C, cKeys);
+  const c = makeParticipant(mesh, DEV_C, ACC_C, { keys: cKeys });
   a.plane.seatsChanged([SEAT_A, SEAT_B, SEAT_C]);
   b.plane.seatsChanged([SEAT_A, SEAT_B, SEAT_C]);
   mesh.hold = true;
@@ -1045,10 +1050,9 @@ test('a live video link degrades to its target and recovers one rung per interva
   const a = makeParticipant(mesh, DEV_A, ACC_A, {
     mediaKind: CallMediaKind.Video,
     counterScript: [c0, c1, c2, c3],
+    keys: aKeys,
   });
-  const b = makeParticipant(mesh, DEV_B, ACC_B);
-  mesh.keys.set(DEV_A, aKeys);
-  mesh.keys.set(DEV_B, bKeys);
+  const b = makeParticipant(mesh, DEV_B, ACC_B, { keys: bKeys });
   await a.plane.begin([SEAT_A]);
   a.plane.seatsChanged([SEAT_A, SEAT_B]);
   await b.plane.begin([SEAT_A, SEAT_B]);
