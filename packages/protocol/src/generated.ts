@@ -4569,6 +4569,104 @@ export function decodeFedConversationRows(r: Reader): FedConversationRows {
   return out;
 }
 
+/** A node asks its peers which of them holds a 1:1 call row it has none of: the call-row tier of section 170, asked as a broadcast because a call row carries no home label to read - the node that accepted the invite owns the row, and nothing in the row names that node. The ask rides the mesh only from a miss on the signalling path, when a frame names a call this node cannot resolve: an answer, a decline, or a relay whose call belongs to a conversation this node serves but whose row was born somewhere else. A peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same NOT_FOUND it would have answered with no mesh at all. Asked only by frames that can only be about a call that already exists - the answer, the decline, the cancel, the end, and the three sealed relays - never by an invite, which mints the row here and would pay the whole wait for an answer that is silence by construction. */
+export interface FedCallQuery {
+  epoch: number;
+  /** The call the asker cannot resolve; ids are client-minted and globally unique, so a peer either holds this row or does not. */
+  callId: Id;
+}
+
+export function encodeFedCallQuery(w: Writer, v: FedCallQuery): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.id(v.callId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedCallQuery(r: Reader): FedCallQuery {
+  r.enter();
+  const epoch = r.u64();
+  const callId = r.id();
+  const out: FedCallQuery = { epoch, callId } as FedCallQuery;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The answer to a FedCallQuery, from the peer that holds the call: the row verbatim, nothing derived. Every field crosses as the owner stores it - the state in CallStateEvent's numbering, the ring deadline, the answer time, and the end reason once there is one - because the replica's whole job is to let a node that never accepted the invite resolve the frames that arrive for it, and a row reconstructed from anything less would answer a different call than the one being asked about. The same struct is the tier's push: every node that changes a call row mirrors the new row to its peers, because a 1:1 call has two writer nodes - one per party - and the node that minted the row would otherwise never learn the device the callee answered from. Applied by a peer only when the row is one this node asked for or one it already holds - never as an unsolicited row this node never had - and applied to an already-held row only when it moves the call forward in the state machine, so a mirrored Connecting cannot land on top of an Ended and resurrect a call both parties watched die. */
+export interface FedCallRows {
+  callId: Id;
+  conversationId: Id;
+  callerId: Id;
+  callerDevice: Id;
+  calleeId: Id;
+  /** 0=Audio, 1=Video. */
+  mediaKind: number;
+  /** CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected, 4=Ended. Three is Reconnecting, which this build's 1:1 calls never reach. */
+  state: number;
+  /** When the ring gives up; the replica owes the sweeper the same deadline the owner holds. */
+  expiresAt: number;
+  /** Set at answer time; absent while the call is still ringing. */
+  calleeDevice?: Id;
+  /** Present when state is Ended; EndReason's numbering. */
+  endReason?: number;
+  answeredAt?: number;
+  endedAt?: number;
+}
+
+export function encodeFedCallRows(w: Writer, v: FedCallRows): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.conversationId);
+  w.id(v.callerId);
+  w.id(v.callerDevice);
+  w.id(v.calleeId);
+  w.u32(v.mediaKind);
+  w.u32(v.state);
+  w.timestamp(v.expiresAt);
+  let present = 0;
+  if (v.calleeDevice !== undefined) present++;
+  if (v.endReason !== undefined) present++;
+  if (v.answeredAt !== undefined) present++;
+  if (v.endedAt !== undefined) present++;
+  w.u32(present);
+  if (v.calleeDevice !== undefined) { const value = v.calleeDevice; w.optional(1, (w) => { w.id(value); }); }
+  if (v.endReason !== undefined) { const value = v.endReason; w.optional(2, (w) => { w.u32(value); }); }
+  if (v.answeredAt !== undefined) { const value = v.answeredAt; w.optional(3, (w) => { w.timestamp(value); }); }
+  if (v.endedAt !== undefined) { const value = v.endedAt; w.optional(4, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeFedCallRows(r: Reader): FedCallRows {
+  r.enter();
+  const callId = r.id();
+  const conversationId = r.id();
+  const callerId = r.id();
+  const callerDevice = r.id();
+  const calleeId = r.id();
+  const mediaKind = r.u32();
+  const state = r.u32();
+  const expiresAt = r.timestamp();
+  const out: FedCallRows = { callId, conversationId, callerId, callerDevice, calleeId, mediaKind, state, expiresAt } as FedCallRows;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.calleeDevice = sub.id(); break;
+      case 2: out.endReason = sub.u32(); break;
+      case 3: out.answeredAt = sub.timestamp(); break;
+      case 4: out.endedAt = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
 export interface FedKeyRotate {
   nodeId: string;
   newPublicKey: Uint8Array;
@@ -7635,6 +7733,10 @@ export const OP = {
   FED_CONVERSATION_QUERY: 245,
   /** The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream. */
   FED_CONVERSATION_ROWS: 246,
+  /** A node asks which peer holds a call row it cannot resolve, so a callee whose node never accepted the invite can answer a ring the caller's node recorded. Broadcast, and answered only by the peer that holds the row: the rest stay silent. */
+  FED_CALL_QUERY: 248,
+  /** The owning peer's answer: the call row verbatim, so the asker can resolve the frames that arrive for a call whose invite it never saw. Applied only by a node that asked and only where it held nothing, so a peer can feed a miss but never overwrite local truth. */
+  FED_CALL_ROWS: 249,
   /** Invites a callee to a call. */
   CALL_INVITE: 224,
   /** Tells the callee a call is ringing. */
@@ -7805,6 +7907,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   244: { code: 244, name: 'FED_ACCOUNT_ROWS', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAccountRows', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   245: { code: 245, name: 'FED_CONVERSATION_QUERY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationQuery', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   246: { code: 246, name: 'FED_CONVERSATION_ROWS', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedConversationRows', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  248: { code: 248, name: 'FED_CALL_QUERY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedCallQuery', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  249: { code: 249, name: 'FED_CALL_ROWS', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedCallRows', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [], feature: 'CALLS' },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [], feature: 'CALLS' },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'CALLS' },

@@ -1246,7 +1246,7 @@ async fn a_reserved_opcode_is_refused_and_closes_the_connection() {
 #[tokio::test]
 async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate() {
     // 240 is ENTITLEMENTS — the first number carved from the reserved head (section
-    // 145's store carve-out). The range gate must police 248-255 and leave the
+    // 145's store carve-out). The range gate must police 250-255 and leave the
     // allocated head alone.
     let h = Harness::new();
     let pipe = Pipe::new();
@@ -1295,8 +1295,9 @@ async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gat
 #[tokio::test]
 async fn the_call_listing_at_the_new_reserved_head_is_not_caught_by_the_range_gate() {
     // 247 is CALL_LIST — the number the call block's last free question took from the
-    // reserved head (section 145's latest carve-out), which moved the head of the
-    // allocated span up by one. The gate must police 248-255 and leave 247 alone, and
+    // reserved head (section 145's carve-out that came before the call-row pair),
+    // which moved the head of the allocated span up by one. The gate must police
+    // 250-255 and leave 247 alone, and
     // the way to know it did is that the *phase* gate answered instead: an allocated
     // opcode is refused for the session's phase, a reserved one for its number.
     let h = Harness::new();
@@ -1337,7 +1338,7 @@ async fn the_conversation_federation_pair_passes_the_range_gate_and_hits_the_ser
     // conversation-federation tier's carve-out from the reserved head (section 145,
     // the same written-decision path the store carve-out at 239-240 took). Two
     // gates could refuse them from a client socket: the range gate (which now
-    // polices 248-255) and the server-auth gate every FED_* opcode already answers
+    // polices 250-255) and the server-auth gate every FED_* opcode already answers
     // to. The proof this test pins is the *ordering*: the refusal the client
     // hears is the server-auth one — UNEXPECTED_OPCODE, connection closed as a
     // protocol violation — and not the range gate's "reserved opcode" hint, which
@@ -1387,7 +1388,7 @@ async fn the_row_replication_tier_passes_the_range_gate_and_hits_the_server_auth
     // FED_CONVERSATION_ROWS — the row-replication tier's carve-out from the reserved
     // head (section 145, the same written-decision path the store carve-out at 239-240
     // and the conversation-federation carve-out at 241-242 took). The range gate now
-    // polices 248-255, so each of the four must survive it and be answered by the
+    // polices 250-255, so each of the four must survive it and be answered by the
     // server-auth gate every FED_* opcode answers to. Unlike the pair test above, the
     // refusal is terminal so only the first frame of a session is ever answered — each
     // number gets its own session here, or the proof would cover one number and claim
@@ -1416,6 +1417,56 @@ async fn the_row_replication_tier_passes_the_range_gate_and_hits_the_server_auth
             codes::UNEXPECTED_OPCODE,
             "the allocated row-replication opcode {} is refused as a server-auth opcode, \
              the same refusal FED_HELLO already earns — proof the range gate let it through",
+            raw
+        );
+        assert_ne!(
+            error.message.as_deref(),
+            Some("reserved opcode"),
+            "the range gate's hint must not appear for a number the registry allocates"
+        );
+        assert_eq!(
+            h.sessions_closed("protocol_violation"),
+            1,
+            "the server-auth refusal is terminal, so the session ends as a violation"
+        );
+        assert_eq!(h.sessions_live(), 0);
+        assert!(pipe.was_closed());
+    }
+}
+
+#[tokio::test]
+async fn the_call_row_replication_pair_passes_the_range_gate_and_hits_the_server_auth_gate() {
+    // 248-249 are FED_CALL_QUERY and FED_CALL_ROWS — the third row tier's carve-out
+    // from the reserved head (section 145, the same written-decision path the store
+    // carve-out at 239-240, the conversation-federation carve-out at 241-242, the
+    // row-replication carve-out at 243-246, and the call listing at 247 took). The
+    // range gate polices 250-255 now, so both numbers must survive it and be answered
+    // by the server-auth gate every FED_* opcode answers to. Each number gets its own
+    // session, because the server-auth refusal is terminal: one session could only
+    // ever prove the first of the two.
+    for raw in [248u32, 249] {
+        let h = Harness::new();
+        let pipe = Pipe::new();
+        pipe.client(
+            Opcode::Hello,
+            1,
+            &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+        );
+        // A raw frame, for the reason the row-replication test above uses one: the
+        // question is about the gate, not the decoder, and the server-auth refusal
+        // runs before any payload decode.
+        let frame = to_frame(raw, 2, &Ping::default()).expect("a scripted frame must encode");
+        pipe.push_bytes(frame.encode().expect("a scripted frame must encode"));
+
+        h.serve(&pipe).await;
+
+        let frames = pipe.sent();
+        let _welcome = welcome_in(&frames);
+        let error = sole_error(&frames);
+        assert_eq!(
+            error.code,
+            codes::UNEXPECTED_OPCODE,
+            "the allocated call-row opcode {} is refused as a server-auth opcode, the same              refusal FED_HELLO already earns — proof the range gate let it through",
             raw
         );
         assert_ne!(

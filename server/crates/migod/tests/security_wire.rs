@@ -211,7 +211,7 @@ async fn assert_error_then_close(
     error
 }
 
-/// Every opcode in the never-allocated span 248-255 is refused with the public
+/// Every opcode in the never-allocated span 250-255 is refused with the public
 /// hint "reserved opcode" and closes the connection. The whole span, not a
 /// sample: a regression that frees one number at the tail is exactly as wrong
 /// as one at the head.
@@ -219,7 +219,7 @@ async fn assert_error_then_close(
 async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_connection() {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    for raw in 248u32..=255 {
+    for raw in 250u32..=255 {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
         send_frame(&mut stream, &frame).await;

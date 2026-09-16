@@ -2601,6 +2601,88 @@
       ]
     },
     {
+      "name": "FedCallQuery",
+      "doc": "A node asks its peers which of them holds a 1:1 call row it has none of: the call-row tier of section 170, asked as a broadcast because a call row carries no home label to read - the node that accepted the invite owns the row, and nothing in the row names that node. The ask rides the mesh only from a miss on the signalling path, when a frame names a call this node cannot resolve: an answer, a decline, or a relay whose call belongs to a conversation this node serves but whose row was born somewhere else. A peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same NOT_FOUND it would have answered with no mesh at all. Asked only by frames that can only be about a call that already exists - the answer, the decline, the cancel, the end, and the three sealed relays - never by an invite, which mints the row here and would pay the whole wait for an answer that is silence by construction.",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "call_id",
+          "type": "id",
+          "doc": "The call the asker cannot resolve; ids are client-minted and globally unique, so a peer either holds this row or does not."
+        }
+      ]
+    },
+    {
+      "name": "FedCallRows",
+      "doc": "The answer to a FedCallQuery, from the peer that holds the call: the row verbatim, nothing derived. Every field crosses as the owner stores it - the state in CallStateEvent's numbering, the ring deadline, the answer time, and the end reason once there is one - because the replica's whole job is to let a node that never accepted the invite resolve the frames that arrive for it, and a row reconstructed from anything less would answer a different call than the one being asked about. The same struct is the tier's push: every node that changes a call row mirrors the new row to its peers, because a 1:1 call has two writer nodes - one per party - and the node that minted the row would otherwise never learn the device the callee answered from. Applied by a peer only when the row is one this node asked for or one it already holds - never as an unsolicited row this node never had - and applied to an already-held row only when it moves the call forward in the state machine, so a mirrored Connecting cannot land on top of an Ended and resurrect a call both parties watched die.",
+      "fields": [
+        {
+          "name": "call_id",
+          "type": "id"
+        },
+        {
+          "name": "conversation_id",
+          "type": "id"
+        },
+        {
+          "name": "caller_id",
+          "type": "id"
+        },
+        {
+          "name": "caller_device",
+          "type": "id"
+        },
+        {
+          "name": "callee_id",
+          "type": "id"
+        },
+        {
+          "name": "media_kind",
+          "type": "u32",
+          "doc": "0=Audio, 1=Video."
+        },
+        {
+          "name": "state",
+          "type": "u32",
+          "doc": "CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected, 4=Ended. Three is Reconnecting, which this build's 1:1 calls never reach."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "doc": "When the ring gives up; the replica owes the sweeper the same deadline the owner holds."
+        },
+        {
+          "name": "callee_device",
+          "type": "id",
+          "optional": true,
+          "id": 1,
+          "doc": "Set at answer time; absent while the call is still ringing."
+        },
+        {
+          "name": "end_reason",
+          "type": "u32",
+          "optional": true,
+          "id": 2,
+          "doc": "Present when state is Ended; EndReason's numbering."
+        },
+        {
+          "name": "answered_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 3
+        },
+        {
+          "name": "ended_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 4
+        }
+      ]
+    },
+    {
       "name": "FedKeyRotate",
       "fields": [
         {

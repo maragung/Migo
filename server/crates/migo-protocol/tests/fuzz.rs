@@ -36,13 +36,13 @@ use migo_protocol::{
 
 #[test]
 fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
-    // Every allocated opcode lives below 248 today (the highest is the call
-    // listing at 247), so the whole span 0..=300 is
+    // Every allocated opcode lives below 250 today (the highest is the call-row
+    // replication answer at 249), so the whole span 0..=300 is
     // swept exhaustively rather than sampled: it covers every allocated number,
     // the never-allocated gaps between ranges, and the reserved head.
     for raw in 0u32..=300 {
         let resolved = Opcode::from_wire(raw); // must not panic, for any input
-        let in_reserved_span = (248..=255).contains(&raw);
+        let in_reserved_span = (250..=255).contains(&raw);
         assert_eq!(
             resolved.is_some(),
             !in_reserved_span && Opcode::ALL.iter().any(|opcode| opcode.to_wire() == raw),
@@ -53,20 +53,21 @@ fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
     // The reserved span the gateway refuses before resolution (section 146):
     // the table must not know a single one of them, or the range gate and the
     // table would disagree about what this build speaks.
-    for raw in 248u32..=255 {
+    for raw in 250u32..=255 {
         assert_eq!(
             Opcode::from_wire(raw),
             None,
-            "opcode {raw} is inside the never-allocated span 248-255 and must not resolve"
+            "opcode {raw} is inside the never-allocated span 250-255 and must not resolve"
         )
     }
 
     // 240 is allocated (ENTITLEMENTS, section 145's store carve-out), 241-242
     // are allocated (the conversation-federation tier), 243-246 are
-    // allocated (the row-replication tier), and 247 is allocated (the call
-    // listing, the same section's latest carve-out); all of them must resolve
-    // — the server-auth gate, not the range gate, is what refuses the
-    // federation opcodes from a client.
+    // allocated (the row-replication tier), 247 is allocated (the call
+    // listing), and 248-249 are allocated (the call-row replication pair, the
+    // same section's latest carve-out); all of them must resolve — the
+    // server-auth gate, not the range gate, is what refuses the federation
+    // opcodes from a client.
     assert_eq!(Opcode::from_wire(240), Some(Opcode::Entitlements));
     assert_eq!(
         Opcode::from_wire(241),
@@ -78,6 +79,8 @@ fn the_opcode_table_resolves_the_low_span_and_the_reserved_tail_exactly() {
     assert_eq!(Opcode::from_wire(245), Some(Opcode::FedConversationQuery));
     assert_eq!(Opcode::from_wire(246), Some(Opcode::FedConversationRows));
     assert_eq!(Opcode::from_wire(247), Some(Opcode::CallList));
+    assert_eq!(Opcode::from_wire(248), Some(Opcode::FedCallQuery));
+    assert_eq!(Opcode::from_wire(249), Some(Opcode::FedCallRows));
 
     // Past the reserved span the numbers are simply unknown, not reserved:
     // a newer client speaking one is answered, not cut off.

@@ -664,9 +664,13 @@ impl App {
         // those on its tick. The ring timeout, the seat grace, and the TURN relays come
         // from the core `[calls]` section, mapped onto the wire's TURN shape, so an
         // operator tunes a ring without a recompile and a relayless deployment gets the
-        // honest empty list.
+        // honest empty list. The store is named here rather than minted inline because the
+        // row-replication tier binds the same `Arc` a layer later: a node's call rows have
+        // one home, and a tier that mirrored a second store would be replicating rows no
+        // handler ever reads.
+        let call_store: Arc<MemoryCallStore> = Arc::new(MemoryCallStore::new());
         let calls = migo_calls::open(
-            Arc::new(MemoryCallStore::new()),
+            Arc::clone(&call_store) as migo_calls::SharedCallStore,
             limiter.clone(),
             Arc::new(StoreCallGate::new(store.clone(), social.clone())),
             &registry,
@@ -863,11 +867,14 @@ impl App {
         // relays for the same reason they are — the transport and the gate
         // share it — and bound into the messaging gate's late-bound handle the
         // moment it exists, so the pull is live before the first client
-        // session can ask a question it answers.
-        let replication_relay = Arc::new(crate::replication::ReplicationRelay::new(
-            federation.clone(),
-            store.clone(),
-        ));
+        // session can ask a question it answers. The call store is bound too,
+        // which is what makes the tier's third map — the 1:1 call row a
+        // lifecycle frame names on the node that did not mint it — real rather
+        // than inert.
+        let replication_relay = Arc::new(
+            crate::replication::ReplicationRelay::new(federation.clone(), store.clone())
+                .with_calls(Arc::clone(&call_store) as migo_calls::SharedCallStore),
+        );
         replication_handle.set(Arc::clone(&replication_relay));
 
         // --- Layer 4: transports ---

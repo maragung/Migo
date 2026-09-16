@@ -34,16 +34,51 @@
 //! subscription: a setting the owner changes on the home node after the pull
 //! does not propagate until the next ask, which is the staleness this tier
 //! owes its readers and no more.
+//!
+//! # The third tier: call rows
+//!
+//! A 1:1 call row breaks the assumption the two tiers above are built on. An
+//! account or a conversation has one node that writes it; a call has two, one
+//! for each party's device, and which node that is falls out of where the two
+//! people happened to connect rather than out of anything the row says. So the
+//! call tier is the only one that is a pull *and* a push:
+//!
+//! - The pull is the same question and answer (`FED_CALL_QUERY` and
+//!   `FED_CALL_ROWS`, opcodes 248 and 249): the callee's node, handed
+//!   `CALL_ANSWER` for a row the inviting node minted, asks the fleet and
+//!   adopts the answer. That is the half section 165 recorded as owed — the
+//!   completion path of a call whose two devices sit on two nodes.
+//! - The push is the half a read-only replica would not survive. Once the
+//!   callee's node has answered, it holds `callee_device` and `Connecting`,
+//!   and the caller's node — which minted the row and is the node that will
+//!   route the caller's SDP — holds neither. So every node that changes a call
+//!   row mirrors the new row to every allowed peer, and a peer applies it only
+//!   when it already holds that row.
+//!
+//! What a node accepts therefore reads as one sentence: **a peer may fill a
+//! row this node asked for, and may update a row this node already holds, but
+//! may never plant a row this node never had and never asked about.** The
+//! update is ordered by the state machine itself — the wire numbering is
+//! already the order the states advance in, so a row only ever moves forward —
+//! which is what keeps a `Connecting` mirror from landing on top of an `Ended`
+//! one and resurrecting a call both parties already watched die.
+//!
+//! The tier is inert on a node whose relay was built without a call store
+//! (see [`ReplicationRelay::with_calls`]): no store, no rows to ask for, no
+//! question worth putting on the wire. That is the honest state of a process
+//! that does not serve calls at all, and it is what the tests that build a
+//! relay without one exercise.
 
 use std::collections::HashSet;
 use std::time::Duration;
 
+use migo_calls::{Call, CallState, EndReason, SharedCallStore};
 use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::FederatedEvent;
 use migo_federation::SharedMesh;
 use migo_protocol::{
-    FedAccountEdge, FedAccountQuery, FedAccountRows, FedConversationQuery, FedConversationRows,
-    Opcode, RelationshipKind,
+    FedAccountEdge, FedAccountQuery, FedAccountRows, FedCallQuery, FedCallRows,
+    FedConversationQuery, FedConversationRows, Opcode, RelationshipKind,
 };
 use migo_store::model::{AccountStatus, Conversation, Gender, NewAccount, Profile, Relationship};
 use migo_store::SharedStore;
@@ -103,6 +138,14 @@ pub struct ReplicationRelay {
     /// The conversations this process has an ask in flight for, with the same
     /// lifecycle as the accounts above.
     asked_conversations: parking_lot::Mutex<HashSet<Id>>,
+    /// The call store the third tier reads, writes, and mirrors. Absent on a
+    /// relay built without one, which makes the whole call tier inert rather
+    /// than wrong: this is the `Option` a process that serves no calls is
+    /// honestly described by, and the two tiers above it are untouched by it.
+    calls: Option<SharedCallStore>,
+    /// The calls this process has an ask in flight for, with the same
+    /// lifecycle as the accounts and conversations above.
+    asked_calls: parking_lot::Mutex<HashSet<Id>>,
 }
 
 impl ReplicationRelay {
@@ -114,7 +157,23 @@ impl ReplicationRelay {
             store,
             asked_accounts: parking_lot::Mutex::new(HashSet::new()),
             asked_conversations: parking_lot::Mutex::new(HashSet::new()),
+            calls: None,
+            asked_calls: parking_lot::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Binds the call store the third tier replicates.
+    ///
+    /// A builder rather than a fourth argument to [`Self::new`], because the
+    /// call store is not part of what a relay *is* — the two row tiers above
+    /// work on a node with no call service at all, and every test that builds
+    /// a relay for them keeps working unchanged. The composition root binds
+    /// the same `Arc` it hands `migo_calls::open`, so the service's writes and
+    /// this tier's mirrors read one store, not two.
+    #[must_use]
+    pub fn with_calls(mut self, calls: SharedCallStore) -> Self {
+        self.calls = Some(calls);
+        self
     }
 
     /// Whether an account's rows are already held: the profile is the read the
@@ -582,6 +641,239 @@ impl ReplicationRelay {
         Ok(true)
     }
 
+    /// Whether this node holds the call row.
+    ///
+    /// False on a relay with no call store, which is the same answer as "the
+    /// row is not here" and is all [`Self::ensure_call`] needs to stay inert.
+    async fn holds_call(&self, call_id: Id) -> bool {
+        let Some(calls) = &self.calls else {
+            return false;
+        };
+        calls
+            .get(call_id)
+            .await
+            .map(|row| row.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Pulls a call row from the node that minted it, then reports whether this
+    /// node now holds it.
+    ///
+    /// The same bounded wait as the two tiers above, for the same reason: the
+    /// ask must never wedge a client request, so a fleet that holds nothing
+    /// costs `ASK_ATTEMPTS × ASK_WAIT` and the answer is `false`, which leaves
+    /// the service to give the `NOT_FOUND` it would have given with no mesh at
+    /// all.
+    ///
+    /// The call sites are the 1:1 lifecycle frames and only those — the
+    /// frames that can only be about a call that already exists. A *new* call
+    /// is minted here, so asking about it would be asking the fleet about a row
+    /// nobody has yet: every invite would pay the whole wait for an answer that
+    /// is silence by construction.
+    pub(crate) async fn ensure_call(&self, call_id: Id, now: Timestamp) -> bool {
+        if self.calls.is_none() {
+            return false;
+        }
+        if self.holds_call(call_id).await {
+            return true;
+        }
+        if self.ask_call(call_id, now).await == 0 {
+            return false;
+        }
+        for _ in 0..ASK_ATTEMPTS {
+            tokio::time::sleep(ASK_WAIT).await;
+            if self.holds_call(call_id).await {
+                return true;
+            }
+        }
+        self.asked_calls.lock().remove(&call_id);
+        false
+    }
+
+    /// Registers the ask and broadcasts the call question, returning how many
+    /// peers were asked. The sibling of [`Self::ask_account`], and a broadcast
+    /// for the same reason: a call row names the conversation it belongs to
+    /// and nothing about which node holds it.
+    pub(crate) async fn ask_call(&self, call_id: Id, now: Timestamp) -> usize {
+        self.asked_calls.lock().insert(call_id);
+        let peers = self.allowed_peers().await;
+        if peers.is_empty() {
+            return 0;
+        }
+        let query = FedCallQuery {
+            epoch: self.mesh.epoch(),
+            call_id,
+        };
+        let payload = match encode_envelope(Opcode::FedCallQuery, &query) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%error, "cannot encode a call query a lifecycle frame asked for");
+                return 0;
+            }
+        };
+        let mut asked = 0;
+        for peer in peers {
+            let event = FederatedEvent {
+                target_node: peer,
+                opcode: Opcode::FedCallQuery.to_wire() as i32,
+                payload: payload.clone(),
+            };
+            match self.mesh.enqueue(event, now).await {
+                Ok(_) => asked += 1,
+                Err(error) => tracing::warn!(
+                    %error,
+                    peer = %peer.to_text(),
+                    "cannot enqueue a call query for this peer"
+                ),
+            }
+        }
+        asked
+    }
+
+    /// The answer half for calls: a peer asked, and this node holds the row.
+    ///
+    /// The row crosses verbatim — both devices included, because a node that
+    /// pulled it is a node that will route for one of them, and a replica
+    /// missing `callee_device` is a replica that cannot route the caller's
+    /// SDP. Silence is the answer for an id this node does not hold, exactly
+    /// as it is for the two tiers above: the asker's bounded wait fails closed
+    /// on silence, and a peer that guessed "not mine" out loud would be
+    /// inventing an answer about somebody else's call.
+    pub(crate) async fn answer_call(
+        &self,
+        peer: Id,
+        query: FedCallQuery,
+        now: Timestamp,
+    ) -> Result<()> {
+        self.mesh.check_epoch(query.epoch)?;
+        let Some(calls) = &self.calls else {
+            return Ok(());
+        };
+        let Some(call) = calls.get(query.call_id).await? else {
+            tracing::debug!(
+                call = %query.call_id.to_text(),
+                "asked about a call this node does not hold; staying silent"
+            );
+            return Ok(());
+        };
+        self.mesh
+            .enqueue(
+                FederatedEvent {
+                    target_node: peer,
+                    opcode: Opcode::FedCallRows.to_wire() as i32,
+                    payload: encode_envelope(Opcode::FedCallRows, &call_wire(&call))?,
+                },
+                now,
+            )
+            .await
+            .map(|_queued| ())
+    }
+
+    /// Mirrors a call row this node just changed to every allowed peer.
+    ///
+    /// The push half, and deliberately infallible: it is called from the
+    /// dispatcher's 1:1 lifecycle handlers *after* the client's own frame has
+    /// already succeeded, so an encode failure or a peer that refuses the
+    /// enqueue must not turn a call that answered into a call that errored.
+    /// Everything here is logged and dropped, and the tier's guarantee is the
+    /// one it can keep: the row is mirrored when the mesh carries it.
+    ///
+    /// Peers that do not hold the row ignore it — see
+    /// [`Self::apply_call_rows`] — so the fan-out costs one small frame per
+    /// write per peer, which for a call is four writes over its whole life.
+    pub(crate) async fn publish_call(&self, call_id: Id, now: Timestamp) {
+        let Some(calls) = &self.calls else {
+            return;
+        };
+        let call = match calls.get(call_id).await {
+            Ok(Some(call)) => call,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, call = %call_id.to_text(), "cannot read the call row to mirror");
+                return;
+            }
+        };
+        let payload = match encode_envelope(Opcode::FedCallRows, &call_wire(&call)) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%error, call = %call_id.to_text(), "cannot encode the call row to mirror");
+                return;
+            }
+        };
+        for peer in self.allowed_peers().await {
+            let event = FederatedEvent {
+                target_node: peer,
+                opcode: Opcode::FedCallRows.to_wire() as i32,
+                payload: payload.clone(),
+            };
+            if let Err(error) = self.mesh.enqueue(event, now).await {
+                tracing::warn!(
+                    %error,
+                    peer = %peer.to_text(),
+                    "cannot enqueue a call row mirror for this peer"
+                );
+            }
+        }
+    }
+
+    /// Applies a call row a peer sent, reporting whether it was written.
+    ///
+    /// The one rule the tier turns on: a peer may fill a row this node asked
+    /// for and may update a row this node already holds, but may never plant a
+    /// row this node never had and never asked about. The first branch is the
+    /// pull's answer and the second is the push, and a frame that is neither
+    /// is refused with a warning rather than written — an unsolicited row is
+    /// how a peer would put a call this node never minted into a store whose
+    /// readers treat it as local truth.
+    ///
+    /// An update is ordered by the state machine and not by arrival: the wire
+    /// numbering is already the order the states advance in, so a row is
+    /// written only when it moves the call forward. Two nodes that end the
+    /// same call concurrently therefore converge on the first end rather than
+    /// racing a `Connecting` mirror over an `Ended` row, and the reason the
+    /// other party already heard is not rewritten under them.
+    pub(crate) async fn apply_call_rows(&self, rows: FedCallRows) -> Result<bool> {
+        let Some(calls) = &self.calls else {
+            return Ok(false);
+        };
+        let asked = self.asked_calls.lock().contains(&rows.call_id);
+        let held = calls.get(rows.call_id).await?;
+        if !asked && held.is_none() {
+            tracing::warn!(
+                call = %rows.call_id.to_text(),
+                "refusing call rows this node never held and no ask of this process is waiting for"
+            );
+            return Ok(false);
+        }
+        let Some(row) = call_of(&rows) else {
+            tracing::warn!(
+                call = %rows.call_id.to_text(),
+                "refusing a replicated call row this build cannot decode"
+            );
+            self.asked_calls.lock().remove(&rows.call_id);
+            return Ok(false);
+        };
+        if let Some(held) = &held {
+            if state_rank(row.state) <= state_rank(held.state) {
+                // Already at or past this row's state. The ask, if there was
+                // one, is answered by what this node holds: there is nothing
+                // left to wait for.
+                self.asked_calls.lock().remove(&rows.call_id);
+                return Ok(false);
+            }
+        }
+        if let Err(error) = calls.put(&row).await {
+            tracing::warn!(
+                %error,
+                call = %rows.call_id.to_text(),
+                "cannot seat the replicated call row"
+            );
+            return Ok(false);
+        }
+        self.asked_calls.lock().remove(&rows.call_id);
+        Ok(true)
+    }
+
     /// The allowed peers an ask broadcasts to. Degraded peers still count —
     /// degraded is a signal about a link's health, not a suspension, and a
     /// slow answer still beats none (section 153).
@@ -611,6 +903,67 @@ fn visibility_wire(visibility: migo_store::model::Visibility) -> u32 {
 /// replica that cannot read a setting must not widen it.
 fn visibility_of(value: u32) -> migo_store::model::Visibility {
     migo_store::model::Visibility::from_i16(i16::try_from(value).unwrap_or(0))
+}
+
+/// A call row as the mesh carries it.
+///
+/// Every field, verbatim: the replica's whole job is to let a node that never
+/// accepted the invite resolve the frames that arrive for it, and a row
+/// reconstructed from anything less — a state without its deadline, an answer
+/// without the device that gave it — would let that node answer a different
+/// call than the one being asked about.
+fn call_wire(call: &Call) -> FedCallRows {
+    FedCallRows {
+        call_id: call.call_id,
+        conversation_id: call.conversation_id,
+        caller_id: call.caller_id,
+        caller_device: call.caller_device,
+        callee_id: call.callee_id,
+        media_kind: call.media_kind,
+        state: call.state.to_wire(),
+        expires_at: call.expires_at,
+        callee_device: call.callee_device,
+        end_reason: call.end_reason.map(EndReason::to_wire),
+        answered_at: call.answered_at,
+        ended_at: call.ended_at,
+    }
+}
+
+/// The store's call row for a replicated one, or `None` when this build cannot
+/// read it.
+///
+/// An unknown state is the refusal that matters: the state machine is a closed
+/// set this build matches on exhaustively, so a row in a state no arm covers is
+/// a row no handler could answer, and reading it as any known state would be
+/// inventing a call. An unknown *reason* is read as no reason at all — the
+/// state is what every reader branches on, and a call that ended for a reason
+/// this build cannot name is still, unmistakably, over.
+fn call_of(rows: &FedCallRows) -> Option<Call> {
+    Some(Call {
+        call_id: rows.call_id,
+        conversation_id: rows.conversation_id,
+        caller_id: rows.caller_id,
+        caller_device: rows.caller_device,
+        callee_id: rows.callee_id,
+        callee_device: rows.callee_device,
+        media_kind: rows.media_kind,
+        state: CallState::from_wire(rows.state)?,
+        end_reason: rows.end_reason.and_then(EndReason::from_wire),
+        expires_at: rows.expires_at,
+        answered_at: rows.answered_at,
+        ended_at: rows.ended_at,
+    })
+}
+
+/// How far along the state machine a call is, for the one ordering the tier
+/// applies to a mirrored row.
+///
+/// Read off the wire numbering itself, which is already the order the states
+/// advance in — ring 0, connecting 1, connected 2, ended 4 — with three left
+/// out because it is the SFU's `Reconnecting`, a state no row this build
+/// writes can carry.
+fn state_rank(state: CallState) -> u32 {
+    state.to_wire()
 }
 
 /// The late-bound cell the privacy gate holds, filled by the composition root
@@ -664,6 +1017,7 @@ mod tests {
     //! bounded wait is only honest to test against a real second node.
 
     use super::*;
+    use migo_calls::{MemoryCallStore, MEDIA_AUDIO};
     use migo_core::random::SeededRandom;
     use migo_core::Secret;
     use migo_crypto::NodeSecret;
@@ -1172,6 +1526,251 @@ mod tests {
                 .expect("the queue reads")
                 .is_empty(),
             "nothing was asked for"
+        );
+    }
+
+    /// The row a node that minted the invite holds: ringing, no callee device,
+    /// which is the shape the pull is asked about.
+    fn ringing_call(call_id: Id, caller: Id, callee: Id) -> Call {
+        Call {
+            call_id,
+            conversation_id: Id::from(0x1111),
+            caller_id: caller,
+            caller_device: Id::from(0xD1),
+            callee_id: callee,
+            callee_device: None,
+            media_kind: MEDIA_AUDIO,
+            state: CallState::Ringing,
+            end_reason: None,
+            expires_at: Timestamp::from_millis(NOW + 30_000),
+            answered_at: None,
+            ended_at: None,
+        }
+    }
+
+    /// A call store holding one row.
+    async fn store_with_call(call: &Call) -> SharedCallStore {
+        let store: SharedCallStore = Arc::new(MemoryCallStore::new());
+        store
+            .put(call)
+            .await
+            .expect("a fresh call store takes the row");
+        store
+    }
+
+    /// The third tier's one rule, in both directions: an answer to this node's
+    /// own ask is seated, and a row nobody asked about and nobody holds is
+    /// refused — an unsolicited row is how a peer would plant a call this node
+    /// never minted into a store whose readers treat it as local truth.
+    #[tokio::test]
+    async fn a_queried_call_row_is_seated_and_an_unqueried_one_is_refused() {
+        let peer = Id::from(0x4444);
+        let call_id = Id::from(0xCA11);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let mine: SharedCallStore = Arc::new(MemoryCallStore::new());
+        let relay = ReplicationRelay::new(Arc::clone(&mesh), Arc::new(MemoryStore::new()))
+            .with_calls(Arc::clone(&mine));
+        let row = ringing_call(call_id, Id::from(0xAAAA), Id::from(0xBBBB));
+
+        assert!(
+            !relay
+                .apply_call_rows(call_wire(&row))
+                .await
+                .expect("the apply reads"),
+            "a row this node never held and never asked for is refused"
+        );
+        assert!(
+            mine.get(call_id).await.expect("the store reads").is_none(),
+            "nothing was planted"
+        );
+
+        assert_eq!(
+            relay.ask_call(call_id, Timestamp::from_millis(NOW)).await,
+            1,
+            "the ask reaches the one allowed peer"
+        );
+        let mut answered = row;
+        answered.state = CallState::Connecting;
+        answered.callee_device = Some(Id::from(0xD2));
+        assert!(
+            relay
+                .apply_call_rows(call_wire(&answered))
+                .await
+                .expect("the apply reads"),
+            "the answer to this node's own ask is seated"
+        );
+        let seated = mine
+            .get(call_id)
+            .await
+            .expect("the store reads")
+            .expect("the row is seated");
+        assert_eq!(seated.state, CallState::Connecting);
+        assert_eq!(
+            seated.callee_device,
+            Some(Id::from(0xD2)),
+            "the device that answered crosses, because a replica without it cannot route the caller's SDP"
+        );
+    }
+
+    /// An update is ordered by the state machine and not by arrival: two nodes
+    /// that end the same call concurrently converge on the first end rather
+    /// than letting a stale mirror resurrect a call both parties watched die.
+    #[tokio::test]
+    async fn a_call_mirror_never_moves_a_row_backwards() {
+        let peer = Id::from(0x4444);
+        let call_id = Id::from(0xCA11);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let mut ended = ringing_call(call_id, Id::from(0xAAAA), Id::from(0xBBBB));
+        ended.state = CallState::Ended;
+        ended.end_reason = Some(EndReason::ByCaller);
+        ended.ended_at = Some(Timestamp::from_millis(NOW + 5));
+        let mine = store_with_call(&ended).await;
+        let relay = ReplicationRelay::new(Arc::clone(&mesh), Arc::new(MemoryStore::new()))
+            .with_calls(Arc::clone(&mine));
+
+        // A mirror that was in flight when the call ended, and lands after it.
+        let mut stale = ended.clone();
+        stale.state = CallState::Connecting;
+        stale.callee_device = Some(Id::from(0xD2));
+        stale.end_reason = None;
+        stale.ended_at = None;
+        assert!(
+            !relay
+                .apply_call_rows(call_wire(&stale))
+                .await
+                .expect("the apply reads"),
+            "a row that does not advance the call is refused"
+        );
+        let held = mine
+            .get(call_id)
+            .await
+            .expect("the store reads")
+            .expect("the row is still held");
+        assert_eq!(held.state, CallState::Ended, "the end stands");
+        assert_eq!(held.end_reason, Some(EndReason::ByCaller));
+
+        // The other node ended it too, and said so differently: the first end
+        // is the one both parties converge on, not the last one to arrive.
+        let mut other_end = stale;
+        other_end.state = CallState::Ended;
+        other_end.end_reason = Some(EndReason::ByCallee);
+        other_end.ended_at = Some(Timestamp::from_millis(NOW + 9));
+        assert!(
+            !relay
+                .apply_call_rows(call_wire(&other_end))
+                .await
+                .expect("the apply reads"),
+            "a second end at the same rank is refused"
+        );
+        let held = mine
+            .get(call_id)
+            .await
+            .expect("the store reads")
+            .expect("the row is still held");
+        assert_eq!(
+            held.end_reason,
+            Some(EndReason::ByCaller),
+            "the reason both parties already heard is not rewritten under them"
+        );
+    }
+
+    /// A relay built without a call store keeps the whole third tier inert
+    /// rather than wrong: nothing is held, nothing is asked, nothing is
+    /// mirrored, and the two tiers above it are untouched by its absence.
+    #[tokio::test]
+    async fn a_relay_without_a_call_store_keeps_the_call_tier_inert() {
+        let peer = Id::from(0x4444);
+        let call_id = Id::from(0xCA11);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let relay = ReplicationRelay::new(Arc::clone(&mesh), Arc::new(MemoryStore::new()));
+
+        let started = std::time::Instant::now();
+        assert!(
+            !relay
+                .ensure_call(call_id, Timestamp::from_millis(NOW))
+                .await,
+            "no store, so the row cannot arrive"
+        );
+        assert!(
+            started.elapsed() < ASK_WAIT,
+            "the failure was immediate, not a spent wait"
+        );
+        assert!(
+            !relay
+                .apply_call_rows(call_wire(&ringing_call(
+                    call_id,
+                    Id::from(0xAAAA),
+                    Id::from(0xBBBB)
+                )))
+                .await
+                .expect("the apply reads"),
+            "there is nowhere to seat a replicated row"
+        );
+        relay
+            .publish_call(call_id, Timestamp::from_millis(NOW))
+            .await;
+        assert!(
+            mesh.due(Timestamp::from_millis(NOW + 60_000))
+                .await
+                .expect("the queue reads")
+                .is_empty(),
+            "nothing was asked for and nothing was mirrored"
+        );
+    }
+
+    /// The push half: a row this node changed is mirrored to every allowed
+    /// peer, whole, so the node that minted the invite learns the device the
+    /// callee answered from.
+    #[tokio::test]
+    async fn a_changed_call_row_is_mirrored_to_every_allowed_peer() {
+        let peer = Id::from(0x4444);
+        let call_id = Id::from(0xCA11);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let mut answered = ringing_call(call_id, Id::from(0xAAAA), Id::from(0xBBBB));
+        answered.state = CallState::Connected;
+        answered.callee_device = Some(Id::from(0xD2));
+        answered.answered_at = Some(Timestamp::from_millis(NOW + 2));
+        let calls = store_with_call(&answered).await;
+        let relay = ReplicationRelay::new(Arc::clone(&mesh), Arc::new(MemoryStore::new()))
+            .with_calls(Arc::clone(&calls));
+
+        relay
+            .publish_call(call_id, Timestamp::from_millis(NOW))
+            .await;
+        let (target, opcode, frame) = the_answer(&mesh).await.expect("the mirror is queued");
+        assert_eq!(target, peer, "the mirror names the peer");
+        assert_eq!(opcode, Opcode::FedCallRows);
+        let rows: FedCallRows = from_frame(&frame).expect("the rows decode");
+        assert_eq!(rows.call_id, call_id);
+        assert_eq!(rows.state, CallState::Connected.to_wire());
+        assert_eq!(rows.callee_device, Some(Id::from(0xD2)));
+        assert_eq!(rows.end_reason, None);
+        assert_eq!(
+            rows.expires_at,
+            Timestamp::from_millis(NOW + 30_000),
+            "the replica owes the sweeper the same deadline the owner holds"
+        );
+    }
+
+    /// A row this node does not hold is not mirrored at all: the push is driven
+    /// by a write, and there was none here.
+    #[tokio::test]
+    async fn a_call_this_node_does_not_hold_is_never_mirrored() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let calls: SharedCallStore = Arc::new(MemoryCallStore::new());
+        let relay = ReplicationRelay::new(Arc::clone(&mesh), Arc::new(MemoryStore::new()))
+            .with_calls(calls);
+
+        relay
+            .publish_call(Id::from(0xCA11), Timestamp::from_millis(NOW))
+            .await;
+        assert!(
+            mesh.due(Timestamp::from_millis(NOW + 60_000))
+                .await
+                .expect("the queue reads")
+                .is_empty(),
+            "nothing was mirrored"
         );
     }
 }

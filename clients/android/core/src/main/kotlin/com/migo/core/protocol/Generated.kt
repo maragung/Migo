@@ -5897,6 +5897,130 @@ data class FedConversationRows(
     }
 }
 
+/** A node asks its peers which of them holds a 1:1 call row it has none of: the call-row tier of section 170, asked as a broadcast because a call row carries no home label to read - the node that accepted the invite owns the row, and nothing in the row names that node. The ask rides the mesh only from a miss on the signalling path, when a frame names a call this node cannot resolve: an answer, a decline, or a relay whose call belongs to a conversation this node serves but whose row was born somewhere else. A peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same NOT_FOUND it would have answered with no mesh at all. Asked only by frames that can only be about a call that already exists - the answer, the decline, the cancel, the end, and the three sealed relays - never by an invite, which mints the row here and would pay the whole wait for an answer that is silence by construction. */
+data class FedCallQuery(
+    val epoch: Long,
+    /** The call the asker cannot resolve; ids are client-minted and globally unique, so a peer either holds this row or does not. */
+    val callId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.id(callId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedCallQuery {
+            r.enter()
+            val epoch = r.u64()
+            val callId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedCallQuery(epoch, callId)
+        }
+    }
+}
+
+/** The answer to a FedCallQuery, from the peer that holds the call: the row verbatim, nothing derived. Every field crosses as the owner stores it - the state in CallStateEvent's numbering, the ring deadline, the answer time, and the end reason once there is one - because the replica's whole job is to let a node that never accepted the invite resolve the frames that arrive for it, and a row reconstructed from anything less would answer a different call than the one being asked about. The same struct is the tier's push: every node that changes a call row mirrors the new row to its peers, because a 1:1 call has two writer nodes - one per party - and the node that minted the row would otherwise never learn the device the callee answered from. Applied by a peer only when the row is one this node asked for or one it already holds - never as an unsolicited row this node never had - and applied to an already-held row only when it moves the call forward in the state machine, so a mirrored Connecting cannot land on top of an Ended and resurrect a call both parties watched die. */
+data class FedCallRows(
+    val callId: Id,
+    val conversationId: Id,
+    val callerId: Id,
+    val callerDevice: Id,
+    val calleeId: Id,
+    /** 0=Audio, 1=Video. */
+    val mediaKind: Long,
+    /** CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected, 4=Ended. Three is Reconnecting, which this build's 1:1 calls never reach. */
+    val state: Long,
+    /** When the ring gives up; the replica owes the sweeper the same deadline the owner holds. */
+    val expiresAt: Long,
+    /** Set at answer time; absent while the call is still ringing. */
+    val calleeDevice: Id? = null,
+    /** Present when state is Ended; EndReason's numbering. */
+    val endReason: Long? = null,
+    val answeredAt: Long? = null,
+    val endedAt: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(conversationId)
+        w.id(callerId)
+        w.id(callerDevice)
+        w.id(calleeId)
+        w.u32(mediaKind)
+        w.u32(state)
+        w.timestamp(expiresAt)
+        var present = 0
+        if (calleeDevice != null) present++
+        if (endReason != null) present++
+        if (answeredAt != null) present++
+        if (endedAt != null) present++
+        w.u32(present)
+        if (calleeDevice != null) {
+            val value = calleeDevice
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        if (endReason != null) {
+            val value = endReason
+            w.optional(2) { w ->
+                w.u32(value)
+            }
+        }
+        if (answeredAt != null) {
+            val value = answeredAt
+            w.optional(3) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (endedAt != null) {
+            val value = endedAt
+            w.optional(4) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedCallRows {
+            r.enter()
+            val callId = r.id()
+            val conversationId = r.id()
+            val callerId = r.id()
+            val callerDevice = r.id()
+            val calleeId = r.id()
+            val mediaKind = r.u32()
+            val state = r.u32()
+            val expiresAt = r.timestamp()
+            var calleeDevice: Id? = null
+            var endReason: Long? = null
+            var answeredAt: Long? = null
+            var endedAt: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> calleeDevice = sub.id()
+                    2L -> endReason = sub.u32()
+                    3L -> answeredAt = sub.timestamp()
+                    4L -> endedAt = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return FedCallRows(callId, conversationId, callerId, callerDevice, calleeId, mediaKind, state, expiresAt, calleeDevice, endReason, answeredAt, endedAt)
+        }
+    }
+}
+
 data class FedKeyRotate(
     val nodeId: String,
     val newPublicKey: ByteArray,
@@ -9418,6 +9542,10 @@ object Op {
     const val FED_CONVERSATION_QUERY: Long = 245L
     /** The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream. */
     const val FED_CONVERSATION_ROWS: Long = 246L
+    /** A node asks which peer holds a call row it cannot resolve, so a callee whose node never accepted the invite can answer a ring the caller's node recorded. Broadcast, and answered only by the peer that holds the row: the rest stay silent. */
+    const val FED_CALL_QUERY: Long = 248L
+    /** The owning peer's answer: the call row verbatim, so the asker can resolve the frames that arrive for a call whose invite it never saw. Applied only by a node that asked and only where it held nothing, so a peer can feed a miss but never overwrite local truth. */
+    const val FED_CALL_ROWS: Long = 249L
     /** Invites a callee to a call. */
     const val CALL_INVITE: Long = 224L
     /** Tells the callee a call is ringing. */
@@ -9588,6 +9716,8 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     244L to OpcodeMeta(244L, "FED_ACCOUNT_ROWS", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAccountRows", "Acknowledged", null, false, listOf(), "FEDERATION"),
     245L to OpcodeMeta(245L, "FED_CONVERSATION_QUERY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationQuery", "Acknowledged", null, false, listOf(), "FEDERATION"),
     246L to OpcodeMeta(246L, "FED_CONVERSATION_ROWS", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedConversationRows", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    248L to OpcodeMeta(248L, "FED_CALL_QUERY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedCallQuery", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    249L to OpcodeMeta(249L, "FED_CALL_ROWS", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedCallRows", "Acknowledged", null, false, listOf(), "FEDERATION"),
     224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null, false, listOf(), "CALLS"),
     225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null, false, listOf(), "CALLS"),
     226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null, false, listOf(), "CALLS"),

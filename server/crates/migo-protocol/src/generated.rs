@@ -7249,6 +7249,138 @@ impl Decode for FedConversationRows {
     }
 }
 
+/// A node asks its peers which of them holds a 1:1 call row it has none of: the call-row tier of section 170, asked as a broadcast because a call row carries no home label to read - the node that accepted the invite owns the row, and nothing in the row names that node. The ask rides the mesh only from a miss on the signalling path, when a frame names a call this node cannot resolve: an answer, a decline, or a relay whose call belongs to a conversation this node serves but whose row was born somewhere else. A peer that holds nothing stays silent, which is what the asker's bounded wait turns back into the same NOT_FOUND it would have answered with no mesh at all. Asked only by frames that can only be about a call that already exists - the answer, the decline, the cancel, the end, and the three sealed relays - never by an invite, which mints the row here and would pay the whole wait for an answer that is silence by construction.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedCallQuery {
+    pub epoch: u64,
+    /// The call the asker cannot resolve; ids are client-minted and globally unique, so a peer either holds this row or does not.
+    pub call_id: Id,
+}
+
+impl Encode for FedCallQuery {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_id(&self.call_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedCallQuery {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The answer to a FedCallQuery, from the peer that holds the call: the row verbatim, nothing derived. Every field crosses as the owner stores it - the state in CallStateEvent's numbering, the ring deadline, the answer time, and the end reason once there is one - because the replica's whole job is to let a node that never accepted the invite resolve the frames that arrive for it, and a row reconstructed from anything less would answer a different call than the one being asked about. The same struct is the tier's push: every node that changes a call row mirrors the new row to its peers, because a 1:1 call has two writer nodes - one per party - and the node that minted the row would otherwise never learn the device the callee answered from. Applied by a peer only when the row is one this node asked for or one it already holds - never as an unsolicited row this node never had - and applied to an already-held row only when it moves the call forward in the state machine, so a mirrored Connecting cannot land on top of an Ended and resurrect a call both parties watched die.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedCallRows {
+    pub call_id: Id,
+    pub conversation_id: Id,
+    pub caller_id: Id,
+    pub caller_device: Id,
+    pub callee_id: Id,
+    /// 0=Audio, 1=Video.
+    pub media_kind: u32,
+    /// CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected, 4=Ended. Three is Reconnecting, which this build's 1:1 calls never reach.
+    pub state: u32,
+    /// When the ring gives up; the replica owes the sweeper the same deadline the owner holds.
+    pub expires_at: Timestamp,
+    /// Set at answer time; absent while the call is still ringing.
+    pub callee_device: Option<Id>,
+    /// Present when state is Ended; EndReason's numbering.
+    pub end_reason: Option<u32>,
+    pub answered_at: Option<Timestamp>,
+    pub ended_at: Option<Timestamp>,
+}
+
+impl Encode for FedCallRows {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.caller_id);
+        w.write_id(&self.caller_device);
+        w.write_id(&self.callee_id);
+        w.write_u32(self.media_kind);
+        w.write_u32(self.state);
+        w.write_timestamp(self.expires_at);
+        let present = usize::from(self.callee_device.is_some())
+            + usize::from(self.end_reason.is_some())
+            + usize::from(self.answered_at.is_some())
+            + usize::from(self.ended_at.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.callee_device {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.end_reason {
+            w.optional(2, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.answered_at {
+            w.optional(3, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.ended_at {
+            w.optional(4, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedCallRows {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.caller_id = r.read_id()?;
+        out.caller_device = r.read_id()?;
+        out.callee_id = r.read_id()?;
+        out.media_kind = r.read_u32()?;
+        out.state = r.read_u32()?;
+        out.expires_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.callee_device = Some(sub.read_id()?),
+                2 => out.end_reason = Some(sub.read_u32()?),
+                3 => out.answered_at = Some(sub.read_timestamp()?),
+                4 => out.ended_at = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FedKeyRotate {
     pub node_id: String,
@@ -11461,6 +11593,10 @@ pub enum Opcode {
     FedConversationQuery = 245,
     /// The home node's answer: the conversation row with its home_region label intact and the member ids, so the asker's membership check answers from real rows and the conversation tier's subscribe half knows which node to ask for the event stream.
     FedConversationRows = 246,
+    /// A node asks which peer holds a call row it cannot resolve, so a callee whose node never accepted the invite can answer a ring the caller's node recorded. Broadcast, and answered only by the peer that holds the row: the rest stay silent.
+    FedCallQuery = 248,
+    /// The owning peer's answer: the call row verbatim, so the asker can resolve the frames that arrive for a call whose invite it never saw. Applied only by a node that asked and only where it held nothing, so a peer can feed a miss but never overwrite local truth.
+    FedCallRows = 249,
     /// Invites a callee to a call.
     CallInvite = 224,
     /// Tells the callee a call is ringing.
@@ -11623,6 +11759,8 @@ impl Opcode {
             244 => Self::FedAccountRows,
             245 => Self::FedConversationQuery,
             246 => Self::FedConversationRows,
+            248 => Self::FedCallQuery,
+            249 => Self::FedCallRows,
             224 => Self::CallInvite,
             225 => Self::CallInviteEvent,
             226 => Self::CallAnswer,
@@ -11761,6 +11899,8 @@ impl Opcode {
             Self::FedAccountRows => "FED_ACCOUNT_ROWS",
             Self::FedConversationQuery => "FED_CONVERSATION_QUERY",
             Self::FedConversationRows => "FED_CONVERSATION_ROWS",
+            Self::FedCallQuery => "FED_CALL_QUERY",
+            Self::FedCallRows => "FED_CALL_ROWS",
             Self::CallInvite => "CALL_INVITE",
             Self::CallInviteEvent => "CALL_INVITE_EVENT",
             Self::CallAnswer => "CALL_ANSWER",
@@ -11899,6 +12039,8 @@ impl Opcode {
             Self::FedAccountRows => 0,
             Self::FedConversationQuery => 2,
             Self::FedConversationRows => 0,
+            Self::FedCallQuery => 2,
+            Self::FedCallRows => 0,
             Self::CallInvite => 20,
             Self::CallInviteEvent => 0,
             Self::CallAnswer => 5,
@@ -12036,6 +12178,8 @@ impl Opcode {
             Self::FedAccountRows => DeliveryClass::Critical,
             Self::FedConversationQuery => DeliveryClass::Critical,
             Self::FedConversationRows => DeliveryClass::Critical,
+            Self::FedCallQuery => DeliveryClass::Critical,
+            Self::FedCallRows => DeliveryClass::Critical,
             Self::CallInvite => DeliveryClass::Critical,
             Self::CallInviteEvent => DeliveryClass::Critical,
             Self::CallAnswer => DeliveryClass::Critical,
@@ -12177,6 +12321,8 @@ impl Opcode {
             Self::FedAccountRows => false,
             Self::FedConversationQuery => false,
             Self::FedConversationRows => false,
+            Self::FedCallQuery => false,
+            Self::FedCallRows => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -12322,6 +12468,8 @@ impl Opcode {
             Self::FedAccountRows => AuthLevel::Server,
             Self::FedConversationQuery => AuthLevel::Server,
             Self::FedConversationRows => AuthLevel::Server,
+            Self::FedCallQuery => AuthLevel::Server,
+            Self::FedCallRows => AuthLevel::Server,
             Self::CallInvite => AuthLevel::User,
             Self::CallInviteEvent => AuthLevel::User,
             Self::CallAnswer => AuthLevel::User,
@@ -12409,6 +12557,8 @@ impl Opcode {
             Self::FedAccountRows => Some(features::FEDERATION),
             Self::FedConversationQuery => Some(features::FEDERATION),
             Self::FedConversationRows => Some(features::FEDERATION),
+            Self::FedCallQuery => Some(features::FEDERATION),
+            Self::FedCallRows => Some(features::FEDERATION),
             Self::CallInvite => Some(features::CALLS),
             Self::CallInviteEvent => Some(features::CALLS),
             Self::CallAnswer => Some(features::CALLS),
@@ -12544,6 +12694,8 @@ impl Opcode {
             Self::FedAccountRows => Direction::Both,
             Self::FedConversationQuery => Direction::Both,
             Self::FedConversationRows => Direction::Both,
+            Self::FedCallQuery => Direction::Both,
+            Self::FedCallRows => Direction::Both,
             Self::CallInvite => Direction::ClientToServer,
             Self::CallInviteEvent => Direction::ServerToClient,
             Self::CallAnswer => Direction::ClientToServer,
@@ -12682,6 +12834,8 @@ impl Opcode {
             Self::FedAccountRows => false,
             Self::FedConversationQuery => false,
             Self::FedConversationRows => false,
+            Self::FedCallQuery => false,
+            Self::FedCallRows => false,
             Self::CallInvite => false,
             Self::CallInviteEvent => false,
             Self::CallAnswer => false,
@@ -12827,6 +12981,8 @@ impl Opcode {
         Self::FedAccountRows,
         Self::FedConversationQuery,
         Self::FedConversationRows,
+        Self::FedCallQuery,
+        Self::FedCallRows,
         Self::CallInvite,
         Self::CallInviteEvent,
         Self::CallAnswer,

@@ -553,7 +553,7 @@ impl Dispatcher for AppDispatcher {
         let now = context.now();
 
         match context.opcode() {
-            // Section 146 invariant: the reserved span 248-255 is never-allocated, and
+            // Section 146 invariant: the reserved span 250-255 is never-allocated, and
             // the gateway refuses it before a frame can reach this dispatcher (see the
             // range gate in migo-gateway's connection.rs). A variant generated into that
             // span therefore must not be routable here — the migo-protocol registry test
@@ -561,8 +561,9 @@ impl Dispatcher for AppDispatcher {
             // the build first, and the allocation needs a written decision per section
             // 145's precedent before any number is taken from the reserved head. The
             // conversation-federation pair at 241-242, the row-replication tier at
-            // 243-246, and the call listing at 247 are three such decisions; the span
-            // they left never-allocated begins at 248.
+            // 243-246, the call listing at 247, and the call-row replication pair at
+            // 248-249 are such decisions; the span they left never-allocated begins
+            // at 250.
             // --- messaging ---
             Opcode::MessageSend => {
                 let caller = MessageCaller::new(
@@ -1413,13 +1414,34 @@ impl Dispatcher for AppDispatcher {
                 .await
             }
             Opcode::CallAnswer => {
-                calls::handle_answer(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_answer(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallDecline => {
-                calls::handle_decline(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_decline(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallCancel => {
-                calls::handle_cancel(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_cancel(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallEnd => {
                 // The id may name a 1:1 call or a group call; the group
@@ -1437,25 +1459,67 @@ impl Dispatcher for AppDispatcher {
                 {
                     Ok(true) => Ok(()),
                     Ok(false) => {
-                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
+                        calls::handle_end(
+                            context,
+                            frame,
+                            &self.calls,
+                            &self.presence_relay,
+                            &self.replication,
+                        )
+                        .await
                     }
                     Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {
-                        calls::handle_end(context, frame, &self.calls, &self.presence_relay).await
+                        calls::handle_end(
+                            context,
+                            frame,
+                            &self.calls,
+                            &self.presence_relay,
+                            &self.replication,
+                        )
+                        .await
                     }
                     Err(error) => Err(error),
                 }
             }
             Opcode::CallSdp => {
-                calls::handle_sdp(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_sdp(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallIce => {
-                calls::handle_ice(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_ice(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallRenegotiate => {
-                calls::handle_renegotiate(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_renegotiate(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallKeyUpdate => {
-                calls::handle_key_update(context, frame, &self.calls, &self.presence_relay).await
+                calls::handle_key_update(
+                    context,
+                    frame,
+                    &self.calls,
+                    &self.presence_relay,
+                    &self.replication,
+                )
+                .await
             }
             Opcode::CallStats => calls::handle_stats(context, frame, &self.calls).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
