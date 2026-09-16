@@ -32,14 +32,17 @@
  * # The room's own settings
  *
  * Three more controls answer to the room's rank ladder rather than the moderation one, and the panel
- * gates them on the same defaults the server resolves. A **rename** (the name and the topic) needs the
- * room's edit permission, which an Administrator and above hold by default. **Role management** — the
- * per-member "Make …" items in the roster menu — needs the manage permission, a Manager or the Owner,
- * and the server refuses a grant at or above the actor's own rank, so the items offered are the ranks
- * strictly below the viewer's. **Archiving** is the owner's alone: no other rank, however senior, may
- * end the room for everybody in it, and there is no unarchive — the confirmation says exactly that.
- * A permission granted per-member by an override the roster cannot see is the server's to admit and
- * the panel's to surface as the refusal it returns.
+ * gates them on the same defaults the server resolves. A **rename** (the name and the topic) and the
+ * **slow-mode interval** — how long a member must wait between messages — need the room's edit
+ * permission, which an Administrator and above hold by default; the interval is whole seconds on
+ * this screen and milliseconds on the wire, zero turns it off, and the server refuses an hour's
+ * worth or more. **Role management** — the per-member "Make …" items in the roster menu — needs the
+ * manage permission, a Manager or the Owner, and the server refuses a grant at or above the actor's
+ * own rank, so the items offered are the ranks strictly below the viewer's. **Archiving** is the
+ * owner's alone: no other rank, however senior, may end the room for everybody in it, and there is
+ * no unarchive — the confirmation says exactly that. A permission granted per-member by an override
+ * the roster cannot see is the server's to admit and the panel's to surface as the refusal it
+ * returns.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -89,6 +92,31 @@ const ROLE_MODERATOR: number = RoomRole.Moderator;
 const ACTION_MUTE: SanctionAction = SanctionAction.Mute;
 const ACTION_KICK: SanctionAction = SanctionAction.Kick;
 const ACTION_BAN: SanctionAction = SanctionAction.Ban;
+
+/**
+ * The ceiling a slow-mode interval may reach: an hour, in the whole seconds the store keeps. The
+ * server refuses anything above it, so the field bound and the parser agree with the wire rather
+ * than letting a screen ask for a change the node will only return as an error.
+ */
+export const SLOW_MODE_MAX_SECONDS = 3600;
+
+/**
+ * A slow-mode field's seconds, or `null` when the text names no interval the server would take.
+ *
+ * Pure, so a test pins it. Whole seconds only — the wire's milliseconds truncate, so a half-second
+ * interval is slow mode off rather than a shorter one, and a field that cannot name a whole second
+ * of wait is refused here rather than sent as something it is not. Zero is slow mode off and is a
+ * valid answer, the one the clear affordance writes; a negative, a decimal, an empty field, or an
+ * interval past the server's hour is not.
+ */
+export function parseSlowModeSeconds(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const seconds = Number(trimmed);
+  return seconds > SLOW_MODE_MAX_SECONDS ? null : seconds;
+}
 
 export function roleLabel(role: number): string {
   if (role === ROLE_OWNER) {
@@ -507,19 +535,23 @@ export function RosterList({
 }
 
 /**
- * The room's settings section: the rename a staff member may apply, and the archive that ends the
- * room for everybody in it.
+ * The room's settings section: the rename and the slow-mode interval a staff member may apply, and
+ * the archive that ends the room for everybody in it.
  *
  * Presentational, so a test pins what each rank sees: a viewer allowed neither control gets nothing
  * at all, not a disabled husk. The rename covers exactly the fields the settings patch carries that
  * this panel can seed honestly — the name and the topic, both trimmed server-side, the name required,
- * the topic clearable to nothing. The archive confirmation states what the server does and no more:
- * the room stops admitting joins and its settings lock, history stays readable and links keep
- * resolving, and there is no unarchive.
+ * the topic clearable to nothing. The slow-mode interval is the patch's third field, whole seconds on
+ * this screen and milliseconds on the wire, zero meaning off; the field is bounded by the server's
+ * own ceiling ({@link SLOW_MODE_MAX_SECONDS}) and offered a clear affordance so turning the interval
+ * off is a button rather than a remembered convention. The archive confirmation states what the
+ * server does and no more: the room stops admitting joins and its settings lock, history stays
+ * readable and links keep resolving, and there is no unarchive.
  */
 export function RoomSettings({
   name,
   topic,
+  slowModeSec,
   canEdit = false,
   canArchive = false,
   saving = false,
@@ -531,6 +563,8 @@ export function RoomSettings({
   name: string;
   /** The room's current topic, when it carries one; the field starts empty without it. */
   topic?: string;
+  /** The room's current slow-mode interval in seconds, when one is set; the field starts at zero. */
+  slowModeSec?: number;
   /** Show the rename fields — the viewer holds the room's edit permission. */
   canEdit?: boolean;
   /** Show the archive control — the viewer is the room's owner. */
@@ -539,26 +573,31 @@ export function RoomSettings({
   saving?: boolean;
   /** True while the archive is in flight. */
   archiving?: boolean;
-  /** Apply the settings; the trimmed name is never empty and at least one field moved. */
-  onApply: (settings: { name: string; topic: string }) => void;
+  /** Apply the settings; the trimmed name is never empty, the seconds parse, and something moved. */
+  onApply: (settings: { name: string; topic: string; slowModeSec: number }) => void;
   /** Archive the room; the owner's confirmation is the opener's to ask for. */
   onArchive: () => void;
 }): ReactNode {
   const [nameValue, setNameValue] = useState(name);
   const [topicValue, setTopicValue] = useState(topic ?? '');
+  const [slowValue, setSlowValue] = useState(String(slowModeSec ?? 0));
   if (!canEdit && !canArchive) {
     return null;
   }
   const trimmedName = nameValue.trim();
   const trimmedTopic = topicValue.trim();
-  const moved = trimmedName !== name || trimmedTopic !== (topic ?? '');
+  // The interval the field names, or null when it names nothing the server would take; the save
+  // stays disabled on null rather than sending the field's text to be refused.
+  const slowSeconds = parseSlowModeSeconds(slowValue);
+  const moved =
+    trimmedName !== name || trimmedTopic !== (topic ?? '') || slowSeconds !== (slowModeSec ?? 0);
 
   function submit(event: FormEvent): void {
     event.preventDefault();
-    if (saving || !moved || trimmedName.length === 0) {
+    if (saving || !moved || trimmedName.length === 0 || slowSeconds === null) {
       return;
     }
-    onApply({ name: trimmedName, topic: trimmedTopic });
+    onApply({ name: trimmedName, topic: trimmedTopic, slowModeSec: slowSeconds });
   }
 
   return (
@@ -589,11 +628,35 @@ export function RoomSettings({
               placeholder="none"
             />
           </label>
+          <label className="field-label">
+            Slow mode
+            <input
+              type="number"
+              className="input"
+              value={slowValue}
+              onChange={(event) => setSlowValue(event.target.value)}
+              min={0}
+              max={SLOW_MODE_MAX_SECONDS}
+              step={1}
+              aria-label="Slow mode seconds"
+              placeholder="0"
+              title="How long a member must wait between messages, in seconds. Zero turns slow mode off; the server refuses an interval longer than an hour."
+            />
+          </label>
           <div className="inline-field">
+            <button
+              type="button"
+              className="btn"
+              disabled={saving || slowSeconds === 0}
+              onClick={() => setSlowValue('0')}
+              title="Clears the interval: slow mode off, the whole room free to answer at its own pace."
+            >
+              Turn Off
+            </button>
             <button
               type="submit"
               className="btn"
-              disabled={saving || !moved || trimmedName.length === 0}
+              disabled={saving || !moved || trimmedName.length === 0 || slowSeconds === null}
             >
               {saving ? <Spinner /> : 'Save'}
             </button>
@@ -864,8 +927,10 @@ export function RoomInfoPanel({
   // A settings change is a flight of its own, and its echo is this side's to record: the fan-out
   // excludes the acting socket, and a rename reaches no frame at all — the state event carries a
   // topic and an interval, nothing else — so the record the shell keeps is moved here, at the one
-  // place that knows the server accepted the change.
-  function applySettings(settings: { name: string; topic: string }): void {
+  // place that knows the server accepted the change. The slow-mode interval is the one settings
+  // field whose change the state event does carry, so the rest of the room learns it from the
+  // delta; the actor's own record still moves here, because the fan-out's exclusion is the actor.
+  function applySettings(settings: { name: string; topic: string; slowModeSec: number }): void {
     const active = client;
     if (!active) {
       return;
@@ -873,11 +938,16 @@ export function RoomInfoPanel({
     setSavingSettings(true);
     setError(null);
     active.rooms
-      .update(roomId, settings)
+      .update(roomId, {
+        name: settings.name,
+        topic: settings.topic,
+        // The wire carries milliseconds; the record and the screen keep the store's whole seconds.
+        slowModeMs: settings.slowModeSec * 1000,
+      })
       .then(() => {
         const held = liveFor(roomId);
         if (held !== null) {
-          noteRoom(applyRoomSettings(held, settings.name, settings.topic));
+          noteRoom(applyRoomSettings(held, settings));
         }
       })
       .catch((cause: unknown) => setError(friendlyError(cause)))
@@ -976,6 +1046,7 @@ export function RoomInfoPanel({
           <RoomSettings
             name={roomRecord?.name ?? ''}
             topic={roomRecord?.topic}
+            slowModeSec={roomRecord?.slowModeSec}
             canEdit={canEdit}
             canArchive={canArchive}
             saving={savingSettings}

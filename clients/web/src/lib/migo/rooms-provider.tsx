@@ -48,6 +48,15 @@ export interface RoomInfo {
   onlineCount?: number;
   /** The room's capacity: the ceiling the online/member counts climb toward. */
   maxMembers?: number;
+  /**
+   * The room's slow-mode interval in whole seconds, when one is set. The wire carries milliseconds
+   * and the server's own store whole seconds; this record keeps the store's units — the ones a
+   * settings screen shows and a person thinks in — and converts at the wire's edge, where the
+   * join reply and the state deltas carry `slowModeMs`. Absent is slow mode off, the same state a
+   * zero interval names on the wire, so a cleared interval leaves the key rather than lingering
+   * as a zero-valued one.
+   */
+  slowModeSec?: number;
 }
 
 export interface RoomsContextValue {
@@ -93,6 +102,9 @@ export function roomInfoOf(joined: RoomJoinResponse): RoomInfo {
     memberCount: joined.room.memberCount,
     onlineCount: joined.room.onlineCount,
     ...(joined.room.maxMembers !== undefined ? { maxMembers: joined.room.maxMembers } : {}),
+    ...(joined.room.slowModeMs !== undefined
+      ? { slowModeSec: Math.floor(joined.room.slowModeMs / 1000) }
+      : {}),
   };
 }
 
@@ -110,6 +122,7 @@ export function applyRoomState(info: RoomInfo, delta: RoomStateEvent): RoomInfo 
     ...(delta.memberCount !== undefined ? { memberCount: delta.memberCount } : {}),
     ...(delta.topic !== undefined ? { topic: delta.topic } : {}),
     ...(delta.maxMembers !== undefined ? { maxMembers: delta.maxMembers } : {}),
+    ...(delta.slowModeMs !== undefined ? { slowModeSec: Math.floor(delta.slowModeMs / 1000) } : {}),
   };
 }
 
@@ -118,17 +131,27 @@ export function applyRoomState(info: RoomInfo, delta: RoomStateEvent): RoomInfo 
  *
  * Pure, so a test can pin it. The server's fan-out excludes the acting socket, and a rename reaches
  * no frame at all — the state event carries a topic and an interval and nothing else — so the record
- * behind the rename is this side's to move, not something a delta will correct. An all-whitespace or
+ * behind the change is this side's to move, not something a delta will correct. An all-whitespace or
  * empty topic is a removal on the wire, so the key leaves the record rather than lingering empty:
- * `topic` is an absent-or-present fact here, never an undefined-valued one.
+ * `topic` is an absent-or-present fact here, never an undefined-valued one. A slow-mode interval of
+ * zero is the wire's own word for off, so it leaves the record the same way: absent is off, and a
+ * `slowModeSec` of zero must not sit in the record as a set interval a screen would seed from.
  */
-export function applyRoomSettings(info: RoomInfo, name: string, topic: string): RoomInfo {
-  const trimmed = topic.trim();
-  const next: RoomInfo = { ...info, name };
+export function applyRoomSettings(
+  info: RoomInfo,
+  settings: { name: string; topic: string; slowModeSec: number },
+): RoomInfo {
+  const trimmed = settings.topic.trim();
+  const next: RoomInfo = { ...info, name: settings.name };
   if (trimmed.length > 0) {
     next.topic = trimmed;
   } else {
     delete next.topic;
+  }
+  if (settings.slowModeSec > 0) {
+    next.slowModeSec = settings.slowModeSec;
+  } else {
+    delete next.slowModeSec;
   }
   return next;
 }

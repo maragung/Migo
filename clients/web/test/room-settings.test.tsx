@@ -5,9 +5,10 @@
  * a regression here is a control appearing where the server will only refuse it, or vanishing where
  * it belongs — and the section's rendering is pinned as markup:
  *
- *   1. **The rename belongs to an administrator and above.** The wire gates a settings change on the
- *      room's edit permission, which the rank defaults give an Administrator, a Manager, and the
- *      Owner; a Moderator who deletes messages all day still has no say in the room's name.
+ *   1. **The rename — and the slow-mode interval beside it — belongs to an administrator and
+ *      above.** The wire gates a settings change on the room's edit permission, which the rank
+ *      defaults give an Administrator, a Manager, and the Owner; a Moderator who deletes messages
+ *      all day still has no say in the room's name or its pace.
  *   2. **The archive belongs to the owner alone.** The server checks the owner column itself, so no
  *      rank comparison and no global-admin elevation softens this gate.
  *   3. **A role change needs the manage permission and a member strictly below the viewer.** The
@@ -27,9 +28,11 @@ import type { Id, RosterEntry } from '@migo/sdk';
 import {
   RosterList,
   RoomSettings,
+  SLOW_MODE_MAX_SECONDS,
   canArchiveRoom,
   canEditRoom,
   canSetRole,
+  parseSlowModeSeconds,
   settableRoles,
 } from '../src/components/room-info-panel.js';
 
@@ -149,6 +152,70 @@ test('an administrator sees the rename but not the archive', () => {
   );
   assert.ok(markup.includes('aria-label="Room name"'), 'the rename the rank admits is missing');
   assert.ok(!markup.includes('Archive Room'), 'the archive leaked onto a non-owner’s panel');
+});
+
+test('a slow-mode interval seeds from the room, is bounded by the server’s hour, and can be turned off', () => {
+  const markup = renderToStaticMarkup(
+    <RoomSettings
+      name="Observatory"
+      topic="What is above us"
+      slowModeSec={30}
+      canEdit={true}
+      canArchive={false}
+      onApply={() => {}}
+      onArchive={() => {}}
+    />,
+  );
+  assert.ok(markup.includes('aria-label="Slow mode seconds"'), 'the slow-mode field is missing');
+  assert.ok(markup.includes('value="30"'), 'the slow-mode field lost its seed');
+  assert.ok(markup.includes('Turn Off'), 'the clear affordance is missing');
+  // The server refuses an interval above an hour, so the field never asks for one.
+  assert.ok(
+    markup.includes(`max="${SLOW_MODE_MAX_SECONDS}"`),
+    'the slow-mode field must carry the server’s ceiling',
+  );
+  // A room with no interval seeds zero — the field's honest "off", not a blank a save would read.
+  const offMarkup = renderToStaticMarkup(
+    <RoomSettings
+      name="Observatory"
+      canEdit={true}
+      canArchive={false}
+      onApply={() => {}}
+      onArchive={() => {}}
+    />,
+  );
+  assert.ok(offMarkup.includes('value="0"'), 'an unset interval must seed the field at zero');
+  // The field is the edit permission's, like the rename beside it: a viewer without it sees none.
+  const bareMarkup = renderToStaticMarkup(
+    <RoomSettings
+      name="Observatory"
+      canEdit={false}
+      canArchive={false}
+      onApply={() => {}}
+      onArchive={() => {}}
+    />,
+  );
+  assert.ok(
+    !bareMarkup.includes('aria-label="Slow mode seconds"'),
+    'the slow-mode field leaked onto a viewer the edit permission excludes',
+  );
+});
+
+test('a slow-mode field parses only whole seconds the server would take', () => {
+  // The honest answers: an interval, and zero as slow mode off.
+  assert.equal(parseSlowModeSeconds('30'), 30);
+  assert.equal(parseSlowModeSeconds('0'), 0);
+  assert.equal(parseSlowModeSeconds(String(SLOW_MODE_MAX_SECONDS)), SLOW_MODE_MAX_SECONDS);
+  // Whitespace around a number is a typist's habit, not a different answer.
+  assert.equal(parseSlowModeSeconds(' 45 '), 45);
+  // Everything else is refused here rather than sent to be refused there: an empty field, text,
+  // a negative wait, a decimal (the wire truncates, so a half-second is off, not a shorter
+  // interval — the field must not pretend otherwise), and anything past the server's hour.
+  assert.equal(parseSlowModeSeconds(''), null);
+  assert.equal(parseSlowModeSeconds('soon'), null);
+  assert.equal(parseSlowModeSeconds('-5'), null);
+  assert.equal(parseSlowModeSeconds('10.5'), null);
+  assert.equal(parseSlowModeSeconds(String(SLOW_MODE_MAX_SECONDS + 1)), null);
 });
 
 test('a manager sees the role items on a lower-ranked member, and none on the owner or their own row', () => {
