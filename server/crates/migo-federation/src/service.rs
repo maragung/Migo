@@ -516,7 +516,7 @@ where
         if !is_federation_opcode(event.opcode) {
             return Err(fault::validation(
                 "opcode",
-                "must be in a federation band: 208..=223, 241..=242, or 243..=246",
+                "must be in a federation band: 208..=223, 241..=242, 243..=246, or 248..=249",
             ));
         }
         if event.payload.is_empty() {

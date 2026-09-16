@@ -20,9 +20,9 @@
 //!   *phase* gate with `UNEXPECTED_OPCODE` and **no message at all** — whether
 //!   this build even knows the opcode is opt-in disclosure, and a stranger
 //!   gets neither the fact nor the reason. The conversation-federation pair
-//!   241-242 and the row-replication tier 243-246 are likewise allocated, and
-//!   their client-side refusals are proven by the gateway suite's range-gate
-//!   tests rather than repeated here.
+//!   241-242, the row-replication tier 243-246, and the call-row pair 248-249
+//!   are likewise allocated, and their client-side refusals are proven by the
+//!   gateway suite's range-gate tests rather than repeated here.
 //! * **Unknown is answered, not fatal.** A never-allocated opcode gets
 //!   `UNKNOWN_OPCODE` and the session continues — a newer client is not a
 //!   protocol violation.

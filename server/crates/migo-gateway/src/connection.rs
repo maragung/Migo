@@ -1072,10 +1072,11 @@ impl<T: Transport> Connection<'_, T> {
     /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
     /// `ENTITLEMENTS` (240) out of its head, the conversation-federation tier later
     /// carved `FED_CONVERSATION_SUBSCRIBE` (241) and `FED_CONVERSATION_EVENT` (242),
-    /// the row-replication tier carved 243-246, the call block's last free
-    /// question, the call listing, carved 247, and the call-row replication pair
-    /// carved 248-249 — each carve-out per the written decisions section 145
-    /// records — so the
+    /// the row-replication tier carved `FED_ACCOUNT_QUERY` and `FED_ACCOUNT_ROWS` (243,
+    /// 244) and `FED_CONVERSATION_QUERY` and `FED_CONVERSATION_ROWS` (245, 246), the
+    /// call enumeration carved `CALL_LIST` (247), and the call-row replication tier
+    /// carved `FED_CALL_QUERY` and `FED_CALL_ROWS` (248, 249) — each carve-out per the
+    /// written decisions section 145 records — so the
     /// never-allocated span this gate polices is 250-255. A client speaking one is
     /// speaking a dialect this node promised
     /// not to know — and unlike a merely unknown opcode (a newer client, answered and

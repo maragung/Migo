@@ -51,8 +51,9 @@ use migo_federation::model::{
 };
 use migo_federation::{
     FederatedEvent, Mesh, MeshConfig, MeshService, NewPeerSpec, PeerIdentity, PeerStatus, PeerView,
-    PendingEvent, SequenceVerdict, CONVERSATION_OPCODE_MAX, CONVERSATION_OPCODE_MIN,
-    FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN, ROW_OPCODE_MAX, ROW_OPCODE_MIN,
+    PendingEvent, SequenceVerdict, CALL_OPCODE_MAX, CALL_OPCODE_MIN, CONVERSATION_OPCODE_MAX,
+    CONVERSATION_OPCODE_MIN, FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN, ROW_OPCODE_MAX,
+    ROW_OPCODE_MIN,
 };
 use migo_protocol::codes;
 use migo_store::traits::FederationStore;
@@ -1580,23 +1581,41 @@ async fn the_row_band_pair_is_accepted() {
 }
 
 #[tokio::test]
-async fn the_gaps_around_the_upper_federation_bands_are_refused() {
-    // 240 is a live client opcode (ENTITLEMENTS) and 248 is the reserved span,
-    // so neither may ride the mesh; the upper bands are exactly the 241-242
-    // conversation pair plus the 243-246 row tier and nothing wider.
+async fn the_call_band_pair_is_accepted() {
+    // The call-row tier's carve-out (section 145's fifth written decision):
+    // 248 FED_CALL_QUERY and 249 FED_CALL_ROWS are mesh frames too, and a call
+    // row crosses as a mesh event like every row before it.
     let h = Harness::new();
-    expect_code(
-        h.mesh
-            .enqueue(event(id(1), CONVERSATION_OPCODE_MIN - 1, b"x"), ts(NOW))
-            .await,
-        codes::VALIDATION_FAILED,
-    );
-    expect_code(
-        h.mesh
-            .enqueue(event(id(1), ROW_OPCODE_MAX + 1, b"x"), ts(NOW))
-            .await,
-        codes::VALIDATION_FAILED,
-    );
+    h.mesh
+        .enqueue(event(id(1), CALL_OPCODE_MIN, b"x"), ts(NOW))
+        .await
+        .expect("the call band's lowest opcode is valid");
+    h.mesh
+        .enqueue(event(id(1), CALL_OPCODE_MAX, b"x"), ts(NOW))
+        .await
+        .expect("the call band's highest opcode is valid");
+}
+
+#[tokio::test]
+async fn the_gaps_around_the_upper_federation_bands_are_refused() {
+    // 240 is a live client opcode (ENTITLEMENTS), 247 is another one (CALL_LIST,
+    // the call enumeration), and 250 opens the reserved span, so none of the
+    // three may ride the mesh; the upper bands are exactly the 241-242
+    // conversation pair, the 243-246 row tier, and the 248-249 call-row pair,
+    // and nothing wider. 247 is the sharp one: it sits *between* two bands, so
+    // a rule that widened either band by one would let a client opcode onto the
+    // wire and this test is what refuses it.
+    let h = Harness::new();
+    for gap in [
+        CONVERSATION_OPCODE_MIN - 1,
+        ROW_OPCODE_MAX + 1,
+        CALL_OPCODE_MAX + 1,
+    ] {
+        expect_code(
+            h.mesh.enqueue(event(id(1), gap, b"x"), ts(NOW)).await,
+            codes::VALIDATION_FAILED,
+        );
+    }
 }
 
 #[tokio::test]

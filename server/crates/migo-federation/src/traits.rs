@@ -199,8 +199,9 @@ pub trait Mesh: Send + Sync {
 
     /// Enqueues an event for delivery to another node, returning the queued view.
     ///
-    /// The opcode must fall in one of the two federation bands, 208-223 or the
-    /// conversation tier's 241-242
+    /// The opcode must fall in one of the federation bands — 208-223, the
+    /// conversation tier's 241-242, the row-replication tier's 243-246, or the
+    /// call-row tier's 248-249
     /// ([`is_federation_opcode`](crate::model::is_federation_opcode))
     /// and the payload be non-empty. Delivery is at least once and the event is durable the
     /// instant this returns, so a crash before it is sent resends rather than loses it.
