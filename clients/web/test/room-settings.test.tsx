@@ -11,10 +11,15 @@
  *      all day still has no say in the room's name or its pace.
  *   2. **The archive belongs to the owner alone.** The server checks the owner column itself, so no
  *      rank comparison and no global-admin elevation softens this gate.
- *   3. **A role change needs the manage permission and a member strictly below the viewer.** The
+ *   3. **The effective permission is the override first, the role default second — and archive
+ *      consults neither bit.** The wire carries no per-member overrides to the client today (the
+ *      roster holds a role and nothing more), so the precedence is pinned here for the day a
+ *      surface grows one: a grant hands a bit to a rank the defaults refuse, a deny takes it from
+ *      a rank the defaults give it, and the owner's archive is the owner column, not a bit.
+ *   4. **A role change needs the manage permission and a member strictly below the viewer.** The
  *      items offered are the wire's real ranks — not the badge's collapsed "Admin" — and stop one
  *      rung below the viewer's own, because the server refuses a grant at or above it.
- *   4. **A viewer with no settings sees nothing at all**, not a panel of disabled inputs.
+ *   5. **A viewer with no settings sees nothing at all**, not a panel of disabled inputs.
  */
 
 import assert from 'node:assert/strict';
@@ -29,9 +34,8 @@ import {
   RosterList,
   RoomSettings,
   SLOW_MODE_MAX_SECONDS,
-  canArchiveRoom,
-  canEditRoom,
   canSetRole,
+  effectivePermission,
   parseSlowModeSeconds,
   settableRoles,
 } from '../src/components/room-info-panel.js';
@@ -42,24 +46,58 @@ function roster(accountId: string, role: number): RosterEntry {
   return { accountId: accountId as Id, role, joinedAt: JOINED };
 }
 
-test('the rename belongs to an administrator and above', () => {
-  assert.equal(canEditRoom(RoomRole.Owner), true);
-  assert.equal(canEditRoom(RoomRole.Manager), true);
-  assert.equal(canEditRoom(RoomRole.Admin), true);
-  assert.equal(canEditRoom(RoomRole.Moderator), false);
-  assert.equal(canEditRoom(RoomRole.Helper), false);
-  assert.equal(canEditRoom(RoomRole.Member), false);
+test('the rename — and the slow-mode interval beside it — belongs to an administrator and above', () => {
+  assert.equal(effectivePermission({ role: RoomRole.Owner }, 'edit'), true);
+  assert.equal(effectivePermission({ role: RoomRole.Manager }, 'edit'), true);
+  assert.equal(effectivePermission({ role: RoomRole.Admin }, 'edit'), true);
+  assert.equal(effectivePermission({ role: RoomRole.Moderator }, 'edit'), false);
+  assert.equal(effectivePermission({ role: RoomRole.Helper }, 'edit'), false);
+  assert.equal(effectivePermission({ role: RoomRole.Member }, 'edit'), false);
   // Unknown — not on the roster, or a value a newer node sent — offers nothing.
-  assert.equal(canEditRoom(RoomRole.Unknown), false);
+  assert.equal(effectivePermission({ role: RoomRole.Unknown }, 'edit'), false);
 });
 
 test('the archive belongs to the owner alone', () => {
-  assert.equal(canArchiveRoom(RoomRole.Owner), true);
-  assert.equal(canArchiveRoom(RoomRole.Manager), false);
+  assert.equal(effectivePermission({ role: RoomRole.Owner }, 'archive'), true);
+  assert.equal(effectivePermission({ role: RoomRole.Manager }, 'archive'), false);
   // A global admin moderates any room, but the server refuses an archive from anyone but the
   // owner, so no elevation softens this gate the way it softens a sanction.
-  assert.equal(canArchiveRoom(RoomRole.Admin), false);
-  assert.equal(canArchiveRoom(RoomRole.Member), false);
+  assert.equal(effectivePermission({ role: RoomRole.Admin }, 'archive'), false);
+  assert.equal(effectivePermission({ role: RoomRole.Member }, 'archive'), false);
+});
+
+test('a per-member override is the effective permission, winning over the role default both ways', () => {
+  // A grant hands the edit bit to a rank the defaults refuse — the moderator a manager trusted
+  // with the room's name, without the rank that would also let them ban.
+  assert.equal(
+    effectivePermission({ role: RoomRole.Moderator, overrides: { edit: true } }, 'edit'),
+    true,
+  );
+  // A deny takes it from a rank the defaults give it — the administrator under a correction.
+  assert.equal(
+    effectivePermission({ role: RoomRole.Owner, overrides: { edit: false } }, 'edit'),
+    false,
+  );
+  // The manage bit answers the same way, and an override for one action leaves the others on
+  // their role defaults: the permissions are per-bit, not a blanket.
+  assert.equal(
+    effectivePermission({ role: RoomRole.Moderator, overrides: { manage: true } }, 'manage'),
+    true,
+  );
+  assert.equal(
+    effectivePermission({ role: RoomRole.Moderator, overrides: { manage: true } }, 'edit'),
+    false,
+  );
+  // Archive is the owner column, not a permission bit: no override grants it to another member,
+  // and none is consulted for it — not even a deny takes the ending of the room from its owner.
+  assert.equal(
+    effectivePermission({ role: RoomRole.Manager, overrides: { archive: true } }, 'archive'),
+    false,
+  );
+  assert.equal(
+    effectivePermission({ role: RoomRole.Owner, overrides: { archive: false } }, 'archive'),
+    true,
+  );
 });
 
 test('a role change needs the manage permission and a member strictly below the viewer', () => {

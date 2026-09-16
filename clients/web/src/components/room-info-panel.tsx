@@ -40,9 +40,10 @@
  * manage permission, a Manager or the Owner, and the server refuses a grant at or above the actor's
  * own rank, so the items offered are the ranks strictly below the viewer's. **Archiving** is the
  * owner's alone: no other rank, however senior, may end the room for everybody in it, and there is
- * no unarchive — the confirmation says exactly that. A permission granted per-member by an override
- * the roster cannot see is the server's to admit and the panel's to surface as the refusal it
- * returns.
+ * no unarchive — the confirmation says exactly that. Each gate is asked in one place,
+ * {@link effectivePermission}: a per-member override the roster cannot see would win there the day
+ * a wire surface grows one, and until then the role default answers and the server's refusal is the
+ * last word, surfaced as the error it returns.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -174,37 +175,77 @@ export function canSanction(myRole: number, targetRole: number, isGlobalAdmin: b
 }
 
 /**
- * Whether the rename controls belong in this viewer's panel.
+ * The room-level actions this panel gates, one per question the server asks before admitting them.
  *
- * Pure, so a test pins it. The wire gates a settings change on the room's edit permission, which the
- * rank defaults give an Administrator and above; the panel cannot see the per-member overrides that
- * could hand the bit to someone lower, so the server's refusal is the last word and is surfaced as
- * the error it returns.
+ * `edit` and `manage` are the wire's own permission bits (`ROOM_EDIT`, `ROOM_MANAGE`): the settings
+ * patch — the rename, the topic, the slow-mode interval — needs the first, and a role change or a
+ * permission override needs the second. `archive` is not a bit at all: the server checks the room's
+ * owner column itself, and no permission anyone holds can hand the ending of a room to another
+ * member, which is why {@link effectivePermission} never consults an override for it.
  */
-export function canEditRoom(myRole: number): boolean {
-  return myRole >= ROLE_ADMIN;
+export type RoomAction = 'edit' | 'manage' | 'archive';
+
+/**
+ * A member's standing in a room, as this client can see it.
+ *
+ * The roster carries a role and nothing more: `RosterEntry` is the account, the rank, and the join
+ * time, and the wire has no surface that reports the per-member permission overrides the server
+ * stores (a grant/deny mask per membership row, invisible even to the member events, which carry a
+ * role and not a permission set). So the role is the whole answer today, and `overrides` is the
+ * seam: the day a wire surface grows one, the overrides land in this record and every gate that
+ * asks {@link effectivePermission} moves with them, because this is the one place the question is
+ * answered.
+ */
+export interface MemberStanding {
+  /** The member's room rank, as the roster carries it: a plain wire number. */
+  role: number;
+  /**
+   * Per-member overrides of the role's permission defaults, keyed by action. Always absent from
+   * real data today — the roster cannot see them — so the role default answers; a test pins the
+   * precedence for the day the wire grows a surface.
+   */
+  overrides?: Readonly<Partial<Record<RoomAction, boolean>>>;
 }
 
 /**
- * Whether the archive control belongs in this viewer's panel.
+ * Whether a member may take a room-level action: the override first, the role's default second.
  *
- * Pure, so a test pins it. The server checks the owner column itself and refuses anyone else — even a
- * Manager, even a global admin — so the gate is the owner's rank alone, not a rank comparison.
+ * Pure, so a test pins it, including the precedence. An override, when one is visible, is the
+ * member's *effective* permission — a grant hands a bit to a rank the defaults would refuse, and a
+ * deny takes it from a rank the defaults would give it — so it wins outright rather than being
+ * folded into a rank comparison, the same order the server resolves its own masks in (role default,
+ * plus the grant, minus the deny). Archive is the exception the server itself makes: the owner
+ * column, not a permission bit, decides it, so no override is consulted and the owner's rank is the
+ * whole answer. Until the wire carries overrides, the role default is the panel's answer and the
+ * server's refusal is the last word, surfaced as the error it returns.
  */
-export function canArchiveRoom(myRole: number): boolean {
-  return myRole === ROLE_OWNER;
+export function effectivePermission(member: MemberStanding, action: RoomAction): boolean {
+  if (action === 'archive') {
+    return member.role === ROLE_OWNER;
+  }
+  const override = member.overrides?.[action];
+  if (override !== undefined) {
+    return override;
+  }
+  return action === 'manage' ? member.role >= ROLE_MANAGER : member.role >= ROLE_ADMIN;
 }
 
 /**
  * Whether the role controls belong on a member's row.
  *
  * Pure, so a test pins it. The server demands the room's manage permission — a Manager or the Owner
- * by default — and that the actor strictly outrank the member; the owner's row is beyond everyone's
- * reach and the viewer's own row carries no actions. A global admin's elevation does not help here:
- * unlike a sanction, a role change is resolved from the membership row alone.
+ * by default, though an override can hand the bit to a lower rank the roster cannot see — and that
+ * the actor strictly outrank the member; the owner's row is beyond everyone's reach and the viewer's
+ * own row carries no actions. A global admin's elevation does not help here: unlike a sanction, a
+ * role change is resolved from the membership row alone.
  */
 export function canSetRole(myRole: number, targetRole: number, isSelf: boolean): boolean {
-  return !isSelf && targetRole !== ROLE_OWNER && myRole >= ROLE_MANAGER && myRole > targetRole;
+  return (
+    !isSelf &&
+    targetRole !== ROLE_OWNER &&
+    effectivePermission({ role: myRole }, 'manage') &&
+    myRole > targetRole
+  );
 }
 
 /**
@@ -819,11 +860,14 @@ export function RoomInfoPanel({
   // controls to a viewer the roster says holds them; the fields start empty and the server remains
   // the authority on what they say.
   const roomRecord = liveFor(roomId);
-  // The settings gates, from the rank defaults the server resolves permissions through. A member
-  // holding a bit by an override the roster cannot see is the server's refusal to tell, and it
-  // surfaces as the error it returns.
-  const canEdit = canEditRoom(myRole);
-  const canArchive = canArchiveRoom(myRole);
+  // The settings gates, all through the one place the permission question is answered: the
+  // viewer's standing, resolved override-first. The roster the standing is built from carries a
+  // role and nothing more — the wire has no surface for the per-member overrides the server
+  // stores — so the role default is the whole answer today, and a member holding a bit by an
+  // override is the server's refusal to tell; it surfaces as the error it returns.
+  const myStanding: MemberStanding = { role: myRole };
+  const canEdit = effectivePermission(myStanding, 'edit');
+  const canArchive = effectivePermission(myStanding, 'archive');
 
   // The raw tallies become the labels the rows show, through the same pure formatter a test pins.
   const tallyLabels = useMemo<ReadonlyMap<Id, string>>(() => {
