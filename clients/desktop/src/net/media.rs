@@ -25,10 +25,15 @@
 //!
 //! # Voice notes
 //!
-//! This client records plain WAV — PCM 16-bit, mono, 8 kHz — which the server's sniffer
-//! identifies from the `RIFF`…`WAVE` magic alone. What it *plays* is whatever the sender
-//! recorded: Chrome and Firefox produce `audio/webm` (Opus in an EBML container), Safari
-//! `audio/mp4`, so the decoder is a real demuxer-and-codec stack rather than a WAV parser.
+//! This client records Opus in an Ogg — mono, 24 kHz input, 24 kbps — the same posture the
+//! Android recorder's own settings keep, so a note from this client is the same container,
+//! codec, and size a note from an Android phone is, and Opus is the speech codec the web
+//! client's recorder produces as well (Chrome and Firefox record Opus in a WebM). The pages
+//! are written as the recording runs, so the draft file is a playable Ogg from its first
+//! second. What it *plays* is whatever the sender recorded: this client's own Ogg Opus, the
+//! WAV this client recorded before the switch, a browser's WebM/Opus or MP4/AAC — so the
+//! decoder is a real demuxer-and-codec stack that picks its path off the container's own
+//! magic, never off a claimed type or a file extension.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,18 +58,32 @@ pub(crate) const IMAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// The server's cap on a document.
 pub(crate) const DOCUMENT_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The server's cap on a voice note's byte size. A five-minute 8 kHz mono WAV is 4.8 MB,
-/// comfortably inside; the cap is stated anyway because the recorder refuses against it,
-/// not against a derived guess.
+/// The server's cap on a voice note's byte size. A five-minute note at this client's 24 kbps
+/// is roughly 900 kB, comfortably inside; the cap is stated anyway because the recorder
+/// refuses against it, not against a derived guess.
 pub(crate) const VOICE_NOTE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The server's cap on a voice note's playing time, in milliseconds.
 pub(crate) const VOICE_NOTE_MAX_MS: u64 = 300_000;
 
-/// What a voice note is recorded at on this client: mono, 16-bit PCM. Eight kilohertz is
-/// the wire's own call rate — the one rate every Migo client already resamples to — and at
-/// the five-minute cap it produces 4.8 MB, less than the byte cap the policy states.
-pub(crate) const VOICE_NOTE_SAMPLE_RATE: u32 = 8_000;
+/// What a voice note is recorded at on this client: mono Opus, 24 kHz input. Twenty-four
+/// kilohertz is the rate the Android recorder configures — the same rate on both clients
+/// means the same bandwidth and roughly the same size of note — and it is Opus's
+/// superwideband, a speech note worth hearing clearly rather than the call wire's 8 kHz
+/// narrowband. Opus itself always runs at 48 kHz internally; the rate stated here is the
+/// encoder's input rate and the bandwidth it may use.
+pub(crate) const VOICE_NOTE_SAMPLE_RATE: u32 = 24_000;
+
+/// The rate the previous release of this client recorded raw PCM at — the one rate that
+/// client ever wrote. Restated because a draft it left on disk is raw PCM at this rate, and
+/// re-encoding such a draft must happen at the rate it was taken at, not the rate notes are
+/// taken at now.
+pub(crate) const LEGACY_VOICE_NOTE_SAMPLE_RATE: u32 = 8_000;
+
+/// The bitrate a voice note is encoded at, the same figure the Android recorder configures:
+/// a speech bitrate, not a music one — section 179's "Normal" quality, where a five-minute
+/// note stays a small upload.
+pub(crate) const VOICE_NOTE_OPUS_BITRATE: i32 = 24_000;
 
 /// How many bars a recorded waveform folds into, and what a bubble renders at most — the
 /// web client's `WAVEFORM_BARS` and the Android client's, the same number, so a note
@@ -556,37 +575,463 @@ pub(crate) fn document_mime_of(path: &Path) -> &'static str {
     }
 }
 
-/// A canonical 44-byte WAV header plus the samples: PCM, 16-bit, mono, at `rate`.
-///
-/// Written by hand rather than through a codec crate because a voice note's container is
-/// one fixed shape on this client, and the server's sniffer needs nothing more than the
-/// `RIFF`…`WAVE` magic the header carries.
-pub(crate) fn wav_bytes(samples: &[i16], rate: u32) -> Vec<u8> {
-    let data_len = samples.len() * 2;
-    let mut out = Vec::with_capacity(44 + data_len);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&u32::to_le_bytes((36 + data_len) as u32));
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&u32::to_le_bytes(16)); // the fmt chunk's own size
-    out.extend_from_slice(&u16::to_le_bytes(1)); // PCM
-    out.extend_from_slice(&u16::to_le_bytes(1)); // mono
-    out.extend_from_slice(&u32::to_le_bytes(rate));
-    out.extend_from_slice(&u32::to_le_bytes(rate * 2)); // byte rate: mono × 16-bit
-    out.extend_from_slice(&u16::to_le_bytes(2)); // block align
-    out.extend_from_slice(&u16::to_le_bytes(16)); // bits per sample
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&u32::to_le_bytes(data_len as u32));
-    for sample in samples {
-        out.extend_from_slice(&sample.to_le_bytes());
+/// One Opus frame's playing time, in milliseconds: the unit the encoder is fed in, the
+/// smallest packet the stream holds, and the granularity a recording's tail is padded to.
+const OPUS_FRAME_MS: u64 = 20;
+
+/// One frame's worth of samples at Opus's own internal rate: the count the Ogg granule
+/// position advances by per frame, whatever rate the input was taken at — RFC 7845 states
+/// granule positions in 48 kHz samples because that is the rate the codec itself runs at.
+const OPUS_FRAME_SAMPLES_AT_48K: u64 = 48_000 * OPUS_FRAME_MS / 1_000;
+
+/// The largest legal Opus packet, the capacity one frame is encoded into.
+const OPUS_MAX_PACKET: usize = 1_275;
+
+/// The encoder complexity: below libopus's default, on purpose. This encoder runs on the
+/// capture thread, in pure Rust, keeping pace with a live microphone — complexity 5 is
+/// libopus's own mid-point of quality against effort, and at a 24 kbps speech bitrate the
+/// difference from higher settings is inaudible while the headroom is what keeps a slow
+/// machine from falling behind realtime.
+const OPUS_COMPLEXITY: i32 = 5;
+
+/// The encoder's lookahead, in 48 kHz samples: the six and a half milliseconds libopus
+/// buffers before its first output sample. Stated in the identification header as the
+/// pre-skip, the field every Ogg Opus writer fills with this figure, so a player that
+/// honours it drops exactly the samples the encoder held back.
+const OPUS_PRE_SKIP: u16 = 312;
+
+/// How many lacing values a page under construction may hold before it is written: the
+/// Ogg page header caps a page at 255 segments, and flushing a little early keeps every
+/// page well inside the cap whatever sizes VBR packets take.
+const OGG_PAGE_LACING_FLUSH: usize = 200;
+
+/// The body size a page under construction aims for, the four kilobytes Ogg writers from
+/// `opusenc` on down batch to: small enough that a death mid-recording costs the note's
+/// last moment rather than its last several seconds, large enough that page headers stay a
+/// rounding error in the byte budget.
+const OGG_PAGE_TARGET_BYTES: usize = 4_096;
+
+/// Ogg's own checksum: CRC-32 with the MPEG-2 polynomial, MSB first, no initial value and
+/// no final XOR, taken over the page with the checksum's own four bytes zeroed. The table
+/// is built at compile time — the bit loop runs once per entry of a constant, not once per
+/// byte of a recording.
+const fn ogg_crc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut entry = 0;
+    while entry < 256 {
+        let mut value = (entry as u32) << 24;
+        let mut bit = 0;
+        while bit < 8 {
+            value = if value & 0x8000_0000 != 0 {
+                (value << 1) ^ 0x04C1_1DB7
+            } else {
+                value << 1
+            };
+            bit += 1;
+        }
+        table[entry] = value;
+        entry += 1;
     }
+    table
+}
+
+static OGG_CRC_TABLE: [u32; 256] = ogg_crc_table();
+
+/// The CRC of one page's bytes, checksum field included — the caller zeroes the field
+/// first, then writes this value into it.
+fn ogg_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for byte in bytes {
+        let index = (((crc >> 24) as u8) ^ byte) as usize;
+        crc = (crc << 8) ^ OGG_CRC_TABLE[index];
+    }
+    crc
+}
+
+/// Writes one Ogg page: RFC 3533's 27-byte header, the lacing table, and the packet body,
+/// with the header-type flag, granule position, serial number, and sequence number the
+/// caller states. The lacing table must hold at most 255 values — the page header's one
+/// byte of segment count — which the writer's flush threshold guarantees.
+fn write_ogg_page<W: std::io::Write>(
+    out: &mut W,
+    header_type: u8,
+    granule: u64,
+    serial: u32,
+    sequence: u32,
+    lacing: &[u8],
+    body: &[u8],
+) -> std::io::Result<()> {
+    debug_assert!(lacing.len() <= 255);
+    let mut page = Vec::with_capacity(27 + lacing.len() + body.len());
+    page.extend_from_slice(b"OggS");
+    page.push(0); // stream structure version
+    page.push(header_type);
+    page.extend_from_slice(&granule.to_le_bytes());
+    page.extend_from_slice(&serial.to_le_bytes());
+    page.extend_from_slice(&sequence.to_le_bytes());
+    page.extend_from_slice(&[0; 4]); // the checksum, written once it can be computed
+    page.push(lacing.len() as u8);
+    page.extend_from_slice(lacing);
+    page.extend_from_slice(body);
+    let crc = ogg_crc(&page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+    out.write_all(&page)
+}
+
+/// Appends one packet's lacing values: a packet is a run of 255s ending in the remainder,
+/// and a packet whose length is a multiple of 255 ends in a zero — the terminating value
+/// that tells a reader the packet ended there.
+fn push_ogg_lacing(lacing: &mut Vec<u8>, packet: &[u8]) {
+    let mut remaining = packet.len();
+    while remaining >= 255 {
+        lacing.push(255);
+        remaining -= 255;
+    }
+    lacing.push(remaining as u8);
+}
+
+/// The identification header RFC 7845 puts in the first page's first packet: the codec's
+/// name, the mapping version, the channel count, the pre-skip, the input sample rate, the
+/// output gain, and the channel mapping family. Nineteen bytes, one fixed shape.
+fn opus_head_packet(input_rate: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(19);
+    out.extend_from_slice(b"OpusHead");
+    out.push(1); // mapping version
+    out.push(1); // channels: mono
+    out.extend_from_slice(&OPUS_PRE_SKIP.to_le_bytes());
+    out.extend_from_slice(&input_rate.to_le_bytes());
+    out.extend_from_slice(&0i16.to_le_bytes()); // output gain: none
+    out.push(0); // channel mapping family: RTP
     out
+}
+
+/// The comment header, the second page's whole content: the codec's name, a vendor string,
+/// and a count of zero comments. Nothing here is a judgement about the audio; the page
+/// exists because the mapping says it must.
+fn opus_tags_packet() -> Vec<u8> {
+    let vendor = b"migo-desktop";
+    let mut out = Vec::with_capacity(8 + 4 + vendor.len() + 4);
+    out.extend_from_slice(b"OpusTags");
+    out.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    out.extend_from_slice(vendor);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}
+
+/// The incremental Ogg Opus writer a recording is sealed into as it runs: PCM in, pages
+/// out, never holding more than the current partial frame and the current partial page.
+///
+/// Written by hand rather than through a container crate because a voice note's stream is
+/// one fixed shape — a single mono Opus logical stream, two header packets, 20 ms frames —
+/// the same reasoning that had this module writing its own WAV header for years. The Opus
+/// packets themselves come from `oporus`, the same pure-Rust codec the decoder below
+/// already leans on: no C toolchain enters the build to carry one.
+///
+/// The granule position advances by 960 per frame — one 20 ms frame at the codec's own
+/// 48 kHz, whatever rate the input was taken at — starting from the pre-skip, so the
+/// position a page states is the count of 48 kHz samples a decoder would have produced by
+/// the end of that page, which is exactly what RFC 7845 asks the field to mean.
+pub(crate) struct OggOpusEncoder<W: std::io::Write> {
+    /// The stream's destination — the recording's draft file, buffered.
+    out: W,
+    /// The codec. VoIP tuning, because a note is a voice and not a concert.
+    encoder: oporus::Encoder,
+    /// The logical stream's serial number, drawn fresh per recording so two notes never
+    /// share a stream identity by accident.
+    serial: u32,
+    /// The next page's sequence number, one per page from zero.
+    sequence: u32,
+    /// One frame's worth of input samples at the note's own rate.
+    frame_len: usize,
+    /// The samples of the frame being filled — fewer than one frame's worth, always.
+    pending: Vec<i16>,
+    /// 48 kHz samples encoded so far, pre-skip included: the granule the next page states.
+    granule: u64,
+    /// The lacing values of the packets batched into the page being built.
+    page_lacing: Vec<u8>,
+    /// The bytes of the packets batched into the page being built.
+    page_body: Vec<u8>,
+    /// Whether the two header pages have been written — deferred to the first push so a
+    /// writer that never receives a sample still produces a well-formed, empty stream.
+    started: bool,
+}
+
+impl<W: std::io::Write> OggOpusEncoder<W> {
+    /// Builds the encoder for one recording at `rate` — one of Opus's five rates — under
+    /// the speech bitrate this client's notes all use.
+    pub(crate) fn new(out: W, rate: u32, serial: u32) -> Result<Self, &'static str> {
+        let encoder =
+            oporus::Encoder::builder(rate, oporus::Channels::Mono, oporus::Application::Voip)
+                .bitrate(oporus::Bitrate::Bits(VOICE_NOTE_OPUS_BITRATE))
+                .complexity(OPUS_COMPLEXITY)
+                .build()
+                .map_err(|_| "could not start the opus encoder")?;
+        let frame_len = rate as usize * OPUS_FRAME_MS as usize / 1_000;
+        Ok(Self {
+            out,
+            encoder,
+            serial,
+            sequence: 0,
+            frame_len,
+            pending: Vec::with_capacity(frame_len),
+            granule: u64::from(OPUS_PRE_SKIP),
+            page_lacing: Vec::new(),
+            page_body: Vec::new(),
+            started: false,
+        })
+    }
+
+    /// Writes the two header pages, once: the identification page a reader detects the
+    /// stream by, and the comment page behind it.
+    fn start(&mut self) -> std::io::Result<()> {
+        if self.started {
+            return Ok(());
+        }
+        self.started = true;
+        let head = opus_head_packet(self.encoder.sample_rate());
+        write_ogg_page(
+            &mut self.out,
+            0x02, // beginning of stream
+            0,
+            self.serial,
+            self.sequence,
+            &[head.len() as u8],
+            &head,
+        )?;
+        self.sequence += 1;
+        let tags = opus_tags_packet();
+        write_ogg_page(
+            &mut self.out,
+            0x00,
+            0,
+            self.serial,
+            self.sequence,
+            &[tags.len() as u8],
+            &tags,
+        )?;
+        self.sequence += 1;
+        Ok(())
+    }
+
+    /// Appends PCM at the note's own rate. A frame is encoded each time enough samples
+    /// have arrived, so the recording exists on disk — inside whatever page is batching —
+    /// from the microphone's first moment, and the bytes are never held whole in memory.
+    pub(crate) fn push(&mut self, pcm: &[i16]) -> std::io::Result<()> {
+        self.start()?;
+        self.pending.extend_from_slice(pcm);
+        let frame_len = self.frame_len;
+        while self.pending.len() >= frame_len {
+            let frame: Vec<i16> = self.pending.drain(..frame_len).collect();
+            self.encode_frame(&frame)?;
+        }
+        Ok(())
+    }
+
+    /// Encodes one complete frame into one packet and batches it into the current page.
+    fn encode_frame(&mut self, frame: &[i16]) -> std::io::Result<()> {
+        let packet = self
+            .encoder
+            .encode_vec(frame, OPUS_MAX_PACKET)
+            .map_err(|_| std::io::Error::other("the opus encoder refused a frame"))?;
+        self.granule += OPUS_FRAME_SAMPLES_AT_48K;
+        push_ogg_lacing(&mut self.page_lacing, &packet);
+        self.page_body.extend_from_slice(&packet);
+        if self.page_lacing.len() >= OGG_PAGE_LACING_FLUSH
+            || self.page_body.len() >= OGG_PAGE_TARGET_BYTES
+        {
+            self.flush_page(false)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the page under construction. `eos` sets the end-of-stream flag — the last
+    /// page of the stream, whatever it holds.
+    fn flush_page(&mut self, eos: bool) -> std::io::Result<()> {
+        let header_type = if eos { 0x04 } else { 0x00 };
+        write_ogg_page(
+            &mut self.out,
+            header_type,
+            self.granule,
+            self.serial,
+            self.sequence,
+            &self.page_lacing,
+            &self.page_body,
+        )?;
+        self.sequence += 1;
+        self.page_lacing.clear();
+        self.page_body.clear();
+        Ok(())
+    }
+
+    /// Ends the stream and hands the writer back. A partial frame at the end is padded
+    /// with silence when `pad_tail` — a speaker cut off mid-word still gets their last
+    /// twenty milliseconds — and dropped when it is the cap's own overrun, so a note the
+    /// cap stopped does not claim time it was refused.
+    pub(crate) fn finish(mut self, pad_tail: bool) -> std::io::Result<W> {
+        self.start()?;
+        if pad_tail && !self.pending.is_empty() {
+            let mut frame = std::mem::take(&mut self.pending);
+            frame.resize(self.frame_len, 0);
+            self.encode_frame(&frame)?;
+        }
+        if self.page_lacing.is_empty() {
+            // Nothing is batched — either every packet landed on a page boundary or the
+            // recording never made a frame. The stream still ends with an end-of-stream
+            // page, carrying a zero-length packet's lacing so the page is well-formed.
+            self.page_lacing.push(0);
+        }
+        self.flush_page(true)?;
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+/// Encodes a whole buffer's PCM into Ogg Opus at `rate` — the one-shot shape of the
+/// incremental writer, for a draft re-encoded in place rather than recorded live.
+pub(crate) fn encode_ogg_opus(
+    samples: &[i16],
+    rate: u32,
+    serial: u32,
+) -> Result<Vec<u8>, &'static str> {
+    let mut out = Vec::new();
+    let mut encoder = OggOpusEncoder::new(&mut out, rate, serial)?;
+    encoder
+        .push(samples)
+        .map_err(|_| "could not encode the recording")?;
+    encoder
+        .finish(true)
+        .map_err(|_| "could not encode the recording")?;
+    Ok(out)
+}
+
+/// States a note's playing time off the pages themselves: the last granule position any
+/// complete page carries, less the pre-skip, in milliseconds. The encoded stream's own
+/// statement of its length — independent of any descriptor — and one that stays honest
+/// for a draft whose tail died with the process, because a truncated page simply is not
+/// counted. `None` when the bytes hold no complete page that states any audio.
+pub(crate) fn ogg_opus_playtime_ms(bytes: &[u8]) -> Option<u64> {
+    let mut last = 0u64;
+    let mut offset = 0usize;
+    while offset + 27 <= bytes.len() {
+        if &bytes[offset..offset + 4] != b"OggS" {
+            return None;
+        }
+        let segments = bytes[offset + 26] as usize;
+        let header_len = 27 + segments;
+        if offset + header_len > bytes.len() {
+            break; // the header itself was cut short: the page never finished
+        }
+        let body: usize = bytes[offset + 27..offset + header_len]
+            .iter()
+            .map(|value| usize::from(*value))
+            .sum();
+        if offset + header_len + body > bytes.len() {
+            break; // the body was cut short: the page never finished
+        }
+        let granule = u64::from_le_bytes(bytes[offset + 6..offset + 14].try_into().ok()?);
+        if granule > 0 {
+            last = granule;
+        }
+        offset += header_len + body;
+    }
+    if last < u64::from(OPUS_PRE_SKIP) {
+        return None;
+    }
+    Some((last - u64::from(OPUS_PRE_SKIP)) * 1_000 / 48_000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use migo_core::{OsRandom, SeededRandom};
+
+    /// A 440 Hz sine at `rate`, `len` samples long, at the given amplitude — a stand-in for
+    /// speech that carries real energy through the codec.
+    fn sine(len: usize, rate: u32, amplitude: f64) -> Vec<i16> {
+        (0..len)
+            .map(|index| {
+                let phase = (index as f64) * 440.0 * std::f64::consts::TAU / f64::from(rate);
+                (phase.sin() * amplitude) as i16
+            })
+            .collect()
+    }
+
+    /// A canonical 44-byte WAV header plus the samples: PCM, 16-bit, mono, at `rate` — the
+    /// container this client recorded before the Opus switch, and still the shape the WAV
+    /// passthrough test needs. Written by hand for the same reason it always was: a fixed
+    /// shape, and the test pins its layout.
+    fn wav_bytes(samples: &[i16], rate: u32) -> Vec<u8> {
+        let data_len = samples.len() * 2;
+        let mut out = Vec::with_capacity(44 + data_len);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&u32::to_le_bytes((36 + data_len) as u32));
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&u32::to_le_bytes(16)); // the fmt chunk's own size
+        out.extend_from_slice(&u16::to_le_bytes(1)); // PCM
+        out.extend_from_slice(&u16::to_le_bytes(1)); // mono
+        out.extend_from_slice(&u32::to_le_bytes(rate));
+        out.extend_from_slice(&u32::to_le_bytes(rate * 2)); // byte rate: mono × 16-bit
+        out.extend_from_slice(&u16::to_le_bytes(2)); // block align
+        out.extend_from_slice(&u16::to_le_bytes(16)); // bits per sample
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&u32::to_le_bytes(data_len as u32));
+        for sample in samples {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        out
+    }
+
+    /// Walks an Ogg stream the way any Ogg reader walks it — lacing table first, body
+    /// length from it — and states each page's header-type flags, granule position,
+    /// sequence number, and body. Every page's checksum is verified against its own bytes
+    /// on the way past, so a test that walks a stream has already proven the checksums.
+    fn ogg_pages(bytes: &[u8]) -> Vec<(u8, u64, u32, Vec<u8>)> {
+        let mut pages = Vec::new();
+        let mut offset = 0usize;
+        while offset + 27 <= bytes.len() {
+            assert_eq!(
+                &bytes[offset..offset + 4],
+                b"OggS",
+                "every page opens with the capture pattern"
+            );
+            let flags = bytes[offset + 5];
+            let granule = u64::from_le_bytes(bytes[offset + 6..offset + 14].try_into().unwrap());
+            let sequence = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().unwrap());
+            let carried = u32::from_le_bytes(bytes[offset + 22..offset + 26].try_into().unwrap());
+            let segments = bytes[offset + 26] as usize;
+            let header_len = 27 + segments;
+            let body_len: usize = bytes[offset + 27..offset + header_len]
+                .iter()
+                .map(|value| usize::from(*value))
+                .sum();
+            let body = bytes[offset + header_len..offset + header_len + body_len].to_vec();
+            let mut zeroed = bytes[offset..offset + header_len + body_len].to_vec();
+            zeroed[22..26].fill(0);
+            assert_eq!(
+                carried,
+                ogg_crc(&zeroed),
+                "the checksum a page carries is the one its bytes state"
+            );
+            pages.push((flags, granule, sequence, body));
+            offset += header_len + body_len;
+        }
+        assert_eq!(offset, bytes.len(), "the pages account for every byte");
+        pages
+    }
+
+    /// The bar one window of PCM folds to — the recorder's own live-sampling judgement,
+    /// restated for tests that must take it over a buffer rather than a stream.
+    fn window_bar(window: &[i16]) -> u8 {
+        let peak = window.iter().copied().fold(0i16, |peak, sample| {
+            if sample.unsigned_abs() > peak.unsigned_abs() {
+                sample
+            } else {
+                peak
+            }
+        });
+        amplitude_to_bar(peak)
+    }
 
     fn keying() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         // A sealed blob under the media domain, opened the way a receiver would.
@@ -652,9 +1097,9 @@ mod tests {
         assert_ne!(first.key, second.key);
     }
 
-    /// The WAV writer produces the canonical header a sniffer — and every other player —
-    /// reads: RIFF/WAVE magic, PCM mono 16-bit at the stated rate, and little-endian
-    /// samples in a data chunk whose length matches.
+    /// The WAV shape this client used to send is still the shape the decode path must
+    /// accept, and the helper that crafts one lays out the canonical header a sniffer — and
+    /// every other player — reads.
     #[test]
     fn the_wav_writer_lays_out_the_canonical_header() {
         let samples: Vec<i16> = vec![-1, 0, 258, i16::MAX];
@@ -681,13 +1126,253 @@ mod tests {
         assert_eq!(wav[48..50], 258i16.to_le_bytes());
     }
 
-    /// A five-minute recording at the stated rate stays inside the byte cap, so the two
-    /// caps the policy states can never disagree on this client.
+    /// An encoded note is an Ogg Opus stream, stated by its own bytes: the capture pattern,
+    /// a beginning-of-stream page whose one packet is the identification header, the
+    /// comment page behind it, numbered pages in order, and a final page flagged
+    /// end-of-stream whose granule position states the whole note at the codec's own rate.
+    #[test]
+    fn an_encoded_note_is_ogg_opus() {
+        let samples = sine(
+            VOICE_NOTE_SAMPLE_RATE as usize,
+            VOICE_NOTE_SAMPLE_RATE,
+            12_000.0,
+        );
+        let ogg = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 0x1234_5678)
+            .expect("one second encodes");
+
+        assert_eq!(&ogg[..4], b"OggS", "the stream opens with Ogg's magic");
+        let pages = ogg_pages(&ogg);
+        assert!(pages.len() >= 3, "identification, comment, and audio pages");
+
+        let (flags, granule, sequence, head) = &pages[0];
+        assert_eq!(*flags & 0x02, 0x02, "the first page begins the stream");
+        assert_eq!(*granule, 0, "the identification page states no time");
+        assert_eq!(*sequence, 0);
+        assert_eq!(&head[..8], b"OpusHead");
+        assert_eq!(
+            head.len(),
+            19,
+            "the identification packet is the fixed 19 bytes"
+        );
+        assert_eq!(head[8], 1, "mapping version 1");
+        assert_eq!(head[9], 1, "mono");
+        assert_eq!(
+            u16::from_le_bytes(head[10..12].try_into().unwrap()),
+            OPUS_PRE_SKIP
+        );
+        assert_eq!(
+            u32::from_le_bytes(head[12..16].try_into().unwrap()),
+            VOICE_NOTE_SAMPLE_RATE
+        );
+        assert_eq!(head[18], 0, "the RTP channel mapping family");
+
+        let (flags, granule, sequence, tags) = &pages[1];
+        assert_eq!(*flags, 0x00, "the comment page is a middle page");
+        assert_eq!(*granule, 0);
+        assert_eq!(*sequence, 1);
+        assert_eq!(&tags[..8], b"OpusTags");
+
+        for (index, (_, _, sequence, _)) in pages.iter().enumerate() {
+            assert_eq!(
+                *sequence, index as u32,
+                "the pages number themselves in order"
+            );
+        }
+
+        let (flags, granule, _, _) = pages.last().expect("the last page exists");
+        assert_eq!(*flags & 0x04, 0x04, "the last page ends the stream");
+        assert_eq!(
+            *granule,
+            u64::from(OPUS_PRE_SKIP) + 48_000,
+            "one second of audio, stated at the codec's own 48 kHz, pre-skip included"
+        );
+    }
+
+    /// A crafted Opus note decodes to PCM: the same pass that plays a web or Android note
+    /// plays this client's own, at the 48 kHz the Ogg mapping states Opus at, one frame's
+    /// worth of samples per packet and the same playing time as the PCM that went in.
+    #[test]
+    fn a_small_opus_note_decodes_to_pcm() {
+        let samples = sine(
+            VOICE_NOTE_SAMPLE_RATE as usize,
+            VOICE_NOTE_SAMPLE_RATE,
+            12_000.0,
+        );
+        let ogg = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 0x0B0B_0B0B)
+            .expect("one second encodes");
+        let decoded = decode_audio(&ogg).expect("the note decodes");
+        assert_eq!(decoded.rate, 48_000);
+        // 50 frames of 20 ms, 960 samples at 48 kHz each: exactly the second that went in.
+        assert_eq!(decoded.samples.len(), 48_000);
+        let loudest = decoded
+            .samples
+            .iter()
+            .map(|sample| sample.unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            u32::from(loudest) > 8_000,
+            "the decoded samples carry the encoded signal, not silence"
+        );
+    }
+
+    /// The WAV this client sent before the switch still decodes — history must keep
+    /// playing — and decodes to exactly the samples it was crafted from.
+    #[test]
+    fn a_wav_note_still_decodes() {
+        let samples: Vec<i16> = (-100..100).map(|index| (index * 300) as i16).collect();
+        let wav = wav_bytes(&samples, VOICE_NOTE_SAMPLE_RATE);
+        let decoded = decode_audio(&wav).expect("a wav note decodes");
+        assert_eq!(decoded.rate, VOICE_NOTE_SAMPLE_RATE);
+        assert_eq!(decoded.samples, samples);
+    }
+
+    /// The waveform over an Opus note is the waveform of its decoded PCM: the bars the
+    /// recorder sampled live, from the PCM that fed the encoder, and the bars taken over
+    /// the decoded note agree on which tenths of a second were speech and which were
+    /// silence — a lossy codec may move a peak a little, never a syllable's place.
+    #[test]
+    fn the_waveform_of_an_opus_note_matches_its_decoded_pcm() {
+        let rate = VOICE_NOTE_SAMPLE_RATE as usize;
+        let mut samples = vec![0i16; rate / 10 * 3]; // three tenths of silence
+        samples.extend(sine(rate / 10 * 4, VOICE_NOTE_SAMPLE_RATE, 14_000.0)); // four of speech
+        samples.extend(vec![0i16; rate / 10 * 3]); // three of silence
+
+        // The bars the recorder samples while recording, one per tenth of a second.
+        let live: Vec<u8> = samples.chunks(rate / 10).map(window_bar).collect();
+        assert_eq!(live.len(), 10);
+
+        let ogg = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 7).expect("the note encodes");
+        let decoded = decode_audio(&ogg).expect("the note decodes");
+        let decoded_bars: Vec<u8> = decoded
+            .samples
+            .chunks(decoded.rate as usize / 10)
+            .map(window_bar)
+            .collect();
+        assert_eq!(
+            decoded_bars.len(),
+            10,
+            "the decoded note is the same length"
+        );
+
+        for (index, bar) in decoded_bars.iter().enumerate() {
+            let live_bar = live[index];
+            match index {
+                3..=6 => {
+                    assert!(
+                        live_bar >= 100,
+                        "the live bars hear the speech (bar {index})"
+                    );
+                    assert!(
+                        *bar >= 60,
+                        "the decoded bars hear the same speech (bar {index}, live {live_bar})"
+                    );
+                }
+                _ => {
+                    assert_eq!(live_bar, 0, "the live bars hear the silence (bar {index})");
+                    assert!(
+                        *bar <= 16,
+                        "the decoded bars hear the same silence (bar {index})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The incremental writer writes the same stream the whole-buffer writer does: a
+    /// recording fed in whatever chunk sizes a microphone hands over becomes, byte for
+    /// byte, the note the same PCM encodes in one push — the buffering is invisible in the
+    /// stream, which is the whole point of recording into it incrementally.
+    #[test]
+    fn an_incrementally_encoded_note_is_the_note_encoded_whole() {
+        let samples = sine(
+            VOICE_NOTE_SAMPLE_RATE as usize * 137 / 100,
+            VOICE_NOTE_SAMPLE_RATE,
+            9_000.0,
+        );
+        let whole = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 0x00C0_FFEE)
+            .expect("the whole-buffer encode succeeds");
+
+        let mut buffer = Vec::new();
+        {
+            let mut encoder = OggOpusEncoder::new(&mut buffer, VOICE_NOTE_SAMPLE_RATE, 0x00C0_FFEE)
+                .expect("the incremental encoder starts");
+            let sizes = [7usize, 133, 1, 999, 61, 480];
+            let mut offset = 0usize;
+            let mut which = 0usize;
+            while offset < samples.len() {
+                let end = (offset + sizes[which % sizes.len()]).min(samples.len());
+                encoder.push(&samples[offset..end]).expect("a chunk pushes");
+                offset = end;
+                which += 1;
+            }
+            encoder.finish(true).expect("the stream finishes");
+        }
+        assert_eq!(buffer, whole);
+    }
+
+    /// The playtime comes from the pages' own granule positions: a note with a tail shorter
+    /// than one frame states the frames it actually holds, no page at all states nothing,
+    /// and a stream whose last page was cut off by a death states the time its complete
+    /// pages hold rather than a figure nobody can play.
+    #[test]
+    fn the_playtime_comes_from_the_pages_granule_positions() {
+        // 1.23 s: 61 frames and a half — the tail pads to 62 frames, 1 240 ms.
+        let samples = sine(
+            VOICE_NOTE_SAMPLE_RATE as usize * 123 / 100,
+            VOICE_NOTE_SAMPLE_RATE,
+            9_000.0,
+        );
+        let ogg = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 5).expect("the note encodes");
+        assert_eq!(ogg_opus_playtime_ms(&ogg), Some(1_240));
+
+        assert_eq!(ogg_opus_playtime_ms(&[]), None, "no bytes state no time");
+
+        let mut truncated = ogg.clone();
+        truncated.truncate(truncated.len() - 1);
+        assert_eq!(
+            ogg_opus_playtime_ms(&truncated),
+            None,
+            "a stream whose only audio page was cut short states no time"
+        );
+    }
+
+    /// A five-minute note at the speech bitrate fits the byte cap: two seconds encoded,
+    /// scaled to the hundred and fifty two-second shares the cap holds, stays inside — the
+    /// recorder refuses against the cap itself, and this is the arithmetic that keeps the
+    /// refusal a formality.
     #[test]
     fn a_capped_recording_fits_the_byte_cap() {
-        let max_samples = VOICE_NOTE_MAX_MS * u64::from(VOICE_NOTE_SAMPLE_RATE) / 1_000;
-        let wav = wav_bytes(&vec![0i16; max_samples as usize], VOICE_NOTE_SAMPLE_RATE);
-        assert!(wav.len() as u64 <= VOICE_NOTE_MAX_BYTES);
+        let samples = sine(
+            VOICE_NOTE_SAMPLE_RATE as usize * 2,
+            VOICE_NOTE_SAMPLE_RATE,
+            10_000.0,
+        );
+        let ogg = encode_ogg_opus(&samples, VOICE_NOTE_SAMPLE_RATE, 1).expect("two seconds encode");
+        assert!(
+            ogg.len() as u64 * 150 <= VOICE_NOTE_MAX_BYTES,
+            "two seconds is {}, so the five-minute cap needs {} bytes of the {} allowed",
+            ogg.len(),
+            ogg.len() * 150,
+            VOICE_NOTE_MAX_BYTES
+        );
+    }
+
+    /// A draft recorded at the previous release's rate encodes into the same container:
+    /// the interchange is the Ogg, whatever rate the PCM inside it was taken at, and the
+    /// decoded note is the same length of time the PCM was.
+    #[test]
+    fn a_legacy_pcm_rate_encodes_to_the_same_container() {
+        let samples = sine(
+            LEGACY_VOICE_NOTE_SAMPLE_RATE as usize,
+            LEGACY_VOICE_NOTE_SAMPLE_RATE,
+            12_000.0,
+        );
+        let ogg = encode_ogg_opus(&samples, LEGACY_VOICE_NOTE_SAMPLE_RATE, 9)
+            .expect("one second at the legacy rate encodes");
+        let decoded = decode_audio(&ogg).expect("the note decodes");
+        assert_eq!(decoded.rate, 48_000);
+        assert_eq!(decoded.samples.len(), 48_000, "one second, at 48 kHz");
     }
 
     /// The amplitude scale is the Android client's: silence is 0, full scale is 255, and the

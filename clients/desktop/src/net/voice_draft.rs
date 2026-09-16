@@ -8,14 +8,19 @@
 //! storage the same way.
 //!
 //! The store is deliberately dumb, the Android twin's own rule: it holds and describes
-//! bytes, and never judges them. The recording itself is raw PCM — mono, 16-bit, little
-//! endian, at the note's own rate — appended by the capture pump as the chunks arrive, so
-//! the draft exists from the microphone's first moment. The descriptor beside it — a small
-//! fixed-layout file, rewritten on the recording's own tick — carries the facts the composer
-//! needs before anyone can read the audio back: how long it had run and the amplitudes
-//! sampled so far. Which conversation a draft belongs to is the filenames' own fact, and a
-//! descriptor whose recording file has vanished reads back as nothing rather than as a
-//! reference to nothing.
+//! bytes, and never judges them. The recording itself is an Ogg Opus stream — the pages
+//! the recorder's encoder writes as its frames fill — appended by the capture pump as the
+//! chunks arrive, so the draft exists from the microphone's first moment and is a playable
+//! Ogg from its first page. The descriptor beside it — a small fixed-layout file, rewritten
+//! on the recording's own tick — carries the facts the composer needs before anyone can
+//! read the audio back: how long it had run and the amplitudes sampled so far. Which
+//! conversation a draft belongs to is the filenames' own fact, and a descriptor whose
+//! recording file has vanished reads back as nothing rather than as a reference to nothing.
+//!
+//! One relic is kept deliberately: a previous release of this client recorded raw PCM at
+//! 8 kHz into a `.pcm` file, and a draft it left behind is still a draft worth recovering.
+//! The legacy file is read back as the samples it is and re-encoded by the caller; the
+//! store itself only knows that the old name existed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,7 +60,13 @@ impl VoiceDraftStore {
 
     /// Where the conversation's recording is written — one draft per conversation, by
     /// design: the second recording a conversation starts is the first draft's overwrite.
-    fn pcm_path(&self, conversation_id: Id) -> PathBuf {
+    fn note_path(&self, conversation_id: Id) -> PathBuf {
+        self.dir.join(format!("{}.ogg", conversation_id.to_text()))
+    }
+
+    /// Where the previous release wrote its raw PCM — the file a legacy draft's bytes live
+    /// in, read back only to be re-encoded into the note the send expects.
+    fn legacy_pcm_path(&self, conversation_id: Id) -> PathBuf {
         self.dir.join(format!("{}.pcm", conversation_id.to_text()))
     }
 
@@ -66,11 +77,18 @@ impl VoiceDraftStore {
     }
 
     /// Creates the recording's file, truncating any draft before it. The capture pump owns
-    /// the handle from here; the store never touches the bytes again until they are read
-    /// back whole.
-    pub(crate) fn create_pcm(&self, conversation_id: Id) -> std::io::Result<fs::File> {
+    /// the handle from here — the encoder the pump feeds writes its pages into it — and the
+    /// store never touches the bytes again until they are read back whole.
+    pub(crate) fn create_note(&self, conversation_id: Id) -> std::io::Result<fs::File> {
         fs::create_dir_all(&self.dir)?;
-        fs::File::create(self.pcm_path(conversation_id))
+        fs::File::create(self.note_path(conversation_id))
+    }
+
+    /// Writes a note's bytes in place of whatever the conversation's draft held — the
+    /// migration path's own hand: a legacy draft, re-encoded, becomes the note it now is.
+    pub(crate) fn write_note(&self, conversation_id: Id, bytes: &[u8]) -> std::io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        fs::write(self.note_path(conversation_id), bytes)
     }
 
     /// Persists the descriptor beside the recording's own file, best-effort: a descriptor
@@ -90,11 +108,15 @@ impl VoiceDraftStore {
     }
 
     /// Reads the conversation's draft, or `None` when none exists. A descriptor whose
-    /// recording file has vanished, or either half that cannot be read, is no draft at all —
-    /// the store describes bytes it can point at, never bytes it can only name.
+    /// recording file has vanished — the note and the legacy PCM both — or either half
+    /// that cannot be read, is no draft at all: the store describes bytes it can point at,
+    /// never bytes it can only name.
     pub(crate) fn load(&self, conversation_id: Id) -> Option<VoiceDraft> {
         let descriptor = fs::read(self.descriptor_path(conversation_id)).ok()?;
-        if descriptor.len() < 12 || !self.pcm_path(conversation_id).is_file() {
+        if descriptor.len() < 12
+            || !(self.note_path(conversation_id).is_file()
+                || self.legacy_pcm_path(conversation_id).is_file())
+        {
             return None;
         }
         let duration_ms = u64::from_le_bytes(descriptor[0..8].try_into().ok()?);
@@ -108,12 +130,19 @@ impl VoiceDraftStore {
         })
     }
 
-    /// Reads the draft's samples back, whole. The odd-length file is refused rather than
-    /// truncated: a PCM stream the pump did not finish writing a sample into is a byte this
-    /// client never recorded, and guessing which half to drop is a judgement the store does
-    /// not make.
-    pub(crate) fn read_samples(&self, conversation_id: Id) -> Option<Vec<i16>> {
-        let bytes = fs::read(self.pcm_path(conversation_id)).ok()?;
+    /// Reads the draft's recorded note back, whole: the Ogg Opus stream the recorder's
+    /// encoder wrote. An absent file is no note — the caller decides what that means.
+    pub(crate) fn read_note(&self, conversation_id: Id) -> Option<Vec<u8>> {
+        fs::read(self.note_path(conversation_id)).ok()
+    }
+
+    /// Reads the samples a legacy draft holds, whole: the raw PCM — mono, 16-bit, little
+    /// endian, at the rate the previous release recorded — that a draft from before the
+    /// Opus switch is. The odd-length file is refused rather than truncated: a PCM stream
+    /// the old pump did not finish writing a sample into is a byte this client never
+    /// recorded, and guessing which half to drop is a judgement the store does not make.
+    pub(crate) fn read_legacy_samples(&self, conversation_id: Id) -> Option<Vec<i16>> {
+        let bytes = fs::read(self.legacy_pcm_path(conversation_id)).ok()?;
         if bytes.len() % 2 != 0 {
             return None;
         }
@@ -130,11 +159,19 @@ impl VoiceDraftStore {
         )
     }
 
-    /// Removes the conversation's draft — both the bytes and the descriptor describing
-    /// them. The one door out for a sent or abandoned note; everything else keeps the draft
-    /// for the undo window or the recovery that follows a death.
+    /// Removes the legacy PCM half alone — the migration's own step, once the re-encoded
+    /// note has taken its place beside the descriptor that always described both.
+    pub(crate) fn clear_legacy(&self, conversation_id: Id) {
+        let _ = fs::remove_file(self.legacy_pcm_path(conversation_id));
+    }
+
+    /// Removes the conversation's draft — the note, the descriptor describing it, and the
+    /// legacy file that might predate the note. The one door out for a sent or abandoned
+    /// note; everything else keeps the draft for the undo window or the recovery that
+    /// follows a death.
     pub(crate) fn clear(&self, conversation_id: Id) {
-        let _ = fs::remove_file(self.pcm_path(conversation_id));
+        let _ = fs::remove_file(self.note_path(conversation_id));
+        let _ = fs::remove_file(self.legacy_pcm_path(conversation_id));
         let _ = fs::remove_file(self.descriptor_path(conversation_id));
     }
 }
@@ -157,28 +194,28 @@ mod tests {
         (VoiceDraftStore::beside(&vault), dir)
     }
 
-    /// The round trip the recovery path depends on: a descriptor and its samples are written
-    /// by the recording's own tick and pump, and the next open of the conversation reads back
-    /// exactly what they stated.
+    /// The round trip the recovery path depends on: a descriptor and its recording are
+    /// written by the recording's own tick and pump, and the next open of the conversation
+    /// reads back exactly what they stated.
     #[test]
     fn a_draft_round_trips_through_the_store() {
         let (store, dir) = scratch("round-trip");
         let conversation = Id::from_bytes([7; 16]);
-        let mut pcm = store
-            .create_pcm(conversation)
+        let mut note = store
+            .create_note(conversation)
             .expect("the recording's file is created");
-        pcm.write_all(&[1u8, 0, 0xFF, 0]).expect("samples append");
-        drop(pcm);
+        // The bytes stand in for the encoder's pages — the store never judges them.
+        note.write_all(b"OggS-not-really-but-the-store-does-not-look")
+            .expect("pages append");
+        drop(note);
         store.save(conversation, 2_500, &[3, 40, 250]);
 
         let draft = store.load(conversation).expect("the draft reads back");
         assert_eq!(draft.duration_ms, 2_500);
         assert_eq!(draft.amplitudes, vec![3, 40, 250]);
         assert_eq!(
-            store
-                .read_samples(conversation)
-                .expect("the samples read back"),
-            vec![1, 255]
+            store.read_note(conversation).expect("the note reads back"),
+            b"OggS-not-really-but-the-store-does-not-look".as_slice()
         );
         // The fold is the send-time judgement, not the store's: the draft keeps its raw
         // bars and the fold is taken when the message is built — here, one sample per
@@ -203,12 +240,14 @@ mod tests {
         assert!(store.load(conversation).is_none());
 
         store.save(conversation, 1_000, &[5]);
-        // The descriptor exists but the recording never wrote a sample: no draft.
+        // The descriptor exists but the recording never wrote a page: no draft.
         assert!(store.load(conversation).is_none());
-        // ...and the other way around, the samples without their descriptor.
-        let mut pcm = store.create_pcm(conversation).expect("the file is created");
-        pcm.write_all(&[0, 0]).expect("samples append");
-        drop(pcm);
+        // ...and the other way around, the recording without its descriptor.
+        drop(
+            store
+                .create_note(conversation)
+                .expect("the file is created"),
+        );
         let _ = fs::remove_file(
             dir.join("voice-note-drafts")
                 .join(format!("{}.draft", conversation.to_text())),
@@ -217,18 +256,69 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// `clear` removes both halves, so a cleared conversation recovers nothing the next time
-    /// it opens — the sent note and the abandoned one leave no draft behind.
+    /// A draft the previous release left as raw PCM still reads as a draft — the descriptor
+    /// describes it, the legacy samples read back as the PCM they are — and its note half
+    /// is empty until the caller re-encodes it into place.
     #[test]
-    fn clearing_removes_both_halves() {
+    fn a_legacy_pcm_draft_is_still_a_draft() {
+        let (store, dir) = scratch("legacy");
+        let conversation = Id::from_bytes([11; 16]);
+        let legacy = dir.join("voice-note-drafts");
+        fs::create_dir_all(&legacy).expect("the drafts directory");
+        fs::write(
+            legacy.join(format!("{}.pcm", conversation.to_text())),
+            [1u8, 0, 0xFF, 0],
+        )
+        .expect("the legacy samples are written");
+        store.save(conversation, 2_000, &[9]);
+
+        let draft = store
+            .load(conversation)
+            .expect("the legacy draft reads back");
+        assert_eq!(draft.duration_ms, 2_000);
+        assert_eq!(
+            store
+                .read_legacy_samples(conversation)
+                .expect("the legacy samples read back"),
+            vec![1, 255]
+        );
+        assert!(
+            store.read_note(conversation).is_none(),
+            "the note half does not exist until the migration writes it"
+        );
+
+        // The migration's own halves: the re-encoded note lands in place, and the legacy
+        // file leaves alone.
+        store
+            .write_note(conversation, b"OggS")
+            .expect("the note is written");
+        store.clear_legacy(conversation);
+        assert!(store.read_legacy_samples(conversation).is_none());
+        assert_eq!(
+            store.read_note(conversation).expect("the note reads back"),
+            b"OggS".as_slice()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `clear` removes every half, so a cleared conversation recovers nothing the next time
+    /// it opens — the sent note and the abandoned one leave no draft behind, not even the
+    /// legacy file an older release might have left.
+    #[test]
+    fn clearing_removes_every_half() {
         let (store, dir) = scratch("clear");
         let conversation = Id::from_bytes([3; 16]);
-        drop(store.create_pcm(conversation).expect("the file is created"));
+        drop(
+            store
+                .create_note(conversation)
+                .expect("the file is created"),
+        );
         store.save(conversation, 500, &[9]);
         assert!(store.load(conversation).is_some());
         store.clear(conversation);
         assert!(store.load(conversation).is_none());
-        assert!(store.read_samples(conversation).is_none());
+        assert!(store.read_note(conversation).is_none());
+        assert!(store.read_legacy_samples(conversation).is_none());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -241,19 +331,17 @@ mod tests {
         let conversation = Id::from_bytes([5; 16]);
         drop(
             store
-                .create_pcm(conversation)
+                .create_note(conversation)
                 .expect("the first file is created"),
         );
         let mut second = store
-            .create_pcm(conversation)
+            .create_note(conversation)
             .expect("the second file is created");
-        second.write_all(&[7, 0]).expect("samples append");
+        second.write_all(b"OggS").expect("pages append");
         drop(second);
         assert_eq!(
-            store
-                .read_samples(conversation)
-                .expect("only the new bytes"),
-            vec![7]
+            store.read_note(conversation).expect("only the new bytes"),
+            b"OggS".as_slice()
         );
         let _ = fs::remove_dir_all(dir);
     }

@@ -1660,11 +1660,11 @@ impl MediaCache {
 
 /// The capture pump's shared half: what the worker reads while the pump writes.
 ///
-/// The samples are *counted*, not kept — the bytes themselves are appended to the draft file
-/// as the chunks arrive, so the count is the recording's own clock (elapsed is the count over
-/// the note's rate) and the worker's memory holds one note's facts, not one note's audio —
-/// section 179's incremental rule, the same one the Android recorder keeps by writing into
-/// its file from the first second.
+/// The samples are *counted*, not kept — the bytes themselves are encoded into the draft
+/// file's Ogg pages as the chunks arrive, so the count is the recording's own clock (elapsed
+/// is the count over the note's rate) and the worker's memory holds one note's facts, not
+/// one note's audio — section 179's incremental rule, the same one the Android recorder
+/// keeps by writing into its file from the first second.
 struct RecordShared {
     /// The samples taken so far. Frozen through a pause, because paused chunks are dropped
     /// rather than buffered — a pause is time the note does not contain.
@@ -4413,14 +4413,22 @@ impl Worker {
         let Some(conversation_id) = voice_note else {
             return;
         };
+        self.restore_draft_as_preview(conversation_id);
+    }
+
+    /// Offers a draft from the store as the composer's preview — the one judgement the
+    /// app-death recovery and the failed-upload restore share. A draft whose recording
+    /// cannot be read, cannot be decoded, or holds less than a quarter-second of speech is
+    /// a draft nobody can hear, cleared quietly rather than offered as speech it is not.
+    /// A draft with no descriptor at all was no draft, and clears nothing.
+    fn restore_draft_as_preview(&mut self, conversation_id: Id) {
         let Some(draft) = self.drafts.load(conversation_id) else {
             return;
         };
-        let Some(samples) = self.drafts.read_samples(conversation_id) else {
-            self.drafts.clear(conversation_id);
-            return;
-        };
-        if (samples.len() as u64) < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
+        let playable = voice_draft_note(&self.drafts, conversation_id)
+            .and_then(|bytes| media::decode_audio(&bytes).ok())
+            .filter(|decoded| (decoded.samples.len() as u64) >= u64::from(decoded.rate) / 4);
+        if playable.is_none() {
             self.drafts.clear(conversation_id);
             return;
         }
@@ -4709,8 +4717,9 @@ impl Worker {
     }
 
     /// Begins a voice-note recording: opens the microphone and hands its chunks to a pump
-    /// that appends them to the draft file at the note's own rate, counting samples and
-    /// folding the live waveform as it goes.
+    /// that feeds the Opus encoder at the note's own rate, writing its Ogg pages to the
+    /// draft file as the frames fill, counting samples and folding the live waveform as it
+    /// goes.
     fn start_recording(&mut self, conversation_id: Id, expires_in_ms: Option<u32>) {
         if self.recording.is_some() {
             return;
@@ -4741,13 +4750,30 @@ impl Worker {
         // its first chunk — an app death a second in leaves a draft, not nothing. Creating it
         // also truncates whatever draft this conversation held before, the one-draft-per-
         // conversation rule's own mechanics.
-        let out = match self.drafts.create_pcm(conversation_id) {
+        let out = match self.drafts.create_note(conversation_id) {
             Ok(file) => std::io::BufWriter::new(file),
             Err(error) => {
                 self.sink.toast(
                     format!("Could not open the recording's draft file: {error}"),
                     ToastKind::Error,
                 );
+                return;
+            }
+        };
+        // The encoder the pump feeds, and the stream serial it writes its pages under — drawn
+        // fresh per recording, so no two notes this client ever records share a stream
+        // identity. A failed encoder start is a refused recording, not a raw-PCM fallback:
+        // a fallback format would make this client the odd note out again.
+        let mut serial = [0u8; 4];
+        OsRandom.fill_bytes(&mut serial);
+        let encoder = match media::OggOpusEncoder::new(
+            out,
+            media::VOICE_NOTE_SAMPLE_RATE,
+            u32::from_le_bytes(serial),
+        ) {
+            Ok(encoder) => encoder,
+            Err(reason) => {
+                self.sink.toast(reason, ToastKind::Error);
                 return;
             }
         };
@@ -4759,7 +4785,7 @@ impl Worker {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
         });
-        let pump = spawn_recording_pump(frames, rate, Arc::clone(&shared), out);
+        let pump = spawn_recording_pump(frames, rate, encoder, Arc::clone(&shared));
         // A new recording is a new note: whatever the composer was holding — a preview, an
         // undo window's cancelled note — stands down, the same handoff the Android composer
         // makes. The bytes stay in the store, where this conversation's own file is the one
@@ -4869,34 +4895,15 @@ impl Worker {
 
     /// Finds a draft the last session left behind — the app-death rule of section 179 — and
     /// offers it as the preview the composer would show a note it had just stopped. A
-    /// recording this session already holds recovers nothing, and a draft whose bytes cannot
-    /// be read or hold less than a quarter-second of speech is a draft nobody can hear,
-    /// cleared quietly rather than offered as speech it is not. A recovered note makes no
-    /// disappearing promise: the arm belonged to the recording that died, not this one.
+    /// recording this session already holds recovers nothing; the judgement on whether the
+    /// draft is speech anyone can hear is the one the failed-upload restore takes, because
+    /// it is the same judgement. A recovered note makes no disappearing promise: the arm
+    /// belonged to the recording that died, not this one.
     fn recover_voice_draft(&mut self, conversation_id: Id) {
         if self.recording.is_some() || self.held_note.is_some() {
             return;
         }
-        let Some(draft) = self.drafts.load(conversation_id) else {
-            return;
-        };
-        let Some(samples) = self.drafts.read_samples(conversation_id) else {
-            self.drafts.clear(conversation_id);
-            return;
-        };
-        if (samples.len() as u64) < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
-            self.drafts.clear(conversation_id);
-            return;
-        }
-        self.hold_note(HeldNote {
-            conversation_id,
-            // The descriptor's own statement of how long the recording ran, which is the
-            // figure the bar was ticking when the app died — the bytes can hold a fraction
-            // of a second more, and the send settles the final figure from them.
-            duration_ms: draft.duration_ms,
-            amplitudes: draft.amplitudes,
-            expires_in_ms: None,
-        });
+        self.restore_draft_as_preview(conversation_id);
     }
 
     /// Ends the live capture and collects the finished note, or `None` when there was
@@ -5055,12 +5062,12 @@ impl Worker {
     }
 
     /// Uploads and sends a held note. The note is read back from the draft store — the same
-    /// bytes the pump wrote — and the draft survives every failure on the way: the commit's
-    /// success is the one door it leaves by, so a dropped request costs a retry and not five
-    /// minutes of speech.
+    /// Ogg Opus the pump's encoder wrote — and the draft survives every failure on the way:
+    /// the commit's success is the one door it leaves by, so a dropped request costs a
+    /// retry and not five minutes of speech.
     async fn upload_held_note(&mut self, note: HeldNote) {
         let conversation_id = note.conversation_id;
-        let Some(samples) = self.drafts.read_samples(conversation_id) else {
+        let Some(recording) = voice_draft_note(&self.drafts, conversation_id) else {
             self.sink.toast(
                 "The recording's draft could not be read back.",
                 ToastKind::Error,
@@ -5068,18 +5075,17 @@ impl Worker {
             self.drafts.clear(conversation_id);
             return;
         };
-        // The cap, enforced on the samples the pump actually wrote. The tick ends the
-        // recording at the same cap, so this truncation is the backstop for a pump that
-        // appended past it in its last chunk.
-        let max_samples =
-            media::VOICE_NOTE_MAX_MS * u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 1_000;
-        let mut samples = samples;
-        samples.truncate(max_samples as usize);
-        let duration_ms = samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
-        let wav = media::wav_bytes(&samples, media::VOICE_NOTE_SAMPLE_RATE);
-        if wav.len() as u64 > media::VOICE_NOTE_MAX_BYTES {
-            // Cannot happen at this rate and cap (a capped recording is 4.8 MB of the 8 MB
-            // budget), but the byte cap is the policy and the policy is checked, not assumed.
+        // The playing time off the stream's own pages — the bytes' own statement, which a
+        // death between ticks cannot overstate, and which falls back to the held note's own
+        // count only when the pages state nothing — capped at the policy's ceiling, which
+        // the tick enforces live and this is the backstop for.
+        let duration_ms = media::ogg_opus_playtime_ms(&recording)
+            .unwrap_or(note.duration_ms)
+            .min(media::VOICE_NOTE_MAX_MS);
+        if recording.len() as u64 > media::VOICE_NOTE_MAX_BYTES {
+            // Cannot happen at this client's bitrate and cap (a capped note is roughly
+            // 900 kB of the 8 MB budget), but the byte cap is the policy and the policy is
+            // checked, not assumed.
             self.sink
                 .toast("That recording is too long to send.", ToastKind::Error);
             self.drafts.clear(conversation_id);
@@ -5087,17 +5093,19 @@ impl Worker {
         }
         let plan = media::OutgoingMedia {
             kind: media::KIND_VOICE_NOTE,
-            // Plain WAV: PCM 16-bit, mono, at the note's own rate — the one container every
-            // client plays and the server's sniffer reads from the RIFF magic alone.
-            mime_type: "audio/wav".to_owned(),
-            size_bytes: wav.len() as u64,
+            // Ogg Opus — the interchange format the Android recorder produces and the web
+            // client's browsers decode — claimed by the container this client actually
+            // records, the same rule every Migo client's claim keeps.
+            mime_type: "audio/ogg".to_owned(),
+            size_bytes: recording.len() as u64,
             key: Vec::new(),
             nonce: Vec::new(),
             width: None,
             height: None,
             duration_ms: Some(duration_ms),
-            // The waveform the pump sampled, folded to the fixed width every client renders —
-            // computed here, before the seal, the only moment the plaintext exists.
+            // The waveform the pump sampled from the PCM that fed the encoder, folded to the
+            // fixed width every client renders — computed here, before the seal, the only
+            // moment the plaintext exists.
             waveform: (!note.amplitudes.is_empty())
                 .then(|| media::downsample_waveform(&note.amplitudes)),
             caption: None,
@@ -5105,7 +5113,7 @@ impl Worker {
             // arm covers the voice note too, the same rule every body follows.
             expires_in_ms: note.expires_in_ms,
         };
-        self.begin_attachment(conversation_id, plan, wav, Some(conversation_id))
+        self.begin_attachment(conversation_id, plan, recording, Some(conversation_id))
             .await;
     }
 
@@ -9630,25 +9638,23 @@ fn body_of(content: Content) -> (Body, Option<u32>) {
 ///
 /// A plain thread, not a task, because the microphone's chunks arrive on a *blocking* std
 /// channel — a runtime thread would sit parked on `recv()` anyway, and a plain thread says
-/// so honestly. The pump owns the receiver and the draft file, and nothing else; the worker
-/// keeps the device handle, and dropping that handle is what stops capture and (via the
-/// closed channel) ends this thread. The samples append at whatever rate the host granted,
-/// resampled to the note's own rate when the host insisted on another, written to the file
-/// as they arrive — never buffered into a second copy of the note — with each tenth of a
-/// second folded into one live-waveform bar on the way past. A paused recording drops its
-/// chunks: a pause is time the note does not contain, so neither the count nor the file
-/// grows through one. The cap's own backstop lives here too — the pump stops appending at
-/// the cap even if nobody noticed the tick — and the last thing the pump does is flush,
-/// so the file a finalisation reads back is the whole note.
+/// so honestly. The pump owns the receiver, the encoder, and the draft file's writer, and
+/// nothing else; the worker keeps the device handle, and dropping that handle is what stops
+/// capture and (via the closed channel) ends this thread. The samples arrive at whatever
+/// rate the host granted, are resampled to the note's own rate when the host insisted on
+/// another, and feed the Ogg Opus encoder frame by frame — never buffered into a second
+/// copy of the note — with each tenth of a second folded into one live-waveform bar on the
+/// way past. A paused recording drops its chunks: a pause is time the note does not
+/// contain, so neither the count nor the file grows through one. The cap's own backstop
+/// lives here too — the pump stops feeding the encoder at the cap even if nobody noticed
+/// the tick — and the last thing the pump does is finish the stream, so the file a
+/// finalisation reads back is a playable Ogg whose final page is flagged done.
 fn spawn_recording_pump(
     frames: std_mpsc::Receiver<Vec<i16>>,
     source_rate: u32,
+    mut encoder: media::OggOpusEncoder<std::io::BufWriter<std::fs::File>>,
     shared: Arc<RecordShared>,
-    mut out: std::io::BufWriter<std::fs::File>,
 ) -> std::thread::JoinHandle<()> {
-    // The pump's own narrow import: `Write` is the file's business, not the module's — this
-    // thread is the only writer the store ever has.
-    use std::io::Write as _;
     std::thread::Builder::new()
         .name("migo-voice-record".to_owned())
         .spawn(move || {
@@ -9662,7 +9668,10 @@ fn spawn_recording_pump(
             // flushed — a bar stands for a tenth of a second someone spoke.
             let mut window_peak: i16 = 0;
             let mut window_len: u64 = 0;
-            let mut byte: [u8; 2] = [0; 2];
+            // Whether the loop ended at the cap, whose tail frame must not be padded into
+            // time the policy refused — every other ending pads, because a speaker cut off
+            // mid-word still gets their last twenty milliseconds.
+            let mut capped = false;
             // `while let` stops when the channel closes — the microphone was dropped, so the
             // recording is over whatever the flag says, and everything written so far is
             // the note.
@@ -9674,6 +9683,7 @@ fn spawn_recording_pump(
                     continue;
                 }
                 if shared.samples.load(Ordering::Relaxed) >= max_samples {
+                    capped = true;
                     break;
                 }
                 resampled.clear();
@@ -9698,21 +9708,48 @@ fn spawn_recording_pump(
                         window_peak = 0;
                         window_len = 0;
                     }
-                    byte.copy_from_slice(&sample.to_le_bytes());
-                    if out.write_all(&byte).is_err() {
-                        // The disk refused the note's next sample: the note is what was
-                        // written, and pressing on would only lie about it.
-                        let _ = out.flush();
-                        return;
-                    }
+                }
+                if encoder.push(&resampled).is_err() {
+                    // The disk refused the note's next page: the note is what was
+                    // written, and pressing on would only lie about it. The stream is
+                    // still finished, so what did land is a playable Ogg.
+                    let _ = encoder.finish(false);
+                    return;
                 }
                 shared
                     .samples
                     .fetch_add(resampled.len() as u64, Ordering::Relaxed);
             }
-            let _ = out.flush();
+            let _ = encoder.finish(!capped);
         })
         .expect("the recording pump's thread spawns")
+}
+
+/// Reads a conversation's draft back as the note it will be sent as: the Ogg Opus the
+/// recorder's encoder wrote, or — for a draft the previous release left as raw PCM — those
+/// samples encoded into the same container first, in place, so the send, the preview, and
+/// every recovery after them see one format. The legacy draft is re-encoded at the rate it
+/// was taken at, which the PCM itself cannot state: 8 kHz is the one rate that release
+/// ever recorded. `None` when the conversation holds no draft bytes worth sending.
+fn voice_draft_note(store: &voice_draft::VoiceDraftStore, conversation_id: Id) -> Option<Vec<u8>> {
+    if let Some(bytes) = store.read_note(conversation_id) {
+        return Some(bytes);
+    }
+    let samples = store.read_legacy_samples(conversation_id)?;
+    if samples.is_empty() {
+        return None;
+    }
+    let mut serial = [0u8; 4];
+    OsRandom.fill_bytes(&mut serial);
+    let ogg = media::encode_ogg_opus(
+        &samples,
+        media::LEGACY_VOICE_NOTE_SAMPLE_RATE,
+        u32::from_le_bytes(serial),
+    )
+    .ok()?;
+    store.write_note(conversation_id, &ogg).ok()?;
+    store.clear_legacy(conversation_id);
+    Some(ogg)
 }
 
 /// Everything the playback pump thread owns, handed over in one piece the way the recording
@@ -10360,5 +10397,64 @@ mod tests {
             !unpacked[0].header.is_batch(),
             "the bare frame is not re-wrapped"
         );
+    }
+
+    /// A draft the previous release left as raw PCM is read back as the note it will be
+    /// sent as: re-encoded in place into the Ogg Opus every new draft already is, at the
+    /// rate that release recorded, leaving the legacy file behind and the next read a plain
+    /// note read. A draft with no bytes at all reads back as nothing.
+    #[test]
+    fn a_legacy_pcm_draft_is_re_encoded_into_place() {
+        let dir =
+            std::env::temp_dir().join(format!("migo-voice-draft-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is created");
+        let vault = dir.join("vault.bin");
+        std::fs::write(&vault, b"not a real vault, only a place to stand beside")
+            .expect("the vault stand-in");
+        let store = voice_draft::VoiceDraftStore::beside(&vault);
+        let conversation = id_of(0x7A);
+
+        // One second of 8 kHz PCM, the shape the old pump wrote, as little-endian pairs.
+        let samples: Vec<i16> = (0..8_000)
+            .map(|index| ((index as f64 * 0.35).sin() * 9_000.0) as i16)
+            .collect();
+        let mut pcm = Vec::with_capacity(samples.len() * 2);
+        for sample in &samples {
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::create_dir_all(dir.join("voice-note-drafts"))
+            .expect("the drafts directory is created");
+        std::fs::write(
+            dir.join("voice-note-drafts")
+                .join(format!("{}.pcm", conversation.to_text())),
+            &pcm,
+        )
+        .expect("the legacy samples are written");
+        store.save(conversation, 1_000, &[10, 200]);
+
+        let note = voice_draft_note(&store, conversation).expect("the legacy draft becomes a note");
+        assert_eq!(&note[..4], b"OggS", "the re-encoded draft is an Ogg");
+        let decoded = media::decode_audio(&note).expect("the re-encoded note decodes");
+        assert_eq!(decoded.rate, 48_000);
+        assert_eq!(decoded.samples.len(), 48_000, "one second, at 48 kHz");
+        assert_eq!(
+            media::ogg_opus_playtime_ms(&note),
+            Some(1_000),
+            "the re-encoded note states the second it holds"
+        );
+
+        // The migration was in place: the note is on disk where a new draft would be, the
+        // legacy file is gone, and a second read returns the same bytes without encoding.
+        assert!(store.read_note(conversation).is_some());
+        assert!(store.read_legacy_samples(conversation).is_none());
+        assert_eq!(
+            voice_draft_note(&store, conversation).as_deref(),
+            Some(&note[..])
+        );
+
+        // A conversation with no draft bytes at all reads back as nothing, encoded or not.
+        assert!(voice_draft_note(&store, id_of(0x7B)).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
