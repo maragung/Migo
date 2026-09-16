@@ -78,4 +78,4 @@ pub use crate::model::{
 };
 pub use crate::notice::{Notice, Outcome};
 pub use crate::service::{effective_tier, open, Moderation};
-pub use crate::traits::{Roster, SharedRoster, SharedWarden, Warden};
+pub use crate::traits::{NoStaff, Roster, SharedRoster, SharedWarden, Warden};

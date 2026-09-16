@@ -23,6 +23,11 @@ hex = "0.4"
 base64.workspace = true
 migo-captcha.workspace = true
 migo-media.workspace = true
+# The operator surface states the store's own audit and report vocabulary, and the
+# moderation service's own cases: a trait whose methods return those types cannot be
+# consumed without naming them.
+migo-moderation.workspace = true
+migo-store.workspace = true
 
 [dev-dependencies]
 # The auth-flow suite completes challenges it issues itself, which needs the test-only
@@ -31,7 +36,6 @@ migo-captcha = { workspace = true, features = ["test-internal"] }
 bytes.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
-migo-store.workspace = true
 migo-cache.workspace = true
 tower.workspace = true
 serde_json.workspace = true

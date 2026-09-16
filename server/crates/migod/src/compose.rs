@@ -719,13 +719,19 @@ impl App {
             &registry,
         );
 
-        // The development posture is that nobody is staff, so every operator action is refused
-        // until a real roster is configured.
-        let roster: SharedRoster = Arc::new(StaffRoster::empty());
+        // Staff powers are derived from the two appointments this deployment already makes, rather
+        // than from a second list beside them: the owner named in configuration holds everything,
+        // and a global admin — the grant `/v1/admins` writes and the web client surfaces — holds
+        // triage and takedown. A deployment that names no owner and appoints no admin therefore has
+        // no staff at all, which is the posture a node with nobody moderating it should have.
+        let roster: SharedRoster = Arc::new(StaffRoster::appointed(
+            store.clone(),
+            config.auth.owner_account_id,
+        ));
         let moderation = migo_moderation::open(
             store.clone(),
             limiter.clone(),
-            roster,
+            roster.clone(),
             Box::new(OsRandom),
             migo_moderation::ModerationConfig::default(),
             &registry,
@@ -1062,6 +1068,11 @@ impl App {
                 node,
                 features,
                 media_files,
+                // The same two handles the gateway's operator opcode holds: one moderation
+                // service, one roster, so a ruling made over REST and one made over the
+                // socket cannot disagree about who is staff or about what was recorded.
+                warden: moderation.clone(),
+                roster,
                 // No delivery channel is wired yet: no email sender, no
                 // operator console. `None` is the honest posture here — the
                 // recovery-request route refuses with `FEATURE_DISABLED`

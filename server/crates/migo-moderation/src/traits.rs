@@ -77,6 +77,25 @@ pub trait Roster: Send + Sync {
 /// A shared, fully erased staff directory.
 pub type SharedRoster = std::sync::Arc<dyn Roster>;
 
+/// A directory in which nobody is staff.
+///
+/// Every account resolves to [`Powers::NONE`], so every operator request is refused. That is a real
+/// posture and not only a fixture — it is what a node that has appointed nobody should answer, and
+/// it is the safe half of the same asymmetry [`Roster`] describes: a roster that cannot decide says
+/// no. It is here rather than in each composition root because "no staff" means exactly one thing
+/// and three copies of it would be three chances to mean something else.
+///
+/// A deployment that *does* appoint people needs a directory that reads those appointments; this is
+/// the floor, not the shape.
+pub struct NoStaff;
+
+#[async_trait]
+impl Roster for NoStaff {
+    async fn powers(&self, _account_id: Id) -> Result<Powers> {
+        Ok(Powers::NONE)
+    }
+}
+
 /// Everything moderation does.
 #[async_trait]
 pub trait Warden: Send + Sync {

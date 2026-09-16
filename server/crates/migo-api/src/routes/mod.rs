@@ -13,6 +13,7 @@ mod config;
 mod health;
 pub mod media;
 mod metrics;
+mod moderation;
 
 use axum::Router;
 
@@ -35,6 +36,7 @@ fn v1() -> Router<ApiState> {
         .merge(account::routes())
         .merge(admins::routes())
         .merge(config::routes())
+        .merge(moderation::routes())
 }
 
 /// The media data plane. Mounted at the root, not under `/v1`: these are the byte

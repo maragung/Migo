@@ -57,6 +57,8 @@
 //! #     clock: Arc<dyn Clock>,
 //! #     registry: Arc<Registry>,
 //! #     node: NodeInfo,
+//! #     warden: migo_moderation::SharedWarden,
+//! #     roster: migo_moderation::SharedRoster,
 //! # ) {
 //! let app = router(
 //!     config,
@@ -68,6 +70,8 @@
 //!         node,
 //!         features: 0,
 //!         media_files: None,
+//!         warden,
+//!         roster,
 //!         recovery_delivery: None,
 //!     },
 //! );
@@ -96,6 +100,7 @@ use migo_auth::SharedAuth;
 use migo_core::config::{ClientPeer, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Timestamp};
+use migo_moderation::{SharedRoster, SharedWarden};
 use migo_protocol::NodeInfo;
 use migo_ratelimit::SharedRateLimiter;
 
@@ -128,6 +133,21 @@ pub struct ApiServices {
     /// storage serves its own bytes (the S3 backend): the routes answer `404` rather
     /// than pretending to be an object store they are not.
     pub media_files: Option<SharedMediaFiles>,
+    /// The moderation service, for the operator surface under `/v1/moderation`.
+    ///
+    /// The same handle the socket gateway holds, deliberately: an operator ruling made over REST
+    /// and one made over the socket are the same act against the same store and the same roster, so
+    /// a queue read over one door shows the other's work and neither can be the one that skips the
+    /// audit row.
+    pub warden: SharedWarden,
+    /// The staff directory the warden resolves powers through.
+    ///
+    /// Held here as well because one route asks the directory a question that is not an act:
+    /// `/v1/moderation/whoami` reports what the caller may do, and the honest source for that is the
+    /// roster itself rather than the service being asked to ask it. Nothing is decided on the
+    /// answer — every act still goes through the warden, which resolves the same powers and refuses
+    /// on its own authority.
+    pub roster: SharedRoster,
     /// The channel recovery rows travel to their account's owner. `None` when the
     /// deployment has none, in which case the recovery-request route refuses with
     /// `FEATURE_DISABLED` rather than minting a row nobody can confirm — a dead end
@@ -162,6 +182,12 @@ struct Inner {
     /// every request is answered with its own socket address.
     trusted_proxies: Vec<std::net::IpAddr>,
     media_files: Option<SharedMediaFiles>,
+    /// The moderation service behind `/v1/moderation`. Held behind the same `Arc` as
+    /// every other service handle so cloning state stays a refcount bump.
+    warden: SharedWarden,
+    /// The staff directory the warden resolves powers through, for the one route that
+    /// asks what a caller may do rather than doing it.
+    roster: SharedRoster,
     /// The recovery-row delivery channel, or `None` when the deployment has
     /// none. Held behind the same `Arc` as every other service handle so
     /// cloning state stays a refcount bump.
@@ -230,6 +256,8 @@ impl ApiState {
                 client_peers: config.federation.client_peers.clone(),
                 trusted_proxies,
                 media_files: services.media_files,
+                warden: services.warden,
+                roster: services.roster,
                 recovery_delivery: services.recovery_delivery,
             }),
         }
@@ -301,6 +329,21 @@ impl ApiState {
     /// routing mistake the caller can fix, not a fault of this node.
     pub(crate) fn media_files(&self) -> Option<&dyn crate::routes::media::MediaFiles> {
         self.inner.media_files.as_deref()
+    }
+
+    /// The moderation service, for the operator handlers under `/v1/moderation`.
+    ///
+    /// Borrowed rather than cloned, like every other service accessor here: the handlers hold the
+    /// `State` for the whole request, so the borrow outlives the call it is passed to and a
+    /// refcount bump per request would buy nothing.
+    pub(crate) fn warden(&self) -> &SharedWarden {
+        &self.inner.warden
+    }
+
+    /// The staff directory, for `/v1/moderation/whoami` — the one question the surface asks the
+    /// directory directly rather than the service.
+    pub(crate) fn roster(&self) -> &SharedRoster {
+        &self.inner.roster
     }
 }
 

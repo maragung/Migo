@@ -193,6 +193,19 @@ impl Harness {
         let real_limiter = Arc::new(CacheRateLimiter::new(cache, policies, &registry));
         let store = Arc::new(MemoryStore::new());
 
+        // The operator surface is mounted on this router too, over the same store
+        // and limiter. This suite never reaches it, so the directory is the one in
+        // which nobody is staff — which is also what makes "an ordinary account is
+        // refused" the default story for any test that wanders in.
+        let moderation = migo_moderation::open(
+            Arc::clone(&store),
+            Arc::clone(&real_limiter) as SharedRateLimiter,
+            Arc::new(migo_moderation::NoStaff),
+            Box::new(SeededRandom::new(SEED)),
+            migo_moderation::ModerationConfig::default(),
+            &registry,
+        );
+
         // A dedicated captcha service and store; the store is held alongside
         // the router so the test can look up the answer it just issued.
         let captcha_store = Arc::new(CaptchaStore::new());
@@ -241,6 +254,8 @@ impl Harness {
             features: 0b101,
             // The tests exercise the auth bootstrap surface, not the media byte routes.
             media_files: None,
+            warden: moderation,
+            roster: Arc::new(migo_moderation::NoStaff),
             // The delivery channel the recovery tests observe: it records
             // every row handed to it, so a test can pin what left the
             // server (a token id and a tag, never on the wire) without
