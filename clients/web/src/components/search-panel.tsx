@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ConversationKind, ContentType } from '@migo/sdk';
+import { ConversationKind, ContentType, ReportSubject } from '@migo/sdk';
 import type { Id, RoomSummary, SuggestedUser } from '@migo/sdk';
 
 import { conversationTitle } from '@/lib/conversation-title.js';
@@ -27,6 +27,8 @@ import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { useJoinRoom } from '@/lib/migo/use-join-room.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { ReportDialog } from './report-dialog.js';
+import type { ReportSubjectRef } from './report-dialog.js';
 
 import { Avatar } from './avatar.js';
 import { Icon } from './icons.js';
@@ -84,6 +86,9 @@ export function SearchPanel({
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Id | null>(null);
+  // A search result is a person like any other, and a search is often how somebody finds the
+  // account they mean to report — so the same dialog opens here, pointed at the same subject.
+  const [reportSubject, setReportSubject] = useState<ReportSubjectRef | null>(null);
   const [recent, setRecent] = useState<string[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -363,8 +368,17 @@ export function SearchPanel({
       )}
 
       {selected !== null ? (
-        <UserProfileModal userId={selected} blocked={false} onClose={() => setSelected(null)} />
+        <UserProfileModal
+          userId={selected}
+          blocked={false}
+          onClose={() => setSelected(null)}
+          onReport={(userId, displayName) =>
+            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
+          }
+        />
       ) : null}
+
+      <ReportDialog subject={reportSubject} onClose={() => setReportSubject(null)} />
     </div>
   );
 }
