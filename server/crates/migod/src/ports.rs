@@ -49,7 +49,7 @@ use migo_media::{Grant, Head, Storage, SNIFF_BYTES};
 use migo_messaging::KickTariff;
 use migo_moderation::{Powers, Roster};
 use migo_notify::{Event, RawToken};
-use migo_protocol::{fault, NotificationEvent, Opcode};
+use migo_protocol::{fault, ModerationEvent, NotificationEvent, Opcode};
 use migo_store::model::NotificationPosition;
 use migo_store::SharedStore;
 
@@ -770,6 +770,96 @@ impl migo_notify::Bell for FederatedBell {
                     %error,
                     recipient = %recipient.to_text(),
                     "cannot enqueue the federated half of a notification bell"
+                );
+            }
+        });
+    }
+}
+
+// --- the warden's word to a reporter ------------------------------------------------
+//
+// A report is filed by an ordinary account and ruled on by somebody else, very often on
+// another node — a moderator works the queue wherever their session happens to be, and the
+// reporter is wherever theirs is. So the ruling is a port exactly the way the bell is, and
+// for the same reason: `Warden::resolve` runs inside the operator's request, where no
+// connection context for the reporter exists to publish from, and it is the composition
+// root's business what telling means.
+//
+// These are the production halves, built over the same two one-slot cells the bell holds:
+// the gateway, which broadcasts onto the reporter's own user topic, and the user-topic
+// relay, which carries the frame to every node the reporter has a session on. Reusing the
+// cells rather than minting new ones is not a shortcut — there is exactly one gateway and
+// one user-topic relay per process, and the startup window they leave is the same window
+// either way: a ruling announced before the gateway opens is dropped, which costs a client
+// a line it was never promised while the audit row that records the ruling stands.
+
+/// The production [`Herald`](migo_moderation::Herald): the gateway, once it exists.
+pub struct GatewayHerald {
+    gateway: Arc<GatewayHandle>,
+}
+
+impl GatewayHerald {
+    /// Builds the announcement over an empty handle the composition root will fill.
+    #[must_use]
+    pub fn new(gateway: Arc<GatewayHandle>) -> Self {
+        Self { gateway }
+    }
+}
+
+impl migo_moderation::Herald for GatewayHerald {
+    fn announce(&self, recipient: Id, event: &ModerationEvent, now: Timestamp) {
+        if let Some(gateway) = self.gateway.get() {
+            gateway.emit_moderation_event(recipient, event, now);
+        }
+    }
+}
+
+/// A [`Herald`](migo_moderation::Herald) that tells locally and, when the reporter's user
+/// topic has watchers on other nodes, carries the same frame there over the user-topic
+/// tier (FED_USER_EVENT, section 170).
+///
+/// The moderation service opens before the mesh does — it is handed the store and the
+/// limiter, and the mesh is built a layer later — so the relay is held in the same one-slot
+/// cell the bell uses: until the composition root fills it, a ruling stays local, which is
+/// the pre-mesh startup window and costs a reporter nothing, because no peer is linked yet
+/// for the frame to have reached either. Because `Herald::announce` is synchronous, the
+/// federated half runs on its own task; it is best-effort and logged, never a reason to
+/// untell the local half.
+///
+/// The frame is carried whole. A ruling is a fact about one case rather than a state of the
+/// recipient, so it is not coalesced on either side — the ingest path's allow-list holds it
+/// to the same rule for the same reason.
+pub struct FederatedHerald {
+    herald: migo_moderation::SharedHerald,
+    relay: Arc<crate::presence_relay::RelayHandle>,
+}
+
+impl FederatedHerald {
+    /// Builds the announcement over the local herald and a cell the composition root fills
+    /// with the user-topic relay once the mesh is up.
+    #[must_use]
+    pub fn new(
+        herald: migo_moderation::SharedHerald,
+        relay: Arc<crate::presence_relay::RelayHandle>,
+    ) -> Self {
+        Self { herald, relay }
+    }
+}
+
+impl migo_moderation::Herald for FederatedHerald {
+    fn announce(&self, recipient: Id, event: &ModerationEvent, now: Timestamp) {
+        self.herald.announce(recipient, event, now);
+        let relay = Arc::clone(&self.relay);
+        let event = event.clone();
+        tokio::spawn(async move {
+            if let Err(error) = relay
+                .forward_frame(recipient, Opcode::ModerationEvent, &event, now)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    recipient = %recipient.to_text(),
+                    "cannot enqueue the federated half of a moderation announcement"
                 );
             }
         });

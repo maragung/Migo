@@ -49,6 +49,9 @@ fn warden() -> SharedWarden {
         store,
         limiter,
         roster,
+        // No herald: these tests drive the service over the store and assert on the case
+        // it mints, and a ruling here has no reporter connected to hear about it.
+        Arc::new(migo_moderation::NoHerald),
         Box::new(OsRandom),
         ModerationConfig::default(),
         &registry,

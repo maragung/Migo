@@ -67,7 +67,7 @@ use crate::model::{
     MAX_REASON_LEN, REPORT_WINDOW_MS,
 };
 use crate::notice::Notice;
-use crate::traits::{Roster, SharedRoster, SharedWarden, Warden};
+use crate::traits::{Herald, Roster, SharedHerald, SharedRoster, SharedWarden, Warden};
 
 /// What filing a report costs. Brief section 145, opcode 192.
 const REPORT_COST: u32 = 20;
@@ -144,7 +144,7 @@ impl<'a> Trace<'a> {
     }
 }
 
-/// Moderation over a store, a rate limiter, and a staff directory.
+/// Moderation over a store, a rate limiter, a staff directory, and a herald.
 ///
 /// No cache. A stale answer here is a suspended account still being served or a resolved
 /// report being acted on twice, and brief section 173 requires that losing the cache lose
@@ -153,10 +153,20 @@ impl<'a> Trace<'a> {
 ///
 /// `Random` is present because this crate mints two kinds of id — a report and an audit
 /// entry — and neither may be derived from anything a caller supplied.
-pub struct Moderation<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter, R: ?Sized = dyn Roster> {
+///
+/// The herald is a fourth port beside the other three because the ruling is this crate's to
+/// make and not its to deliver: `resolve` runs wherever the operator's request landed, and
+/// the reporter is very often connected to a different node.
+pub struct Moderation<
+    S: ?Sized = dyn Store,
+    L: ?Sized = dyn RateLimiter,
+    R: ?Sized = dyn Roster,
+    H: ?Sized = dyn Herald,
+> {
     store: Arc<S>,
     limiter: Arc<L>,
     roster: Arc<R>,
+    herald: Arc<H>,
     config: ModerationConfig,
     /// Behind a `Mutex` and never held across an `await`. Every use in this file takes the
     /// lock, generates, and drops it on the same line.
@@ -164,12 +174,15 @@ pub struct Moderation<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter, R: ?Si
     meters: Meters,
 }
 
-impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<S, L, R> {
+impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized, H: Herald + ?Sized>
+    Moderation<S, L, R, H>
+{
     /// Builds a service over concrete parts.
     pub fn new(
         store: Arc<S>,
         limiter: Arc<L>,
         roster: Arc<R>,
+        herald: Arc<H>,
         random: Box<dyn Random>,
         config: ModerationConfig,
         registry: &Registry,
@@ -178,6 +191,7 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
             store,
             limiter,
             roster,
+            herald,
             config,
             random: Mutex::new(random),
             meters: Meters::new(registry),
@@ -337,11 +351,46 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
             fault::not_found("report")
         })
     }
+
+    /// Tells the reporter what became of the report they filed.
+    ///
+    /// Called after the audit row and never before it. The row is the record and the frame is
+    /// the courtesy: a reporter told about a ruling the store has not written would be reading
+    /// about a state that does not exist yet, and a `resolve` that failed on the write would
+    /// have announced a ruling that never happened.
+    ///
+    /// An escalation announces nothing. It decides nothing, it leaves the report open, and
+    /// "your report was reviewed" is not true of one that is still waiting for an answer —
+    /// which is the whole reason [`Resolution::status`] answers `None` for it. The reporter
+    /// is not owed a frame saying a queue is still a queue.
+    ///
+    /// One event per ruling and not per subject: `case_id` is the *reporter's* handle on what
+    /// they filed, and the reply to `REPORT_CREATE` was a bare acknowledgement precisely so
+    /// that no client would present it as a receipt. What this adds is not the receipt — it is
+    /// the ending.
+    fn announce(&self, report: &Report, resolution: Resolution, now: Timestamp) {
+        if resolution.status().is_none() {
+            return;
+        }
+        self.herald.announce(
+            report.reporter_id,
+            &migo_protocol::ModerationEvent {
+                case_id: report.report_id,
+                // The field is `u32` and every resolution is non-negative by construction,
+                // so this widens rather than reinterprets: `unsigned_abs` and not `as`,
+                // which would assert the same thing to the compiler without saying it to
+                // the reader.
+                action: u32::from(resolution.to_i16().unsigned_abs()),
+                state: resolution.state().to_string(),
+            },
+            now,
+        );
+    }
 }
 
 #[async_trait]
-impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden
-    for Moderation<S, L, R>
+impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized, H: Herald + ?Sized> Warden
+    for Moderation<S, L, R, H>
 {
     async fn file_report(&self, caller: &Caller, filing: Filing) -> Result<Filed> {
         if caller.account_id.is_nil() || caller.device_id.is_nil() {
@@ -496,6 +545,11 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden
         )
         .await?;
 
+        // After the row and never before it, because the row is the record and this is the
+        // courtesy. A reporter told about a ruling the store has not written would be reading
+        // about a state that does not exist yet.
+        self.announce(&report, resolution, resolved.now);
+
         self.meters.resolved(resolution);
         // Re-read rather than patch the copy in hand. The store is the thing that knows
         // what the row says, and a projection assembled from what this function *intended*
@@ -610,7 +664,9 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden
     }
 }
 
-impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<S, L, R> {
+impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized, H: Herald + ?Sized>
+    Moderation<S, L, R, H>
+{
     /// Carries out one action and returns the audit summary for it.
     ///
     /// Split from [`Warden::act`] so that the sequence there reads as authorize, charge,
@@ -729,17 +785,24 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
 /// The form the composition root wants: every part arrives as a trait object, so `migod`
 /// can hand over a Postgres store, a Redis-backed limiter, and whichever staff directory
 /// this deployment uses without this crate knowing that any of them exist.
+///
+/// The herald is the fourth of those and the only one that faces a *user* rather than a
+/// store: it is how a ruling reaches the person who filed the report. A deployment that
+/// passes [`NoHerald`](crate::traits::NoHerald) still records every ruling — what it gives up
+/// is the reporter finding out, which is the whole of what this crate can do for them
+/// without one.
 #[must_use]
 pub fn open(
     store: SharedStore,
     limiter: SharedRateLimiter,
     roster: SharedRoster,
+    herald: SharedHerald,
     random: Box<dyn Random>,
     config: ModerationConfig,
     registry: &Registry,
 ) -> SharedWarden {
     Arc::new(Moderation::new(
-        store, limiter, roster, random, config, registry,
+        store, limiter, roster, herald, random, config, registry,
     ))
 }
 

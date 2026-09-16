@@ -1,10 +1,10 @@
 //! Cross-node delivery of the frames whose topic is a user: the friend-graph
-//! hint, the notification bell, and the sealed sender-key distribution — the
-//! scenario section 170's user-topic tier carries beside presence, and the one
-//! this suite exists to prove: before the tier carried them, a member whose
-//! session lived on another node heard none of the three. The sender got his
-//! `Acknowledged`, the local hub had nobody listening, and the frame stopped
-//! at the node that took it.
+//! hint, the notification bell, the sealed sender-key distribution, and the
+//! warden's word to a reporter — the frames section 170's user-topic tier
+//! carries beside presence, and the one this suite exists to prove: before the
+//! tier carried them, a member whose session lived on another node heard none
+//! of them. The sender got his `Acknowledged`, the local hub had nobody
+//! listening, and the frame stopped at the node that took it.
 //!
 //! The topology is the honest shape cross_node_presence.rs uses: two full
 //! nodes over ONE store through `App::build_with_store`, linked by ephemeral
@@ -34,8 +34,8 @@ use migo_crypto::NodeSecret;
 use migo_protocol::{
     from_frame, to_frame, Acknowledged, ConversationCreateRequest, ConversationKind,
     ConversationSummary, Decode, Encode, Frame, FriendEvent, FriendTarget, GroupKeyDistribution,
-    Hello, NotificationEvent, NotificationKind, Opcode, SubscribeRequest, Topic, TopicKind,
-    Welcome, PROTOCOL_VERSION,
+    Hello, ModerationEvent, NotificationEvent, NotificationKind, Opcode, ReportFile,
+    SubscribeRequest, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -309,6 +309,10 @@ struct Fleet {
     a_addr: SocketAddr,
     b_addr: SocketAddr,
     id_b: Id,
+    /// The one store both nodes serve. Held here because a scenario that needs a
+    /// store fact the front door does not write — a global admin appointment, say —
+    /// has to write it the way the operator surface would have.
+    store: migo_store::SharedStore,
 }
 
 /// Builds and links the two-node fleet the scenarios share.
@@ -349,6 +353,7 @@ async fn fleet() -> Fleet {
         a_addr,
         b_addr,
         id_b,
+        store,
     }
 }
 
@@ -509,4 +514,107 @@ async fn a_sealed_key_distribution_reaches_the_member_on_the_other_node() {
     );
     drop(alice);
     drop(bob);
+}
+
+/// A ruling on a report reaches the reporter on the node they are connected to.
+///
+/// This is the fourth frame the tier carries and the one with the longest way to
+/// travel: a report is filed by an ordinary account, the ruling on it is made by
+/// somebody else — a moderator working the queue anywhere their session happens to
+/// be — and the reporter is not in that conversation at all. Before the warden's
+/// announcement rode this tier, a ruling reached only the sessions on the ruling
+/// moderator's own node, so a reporter connected elsewhere never heard the ending of
+/// their own report; the case closed and nobody told them.
+///
+/// The reporter's session lives on beta; the ruling is made on alpha. The frame is
+/// carried whole and not coalesced, because each ruling is a fact about one case
+/// rather than a state of the recipient — collapsing a burst would lose one report's
+/// ending to deliver another's.
+#[tokio::test]
+async fn a_ruling_reaches_the_reporter_on_the_other_node() {
+    let fleet = fleet().await;
+    let reporter_grant = registered_grant(&fleet.app_b, "ruling_reporter").await;
+    let subject_grant = registered_grant(&fleet.app_a, "ruling_subject").await;
+    let staff_grant = registered_grant(&fleet.app_a, "ruling_staff").await;
+
+    // The moderator's power is a store fact this node reads on the call, and the
+    // appointment is written straight into the store because the front door that
+    // writes it — `/v1/admins` — mints nothing and the account id it names is only
+    // known once the registration above returned.
+    fleet
+        .store
+        .put_global_admin(migo_store::model::GlobalAdmin {
+            account_id: staff_grant.account_id,
+            granted_by: staff_grant.account_id,
+            granted_at: fleet.app_a.clock.now(),
+        })
+        .await
+        .expect("the appointment lands");
+
+    // The reporter self-subscribes on beta, which is what puts beta in alpha's watch
+    // table for her topic — and therefore what makes alpha's relay carry the ruling there.
+    let mut reporter = Client::connect_fresh(fleet.b_addr, &reporter_grant).await;
+    await_watcher(&fleet.app_a, reporter_grant.account_id, fleet.id_b).await;
+
+    // She files through the front door of her own node, about an account that lives on
+    // the other one. The acknowledgement is all the wire promises her, so the case id is
+    // read back the way an operator would: off the queue.
+    let _: Acknowledged = reporter
+        .ask(
+            Opcode::ReportCreate,
+            &ReportFile {
+                subject_kind: 0,
+                subject_id: subject_grant.account_id,
+                reason: 4,
+                note: Some("crossing the nodes with this one".to_string()),
+            },
+        )
+        .await;
+
+    let operator = migo_moderation::Operator::new(
+        staff_grant.account_id,
+        staff_grant.device_id,
+        migo_moderation::Powers::NONE,
+        fleet.app_a.clock.now(),
+    )
+    .reauthenticated();
+    let queue = fleet
+        .app_a
+        .moderation
+        .queue(&operator, Some(10))
+        .await
+        .expect("the appointment is TRIAGE, so the queue opens");
+    let case = queue.first().expect("the report she filed is in it");
+    assert_eq!(case.reporter_id, reporter_grant.account_id);
+    let report_id = case.report_id;
+
+    // The ruling happens on alpha, where the moderator's session is.
+    fleet
+        .app_a
+        .moderation
+        .resolve(
+            &operator,
+            report_id,
+            migo_moderation::Resolution::Warned,
+            Some("warned, first offence"),
+        )
+        .await
+        .expect("the case closes");
+
+    // And she hears about it on beta, on her own user topic: the case, the ruling code,
+    // and the state it left the report in — and nothing about the subject, because what
+    // happened to somebody else's account is not the reporter's to read.
+    let arrived: ModerationEvent = reporter
+        .next_event_of(Opcode::ModerationEvent, MESH_BUDGET)
+        .await;
+    assert_eq!(
+        arrived.case_id, report_id,
+        "the frame names the case she filed, so her client can match it"
+    );
+    assert_eq!(
+        arrived.action, 1,
+        "the ruling code travels, so the client words the sentence itself"
+    );
+    assert_eq!(arrived.state, "actioned");
+    drop(reporter);
 }

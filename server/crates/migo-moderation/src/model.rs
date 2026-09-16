@@ -342,6 +342,29 @@ impl Resolution {
         }
     }
 
+    /// The `state` word a client reads on `MODERATION_EVENT`.
+    ///
+    /// Three words rather than the two `report.status` can hold, and derived from
+    /// [`Resolution::status`] so the two can never disagree: an escalation leaves the report
+    /// open, and a reporter whose event said "actioned" about a report still sitting in a
+    /// queue would have been told something was decided that was not. The words are the
+    /// stored ones in lowercase rather than the column's numbers, because this one crosses
+    /// the wire to a client that has no copy of the schema's constants and no business
+    /// having one — a client renders "your report was reviewed" from the event's arrival,
+    /// and the word is what an operator reading a support ticket can be shown verbatim.
+    ///
+    /// Stable, and load-bearing once shipped: a client that branches on it is branching on
+    /// these three strings.
+    #[must_use]
+    pub const fn state(self) -> &'static str {
+        use migo_store::model::report_status;
+        match self.status() {
+            None => "open",
+            Some(report_status::ACTIONED) => "actioned",
+            Some(_) => "dismissed",
+        }
+    }
+
     /// A short, stable label for a metric.
     #[must_use]
     pub const fn label(self) -> &'static str {

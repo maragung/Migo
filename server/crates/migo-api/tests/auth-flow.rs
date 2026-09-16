@@ -206,6 +206,9 @@ impl Harness {
             shared_store,
             Arc::clone(&real_limiter) as SharedRateLimiter,
             Arc::new(migo_moderation::NoStaff),
+            // No realtime path is bound here either: a ruling has nowhere to be announced,
+            // and this suite never rules on anything.
+            Arc::new(migo_moderation::NoHerald),
             Box::new(SeededRandom::new(SEED)),
             migo_moderation::ModerationConfig::default(),
             &registry,

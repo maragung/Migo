@@ -53,6 +53,7 @@
 //!     store,
 //!     limiter,
 //!     roster,
+//!     herald,
 //!     Box::new(OsRandom),
 //!     ModerationConfig::default(),
 //!     &registry,
@@ -78,4 +79,6 @@ pub use crate::model::{
 };
 pub use crate::notice::{Notice, Outcome};
 pub use crate::service::{effective_tier, open, Moderation};
-pub use crate::traits::{NoStaff, Roster, SharedRoster, SharedWarden, Warden};
+pub use crate::traits::{
+    Herald, NoHerald, NoStaff, Roster, SharedHerald, SharedRoster, SharedWarden, Warden,
+};
