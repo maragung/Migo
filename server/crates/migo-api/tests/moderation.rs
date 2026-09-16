@@ -153,11 +153,11 @@ impl Harness {
         let store = Arc::new(MemoryStore::new());
 
         let roster = Arc::new(TestRoster::new());
-        // Coerced through a typed binding rather than at the argument: `open`'s first parameter is
-        // already `Arc<dyn Store>`, and a bare `Arc::clone(&store)` in that position is checked
-        // with the clone's own type parameter fixed to the trait object, which then refuses the
-        // concrete `&Arc<MemoryStore>`.
-        let shared_store: SharedStore = Arc::clone(&store);
+        // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
+        // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
+        // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
+        // handed — the same reason the limiter and the roster below are cast.
+        let shared_store = Arc::clone(&store) as SharedStore;
         let warden = open(
             shared_store,
             Arc::clone(&limiter) as SharedRateLimiter,

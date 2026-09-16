@@ -62,7 +62,7 @@ use migo_protocol::{codes, NodeInfo};
 use migo_ratelimit::{
     BucketKey, CacheRateLimiter, Policies, RateLimiter, SharedRateLimiter, TrustTier, Verdict,
 };
-use migo_store::MemoryStore;
+use migo_store::{MemoryStore, SharedStore};
 
 // --- constants ----------------------------------------------------------------------------
 
@@ -147,8 +147,12 @@ impl Harness {
         // surface under test, so it is the real service over the same store, limiter and
         // registry the rest of the harness uses, with a directory in which nobody is
         // staff — the posture every operator route below is refused under.
+        // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
+        // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
+        // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
+        // handed — the same reason the limiter below is cast.
         let moderation = migo_moderation::open(
-            Arc::clone(&store),
+            Arc::clone(&store) as SharedStore,
             Arc::clone(&real_limiter) as SharedRateLimiter,
             Arc::new(migo_moderation::NoStaff),
             Box::new(SeededRandom::new(SEED)),

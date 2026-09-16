@@ -197,11 +197,11 @@ impl Harness {
         // and limiter. This suite never reaches it, so the directory is the one in
         // which nobody is staff — which is also what makes "an ordinary account is
         // refused" the default story for any test that wanders in.
-        // The trait object is coerced through a typed binding rather than at the argument:
-        // `open`'s first parameter is already `Arc<dyn Store>`, and a bare `Arc::clone(&store)`
-        // there would be checked with the clone's own type parameter fixed to the trait object,
-        // which refuses the concrete `&Arc<MemoryStore>` it is handed.
-        let shared_store: SharedStore = Arc::clone(&store);
+        // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
+        // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
+        // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
+        // handed — the same reason the limiter above is cast.
+        let shared_store = Arc::clone(&store) as SharedStore;
         let moderation = migo_moderation::open(
             shared_store,
             Arc::clone(&real_limiter) as SharedRateLimiter,
