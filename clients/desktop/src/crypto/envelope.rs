@@ -267,3 +267,96 @@ impl<'a> Cursor<'a> {
         slice
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ratchet_header() -> RatchetHeader {
+        RatchetHeader {
+            ratchet_key: [0x42; PUBLIC_KEY_LEN],
+            previous_chain_length: 3,
+            message_number: 5,
+        }
+    }
+
+    /// 64 bytes of "ciphertext": comfortably more than the 16-byte AEAD tag the decoder demands,
+    /// and opaque to it either way — the envelope layer never opens what it carries.
+    fn established() -> Envelope {
+        Envelope::established(ratchet_header(), vec![0xAB; 64])
+    }
+
+    #[test]
+    fn an_established_envelope_round_trips() {
+        let envelope = established();
+        let bytes = envelope.encode().expect("a well-formed envelope encodes");
+        let parsed = Envelope::decode(&bytes).expect("its own encoding decodes");
+
+        // `Envelope` carries no `PartialEq`, and the wire bytes are the contract anyway: the
+        // fields are asserted individually, then the parsed envelope is re-encoded and must
+        // reproduce the exact bytes, which is the property a web or Android peer depends on.
+        assert_eq!(parsed.scheme, SCHEME_DOUBLE_RATCHET);
+        assert_eq!(parsed.sender_key_id, 0);
+        assert!(parsed.preamble.is_none());
+        assert_eq!(parsed.header.ratchet_key, [0x42; PUBLIC_KEY_LEN]);
+        assert_eq!(parsed.header.message_number, 5);
+        assert_eq!(parsed.header.previous_chain_length, 3);
+        assert_eq!(parsed.ciphertext, vec![0xAB; 64]);
+        assert_eq!(
+            parsed.encode().expect("the parsed envelope re-encodes"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_future_envelope_version_is_refused_clearly_and_deterministically() {
+        // Brief section 176: a change to the envelope format needs a new `envelope_version`, and
+        // a client must keep reading the old one because stored history cannot be re-encoded.
+        // Until that future version exists, refusing it — rather than guessing at its layout —
+        // is what keeps this parser honest, and this test simulates it by bumping the version
+        // byte on the test side only: `ENVELOPE_VERSION` itself never moves here. Every value
+        // the byte can hold is swept, so nothing above or below the current version is accepted
+        // silently, and every refusal is the same named reason rather than a panic.
+        let bytes = established().encode().expect("encodes");
+        for version in 0u8..=255 {
+            let mut candidate = bytes.clone();
+            candidate[0] = version;
+            match Envelope::decode(&candidate) {
+                Ok(_) => assert_eq!(
+                    version, ENVELOPE_VERSION,
+                    "no version but the current one may decode"
+                ),
+                Err(error) => {
+                    assert_ne!(version, ENVELOPE_VERSION);
+                    assert!(
+                        matches!(error, CryptoError::Envelope("unsupported envelope version")),
+                        "version {version} was refused as {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_prefix_of_an_envelope_is_answered_never_with_a_panic() {
+        // The envelope is self-delimiting only by running to the end, so a truncated download with
+        // a ciphertext tail of sixteen bytes or more parses as a *shorter valid envelope* — that
+        // is the fixed layout's design, not a bug. What must hold for every prefix is weaker and
+        // more important: the parser always answers (Ok or Err, never a panic or an index out of
+        // bounds — history sync hands it bytes shaped by whatever wrote them), and whatever it
+        // accepts is canonical, meaning re-encoding the parsed envelope reproduces the exact
+        // prefix, so a truncated envelope can never decode into something claiming more bytes
+        // than it has.
+        let bytes = established().encode().expect("encodes");
+        for len in 0..=bytes.len() {
+            match Envelope::decode(&bytes[..len]) {
+                Err(_) => {}
+                Ok(parsed) => assert_eq!(
+                    parsed.encode().expect("an accepted envelope re-encodes"),
+                    &bytes[..len],
+                    "a prefix of {len} bytes decoded non-canonically"
+                ),
+            }
+        }
+    }
+}
