@@ -440,3 +440,74 @@ test('call keys: a frame for another call or device is left for the signaling la
   assert.equal(a.errors.length, errorsBefore);
   assert.equal(a.callKeys.keyEpoch(CALL), 0, 'an untracked call changed nothing');
 });
+
+// --- onKeyChanged: the media plane's two moments ---
+
+test('call keys: onKeyChanged fires when the first key is held and on every advance', async () => {
+  const a = node(idOf(1), idOf(2));
+  const events: Id[] = [];
+  a.callKeys.onKeyChanged((callId) => events.push(callId));
+
+  // The first seat's mint: the first moment the media plane can seal anything.
+  snapshot(a, [a], 1);
+  assert.deepEqual(events, [CALL], 'the mint announces the key');
+
+  // A joins-in-progress peer: its key arrives as the distributor's answer, which is its first
+  // held key — the listener's other first-moment shape.
+  const b = node(idOf(3), idOf(4), [a.store]);
+  const bEvents: Id[] = [];
+  b.callKeys.onKeyChanged((callId) => bEvents.push(callId));
+  snapshot(b, [a, b], 2);
+  announceJoin(a, b, 2);
+  await settle([a, b]);
+
+  assert.equal(b.callKeys.hasKey(CALL), true);
+  assert.equal(bEvents.length >= 1, true, 'the joiner heard its installed key');
+  assert.deepEqual(bEvents.filter((id) => id === CALL).length, bEvents.length);
+
+  // Every epoch advance after that — the rotator's own and the adopters' — announces too, because
+  // a rotation invalidates the sealing of anything a media plane still had in flight.
+  const rotatorEpochs: Array<number | null> = [];
+  const adopterEpochs: Array<number | null> = [];
+  a.callKeys.onKeyChanged(() => rotatorEpochs.push(a.callKeys.keyEpoch(CALL)));
+  b.callKeys.onKeyChanged(() => adopterEpochs.push(b.callKeys.keyEpoch(CALL)));
+  const c = node(idOf(5), idOf(6), [a.store]);
+  snapshot(c, [a, b, c], 3);
+  announceJoin(a, c, 3);
+  announceJoin(b, c, 3);
+  await settle([a, b, c]);
+
+  assert.equal(a.callKeys.keyEpoch(CALL), b.callKeys.keyEpoch(CALL));
+  assert.ok(rotatorEpochs.includes(a.callKeys.keyEpoch(CALL)), 'the rotator heard its own advance');
+  assert.ok(adopterEpochs.includes(b.callKeys.keyEpoch(CALL)), 'the adopter heard the update');
+});
+
+test('call keys: onKeyChanged stays silent for frames that change no key state', async () => {
+  const a = node(idOf(1), idOf(2));
+  snapshot(a, [a], 1);
+  await settle([a]);
+  const events: Id[] = [];
+  a.callKeys.onKeyChanged((callId) => events.push(callId));
+
+  // A replayed epoch-0 update (the epoch does not advance) and an update for an untracked call:
+  // neither is a key-state change, so neither may wake a media plane.
+  a.transport.emit(
+    OP.CALL_KEY_UPDATE,
+    encodeBody(encodeCallKeyUpdate, {
+      callId: CALL,
+      epoch: 0,
+      sealedKeyMaterial: new Uint8Array([1, 2, 3]),
+    }),
+  );
+  a.transport.emit(
+    OP.CALL_KEY_UPDATE,
+    encodeBody(encodeCallKeyUpdate, {
+      callId: idFromBytes(new Uint8Array(16).fill(0x44)),
+      epoch: 5,
+      sealedKeyMaterial: new Uint8Array([4]),
+    }),
+  );
+  await settle([a]);
+  assert.deepEqual(events, [], 'no key-state change, no event');
+  assert.equal(a.callKeys.keyEpoch(CALL), 0);
+});

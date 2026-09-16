@@ -1,8 +1,8 @@
 'use client';
 
 /**
- * The group-call manager: one React context that owns this device's seat in one group call, and
- * the map of the calls it could still join.
+ * The group-call manager: one React context that owns this device's seat in one group call, the
+ * map of the calls it could still join, and the call's media plane.
  *
  * The SDK's group-call domain is pure signaling — it sends what it is handed and delivers what
  * arrives. This provider is the piece above it a roster UI needs: it joins with a sealed
@@ -14,15 +14,20 @@
  * own words on the screen, because a roster that vanishes without a sentence teaches its user to
  * distrust the next one.
  *
- * # What this manager deliberately does not do
+ * # The media plane
  *
- * No media. This build carries the roster, not the media plane: no `getUserMedia`, no peer
- * connections, no microphone to tear down. The join's sealed offer is the placeholder the roster
- * module seals. The frame-key distribution between participants that a real media plane needs
- * (section 163's client-side triggers) lives in the SDK now — `MigoClient.callKeys` rotates the
- * call's key on roster movement, asks and answers for mid-call joins, and exposes the seal/open
- * surface a future media plane seals its frames through — so when that plane lands, it calls this
- * manager's call id into `callKeys` and nothing here has to change.
+ * The seat and the frame key are what the plane needs, and both exist by the time the seat is
+ * accepted: the SDK mints the first seat's key on the roster snapshot, a mid-call joiner's key
+ * arrives with a distributor's answer, and {@link MigoClient.callKeys} says which is which
+ * (`hasKey` now, `onKeyChanged` the moment it becomes true or advances). So the manager starts
+ * exactly one {@link GroupMediaPlane} per seated call — never before the key is held, because
+ * nothing the plane seals could be opened otherwise — feeds it the roster projection and the
+ * sealed SDP/ICE relays, and drives its quality tick. Every exit path (leave, retirement, seat
+ * replacement, dropped session, unmount, tab close) tears it down through the same one function,
+ * so no link and no local track outlives the seat that owned them. The join frame's sealed offer
+ * stays the roster module's placeholder for the reason {@link ./group-media.ts} states: the
+ * joiner holds no frame key at the moment of joining, so the real descriptions ride per-peer
+ * offers on the relay, where both ends already hold the key.
  *
  * One call at a time. A device holds one seat in one call in this build; the join guard is a
  * synchronous check of the tracked call, the same discipline the 1:1 manager keeps for its
@@ -42,9 +47,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from 'react';
 
 import { CallMediaKind, newId } from '@migo/sdk';
-import type { Id } from '@migo/sdk';
+import type { Id, TurnServer } from '@migo/sdk';
 
 import { generateCallKey } from './call-signal.js';
+import { GroupMediaPlane, groupIceServers } from './group-media.js';
+import type { GroupMediaLink } from './group-media.js';
 import {
   inProgressArrived,
   inProgressDeparted,
@@ -61,6 +68,9 @@ import { useMigo } from './use-migo.js';
 /** What a group call that could not even be joined says, as a fact. */
 export const GROUP_CALL_JOIN_FAILED = 'Could not join the group call.';
 
+/** How often the media plane's quality ladder reads its links and moves a rung. */
+const QUALITY_TICK_MS = 3_000;
+
 /**
  * The empty in-progress map, shared: the folds below always build a fresh map, so no write ever
  * reaches into this one.
@@ -68,14 +78,15 @@ export const GROUP_CALL_JOIN_FAILED = 'Could not join the group call.';
 const NO_CALLS_IN_PROGRESS: ReadonlyMap<Id, InProgressGroupCall> = new Map();
 
 /**
- * The tracked group call: the seat list as this device last knew it, plus the phase of our own
- * seat. Kept by the manager and rendered by the roster screen; every field the screen shows is a
- * field here, so a screen state is pinnable by a test without a socket.
+ * The tracked group call: the seat list as this device last knew it, the phase of our own seat,
+ * and the media the plane is holding. Kept by the manager and rendered by the roster screen; every
+ * field the screen shows is a field here, so a screen state is pinnable by a test without a
+ * socket.
  */
 export interface ActiveGroupCall {
   callId: Id;
   conversationId: Id;
-  /** What the join carried; the label and nothing else in this build — no media rides it yet. */
+  /** What the join carried: the label, and what the plane acquires (a camera when video). */
   mediaKind: CallMediaKind;
   /** `joining` until the join reply or roster snapshot lands; `seated` after. */
   phase: 'joining' | 'seated';
@@ -87,6 +98,18 @@ export interface ActiveGroupCall {
   participantCount: number;
   /** When this device's seat was accepted, for the duration line. */
   joinedAt: number | null;
+  /** The media links this device's plane holds, in join order; empty until media exists. */
+  links: GroupMediaLink[];
+  /** The plane's local stream once media exists — the self-view's source. */
+  localStream: MediaStream | null;
+  /** Whether this seat publishes video (it wanted to, and the product limit admitted it). */
+  videoPublished: boolean;
+  /** Whether this seat's microphone is muted. */
+  muted: boolean;
+  /** Whether this seat's camera is on; `null` when no camera was published. */
+  cameraOn: boolean | null;
+  /** A media failure stated as a fact (the microphone the plane could not acquire). */
+  mediaError: string | null;
 }
 
 /** What the rest of the app reads and calls. */
@@ -102,13 +125,30 @@ export interface GroupCallManagerValue {
   groupCallInProgress: (conversationId: Id) => InProgressGroupCall | null;
   /**
    * Joins the conversation's group call: the running call's id when the caller has one (seating
-   * into it), a freshly minted id otherwise.
+   * into it), a freshly minted id otherwise. The media kind chooses what the seat acquires — a
+   * camera joins as video within the product limit.
    */
-  joinGroupCall: (conversationId: Id, callId?: Id) => Promise<void>;
+  joinGroupCall: (conversationId: Id, callId?: Id, mediaKind?: CallMediaKind) => Promise<void>;
   /** Leaves the tracked call: the screen turns to its "left" note, and the server frees the seat. */
   leaveGroupCall: () => Promise<void>;
   /** Dismisses the ended screen, leaving no call tracked. */
   dismissGroupCall: () => void;
+  /**
+   * Mutes or unmutes the seated call's microphone, everywhere at once. Returns the new muted
+   * state, or `null` when no microphone exists to mute.
+   */
+  toggleGroupMute: () => boolean | null;
+  /**
+   * Turns the seated call's camera on or off, everywhere at once. Returns the new state, or `null`
+   * when no camera was published (an audio seat, or video the product limit refused).
+   */
+  toggleGroupCamera: () => boolean | null;
+  /**
+   * The remote stream of one roster device, once its link's tracks have arrived — the audio
+   * element's source. Read during a render that follows a link change, so a stream that just
+   * arrived is an element the same render attaches.
+   */
+  groupRemoteStream: (deviceId: Id) => MediaStream | null;
 }
 
 const GroupCallManagerContext = createContext<GroupCallManagerValue | null>(null);
@@ -134,6 +174,15 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
   const activeRef = useRef<ActiveGroupCall | null>(null);
   const trackedRef = useRef<ReadonlyMap<Id, InProgressGroupCall>>(NO_CALLS_IN_PROGRESS);
 
+  // The media plane of the seated call, and what it needs: the join reply's TURN list, the frame
+  // key's epoch as this device last saw it (a null epoch means "no key held yet"), and the quality
+  // tick's timer. All ref-held because the plane is created and torn down by call-flow events, not
+  // by renders — a re-render must never rebuild a live peer connection.
+  const planeRef = useRef<GroupMediaPlane | null>(null);
+  const turnServersRef = useRef<TurnServer[]>([]);
+  const keyEpochRef = useRef<number | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // --- tracked-state writers: ref first (handlers read it synchronously), then React state ---
 
   const setActive = useCallback((call: ActiveGroupCall | null): void => {
@@ -146,6 +195,129 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     setTrackedCalls(calls);
   }, []);
 
+  // --- the media plane's lifecycle ---
+
+  /**
+   * Tears the media plane down, completely: links closed, local tracks stopped, tick disarmed. One
+   * function for every exit path, so no link and no track outlives the seat that owned them.
+   */
+  const teardownMedia = useCallback((): void => {
+    if (tickRef.current !== null) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    planeRef.current?.leave();
+    planeRef.current = null;
+    keyEpochRef.current = null;
+  }, []);
+
+  /**
+   * Starts the seated call's media plane, if it can exist and does not yet.
+   *
+   * "Can exist" is three facts: the seat is accepted, the call's frame key is held (nothing the
+   * plane seals could be opened before it is — the first seat's key is minted on the snapshot, a
+   * joiner's arrives with a distributor's answer), and the seat is still this device's. The join
+   * reply's TURN relays ride the plane's ICE servers, with the public STUN fallback behind them.
+   */
+  const maybeStartMedia = useCallback((): void => {
+    const current = clientRef.current;
+    const active = activeRef.current;
+    if (
+      current === null ||
+      planeRef.current !== null ||
+      active === null ||
+      active.note !== null ||
+      active.phase !== 'seated'
+    ) {
+      return;
+    }
+    if (!current.callKeys.hasKey(active.callId)) {
+      // A joiner's key ask is still in flight; `onKeyChanged` is what re-runs this.
+      return;
+    }
+    const accountId = accountIdRef.current;
+    const deviceId = deviceIdRef.current;
+    if (accountId === null || deviceId === null) {
+      return;
+    }
+    const callId = active.callId;
+    const plane = new GroupMediaPlane({
+      callId,
+      conversationId: active.conversationId,
+      accountId,
+      deviceId,
+      mediaKind: active.mediaKind,
+      iceServers: groupIceServers(turnServersRef.current),
+      createPeer: (iceServers) => new RTCPeerConnection({ iceServers }),
+      acquire: (kind) =>
+        navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: kind === CallMediaKind.Video,
+        }),
+      sendSdp: (toDevice, sealed) => current.calls.sendSdp(callId, toDevice, sealed),
+      sendIce: (toDevice, sealed) => current.calls.sendIce(callId, toDevice, sealed),
+      seal: (frame) => current.callKeys.sealFrame(callId, frame),
+      open: (sealed) => current.callKeys.openFrame(callId, sealed),
+      onLinks: (links) => {
+        const planeNow = planeRef.current;
+        const activeNow = activeRef.current;
+        if (planeNow === null || activeNow === null || activeNow.callId !== callId) {
+          return;
+        }
+        setActive({
+          ...activeNow,
+          links,
+          localStream: planeNow.localStream,
+          videoPublished: planeNow.videoPublished,
+          muted: planeNow.muted,
+          cameraOn: planeNow.cameraOn,
+        });
+      },
+      onFailure: (what) => {
+        const activeNow = activeRef.current;
+        if (activeNow !== null && activeNow.callId === callId) {
+          setActive({ ...activeNow, mediaError: what });
+        }
+      },
+    });
+    planeRef.current = plane;
+    void plane.begin(active.seats).catch(() => {
+      // begin's own failures are already stated through onFailure; this is the unexpected rest.
+    });
+    tickRef.current = setInterval(() => {
+      void planeRef.current?.tick(Date.now()).catch(() => {
+        // A tick that cannot read its links is a tick the next one retries.
+      });
+    }, QUALITY_TICK_MS);
+  }, [setActive]);
+
+  /**
+   * The frame key changed state for the seated call. A first-held key is what makes sealing
+   * possible (the plane starts through {@link maybeStartMedia}); an epoch advance invalidates the
+   * sealing of every negotiation still in flight, so the plane resets its unconnected links and
+   * the dialer re-dials under the fresh key — connected links keep flowing, their media riding
+   * DTLS-SRTP, which the frame key does not gate.
+   */
+  const onKeyChangedFor = useCallback(
+    (callId: Id): void => {
+      const current = clientRef.current;
+      if (current === null) {
+        return;
+      }
+      const epoch = current.callKeys.keyEpoch(callId);
+      const previous = keyEpochRef.current;
+      keyEpochRef.current = epoch;
+      if (previous === null) {
+        maybeStartMedia();
+        return;
+      }
+      if (epoch !== null && epoch > previous) {
+        planeRef.current?.keyEpochChanged();
+      }
+    },
+    [maybeStartMedia],
+  );
+
   // --- the flows the UI calls ---
 
   /**
@@ -156,17 +328,18 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
    * it is the point: client-minted ids are the protocol's idempotency key, so this join seats
    * into the running call rather than minting a second one the conversation did not ask for. A
    * fresh join mints the id here, and a retried join re-seats the same call either way. The
-   * offer is the roster module's sealed placeholder: this build's honest stand-in for a media
-   * description, sealed under a per-call key exactly as the real one will be (section 165's rule
-   * is about what the server sees, not about whether the media plane has landed).
+   * offer is the roster module's sealed placeholder: the joiner holds no frame key at the moment
+   * of joining, so the real media descriptions ride per-peer offers on the relay once the key
+   * arrives (see {@link ./group-media.ts}).
    *
    * The roster snapshot the screen builds from does not come back on the reply: the server
    * *publishes* it to this account's own topic, and the snapshot handler below may fire before or
    * after the reply resolves — both orders reach the same screen, because the snapshot is what
-   * marks the seat accepted, not the reply.
+   * marks the seat accepted, not the reply. The reply does carry the call's TURN relays, which
+   * the media plane's peer connections dial through.
    */
   const joinGroupCall = useCallback(
-    async (conversationId: Id, callId?: Id): Promise<void> => {
+    async (conversationId: Id, callId?: Id, mediaKind = CallMediaKind.Audio): Promise<void> => {
       const current = clientRef.current;
       if (current === null || accountIdRef.current === null || deviceIdRef.current === null) {
         return;
@@ -185,12 +358,18 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       setActive({
         callId: joinedCallId,
         conversationId,
-        mediaKind: CallMediaKind.Audio,
+        mediaKind,
         phase: 'joining',
         note: null,
         seats: [],
         participantCount: 0,
         joinedAt: null,
+        links: [],
+        localStream: null,
+        videoPublished: false,
+        muted: false,
+        cameraOn: null,
+        mediaError: null,
       });
       // Seating in the tracked call makes the roster this conversation's call state; the
       // tracker's entry has nothing left to tell the header.
@@ -200,18 +379,22 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         setTracked(without);
       }
       try {
-        await current.groupCalls.join(
+        const joined = await current.groupCalls.join(
           conversationId,
-          CallMediaKind.Audio,
+          mediaKind,
           placeholderSealedOffer(generateCallKey(), joinedCallId),
           joinedCallId,
         );
+        turnServersRef.current = joined.servers;
         // The snapshot may already have marked the seat accepted (it is published, not replied);
-        // this only fills in the timestamp for a reply that won the race.
+        // this only fills in the timestamp for a reply that won the race. Either order has the
+        // key in place by now for a first seat, so the plane may start; a joiner whose key ask
+        // is still in flight is started by `onKeyChanged` instead.
         const active = activeRef.current;
         if (active !== null && active.callId === joinedCallId && active.phase === 'joining') {
           setActive({ ...active, phase: 'seated', joinedAt: active.joinedAt ?? Date.now() });
         }
+        onKeyChangedFor(joinedCallId);
       } catch {
         // The join never landed (membership refused, the socket gone). A snapshot that arrived
         // despite the failure means it did land — only fail a call still waiting for its seat.
@@ -222,15 +405,16 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         }
       }
     },
-    [setActive, setTracked],
+    [setActive, setTracked, onKeyChangedFor],
   );
 
   /**
    * Leaves the tracked call.
    *
-   * The screen turns to its "left" note at once and the leave follows best-effort: the seat may
-   * already be gone (the call retired, or another device replaced it), and a leave for a seat this
-   * device no longer holds is the server's NOT_FOUND, not a fact the user needs.
+   * The screen turns to its "left" note at once, the media plane is torn down at once, and the
+   * leave follows best-effort: the seat may already be gone (the call retired, or another device
+   * replaced it), and a leave for a seat this device no longer holds is the server's NOT_FOUND,
+   * not a fact the user needs.
    */
   const leaveGroupCall = useCallback(async (): Promise<void> => {
     const current = clientRef.current;
@@ -238,11 +422,12 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     if (current === null || active === null || active.note !== null) {
       return;
     }
-    setActive({ ...active, note: 'left' });
+    teardownMedia();
+    setActive({ ...active, note: 'left', links: [] });
     await current.groupCalls.leave(active.callId).catch(() => {
       // See above — the screen is already honest.
     });
-  }, [setActive]);
+  }, [setActive, teardownMedia]);
 
   const dismissGroupCall = useCallback((): void => {
     const active = activeRef.current;
@@ -250,11 +435,40 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       // A live call is not dismissable; the leave button is its exit.
       return;
     }
+    teardownMedia();
     setActive(null);
     setGroupCallError(null);
+  }, [setActive, teardownMedia]);
+
+  /** Mutes the seated call's microphone, or says there is none to mute. */
+  const toggleGroupMute = useCallback((): boolean | null => {
+    const plane = planeRef.current;
+    if (plane === null) {
+      return null;
+    }
+    const muted = plane.toggleMute();
+    const active = activeRef.current;
+    if (active !== null) {
+      setActive({ ...active, muted });
+    }
+    return muted;
   }, [setActive]);
 
-  // --- the three SDK streams, registered once per session ---
+  /** Turns the seated call's camera on or off, or says no camera was published. */
+  const toggleGroupCamera = useCallback((): boolean | null => {
+    const plane = planeRef.current;
+    if (plane === null) {
+      return null;
+    }
+    const cameraOn = plane.toggleCamera();
+    const active = activeRef.current;
+    if (active !== null && cameraOn !== null) {
+      setActive({ ...active, cameraOn });
+    }
+    return cameraOn;
+  }, [setActive]);
+
+  // --- the SDK streams, registered once per session ---
 
   /**
    * The roster snapshot: the authoritative seat list for a join this device made. Snapshots for
@@ -268,10 +482,13 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     if (!client) {
       // The session dropped mid-call: there is no signaling left to leave with, so the screen
       // states what happened and stops. The seat may persist server-side until this device
-      // returns; this build does not auto-re-join on resume.
+      // returns; this build does not auto-re-join on resume. The plane is torn down at once —
+      // its links' relay is gone with the session, and a live mic outliving its call is a fact
+      // nobody asked the user for.
       const active = activeRef.current;
+      teardownMedia();
       if (active !== null && active.note === null) {
-        setActive({ ...active, note: 'connection' });
+        setActive({ ...active, note: 'connection', links: [] });
       }
       // The tracked calls are announcement-kept; with no signaling left they could only go
       // stale, and a stale entry is a join the server would refuse.
@@ -284,13 +501,16 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         if (active === null || active.callId !== roster.callId) {
           return;
         }
+        const seats = seatsFromSnapshot(roster);
         setActive({
           ...active,
           phase: 'seated',
-          seats: seatsFromSnapshot(roster),
+          seats,
           participantCount: roster.participantCount,
           joinedAt: active.joinedAt ?? Date.now(),
         });
+        onKeyChangedFor(roster.callId);
+        planeRef.current?.seatsChanged(seats);
       }),
       client.groupCalls.onParticipantJoined((event) => {
         const active = activeRef.current;
@@ -301,11 +521,13 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
           if (active.note !== null) {
             return;
           }
+          const seats = seatArrived(active.seats, event, Date.now());
           setActive({
             ...active,
-            seats: seatArrived(active.seats, event, Date.now()),
+            seats,
             participantCount: event.participantCount,
           });
+          planeRef.current?.seatsChanged(seats);
           return;
         }
         setTracked(inProgressArrived(trackedRef.current, event));
@@ -327,18 +549,46 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
             // This connection never hears its own leave (the server skips the origin session when
             // publishing), so a departure naming this exact account *and* device is the seat being
             // replaced from this account's other device — the call continues, just not here.
-            setActive({ ...active, note: 'moved' });
+            teardownMedia();
+            setActive({ ...active, note: 'moved', links: [] });
             return;
           }
+          const retired = isCallRetired(event);
+          if (retired) {
+            teardownMedia();
+          }
+          const seats = seatDeparted(active.seats, event);
           setActive({
             ...active,
-            note: isCallRetired(event) ? 'ended' : null,
-            seats: seatDeparted(active.seats, event),
+            note: retired ? 'ended' : null,
+            seats,
             participantCount: event.participantCount,
+            ...(retired ? { links: [] } : {}),
           });
+          if (!retired) {
+            planeRef.current?.seatsChanged(seats);
+          }
           return;
         }
         setTracked(inProgressDeparted(trackedRef.current, event));
+      }),
+      // The frame key's state changes: a first-held key starts the plane, an epoch advance
+      // resets the negotiations the rotation stranded.
+      client.callKeys.onKeyChanged((callId) => {
+        const active = activeRef.current;
+        if (active !== null && active.callId === callId) {
+          onKeyChangedFor(callId);
+        }
+      }),
+      // The sealed SDP and ICE relays of every call — the 1:1 plane's frames and this plane's
+      // ride the same two opcodes, and each listener keeps only what it can open.
+      client.calls.onSdp((event) => {
+        void planeRef.current?.onSdp(event).catch(() => {
+          // A relay the plane could not process is one its key change will reset.
+        });
+      }),
+      client.calls.onIce((event) => {
+        planeRef.current?.onIce(event);
       }),
     ];
     return () => {
@@ -346,11 +596,13 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         off();
       }
     };
-  }, [client, setActive, setTracked]);
+  }, [client, setActive, setTracked, teardownMedia, onKeyChangedFor]);
 
   // Closing the tab while seated must tell the server, the same contract the 1:1 manager keeps:
   // without it the seat lingers until the server notices the dead session. The RPC is fired
-  // without awaiting it — whether the frame beats the socket's death is the browser's race.
+  // without awaiting it — whether the frame beats the socket's death is the browser's race. The
+  // plane goes first: its links close with the page, and a mic left on by an orphaned track is
+  // the fact nobody asked for.
   useEffect(() => {
     const onPageUnload = (): void => {
       const active = activeRef.current;
@@ -358,25 +610,33 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       if (current === null || active === null || active.note !== null) {
         return;
       }
+      teardownMedia();
       void current.groupCalls.leave(active.callId).catch(() => {});
     };
     window.addEventListener('beforeunload', onPageUnload);
     return () => window.removeEventListener('beforeunload', onPageUnload);
-  }, []);
+  }, [teardownMedia]);
 
-  // Unmounting the shell must not leave a tracked call behind.
+  // Unmounting the shell must not leave a tracked call, a live plane, or a running tick behind.
   useEffect(
     () => (): void => {
+      teardownMedia();
       setActive(null);
       setTracked(NO_CALLS_IN_PROGRESS);
     },
-    [setActive, setTracked],
+    [setActive, setTracked, teardownMedia],
   );
 
   /** The call running in a conversation this device is not seated in, when one is. */
   const groupCallInProgress = useCallback(
     (conversationId: Id): InProgressGroupCall | null => trackedCalls.get(conversationId) ?? null,
     [trackedCalls],
+  );
+
+  /** The remote stream of one roster device, once its link's tracks have arrived. */
+  const groupRemoteStream = useCallback(
+    (deviceId: Id): MediaStream | null => planeRef.current?.remoteStreamOf(deviceId) ?? null,
+    [],
   );
 
   const value: GroupCallManagerValue = {
@@ -386,6 +646,9 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     joinGroupCall,
     leaveGroupCall,
     dismissGroupCall,
+    toggleGroupMute,
+    toggleGroupCamera,
+    groupRemoteStream,
   };
 
   return (

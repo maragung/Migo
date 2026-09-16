@@ -36,10 +36,15 @@ import { CallMediaKind } from '@migo/sdk';
 import type { GroupCallJoinedEvent, GroupCallLeftEvent, GroupCallRoster, Id } from '@migo/sdk';
 
 import { GroupCallButton } from '../src/components/call-buttons.js';
-import { GroupCallScreen } from '../src/components/group-call-overlay.js';
+import {
+  GroupCallScreen,
+  groupSeatState,
+  ownSeatState,
+} from '../src/components/group-call-overlay.js';
 import type { GroupCallScreenProps } from '../src/components/group-call-overlay.js';
 import { GroupCallManagerProvider, useGroupCall } from '../src/lib/migo/group-call-manager.js';
 import type { ActiveGroupCall } from '../src/lib/migo/group-call-manager.js';
+import type { GroupMediaLink } from '../src/lib/migo/group-media.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
 import {
   GROUP_CALL_NOTES,
@@ -115,6 +120,12 @@ function activeCall(overrides: Partial<ActiveGroupCall> = {}): ActiveGroupCall {
     ],
     participantCount: 2,
     joinedAt: NOW - 60_000,
+    links: [],
+    localStream: null,
+    videoPublished: false,
+    muted: false,
+    cameraOn: null,
+    mediaError: null,
     ...overrides,
   };
 }
@@ -128,8 +139,11 @@ function screen(overrides: Partial<GroupCallScreenProps> = {}): string {
     ]),
     meId: ME,
     nowMs: NOW,
+    streams: new Map<Id, MediaStream>(),
     onLeave: () => {},
     onDismiss: () => {},
+    onToggleMute: () => null,
+    onToggleCamera: () => null,
     ...overrides,
   };
   return renderToStaticMarkup(<GroupCallScreen {...props} />);
@@ -266,7 +280,10 @@ test('a seated screen states the count, marks the roster’s you, and offers lea
   assert.ok(markup.includes('Ada Lovelace'), 'the roster renders names');
   assert.ok(markup.includes('You'), 'this session’s seat is findable');
   assert.ok(markup.includes('aria-label="Leave the call"'));
-  assert.ok(markup.includes('Roster only in this build'), 'no media is stated, not hidden');
+  // The mic control exists from the seated moment; the camera control only does once a camera is
+  // published — a button that does nothing is a promise the call cannot keep.
+  assert.ok(markup.includes('aria-label="Mute microphone"'));
+  assert.ok(!markup.includes('camera'), 'an audio seat offers no camera toggle');
   // The duration reads the passed clock: one minute seated renders 1:00.
   assert.ok(markup.includes('1:00'));
 });
@@ -284,15 +301,102 @@ test('an ended screen shows its note and a way back, not a leave control', () =>
   assert.ok(screen({ call: activeCall({ note: 'left' }) }).includes('You left the call'));
 });
 
+// --- the media the screen states ---
+
+test('a seat’s state word follows its link; flowing media says nothing', () => {
+  const adaSeat = { userId: ADA, deviceId: 'ada_laptop' as Id, joinedAt: NOW - 30_000 };
+  // Known to the roster, not yet to the plane: the honest word for a link not dialed yet.
+  assert.equal(groupSeatState(adaSeat, activeCall(), ME), 'Connecting…');
+  const withLink = (link: Partial<GroupMediaLink>): ActiveGroupCall =>
+    activeCall({
+      links: [
+        {
+          userId: ADA,
+          deviceId: 'ada_laptop' as Id,
+          phase: 'connecting',
+          audio: false,
+          video: false,
+          quality: 'full',
+          ...link,
+        },
+      ],
+    });
+  assert.equal(groupSeatState(adaSeat, withLink({ phase: 'connecting' }), ME), 'Connecting…');
+  // Flowing media at the top rung: no word — a screen that labels everything labels nothing.
+  assert.equal(groupSeatState(adaSeat, withLink({ phase: 'connected', audio: true }), ME), null);
+  // The ladder has moved: the word says what the link is doing about it.
+  assert.equal(
+    groupSeatState(
+      adaSeat,
+      withLink({ phase: 'connected', audio: true, quality: 'video-off' }),
+      ME,
+    ),
+    'Degraded',
+  );
+  assert.equal(groupSeatState(adaSeat, withLink({ phase: 'failed' }), ME), 'Connection lost');
+});
+
+test('the own seat’s words are what its user controls and what was refused', () => {
+  // Quiet when everything flows.
+  assert.equal(ownSeatState(activeCall()), null);
+  assert.equal(ownSeatState(activeCall({ muted: true })), 'Muted');
+  assert.equal(ownSeatState(activeCall({ cameraOn: false, videoPublished: true })), 'Camera off');
+  // A video seat the product limit refused video: the ninth stream is refused as a stream, never
+  // as a participant — the seat stays, audio-only, and says so.
+  assert.equal(
+    ownSeatState(activeCall({ mediaKind: CallMediaKind.Video, videoPublished: false })),
+    'Audio only',
+  );
+  // An audio seat that publishes no video is not "audio only" — it never claimed otherwise.
+  assert.equal(ownSeatState(activeCall({ mediaKind: CallMediaKind.Audio })), null);
+});
+
+test('the screen renders the state words and the controls that exist, and only those', () => {
+  // A degraded remote seat names itself on the roster.
+  const degraded = screen({
+    call: activeCall({
+      links: [
+        {
+          userId: ADA,
+          deviceId: 'ada_laptop' as Id,
+          phase: 'connected',
+          audio: true,
+          video: false,
+          quality: 'frame-rate-lowered',
+        },
+      ],
+    }),
+  });
+  assert.ok(degraded.includes('Degraded'));
+  // A muted seat turns its control into the unmute action.
+  const muted = screen({ call: activeCall({ muted: true }) });
+  assert.ok(muted.includes('aria-label="Unmute microphone"'));
+  assert.ok(muted.includes('Muted'));
+  // A published camera turns the camera control on.
+  const withCamera = screen({
+    call: activeCall({ mediaKind: CallMediaKind.Video, videoPublished: true, cameraOn: true }),
+  });
+  assert.ok(withCamera.includes('aria-label="Turn camera off"'));
+  // A microphone the plane could not acquire is stated as a fact where the count was.
+  const noMic = screen({
+    call: activeCall({ mediaError: 'Microphone unavailable. Check permissions and try again.' }),
+  });
+  assert.ok(noMic.includes('Microphone unavailable'));
+  assert.ok(
+    !noMic.includes('in this call'),
+    'the count yields to the failure, it does not hide it',
+  );
+});
+
 // --- the join button's gate ---
 
-test('the group-call button exists only where a group conversation is', () => {
+test('the group-call buttons exist only where a group conversation is', () => {
   assert.equal(
     renderToStaticMarkup(
       <GroupCallButton conversationId={null} inProgress={null} onJoin={() => Promise.resolve()} />,
     ),
     '',
-    'no group conversation, no button',
+    'no group conversation, no buttons',
   );
   const markup = renderToStaticMarkup(
     <GroupCallButton
@@ -301,10 +405,10 @@ test('the group-call button exists only where a group conversation is', () => {
       onJoin={() => Promise.resolve()}
     />,
   );
-  assert.ok(markup.includes('aria-label="Join group call"'));
-  // One button, not a voice/video pair: this build renders the roster, and a video button would
-  // promise video it cannot show.
-  assert.equal(markup.match(/<button/g)?.length ?? 0, 1);
+  // A voice/video pair: the media plane carries both, so each button promises what it delivers.
+  assert.ok(markup.includes('aria-label="Join group voice call"'));
+  assert.ok(markup.includes('aria-label="Join group video call"'));
+  assert.equal(markup.match(/<button/g)?.length ?? 0, 2);
 });
 
 // --- a call in progress, as a member who is not seated hears it ---
@@ -339,41 +443,58 @@ test('the last seat retires the tracked call; a fresh call replaces the entry', 
   assert.deepEqual(tracked.get(CONVERSATION), { callId: 'call_next' as Id, participantCount: 1 });
 });
 
-test('a call in progress turns the join button into joining the running call, by its id', () => {
-  const joins: Array<{ conversationId: Id; callId: Id | undefined }> = [];
-  // The button is a plain function of its props (no hooks), so the test can invoke it directly
-  // and press what it rendered — the rig's static markup cannot carry a click.
-  const button: ReactNode = GroupCallButton({
+test('a call in progress turns the join buttons into joining the running call, by its id', () => {
+  const joins: Array<{ conversationId: Id; callId: Id | undefined; mediaKind: CallMediaKind }> = [];
+  // The buttons are a plain function of their props (no hooks), so the test can invoke them
+  // directly and press what they rendered — the rig's static markup cannot carry a click.
+  const controls: ReactNode = GroupCallButton({
     conversationId: CONVERSATION,
     inProgress: { callId: CALL, participantCount: 2 },
-    onJoin: (conversationId, callId) => {
-      joins.push({ conversationId, callId });
+    onJoin: (conversationId, callId, mediaKind) => {
+      joins.push({ conversationId, callId, mediaKind: mediaKind ?? CallMediaKind.Audio });
       return Promise.resolve();
     },
   });
-  const markup = renderToStaticMarkup(button);
-  assert.ok(markup.includes('aria-label="Join group call in progress (2)"'));
-  assert.ok(isValidElement(button));
-  (button.props as { onClick: () => void }).onClick();
-  // The join must carry the running call's id: a fresh one would mint a second call the
+  const markup = renderToStaticMarkup(controls);
+  assert.ok(markup.includes('aria-label="Join group voice call in progress (2)"'));
+  assert.ok(markup.includes('aria-label="Join group video call in progress (2)"'));
+  // The rendered pair of buttons, pressed in order: voice, then video.
+  assert.ok(isValidElement(controls));
+  const buttons = (controls.props as { children: ReactNode[] }).children;
+  assert.equal(buttons.length, 2);
+  for (const button of buttons) {
+    assert.ok(isValidElement(button));
+    (button.props as { onClick: () => void }).onClick();
+  }
+  // Both joins must carry the running call's id: a fresh one would mint a second call the
   // conversation did not ask for, and the id is the protocol's idempotency key.
-  assert.deepEqual(joins, [{ conversationId: CONVERSATION, callId: CALL }]);
+  assert.deepEqual(joins, [
+    { conversationId: CONVERSATION, callId: CALL, mediaKind: CallMediaKind.Audio },
+    { conversationId: CONVERSATION, callId: CALL, mediaKind: CallMediaKind.Video },
+  ]);
 });
 
-test('with no call in progress the join button passes no id, and the manager mints one', () => {
-  const joins: Array<{ conversationId: Id; callId: Id | undefined }> = [];
-  const button: ReactNode = GroupCallButton({
+test('with no call in progress the join buttons pass no id, and the manager mints one', () => {
+  const joins: Array<{ conversationId: Id; callId: Id | undefined; mediaKind: CallMediaKind }> = [];
+  const controls: ReactNode = GroupCallButton({
     conversationId: CONVERSATION,
     inProgress: null,
-    onJoin: (conversationId, callId) => {
-      joins.push({ conversationId, callId });
+    onJoin: (conversationId, callId, mediaKind) => {
+      joins.push({ conversationId, callId, mediaKind: mediaKind ?? CallMediaKind.Audio });
       return Promise.resolve();
     },
   });
-  assert.ok(renderToStaticMarkup(button).includes('aria-label="Join group call"'));
-  assert.ok(isValidElement(button));
-  (button.props as { onClick: () => void }).onClick();
-  assert.deepEqual(joins, [{ conversationId: CONVERSATION, callId: undefined }]);
+  assert.ok(renderToStaticMarkup(controls).includes('aria-label="Join group voice call"'));
+  assert.ok(isValidElement(controls));
+  const buttons = (controls.props as { children: ReactNode[] }).children;
+  for (const button of buttons) {
+    assert.ok(isValidElement(button));
+    (button.props as { onClick: () => void }).onClick();
+  }
+  assert.deepEqual(joins, [
+    { conversationId: CONVERSATION, callId: undefined, mediaKind: CallMediaKind.Audio },
+    { conversationId: CONVERSATION, callId: undefined, mediaKind: CallMediaKind.Video },
+  ]);
 });
 
 test('the manager exposes the in-progress read and its actions bound', () => {
@@ -385,7 +506,10 @@ test('the manager exposes the in-progress read and its actions bound', () => {
         data-bound={
           typeof manager.joinGroupCall === 'function' &&
           typeof manager.leaveGroupCall === 'function' &&
-          typeof manager.dismissGroupCall === 'function'
+          typeof manager.dismissGroupCall === 'function' &&
+          typeof manager.toggleGroupMute === 'function' &&
+          typeof manager.toggleGroupCamera === 'function' &&
+          typeof manager.groupRemoteStream === 'function'
             ? 'bound'
             : 'missing'
         }

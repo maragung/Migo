@@ -6,10 +6,10 @@
  *
  * The 1:1 buttons render only where a call has exactly one other participant — the chat header
  * passes the peer's id for a `Direct` conversation and nothing for any other kind, so they appear
- * precisely where the wire's 1:1 call signaling can name a callee. The group control is the
- * mirror: it renders only for a `Group` conversation (rooms are public spaces whose open
- * membership deserves its own pass), and it is one button, not a voice/video pair — this build
- * carries the roster and no media, and a video button would promise video it cannot render.
+ * precisely where the wire's 1:1 call signaling can name a callee. The group controls are the
+ * mirror: they render only for a `Group` conversation (rooms are public spaces whose open
+ * membership deserves its own pass), and they are a voice/video pair now that the group call's
+ * media plane carries both.
  */
 
 import type { ReactNode } from 'react';
@@ -90,25 +90,37 @@ export function GroupCallButton({
   if (conversationId === null) {
     return null;
   }
+  const callId = inProgress === null ? undefined : inProgress.callId;
+  const countWords =
+    inProgress === null ? '' : ` the ${inProgress.participantCount} already in the roster`;
   return (
-    <button
-      type="button"
-      className="icon-btn call-btn"
-      aria-label={
-        inProgress === null
-          ? 'Join group call'
-          : `Join group call in progress (${inProgress.participantCount})`
-      }
-      title={
-        inProgress === null
-          ? 'Group voice call — join the roster'
-          : `Group voice call — join the ${inProgress.participantCount} already in the roster`
-      }
-      onClick={() =>
-        void onJoin(conversationId, inProgress === null ? undefined : inProgress.callId)
-      }
-    >
-      📞
-    </button>
+    <div className="call-buttons" role="group" aria-label="Join the group call">
+      <button
+        type="button"
+        className="icon-btn call-btn"
+        aria-label={
+          inProgress === null
+            ? 'Join group voice call'
+            : `Join group voice call in progress (${inProgress.participantCount})`
+        }
+        title={`Group voice call — join${countWords || ' the roster'}`}
+        onClick={() => void onJoin(conversationId, callId, CallMediaKind.Audio)}
+      >
+        📞
+      </button>
+      <button
+        type="button"
+        className="icon-btn call-btn"
+        aria-label={
+          inProgress === null
+            ? 'Join group video call'
+            : `Join group video call in progress (${inProgress.participantCount})`
+        }
+        title={`Group video call — join${countWords || ' the roster'}`}
+        onClick={() => void onJoin(conversationId, callId, CallMediaKind.Video)}
+      >
+        🎥
+      </button>
+    </div>
   );
 }
