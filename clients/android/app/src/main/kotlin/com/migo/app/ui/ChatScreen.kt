@@ -114,6 +114,7 @@ import com.migo.app.model.ownedStickerPacks
 import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
 import com.migo.core.domain.GroupCallInProgress
+import com.migo.core.domain.ReportSubject
 import com.migo.core.domain.canFounderAct
 import com.migo.core.domain.canVoteKickGroup
 import com.migo.core.domain.filterChatSearch
@@ -366,6 +367,16 @@ fun ChatScreen(
      * about, either way.
      */
     onMemberFriendRespond: (Boolean) -> Unit = { },
+    /**
+     * Opens the report sheet over one thing, named as the sheet's own heading should call it.
+     *
+     * The chat offers two of the four subjects — the message under a long press, and the person a
+     * profile card is about — and it hands the label along because it is the only surface that
+     * knows what the reader was looking at. A message's label is deliberately not its text: the
+     * conversations here are end-to-end encrypted, and a quote of the line being reported is
+     * exactly the plaintext the node is not meant to hold.
+     */
+    onReport: ((ReportSubject, Id, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -551,6 +562,19 @@ fun ChatScreen(
                                     onSetVoiceNoteListened = onSetVoiceNoteListened,
                                     voiceNoteSpeed = voiceNoteSpeed,
                                     onVoiceNoteSpeed = onVoiceNoteSpeed,
+                                    // Offered on somebody else's line only. Reporting one's own
+                                    // message is a client bug rather than a queue entry — the node
+                                    // refuses it — so the button is not drawn where it can only
+                                    // fail, the same rule the web client's row action follows.
+                                    onReport = onReport?.takeIf { !item.message.mine }?.let { report ->
+                                        {
+                                            report(
+                                                ReportSubject.Message,
+                                                item.message.messageId,
+                                                "this message",
+                                            )
+                                        }
+                                    },
                                 )
                                 is TimelineItem.Notice -> SystemNotice(text = item.notice.text)
                             }
@@ -777,6 +801,20 @@ fun ChatScreen(
                 onMuteForMe = { on -> onMuteForMe(view.userId, on) },
                 onFriendRequest = onMemberFriendRequest,
                 onFriendRespond = onMemberFriendRespond,
+                // The card's own report door, offered wherever the card is — including over a
+                // room chat, where the mute rides beside it. The two are different authorities:
+                // the mute is this reader's own choice, the report is a grievance the node keeps,
+                // so a person who has muted somebody can still be the one who reports them.
+                // Never for one's own card: the node refuses a report about the reporter.
+                onReport = onReport?.takeIf { view.userId != selfId }?.let { report ->
+                    {
+                        report(
+                            ReportSubject.User,
+                            view.userId,
+                            view.profile?.displayName?.takeIf { it.isNotBlank() } ?: view.name,
+                        )
+                    }
+                },
             )
         }
     }
@@ -1260,6 +1298,8 @@ private fun MessageLine(
     voiceNoteSpeed: VoiceNoteSpeed,
     /** Sets the playback rate, from the player's own speed control. */
     onVoiceNoteSpeed: (VoiceNoteSpeed) -> Unit,
+    /** Files a report about this line, or null when the line is not one that may be reported. */
+    onReport: (() -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     // The dark scheme's surfaces are too deep for the light ink the reference's name colours were
@@ -1380,6 +1420,12 @@ private fun MessageLine(
                             null
                         },
                         voiceListened = voiceListened,
+                        onReport = onReport?.let { report ->
+                            {
+                                reactionBarOpen.value = false
+                                report()
+                            }
+                        },
                     )
                 }
             }
@@ -1407,6 +1453,7 @@ private fun LineActions(
     onDelete: () -> Unit,
     onToggleVoiceListened: (() -> Unit)? = null,
     voiceListened: Boolean = false,
+    onReport: (() -> Unit)? = null,
 ) {
     Column(modifier = Modifier.padding(top = 2.dp)) {
         Row {
@@ -1423,6 +1470,11 @@ private fun LineActions(
             if (onToggleVoiceListened != null) {
                 TextButton(onClick = onToggleVoiceListened) {
                     Text(if (voiceListened) "Mark as unlistened" else "Mark as listened")
+                }
+            }
+            if (onReport != null) {
+                TextButton(onClick = onReport) {
+                    Text("⚑ Report", color = MaterialTheme.colorScheme.error)
                 }
             }
             TextButton(onClick = onDelete) { Text("Delete") }
@@ -3198,6 +3250,8 @@ private fun MemberProfileSheet(
     onMuteForMe: (Boolean) -> Unit,
     onFriendRequest: () -> Unit,
     onFriendRespond: (Boolean) -> Unit,
+    /** Files a report about this account, or null on one's own card, which cannot be reported. */
+    onReport: (() -> Unit)? = null,
 ) {
     // The clipboard the copy-id control writes to, and the mark that says it did: the platform's
     // own service, fetched once, with the copied state outliving the tap that set it the same way
@@ -3415,6 +3469,15 @@ private fun MemberProfileSheet(
                         label = if (muted) "Unmute" else "Mute for me",
                         sub = "Hides this person's messages in this room for you",
                         onClick = { onMuteForMe(!muted) },
+                    )
+                }
+                if (onReport != null) {
+                    SheetAction(
+                        glyph = "⚑",
+                        label = "Report",
+                        sub = "Sends this account to the node's moderators, who decide alone",
+                        danger = true,
+                        onClick = onReport,
                     )
                 }
             }
