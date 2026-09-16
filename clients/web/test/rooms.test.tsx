@@ -22,6 +22,10 @@
  *      ceiling and a state delta can move it, each without disturbing the counters or the topic;
  *      the label reads "here/max" only when a real maximum is known, and the bare head-count
  *      otherwise.
+ *   6. **A slow-mode interval is milliseconds on the wire and whole seconds in the record.** The
+ *      join and the state deltas carry `slowModeMs`; the record — like the server's own store, and
+ *      the settings screen that seeds from it — keeps seconds, and an interval of zero or absent is
+ *      off, never a zero-valued key sitting in the record as a set interval.
  */
 
 import assert from 'node:assert/strict';
@@ -107,16 +111,58 @@ test('a room-state delta replaces only the fields it carries', () => {
 test('a settings change moves the record itself, because no frame will bring the actor their own rename', () => {
   const info = roomInfoOf(joined());
   // The rename: a name no state event carries, so the record is the only place it can land.
-  const renamed = applyRoomSettings(info, 'Observatory Annex', 'What is above us');
+  const renamed = applyRoomSettings(info, {
+    name: 'Observatory Annex',
+    topic: 'What is above us',
+    slowModeSec: 0,
+  });
   assert.equal(renamed.name, 'Observatory Annex');
   assert.equal(renamed.topic, 'What is above us');
   // A topic set to nothing is a removal on the wire, so the key leaves rather than lingering empty.
-  const cleared = applyRoomSettings(renamed, 'Observatory Annex', '');
+  const cleared = applyRoomSettings(renamed, {
+    name: 'Observatory Annex',
+    topic: '',
+    slowModeSec: 0,
+  });
   assert.ok(!('topic' in cleared), 'an emptied topic must leave the record');
   assert.equal(cleared.name, 'Observatory Annex', 'the name outlives the topic beside it');
   // Whitespace is the wire's own reading of "no topic": trimmed, then gone.
-  const spaced = applyRoomSettings(cleared, 'Observatory Annex', '   ');
+  const spaced = applyRoomSettings(cleared, {
+    name: 'Observatory Annex',
+    topic: '   ',
+    slowModeSec: 0,
+  });
   assert.ok(!('topic' in spaced), 'an all-whitespace topic is a removal, not a blank string');
+});
+
+test('a slow-mode interval rides the join in milliseconds, is held in seconds, and zero means off', () => {
+  // The join carries the wire's milliseconds; the record keeps the store's whole seconds.
+  const info = roomInfoOf(joined({ room: { ...ROOM, slowModeMs: 30_000 } }));
+  assert.equal(info.slowModeSec, 30);
+  // A room with no interval carries no key at all, not an undefined-valued one.
+  const bare = roomInfoOf(joined());
+  assert.ok(!('slowModeSec' in bare), 'an absent interval must stay absent');
+  // A state delta moves the interval without disturbing the rest, and truncates the wire's
+  // milliseconds to the store's whole seconds — a sub-second interval is slow mode off.
+  const slowed = applyRoomState(info, { roomId: ROOM.roomId, slowModeMs: 60_000 });
+  assert.equal(slowed.slowModeSec, 60);
+  assert.equal(slowed.topic, 'What is above us', 'an interval delta must not blank the topic');
+  const subSecond = applyRoomState(slowed, { roomId: ROOM.roomId, slowModeMs: 500 });
+  assert.equal(subSecond.slowModeSec, 0, 'a sub-second interval is the wire’s word for off');
+  // The actor's own change lands through the settings applier, and an interval of zero — the
+  // field's "Turn Off" — leaves the record rather than sitting in it as a set interval.
+  const turnedOff = applyRoomSettings(subSecond, {
+    name: 'Observatory',
+    topic: 'What is above us',
+    slowModeSec: 0,
+  });
+  assert.ok(!('slowModeSec' in turnedOff), 'a cleared interval must leave the record');
+  const turnedOn = applyRoomSettings(turnedOff, {
+    name: 'Observatory',
+    topic: 'What is above us',
+    slowModeSec: 120,
+  });
+  assert.equal(turnedOn.slowModeSec, 120);
 });
 
 test('a join carries the room’s capacity, and a state delta moves it without touching the rest', () => {
