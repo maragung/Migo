@@ -144,6 +144,43 @@ async fn build_node(
         .expect("a development node must build over the shared store")
 }
 
+/// The same node with a seat grace short enough to observe inside one test
+/// budget: the retirement scenario below waits out the grace window plus one
+/// sweep tick, and the production default's thirty seconds belongs to an
+/// operator's patience, not a test's. Only the roster-holding node needs it —
+/// the sweeper that retires the dead seat is the one whose group store holds
+/// it.
+async fn build_node_with_short_seat_grace(
+    store: &migo_store::SharedStore,
+    node_id: &str,
+    region: &str,
+    seed: &str,
+) -> App {
+    let config = Config::from_sources(
+        &[],
+        &[
+            ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
+            ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+            (
+                "MIGO_NODE__MESH_BIND".to_string(),
+                "127.0.0.1:0".to_string(),
+            ),
+            ("MIGO_NODE__ID".to_string(), node_id.to_string()),
+            ("MIGO_NODE__REGION".to_string(), region.to_string()),
+            ("MIGO_NODE__SIGNING_KEY".to_string(), seed.to_string()),
+            ("MIGO_CALLS__SEAT_GRACE_MS".to_string(), "1500".to_string()),
+            (
+                "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
+                "100".to_string(),
+            ),
+        ],
+    )
+    .expect("configuration should parse");
+    App::build_with_store(&config, store.clone())
+        .await
+        .expect("a development node must build over the shared store")
+}
+
 /// Registers one account through the front door of a node, stamped with that node's
 /// own clock so the inline token is not born expired.
 async fn registered_grant(app: &App, username: &str) -> Grant {
@@ -704,4 +741,214 @@ async fn a_group_calls_announcements_reach_a_far_subscriber_exactly_once() {
         .assert_quiet_for(Opcode::CallSfuEvent, &evidence)
         .await;
     bob.assert_quiet_for(Opcode::CallSfuEvent, &evidence).await;
+}
+
+/// A dead seat's retirement crosses the same two hops the join crossed — the
+/// frame the *sweeper* owes a far roster. The departure above was asked for:
+/// bob's client sent the `CALL_END` whose handler published and forwarded in
+/// the same breath. A seat whose session died sends nothing, so the crossing
+/// hangs on the roster-holding node's sweeper publishing the retirement out
+/// of band and handing it to the same fan-out tier a request handler uses —
+/// the half that would silently not exist if the sweeper owed only its own
+/// node's subscribers. The scenario keeps the first test's shape — alice the
+/// far subscriber on the conversation's home node, bob the joiner on the
+/// other node — and replaces the leave with the one honest signal a dead
+/// client ever sends: a socket that closes with no frame at all. The grace
+/// window is shortened on bob's node so the retirement lands inside a test
+/// budget; everything after the drop is the production timing, grace plus one
+/// sweep tick plus the tier's own drain.
+#[tokio::test]
+async fn a_dead_seat_s_retirement_reaches_the_far_subscriber() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "migod=debug,migo_federation=info,migo_gateway=warn",
+        ))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+
+    // The fleet: the same two nodes, with bob's holding the short seat grace
+    // because his seat is the one that will die.
+    let store = migo_store::open(&StoreConfig::default())
+        .await
+        .expect("the in-memory backend opens");
+    let app_a = build_node(&store, "node-alpha", "alpha", SEED_ALPHA).await;
+    let app_b = build_node_with_short_seat_grace(&store, "node-beta", "beta", SEED_BETA).await;
+    let a_addr = app_a.tcp_bind.expect("node alpha binds its TCP listener");
+    let b_addr = app_b.tcp_bind.expect("node beta binds its TCP listener");
+    let mesh_a = app_a.mesh_bind.expect("node alpha binds its mesh listener");
+    let mesh_b = app_b.mesh_bind.expect("node beta binds its mesh listener");
+    let id_a = mesh_node_id(SEED_ALPHA);
+    let id_b = mesh_node_id(SEED_BETA);
+    assert_ne!(id_a, id_b, "the two seeds must derive two mesh identities");
+
+    migod::apply_mesh_peers(
+        &app_a.federation,
+        id_a,
+        &[mesh_peer_of(SEED_BETA, mesh_b, "beta")],
+        app_a.clock.now(),
+    )
+    .await
+    .expect("node alpha admits node beta");
+    migod::apply_mesh_peers(
+        &app_b.federation,
+        id_b,
+        &[mesh_peer_of(SEED_ALPHA, mesh_a, "alpha")],
+        app_b.clock.now(),
+    )
+    .await
+    .expect("node beta admits node alpha");
+
+    let alice_grant = registered_grant(&app_a, "sfudeadalice").await;
+    let bob_grant = registered_grant(&app_a, "sfudeadbob").await;
+
+    let mut alice = Client::connect_fresh(a_addr, &alice_grant).await;
+    let mut bob = Client::connect_fresh(b_addr, &bob_grant).await;
+
+    // The conversation, homed on alpha by the node alice created it through —
+    // the same home the tier's fan-out question will read after the death.
+    let summary: ConversationSummary = alice
+        .ask(
+            Opcode::ConversationCreate,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![bob_grant.account_id],
+                title: Some("The Dead Seat's Call".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // Both sides subscribed, and the watch ask waited for by table — so the
+    // tier is proven up *before* the death, and a silent far socket after the
+    // drop is the retirement's silence, not the subscription's.
+    alice.subscribe_conversation(conversation_id).await;
+    bob.subscribe_conversation(conversation_id).await;
+    let mut registered = false;
+    let deadline = tokio::time::Instant::now() + MESH_BUDGET;
+    while tokio::time::Instant::now() < deadline {
+        if app_a
+            .conversation_relay
+            .watchers_of(conversation_id)
+            .contains(&id_b)
+        {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(125)).await;
+    }
+    assert!(
+        registered,
+        "node alpha must register node beta as a watcher of the conversation within the \
+         mesh budget: {:?}",
+        app_a.conversation_relay.watchers_of(conversation_id)
+    );
+
+    let evidence = || {
+        format!(
+            "alpha's gateway wrote {} frames and dropped {:?}; beta's gateway wrote {} \
+             frames and dropped {:?}",
+            app_a.gateway.frames_out_total(),
+            app_a.gateway.dropped_frames_total(),
+            app_b.gateway.frames_out_total(),
+            app_b.gateway.dropped_frames_total(),
+        )
+    };
+
+    // The join: bob's seat lands on beta's group store, the roster returns to
+    // his own user topic, and the join announcement crosses to alice — the
+    // frames the first test already proved, kept here so the retirement is
+    // the only thing the death changes.
+    let call_id = Id::from_bytes([0xD5; 16]);
+    let _: CallTurnResponse = bob
+        .ask(
+            Opcode::CallSfuJoin,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: Id::from(0u128),
+                media_kind: 0,
+                caller_device: Id::from(0u128),
+                capabilities: 0,
+                sealed_offer: SEALED_OFFER.to_vec(),
+            },
+        )
+        .await;
+    let roster_frame = bob
+        .next_event_of(Opcode::CallSfuEvent, STEP, &evidence)
+        .await;
+    let roster: CallStateEvent = from_frame(&roster_frame).expect("the roster event decodes");
+    assert_eq!(roster.call_id, call_id, "the roster names the call");
+    let join_frame = alice
+        .next_event_of(Opcode::CallSfuEvent, MESH_BUDGET, &evidence)
+        .await;
+    let join: CallStateEvent = from_frame(&join_frame).expect("the join announcement decodes");
+    assert_eq!(join.call_id, call_id, "the announcement names the call");
+    assert_eq!(
+        join.state,
+        migo_calls::group_store::GROUP_STATE_CONNECTED,
+        "the join announcement is the Connected state"
+    );
+    alice
+        .assert_quiet_for(Opcode::CallSfuEvent, &evidence)
+        .await;
+    bob.assert_quiet_for(Opcode::CallSfuEvent, &evidence).await;
+
+    // The sweeper `App::serve` spawns in production on the roster-holding
+    // node, started by hand because neither node serves — the retirement it
+    // publishes is the whole point.
+    let _sweeper = app_b.spawn_call_sweeper();
+
+    // The death: bob's socket closes with no `CALL_END`, the only honest
+    // signal a dead client ever sends. Beta stamps the seat gone on the
+    // session edge, and the sweeper owes the retirement once the shortened
+    // grace passes.
+    drop(bob);
+
+    // The retirement the far subscriber must hear: the sweeper's departure,
+    // published out of band on the roster-holding node and carried to the
+    // home node's conversation topic — `Ended`, the dead member named, the
+    // roster emptied, and the reason telling the truth about a departure
+    // nobody chose to send.
+    let retired_frame = alice
+        .next_event_of(Opcode::CallSfuEvent, MESH_BUDGET, &evidence)
+        .await;
+    let retired: CallStateEvent = from_frame(&retired_frame).expect("the retirement decodes");
+    assert_eq!(retired.call_id, call_id, "the retirement names the call");
+    assert_eq!(
+        retired.conversation_id,
+        Some(conversation_id),
+        "the retirement names the conversation it belongs to"
+    );
+    assert_eq!(
+        retired.state,
+        migo_calls::group_store::GROUP_STATE_ENDED,
+        "the retirement is the Ended state"
+    );
+    assert_eq!(
+        retired.user_id,
+        Some(bob_grant.account_id),
+        "the retirement names the member whose session died"
+    );
+    assert_eq!(
+        retired.device_id,
+        Some(bob_grant.device_id),
+        "the retirement names the dead member's device"
+    );
+    assert_eq!(
+        retired.participant_count,
+        Some(0),
+        "the roster is empty after the retirement"
+    );
+    assert_eq!(
+        retired.reason,
+        Some(migo_calls::EndReason::Network.to_wire()),
+        "Network: the session died, nobody withdrew"
+    );
+
+    // And exactly once: the retirement is the last frame the call owes
+    // anybody, so the far socket falls quiet on the announcement opcode.
+    alice
+        .assert_quiet_for(Opcode::CallSfuEvent, &evidence)
+        .await;
 }

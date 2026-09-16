@@ -409,9 +409,12 @@ pub trait Callkeeper: Send + Sync {
     /// older than the configured grace is removed, the call retires when its
     /// last seat empties, and each retired seat produces the departure event
     /// the *remaining* roster should hear — carrying the conversation id, so
-    /// the publisher knows which topic that is. The caller of this method owns
-    /// the publishing, exactly as the ring sweep's caller does, because only
-    /// the composition root knows which topics reach anyone.
+    /// the publisher knows which topic that is. The retirement is taken
+    /// atomically in the store, so a sweep that runs twice — or two that
+    /// race — retires each seat exactly once and returns its departure
+    /// exactly once. The caller of this method owns the publishing, exactly
+    /// as the ring sweep's caller does, because only the composition root
+    /// knows which topics reach anyone.
     async fn group_sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>>;
 }
 

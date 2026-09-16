@@ -1127,41 +1127,37 @@ where
 
     async fn group_sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>> {
         let mut departures = Vec::new();
-        for mut call in self.groups.all().await? {
-            let grace_ends =
-                |gone_since: Timestamp| gone_since.saturating_add_millis(self.config.seat_grace_ms);
-            let expired: Vec<usize> = call
-                .participants
-                .iter()
-                .enumerate()
-                .filter_map(|(index, participant)| {
-                    participant
-                        .gone_since
-                        .filter(|&gone| now.is_at_or_after(grace_ends(gone)))
-                        .map(|_| index)
-                })
-                .collect();
-            if expired.is_empty() {
+        for call in self.groups.all().await? {
+            // The retirement is the store's to take, not this loop's: the
+            // sweep runs every tick, and two of them reading the same roster
+            // must not retire the same seat twice — the store decides under
+            // its own lock whose grace has passed, and only the caller that
+            // took the seats sees them returned. A racing writer's stale
+            // roster clone is corrected on its own put, so the seat cannot
+            // come back to be retired a second time either.
+            let retired = self
+                .groups
+                .retire_gone(call.call_id, self.config.seat_grace_ms, now)
+                .await?;
+            if retired.is_empty() {
                 continue;
             }
-            // Removed from the back so the indices collected against the
-            // roster as it stood stay valid as it shrinks.
-            for index in expired.iter().rev() {
-                let retired = call.participants.remove(*index);
+            // Each departure names the roster's size after its own change,
+            // rebuilt from the candidate snapshot the sweep read: the seats
+            // leave from the back of the roster, so the last seat the roster
+            // held is the first to be mourned, and the count climbs back to
+            // the snapshot's size as the earlier seats' events follow.
+            let remaining = call.participants.len() - retired.len();
+            for (index, seat) in retired.iter().enumerate().rev() {
                 self.meters.group_left();
                 departures.push(group_leave_event(
                     &call,
-                    retired.account_id,
-                    retired.device_id,
-                    call.participants.len() as u32,
+                    seat.account_id,
+                    seat.device_id,
+                    (remaining + index) as u32,
                     EndReason::Network,
                 ));
             }
-            if call.participants.is_empty() {
-                call.ended_at = Some(now);
-            }
-            self.groups.put(&call).await?;
-            self.groups.retire_if_empty(call.call_id).await?;
         }
         Ok(departures)
     }
