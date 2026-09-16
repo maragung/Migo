@@ -484,6 +484,8 @@ class FakePeerConnection {
 
 /** One link: the two fake ends, connected once both hold both descriptions. */
 interface FakeLink {
+  /** The device that dialed, so a re-dial is told apart from the answer it is owed. */
+  dialerDevice: Id;
   dialer: FakePeerConnection;
   answerer: FakePeerConnection | null;
   connected: boolean;
@@ -556,11 +558,14 @@ class VirtualMesh {
     if (link === undefined) {
       const dialer = this.lastPc.get(from);
       assert.ok(dialer !== undefined, 'an offer implies the offerer just built a peer connection');
-      link = { dialer, answerer: null, connected: false };
+      link = { dialerDevice: from, dialer, answerer: null, connected: false };
       this.links.set(key, link);
       dialer.link = link;
-    } else {
-      // A re-dial after a reset: the offerer's fresh peer connection replaces the stranded one.
+    } else if (link.dialerDevice === from) {
+      // A re-dial after a reset: the offerer's fresh peer connection replaces the stranded one. Only
+      // the dialer's own device may take the seat — an answer arriving from the other end also brings a
+      // peer connection this wire has never seen, and letting it claim the dialer would strand the link
+      // one description short of connecting.
       const current = this.lastPc.get(from);
       if (current !== undefined && current !== link.dialer && current.link === null) {
         link.dialer = current;
