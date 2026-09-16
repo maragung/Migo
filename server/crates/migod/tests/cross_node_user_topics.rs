@@ -37,7 +37,6 @@ use migo_protocol::{
     Hello, ModerationEvent, NotificationEvent, NotificationKind, Opcode, ReportFile,
     SubscribeRequest, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
-use migo_store::traits::GlobalAdminStore;
 use migod::App;
 
 /// How long any single exchange may take before the test declares a node
