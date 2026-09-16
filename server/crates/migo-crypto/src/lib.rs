@@ -40,6 +40,7 @@
 //!
 //! | Module | Responsibility |
 //! |---|---|
+//! | [`aad`] | What a tag authenticates besides the ciphertext: the envelope's bound context, and its versions |
 //! | [`error`] | One error type, deliberately vague, so failures are not oracles |
 //! | [`kdf`] | HKDF-SHA256 with a distinct label per purpose |
 //! | [`aead`] | XChaCha20-Poly1305 sealing and opening |
@@ -70,6 +71,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod aad;
 pub mod aead;
 pub mod call_key;
 pub mod error;
@@ -82,6 +84,7 @@ pub mod ratchet;
 pub mod sender_key;
 pub mod x3dh;
 
+pub use crate::aad::{EnvelopeVersion, ParsedContext};
 pub use crate::aead::{open, seal, SymmetricKey, KEY_LEN, NONCE_LEN, TAG_LEN};
 pub use crate::call_key::CallKeyState;
 pub use crate::error::{CryptoError, Result};

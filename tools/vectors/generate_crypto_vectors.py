@@ -66,6 +66,19 @@ TAG_LEN = 16
 MAC_TAG_LEN = 32
 MIN_MAC_TAG_LEN = 16
 
+# --- the associated-data context, migo.md section 11 -------------------------
+
+# The purpose label every v2 AAD starts with, transcribed from the specification. It
+# is lowercase and hyphenated like the KDF labels, and it is fixed-length, so a reader
+# never has to parse it back — a receiver builds the context from the metadata the
+# frame claims, and the tag then proves the sender built the same bytes.
+AAD_DOMAIN = b"migo-envelope-aad"
+AAD_VERSION_V1 = 1
+AAD_VERSION_V2 = 2
+SCHEME_DOUBLE_RATCHET = 1
+SCHEME_DOUBLE_RATCHET_PREKEY = 2
+ID_LEN = 16
+
 
 # --- HKDF-SHA256, RFC 5869 ---------------------------------------------------
 
@@ -498,6 +511,170 @@ def aead_file() -> dict:
     }
 
 
+def aad_context_file() -> dict:
+    """The associated-data context an envelope binds, and the AAD assembled from it.
+
+    This file pins a *layout*, not a computation. The v1 AAD was `associated_data ||
+    header`; the v2 AAD is that same prefix followed by a context that names the
+    metadata the sender meant this ciphertext for — the envelope version, the scheme,
+    the sending device, the conversation, and the message id. Its whole value is that
+    four implementations agree byte for byte on where those fields sit, so the cases
+    below are concatenations written out from the field table in migo.md section 11
+    rather than from any implementation.
+
+    The v1 cases carry a message id deliberately. A v1 envelope binds none of this,
+    so its AAD must not change when a caller happens to know the metadata — the
+    `context` is empty and the `aad` equals the v1 construction, byte for byte. That
+    is what makes the version byte safe to read before the tag has been checked: a
+    receiver that sees 1 computes the old AAD and a receiver that sees 2 computes the
+    new one, and neither has to guess.
+    """
+
+    def context(
+        version: int,
+        scheme: int,
+        sender_device: bytes,
+        conversation_id: bytes,
+        message_id: bytes | None,
+    ) -> bytes:
+        if version == AAD_VERSION_V1:
+            # Nothing is bound. See the docstring: this is the compatibility rule.
+            return b""
+        if version != AAD_VERSION_V2:
+            raise ValueError(f"no context layout for envelope version {version}")
+        out = bytearray(AAD_DOMAIN)
+        out.append(version)
+        out.append(scheme)
+        out += sender_device
+        out += conversation_id
+        # A flag byte rather than a length prefix: the message id is the only variable
+        # length field in the layout, and it is either wholly present or wholly absent,
+        # so one byte says everything the receiver needs and no length can disagree.
+        out.append(1 if message_id is not None else 0)
+        if message_id is not None:
+            out += message_id
+        return bytes(out)
+
+    def aad(associated_data: bytes, header: bytes, context_bytes: bytes) -> bytes:
+        return associated_data + header + context_bytes
+
+    # Fixed, recognisable inputs. The X3DH associated data is the two identities in the
+    # order section 11 fixes them, and the header is a ratchet public key followed by the
+    # two big-endian counters, so both are plausible lengths as well as plausible values.
+    ad = bytes.fromhex("11" * 32 + "22" * 32)
+    header = bytes.fromhex("33" * 32 + "00000000" + "00000007")
+    device_a = bytes.fromhex("a0" * 16)
+    device_b = bytes.fromhex("b0" * 16)
+    conv_a = bytes.fromhex("c0" * 16)
+    conv_b = bytes.fromhex("d0" * 16)
+    msg_a = bytes.fromhex("e0" * 16)
+    msg_b = bytes.fromhex("f0" * 16)
+
+    plans = [
+        # (name, version, scheme, sender_device, conversation_id, message_id)
+        ("v1_binds_nothing", AAD_VERSION_V1, SCHEME_DOUBLE_RATCHET, device_a, conv_a, None),
+        (
+            "v1_binds_nothing_even_with_a_message_id",
+            AAD_VERSION_V1,
+            SCHEME_DOUBLE_RATCHET,
+            device_a,
+            conv_a,
+            msg_a,
+        ),
+        ("v2_pairwise_without_a_message_id", AAD_VERSION_V2, SCHEME_DOUBLE_RATCHET, device_a, conv_a, None),
+        ("v2_pairwise_with_a_message_id", AAD_VERSION_V2, SCHEME_DOUBLE_RATCHET, device_a, conv_a, msg_a),
+        (
+            "v2_prekey_with_a_message_id",
+            AAD_VERSION_V2,
+            SCHEME_DOUBLE_RATCHET_PREKEY,
+            device_b,
+            conv_b,
+            msg_b,
+        ),
+        (
+            "v2_prekey_without_a_message_id",
+            AAD_VERSION_V2,
+            SCHEME_DOUBLE_RATCHET_PREKEY,
+            device_b,
+            conv_b,
+            None,
+        ),
+        (
+            "v2_distinguishes_the_sending_device",
+            AAD_VERSION_V2,
+            SCHEME_DOUBLE_RATCHET,
+            device_b,
+            conv_a,
+            msg_a,
+        ),
+        (
+            "v2_distinguishes_the_conversation",
+            AAD_VERSION_V2,
+            SCHEME_DOUBLE_RATCHET,
+            device_a,
+            conv_b,
+            msg_a,
+        ),
+        ("v2_all_zero_device", AAD_VERSION_V2, SCHEME_DOUBLE_RATCHET, bytes(16), conv_a, msg_a),
+    ]
+
+    cases = []
+    for name, version, scheme, device, conversation, message in plans:
+        ctx = context(version, scheme, device, conversation, message)
+        cases.append(
+            {
+                "name": name,
+                "envelope_version": version,
+                "scheme": scheme,
+                "sender_device": device.hex(),
+                "conversation_id": conversation.hex(),
+                "message_id": None if message is None else message.hex(),
+                "associated_data": ad.hex(),
+                "header": header.hex(),
+                "context": ctx.hex(),
+                "aad": aad(ad, header, ctx).hex(),
+                "provenance": "hand-authored from migo.md section 11",
+            }
+        )
+
+    # The version gate. Every reader must accept both versions and refuse everything
+    # else, because a reader that accepted an unknown version would be guessing at a
+    # layout the sender had not chosen, and any accepted value that no build writes is
+    # a value an attacker can pick to reach code the sender never ran.
+    invalid = [
+        {
+            "name": f"envelope_version_{version}",
+            "envelope_version": version,
+            "error": "UnsupportedVersion",
+            "why": "no build writes this version, so no reader may assume a layout for it",
+        }
+        for version in (0, 3, 4, 255)
+    ]
+
+    return {
+        "$comment": "The associated-data context an envelope binds (migo.md section 11): the field layout, the v1 rule that binds nothing, and the version gate every reader must apply.",
+        "provenance": "hand-authored from migo.md section 11; the layout is a field table, so it is written out here rather than derived from any implementation",
+        "note": "`aad` is `associated_data || header || context`, assembled so a runner can compare one value. The v1 cases exist to pin that a v1 envelope's AAD does not move when a caller knows the metadata — reading the version byte before the tag is checked is only safe while that stays true.",
+        "domain": AAD_DOMAIN.hex(),
+        "ascii": AAD_DOMAIN.decode("ascii"),
+        "field_table": [
+            {"field": "domain", "bytes": len(AAD_DOMAIN), "note": "the fixed purpose label"},
+            {"field": "envelope_version", "bytes": 1, "note": "must equal the envelope's own version byte"},
+            {"field": "scheme", "bytes": 1, "note": "must equal the envelope's own scheme byte"},
+            {"field": "sender_device", "bytes": ID_LEN, "note": "the device the frame claims to be from"},
+            {"field": "conversation_id", "bytes": ID_LEN, "note": "the conversation the frame claims to belong to"},
+            {"field": "flags", "bytes": 1, "note": "bit 0: a message id follows"},
+            {"field": "message_id", "bytes": ID_LEN, "note": "present only when flags bit 0 is set"},
+        ],
+        "versions": {
+            "accepted": [AAD_VERSION_V1, AAD_VERSION_V2],
+            "refused": "every other u8 value, 0..=255",
+        },
+        "cases": cases,
+        "invalid": invalid,
+    }
+
+
 def mac_file() -> dict:
     cases = []
 
@@ -650,6 +827,7 @@ def mac_file() -> dict:
 FILES = {
     "kdf.json": kdf_file,
     "aead.json": aead_file,
+    "aad-context.json": aad_context_file,
     "mac.json": mac_file,
 }
 

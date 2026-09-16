@@ -24,6 +24,8 @@
 
 use std::path::PathBuf;
 
+use migo_core::Id;
+use migo_crypto::aad::{self, EnvelopeVersion};
 use migo_crypto::error::CryptoError;
 use migo_crypto::{aead, kdf, mac, MacKey, SymmetricKey};
 use serde_json::Value;
@@ -94,6 +96,27 @@ fn salt_of(case: &Value) -> Option<Vec<u8>> {
             Some(hex::decode(text).unwrap_or_else(|e| panic!("salt is not hex: {e}")))
         }
         Some(other) => panic!("salt has type {other:?}"),
+    }
+}
+
+/// A 16-byte identifier, as the `Id` the protocol carries.
+///
+/// Read through `text`/`raw` rather than straight from the string so a vector
+/// with a short or malformed id fails here, naming the field, instead of being
+/// zero-padded into a context that silently no longer matches.
+fn id_of(case: &Value, field: &str) -> Id {
+    let bytes: [u8; 16] = raw(case, field)
+        .try_into()
+        .unwrap_or_else(|_| panic!("field `{field}` is not a 16-byte id: {case}"));
+    Id::from_bytes(bytes)
+}
+
+/// The optional message id a case names, or `None` when the field is `null`.
+fn message_id_of(case: &Value) -> Option<Id> {
+    match case.get("message_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(_)) => Some(id_of(case, "message_id")),
+        Some(other) => panic!("message_id has type {other:?}"),
     }
 }
 
@@ -501,13 +524,218 @@ fn tag_truncation_follows_the_documented_floor() {
     }
 }
 
+// --- aad context -------------------------------------------------------------
+//
+// The envelope's bound context is the one structure here that four separate
+// implementations build: the Rust reference the server links, a second Rust
+// build inside the desktop client, the TypeScript SDK, and the Kotlin client.
+// None of them call each other, so nothing but this file keeps their bytes
+// identical — and a disagreement is not a test failure in the field, it is a
+// message that will not open, reported by a person as "it says delivered but
+// nothing arrives".
+
+#[test]
+fn aad_contexts_match_the_vectors() {
+    let file = load("aad-context.json");
+    assert_eq!(
+        hex::encode(aad::DOMAIN),
+        text(&file, "domain"),
+        "the domain label is what the field table starts with"
+    );
+    assert_eq!(
+        String::from_utf8(aad::DOMAIN.to_vec()).expect("domain is ascii"),
+        text(&file, "ascii")
+    );
+
+    for case in section(&file, "cases", "aad-context.json") {
+        let version = EnvelopeVersion::from_wire(
+            u8::try_from(length(case, "envelope_version")).expect("a version byte"),
+        )
+        .unwrap_or_else(|| panic!("case `{}` names a version this build refuses", name(case)));
+        let scheme = u8::try_from(length(case, "scheme")).expect("a scheme byte");
+        let sender = id_of(case, "sender_device");
+        let conversation = id_of(case, "conversation_id");
+        let message_id = message_id_of(case);
+
+        let context = aad::context(version, scheme, &sender, &conversation, message_id.as_ref());
+        assert_eq!(
+            hex::encode(&context),
+            text(case, "context"),
+            "context for case `{}`",
+            name(case)
+        );
+
+        // The assembled value is what a ratchet actually authenticates, so the
+        // case pins the whole string and not just the half that is new.
+        let assembled = aad::assemble(
+            &raw(case, "associated_data"),
+            &raw(case, "header"),
+            &context,
+        );
+        assert_eq!(
+            hex::encode(&assembled),
+            text(case, "aad"),
+            "associated data for case `{}`",
+            name(case)
+        );
+
+        // A context that a reader could not take apart again would still
+        // authenticate, so this is not redundant with the comparison above: it
+        // pins that the layout is unambiguous rather than merely reproducible.
+        //
+        // Only a version that binds a context has one to take apart. A
+        // version-1 case carries the empty context on purpose — that is the
+        // compatibility rule, and `parse_context` refusing zero bytes is the
+        // rule holding rather than a gap here, so the refusal is asserted
+        // instead of the case being skipped.
+        if !version.binds_context() {
+            assert!(context.is_empty(), "case `{}` binds no context", name(case));
+            assert!(
+                aad::parse_context(&context).is_err(),
+                "case `{}`: an absent context is not a context",
+                name(case)
+            );
+            continue;
+        }
+        let parsed = aad::parse_context(&context).unwrap_or_else(|e| {
+            panic!("case `{}` produced an unparseable context: {e}", name(case))
+        });
+        assert_eq!(parsed.version, version, "case `{}` version", name(case));
+        assert_eq!(parsed.scheme, scheme, "case `{}` scheme", name(case));
+        assert_eq!(parsed.sender_device, sender, "case `{}` sender", name(case));
+        assert_eq!(
+            parsed.conversation_id,
+            conversation,
+            "case `{}` conversation",
+            name(case)
+        );
+        assert_eq!(
+            parsed.message_id,
+            message_id,
+            "case `{}` message id",
+            name(case)
+        );
+    }
+}
+
+#[test]
+fn a_version_one_envelope_binds_no_context() {
+    // The compatibility rule, stated as a test rather than as a comment: a v1
+    // envelope's associated data must be `associated_data || header` and nothing
+    // else, whatever metadata the caller happens to hold. If this ever stops
+    // being true, every v1 message already stored stops opening, and it fails
+    // looking like corruption rather than looking like a version mistake.
+    let file = load("aad-context.json");
+    let sender = Id::from_bytes([0xa0; 16]);
+    let conversation = Id::from_bytes([0xc0; 16]);
+    let message = Id::from_bytes([0xe0; 16]);
+
+    for (label, message_id) in [("without a message id", None), ("with one", Some(&message))] {
+        let context = aad::context(EnvelopeVersion::V1, 1, &sender, &conversation, message_id);
+        assert!(
+            context.is_empty(),
+            "a v1 context must be empty {label}, got {} bytes",
+            context.len()
+        );
+    }
+
+    // The two v1 cases in the file must therefore be byte-identical to each
+    // other and to the plain concatenation, which is the claim in one line.
+    let v1: Vec<&Value> = section(&file, "cases", "aad-context.json")
+        .iter()
+        .filter(|case| length(case, "envelope_version") == 1)
+        .collect();
+    assert!(v1.len() >= 2, "the file must carry the v1 rule both ways");
+    for case in &v1 {
+        let plain = format!("{}{}", text(case, "associated_data"), text(case, "header"));
+        assert_eq!(
+            text(case, "aad"),
+            plain,
+            "v1 case `{}` is not a plain concatenation",
+            name(case)
+        );
+        assert_eq!(text(case, "context"), "", "v1 case `{}`", name(case));
+    }
+}
+
+#[test]
+fn the_version_gate_accepts_exactly_the_versions_this_build_writes() {
+    let file = load("aad-context.json");
+    for case in section(&file, "invalid", "aad-context.json") {
+        let value = u8::try_from(length(case, "envelope_version")).expect("a version byte");
+        assert_eq!(
+            kind_of_version(value),
+            text(case, "error"),
+            "case `{}`",
+            name(case)
+        );
+        assert!(
+            EnvelopeVersion::from_wire(value).is_none(),
+            "case `{}` names a version a reader must refuse: {}",
+            name(case),
+            text(case, "why")
+        );
+    }
+
+    // The sweep is the part a per-case list cannot express: a reader that
+    // accepted, say, only 255 and 0 would pass the cases above. Every byte a
+    // `u8` can hold is checked against the two the protocol defines.
+    let accepted = file
+        .get("versions")
+        .and_then(|v| v.get("accepted"))
+        .and_then(Value::as_array)
+        .expect("the file declares which versions are accepted");
+    let mut writers = Vec::new();
+    for value in 0..=u8::MAX {
+        if let Some(version) = EnvelopeVersion::from_wire(value) {
+            writers.push(u64::from(version.wire()));
+            assert_eq!(
+                version.wire(),
+                value,
+                "a version must round-trip through its own byte"
+            );
+            assert!(
+                version.binds_context() == (value == 2),
+                "version {value} disagrees with itself about binding a context"
+            );
+        }
+    }
+    let declared: Vec<u64> = accepted
+        .iter()
+        .map(|v| v.as_u64().expect("a number"))
+        .collect();
+    assert_eq!(writers, declared, "the gate and the file disagree");
+    // Widened to `u64` to compare against the file's numbers: a `Vec<u8>` and a
+    // `Vec<u64>` are different types, and the point of this assertion is the
+    // sequence of versions rather than their width.
+    let spelled_out: Vec<u64> = EnvelopeVersion::ACCEPTED
+        .iter()
+        .map(|version| u64::from(version.wire()))
+        .collect();
+    assert_eq!(spelled_out, declared, "`ACCEPTED` is the gate, spelled out");
+}
+
+/// The error name a refused version byte produces, so the file's `error` field
+/// is checked against a name rather than against whatever the runner feels like
+/// calling it. A version is refused by returning `None`, and the vectors name
+/// that refusal `UnsupportedVersion`; anything else is a different failure and
+/// must not be spelled the same way.
+fn kind_of_version(value: u8) -> &'static str {
+    if EnvelopeVersion::from_wire(value).is_none() {
+        "UnsupportedVersion"
+    } else {
+        "accepted"
+    }
+}
+
 // --- the suite is present at all --------------------------------------------
 
 #[test]
 fn every_vector_file_is_present_and_populated() {
-    let expected: [(&str, &[&str]); 3] = [
+    let expected: [(&str, &[&str]); 4] = [
         ("kdf.json", &["cases", "rfc", "pairs"]),
         ("aead.json", &["cases", "invalid"]),
+        ("aad-context.json", &["cases", "invalid"]),
         (
             "mac.json",
             &["cases", "parts", "rfc", "truncation", "distinct_pairs"],

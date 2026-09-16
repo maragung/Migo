@@ -95,23 +95,29 @@ fn everything_the_server_records_of_a_conversation_decrypts_nothing() {
     let mut bob = RatchetSession::responder(&bob_seed, bob_spk);
 
     // A genuine conversation, every frame of which the "server" captures.
+    //
+    // Every call here passes an empty context, which is the version-1 associated data: this test is
+    // about whether a captured transcript can be replayed against keys the attacker chose, and the
+    // bound context of section 11 is orthogonal to that. A version-2 context would have to be
+    // *not* empty and identical on both sides for the frames to open at all, which would add a
+    // second thing the test depends on without testing it.
     let mut frames = Vec::new();
     for round in 0..5u32 {
         let sent = format!("alice {round}");
         let frame = alice
-            .encrypt_next(sent.as_bytes(), &mut random)
+            .encrypt_next(sent.as_bytes(), &mut random, &[])
             .expect("encrypts");
         assert_eq!(
-            bob.decrypt(&frame.0, &frame.1).expect("bob decrypts"),
+            bob.decrypt(&frame.0, &frame.1, &[]).expect("bob decrypts"),
             sent.as_bytes(),
             "the transcript must be genuine or the test proves nothing"
         );
         frames.push(frame);
         let reply = format!("bob {round}");
         let frame = bob
-            .encrypt_next(reply.as_bytes(), &mut random)
+            .encrypt_next(reply.as_bytes(), &mut random, &[])
             .expect("encrypts");
-        assert!(alice.decrypt(&frame.0, &frame.1).is_ok());
+        assert!(alice.decrypt(&frame.0, &frame.1, &[]).is_ok());
         frames.push(frame);
     }
 
@@ -137,7 +143,7 @@ fn everything_the_server_records_of_a_conversation_decrypts_nothing() {
     let mut attacker = RatchetSession::responder(&attacker_seed, attacker_spk);
     for (index, (header, ciphertext)) in frames.iter().enumerate() {
         assert!(
-            attacker.decrypt(header, ciphertext).is_err(),
+            attacker.decrypt(header, ciphertext, &[]).is_err(),
             "the attacker opened frame {index} of the captured transcript"
         );
     }

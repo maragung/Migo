@@ -30,7 +30,17 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 
-import { CryptoError, MacKey, SymmetricKey, aead, kdf, mac } from '../src/index.js';
+import {
+  ACCEPTED_VERSIONS,
+  CryptoError,
+  EnvelopeVersion,
+  MacKey,
+  SymmetricKey,
+  aad,
+  aead,
+  kdf,
+  mac,
+} from '../src/index.js';
 
 // --- plumbing ---------------------------------------------------------------
 
@@ -645,6 +655,246 @@ test('no error carries the bytes it was handed', () => {
   }
 });
 
+// --- aad context -------------------------------------------------------------
+//
+// The envelope's bound context is the one structure here that four separate builds construct: the
+// Rust reference the server links, a second Rust build inside the desktop client, this package, and
+// the Kotlin client. None of them call each other, so nothing but this file keeps their bytes
+// identical — and a disagreement is not a test failure in the field, it is a message that will not
+// open, reported by a person as "it says delivered but nothing arrives".
+
+/** A 16-byte identifier, read through `bytesOf` so a short one names its own field. */
+function idOf(item: Case, key: string): Uint8Array {
+  const bytes = bytesOf(item, key);
+  assert.equal(bytes.length, aad.ID_BYTE_LEN, `field \`${key}\` is not a 16-byte id`);
+  return bytes;
+}
+
+/** The optional message id a case names, or `null` when the field is `null`. */
+function messageIdOf(item: Case): Uint8Array | null {
+  const value = item.message_id;
+  if (value === undefined || value === null) {
+    return null;
+  }
+  assert.equal(typeof value, 'string', '`message_id` must be hex or null');
+  return idOf(item, 'message_id');
+}
+
+/**
+ * The name a vector file gives a refused version byte.
+ *
+ * A version is refused by returning `null`, and the file calls that `UnsupportedVersion`. Spelling
+ * it here rather than inlining the literal keeps the file's vocabulary in one place: anything else
+ * a reader could do with an unknown byte is a different failure and must not share the name.
+ */
+function kindOfVersion(value: number): string {
+  return aad.fromWire(value) === null ? 'UnsupportedVersion' : 'accepted';
+}
+
+test('aad contexts match the vectors', () => {
+  const file = load('aad-context.json');
+  assert.equal(hex(aad.DOMAIN), text(file as Case, 'domain'), 'the domain label');
+  assert.equal(
+    new TextDecoder().decode(aad.DOMAIN),
+    text(file as Case, 'ascii'),
+    'the domain label is the ascii it claims',
+  );
+
+  for (const item of section(file, 'cases', 'aad-context.json')) {
+    const version = aad.fromWire(count(item, 'envelope_version'));
+    assert.notEqual(version, null, `case \`${caseName(item)}\` names a version this build refuses`);
+    const sender = idOf(item, 'sender_device');
+    const conversation = idOf(item, 'conversation_id');
+    const messageId = messageIdOf(item);
+
+    const context = aad.context(
+      version as aad.EnvelopeVersion,
+      count(item, 'scheme'),
+      sender,
+      conversation,
+      messageId,
+    );
+    assert.equal(hex(context), text(item, 'context'), `context for case \`${caseName(item)}\``);
+
+    // The assembled value is what a ratchet actually authenticates, so the case pins the whole
+    // string and not just the half that is new.
+    const assembled = aad.assemble(
+      bytesOf(item, 'associated_data'),
+      bytesOf(item, 'header'),
+      context,
+    );
+    assert.equal(
+      hex(assembled),
+      text(item, 'aad'),
+      `associated data for case \`${caseName(item)}\``,
+    );
+
+    // A context a reader could not take apart again would still authenticate, so this is not
+    // redundant with the comparison above: it pins that the layout is unambiguous rather than
+    // merely reproducible.
+    //
+    // Only a version that binds a context has one to take apart. A version-1 case carries the empty
+    // context on purpose — that is the compatibility rule, and `parseContext` refusing zero bytes is
+    // that rule holding rather than a gap in this test, so the refusal is asserted in this branch
+    // instead of the case being skipped.
+    if (!aad.bindsContext(version as aad.EnvelopeVersion)) {
+      assert.equal(context.length, 0, `case \`${caseName(item)}\` binds no context`);
+      assert.throws(
+        () => aad.parseContext(context),
+        CryptoError,
+        `case \`${caseName(item)}\`: an absent context is not a context`,
+      );
+      continue;
+    }
+    const parsed = aad.parseContext(context);
+    assert.equal(parsed.version, version, `case \`${caseName(item)}\` version`);
+    assert.equal(parsed.scheme, count(item, 'scheme'), `case \`${caseName(item)}\` scheme`);
+    assert.equal(hex(parsed.senderDevice), hex(sender), `case \`${caseName(item)}\` sender`);
+    assert.equal(
+      hex(parsed.conversationId),
+      hex(conversation),
+      `case \`${caseName(item)}\` conversation`,
+    );
+    assert.equal(
+      parsed.messageId === null ? null : hex(parsed.messageId),
+      messageId === null ? null : hex(messageId),
+      `case \`${caseName(item)}\` message id`,
+    );
+  }
+});
+
+test('a version-one envelope binds no context', () => {
+  // The compatibility rule, stated as a test rather than as a comment: a v1 envelope's associated
+  // data must be `associated_data || header` and nothing else, whatever metadata the caller happens
+  // to hold. If this ever stops being true, every v1 message already stored stops opening, and it
+  // fails looking like corruption rather than looking like a version mistake.
+  const file = load('aad-context.json');
+  const sender = new Uint8Array(aad.ID_BYTE_LEN).fill(0xa0);
+  const conversation = new Uint8Array(aad.ID_BYTE_LEN).fill(0xc0);
+  const message = new Uint8Array(aad.ID_BYTE_LEN).fill(0xe0);
+
+  const shapes: ReadonlyArray<readonly [string, Uint8Array | null]> = [
+    ['without a message id', null],
+    ['with one', message],
+  ];
+  for (const [label, messageId] of shapes) {
+    const context = aad.context(EnvelopeVersion.V1, 1, sender, conversation, messageId);
+    assert.equal(context.length, 0, `a v1 context must be empty ${label}`);
+  }
+
+  // The two v1 cases in the file must therefore be byte-identical to the plain concatenation,
+  // which is the same claim read off the file instead of off the builder.
+  const v1 = section(file, 'cases', 'aad-context.json').filter(
+    (item) => count(item, 'envelope_version') === 1,
+  );
+  assert.ok(v1.length >= 2, 'the file must carry the v1 rule both ways');
+  for (const item of v1) {
+    assert.equal(
+      text(item, 'aad'),
+      text(item, 'associated_data') + text(item, 'header'),
+      `v1 case \`${caseName(item)}\` is not a plain concatenation`,
+    );
+    assert.equal(text(item, 'context'), '', `v1 case \`${caseName(item)}\``);
+  }
+});
+
+test('the version gate accepts exactly the versions this build writes', () => {
+  const file = load('aad-context.json');
+  for (const item of section(file, 'invalid', 'aad-context.json')) {
+    const value = count(item, 'envelope_version');
+    assert.equal(kindOfVersion(value), text(item, 'error'), `case \`${caseName(item)}\``);
+    assert.equal(
+      aad.fromWire(value),
+      null,
+      `case \`${caseName(item)}\` names a version a reader must refuse`,
+    );
+  }
+
+  // The sweep is the part a per-case list cannot express: a reader that accepted, say, only 255 and
+  // 0 would pass the cases above. Every byte a `u8` can hold is checked against the two the
+  // protocol defines, and `ACCEPTED_VERSIONS` is checked against the file.
+  const declared = file.versions as { accepted: number[] };
+  const writers: number[] = [];
+  for (let value = 0; value <= 0xff; value += 1) {
+    const version = aad.fromWire(value);
+    if (version !== null) {
+      writers.push(version);
+      assert.ok(
+        aad.bindsContext(version) === (value === 2),
+        `version ${value} disagrees with itself about binding a context`,
+      );
+    }
+  }
+  assert.deepEqual(writers, declared.accepted, 'the gate and the file disagree');
+  assert.deepEqual([...ACCEPTED_VERSIONS], declared.accepted, '`ACCEPTED_VERSIONS` is the gate');
+});
+
+test('a context of the wrong width is refused rather than truncated', () => {
+  // This package does not depend on `@migo/wire`, so the ids arrive as plain byte arrays and a
+  // caller that forgot `idToBytes` would otherwise hand over something that is not 16 bytes. The
+  // failure that would cause is the worst kind to debug: a context that is silently the wrong shape
+  // authenticates nothing, and the symptom is a peer reporting "delivered but nothing arrives".
+  const good = new Uint8Array(aad.ID_BYTE_LEN);
+  throwsKind(
+    'BadLength',
+    () => aad.context(EnvelopeVersion.V2, 1, good.slice(0, 15), good),
+    'a 15-byte sender device id',
+  );
+  throwsKind(
+    'BadLength',
+    () => aad.context(EnvelopeVersion.V2, 1, good, good.slice(1)),
+    'a conversation id one byte short',
+  );
+  throwsKind(
+    'BadLength',
+    () => aad.context(EnvelopeVersion.V2, 1, good, good, new Uint8Array(17)),
+    'a 17-byte message id',
+  );
+  // A v1 context is empty whatever it is passed, including a bad id: refusing there would make the
+  // version-1 path stricter than it has ever been, and no v1 message carries an id to check.
+  assert.equal(aad.context(EnvelopeVersion.V1, 1, good.slice(0, 1), good).length, 0);
+});
+
+test('a malformed context is refused', () => {
+  const context = aad.context(
+    EnvelopeVersion.V2,
+    1,
+    new Uint8Array(aad.ID_BYTE_LEN).fill(1),
+    new Uint8Array(aad.ID_BYTE_LEN).fill(2),
+    new Uint8Array(aad.ID_BYTE_LEN).fill(3),
+  );
+  assert.equal(aad.parseContext(context).messageId?.length, aad.ID_BYTE_LEN);
+
+  // Truncated: every prefix up to the fixed part is short.
+  for (const cut of [0, aad.DOMAIN.length, context.length - 1]) {
+    throwsKind(
+      'BadLength',
+      () => aad.parseContext(context.slice(0, cut)),
+      `a context truncated to ${cut} bytes`,
+    );
+  }
+  // A different domain label is not this structure.
+  const wrongDomain = context.slice();
+  wrongDomain[0] = (wrongDomain[0] ?? 0) ^ 0x01;
+  throwsKind('MalformedHeader', () => aad.parseContext(wrongDomain), 'a context with a bad domain');
+  // A version byte no build writes.
+  const wrongVersion = context.slice();
+  wrongVersion[aad.DOMAIN.length] = 9;
+  throwsKind(
+    'MalformedHeader',
+    () => aad.parseContext(wrongVersion),
+    'a context claiming version 9',
+  );
+  // A flag whose meaning is undefined is a flag an attacker chooses the meaning of.
+  const wrongFlags = context.slice();
+  wrongFlags[aad.DOMAIN.length + 2 + aad.ID_BYTE_LEN * 2] = 0x80;
+  throwsKind(
+    'MalformedHeader',
+    () => aad.parseContext(wrongFlags),
+    'a context carrying an undefined flag',
+  );
+});
+
 // --- the suite is present at all --------------------------------------------
 
 test('every vector file is present and populated', () => {
@@ -652,6 +902,7 @@ test('every vector file is present and populated', () => {
     ['kdf.json', ['cases', 'rfc', 'pairs']],
     ['aead.json', ['cases', 'invalid']],
     ['mac.json', ['cases', 'parts', 'rfc', 'truncation', 'distinct_pairs']],
+    ['aad-context.json', ['cases', 'invalid']],
   ];
   let total = 0;
   for (const [file, sections] of expected) {

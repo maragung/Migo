@@ -23,10 +23,13 @@
 //! replay a session key into a conversation with a third party without the tag failing.
 //!
 //! Section 11 also lists `conversation_id` and `message_id` among the metadata it would bind. The
-//! ratchet in `migo-crypto` does not thread per-message associated data, and adding it here alone
-//! would desync from a web or Android peer and make genuine messages undecryptable. Binding that
-//! extra context is a coordinated change across all four implementations, so it is deferred here in
-//! the same terms as in the TypeScript SDK rather than done half-way on one client.
+//! ratchet in `migo-crypto` threads a per-message context now — envelope version 2 — but this client
+//! still writes version 1 and passes `NO_CONTEXT`, because binding that context desyncs from any
+//! peer still writing version 1: the two ends must hand the ratchet the same bytes or genuine
+//! messages stop opening. Moving to version 2 is a coordinated change across all four
+//! implementations — the four builds that construct the structure and none of which calls another —
+//! so it is deferred here in the same terms as in the TypeScript SDK rather than done half-way on
+//! one client.
 
 use std::collections::HashMap;
 
@@ -45,6 +48,21 @@ use super::CryptoError;
 /// prekey. A hundred is enough that a device offline for a week still has unused ones when it
 /// returns, and small enough that the published bundle stays a few kilobytes.
 pub const ONE_TIME_PREKEY_COUNT: u32 = 100;
+
+/// The bound context this client seals and opens under: none.
+///
+/// Section 11's context — the version, the scheme, the sending device, the conversation, the message
+/// — is a version-2 envelope feature, and this client still writes version 1. An empty context is
+/// exactly the version-1 associated data, so passing it changes nothing on the wire; what it does
+/// is keep the two ends of a session symmetric, because both must hand the ratchet the *same*
+/// context or the frames stop opening.
+///
+/// The context is not merely unset here: it is not yet reachable from this layer. `seal` and `open`
+/// each hold the conversation and the *peer's* device, and the context also names the sending
+/// device and, for a message, a message id — neither of which the session store is told, because
+/// today it does not need them. Wiring them through is the coordinated step, and it moves the
+/// version byte with it.
+const NO_CONTEXT: &[u8] = &[];
 
 /// This device's own key material.
 ///
@@ -370,7 +388,10 @@ impl SessionStore {
         }
 
         let entry = self.sessions.get_mut(&key).expect("inserted above");
-        let (header, ciphertext) = entry.session.encrypt_next(plaintext, &mut random)?;
+        let (header, ciphertext) =
+            entry
+                .session
+                .encrypt_next(plaintext, &mut random, NO_CONTEXT)?;
 
         // The peer has replied, so it has the session; the preamble has done its job and every
         // further message saves the ~110 bytes it costs.
@@ -413,9 +434,10 @@ impl SessionStore {
         }
 
         let entry = self.sessions.get_mut(&key).ok_or(CryptoError::NoSession)?;
-        let plaintext = entry
-            .session
-            .decrypt(&envelope.header, &envelope.ciphertext)?;
+        let plaintext =
+            entry
+                .session
+                .decrypt(&envelope.header, &envelope.ciphertext, NO_CONTEXT)?;
         // We have heard from them, so they have the session. Stop paying for the preamble.
         entry.outgoing_preamble = None;
         Ok(plaintext)

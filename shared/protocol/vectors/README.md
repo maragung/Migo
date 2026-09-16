@@ -125,13 +125,22 @@ the vector honest about what appears on the wire.
 
 `kdf.json` covers `kdf::derive` and `derive_pair`; `aead.json` covers
 `aead::seal_with_nonce` and `open`; `mac.json` covers `MacKey::derive`, `tag` and
-`tag_parts`. Each case carries its own `provenance`:
+`tag_parts`; `aad-context.json` covers the associated-data context an envelope
+binds (`migo.md` §11) — its field layout, the rule that a version-1 envelope binds
+none of it, and the version gate every reader applies. Each case carries its own
+`provenance`:
 
 * `rfc-5869` — an HKDF test vector from the RFC, run through our function's
   parameter shape. Catches a genuine implementation bug.
 * `rfc-8439` / `xchacha-draft` — an AEAD vector from the specification.
 * `independent-python` — computed by the generator from the RFC construction.
   Catches an implementation bug *and* cross-language drift.
+* `hand-authored` — written out from the specification as a field table rather
+  than derived from any implementation, which is what `aad-context.json` is. Four
+  builds construct that structure (the Rust reference, the desktop client, the
+  TypeScript SDK, the Kotlin client) and none of them call each other, so this
+  file is the only thing keeping their bytes identical; a disagreement is not a
+  test failure in the field, it is a message that will not open.
 
 Regenerate with:
 
