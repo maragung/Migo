@@ -42,7 +42,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.RoomLiveInfo
@@ -211,7 +210,7 @@ private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () ->
             UnreadPill(count = row.unread)
             Spacer(modifier = Modifier.width(8.dp))
         }
-        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
     }
 }
 
@@ -230,11 +229,11 @@ fun OccupancyBar(current: Long, capacity: Long) {
             color = if (nearFull) Color(0xFFFDEEE0) else Color(0xFFEEF7FA),
             contentColor = if (nearFull) Color(0xFFD95F07) else Color(0xFF157A92),
             border = BorderStroke(1.dp, if (nearFull) Color(0xFFF6D4B4) else Color(0xFFCFE3EA)),
-            shape = RoundedCornerShape(999.dp),
+            shape = RoundedCornerShape(MigoRadius.pill),
         ) {
             Text(
                 text = "$current / $capacity",
-                fontSize = 11.sp,
+                fontSize = MigoType.bodySm,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 1.dp),
             )
@@ -244,7 +243,7 @@ fun OccupancyBar(current: Long, capacity: Long) {
             modifier = Modifier
                 .width(64.dp)
                 .height(3.5.dp)
-                .background(Color(0xFFE4F1F5), RoundedCornerShape(999.dp)),
+                .background(Color(0xFFE4F1F5), RoundedCornerShape(MigoRadius.pill)),
         ) {
             if (capacity > 0L) {
                 Box(
@@ -253,7 +252,7 @@ fun OccupancyBar(current: Long, capacity: Long) {
                         .height(3.5.dp)
                         .background(
                             if (nearFull) Color(0xFFF5820C) else Color(0xFF1993AB),
-                            RoundedCornerShape(999.dp),
+                            RoundedCornerShape(MigoRadius.pill),
                         ),
                 )
             }
@@ -420,7 +419,7 @@ private fun DirectoryRow(room: RoomSummary, onOpenIntent: () -> Unit) {
         }
         // A full room's pill is already orange, and the sheet the row opens names the fact on
         // its primary button rather than letting the server refuse the tap.
-        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
     }
 }
 

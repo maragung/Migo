@@ -43,7 +43,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RelationshipEntry
@@ -360,7 +359,7 @@ private fun FriendRow(
             UnreadPill(count = unread)
             Spacer(modifier = Modifier.width(8.dp))
         }
-        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
     }
 }
 
@@ -433,7 +432,7 @@ private fun RequestsBadge(count: Int) {
     Surface(
         color = Color(0xFFE5503C),
         contentColor = Color.White,
-        shape = RoundedCornerShape(999.dp),
+        shape = RoundedCornerShape(MigoRadius.pill),
         modifier = Modifier.semantics {
             contentDescription = "$count pending friend requests"
         },

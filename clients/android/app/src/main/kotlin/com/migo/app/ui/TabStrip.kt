@@ -28,7 +28,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
@@ -136,7 +135,16 @@ fun MobileTabStrip(
     }
 }
 
-/** The home tabs in strip order — the reference's MOBILE_NAV_ORDER, verbatim. */
+/**
+ * The home tabs in strip order — the web's `TABBED_NAV_ORDER`, which is its `MOBILE_NAV_ORDER`
+ * minus `main`.
+ *
+ * The distinction is the web client's own: `main` is the conversation list, and the tabbed layout
+ * keeps no conversation list in its strip because it has one elsewhere — here, in [ChatListShell]'s
+ * bottom bar, which offers Main as its own tab. So this strip is the three-view order and the shell
+ * is the four-tab one, and calling this list "MOBILE_NAV_ORDER verbatim" would have named the wrong
+ * one of the two.
+ */
 private val navOrder = listOf(AppState.Section.FRIENDS, AppState.Section.ROOMS, AppState.Section.FEED)
 
 private fun navLabel(section: AppState.Section): String = when (section) {
@@ -190,7 +198,7 @@ private fun NavChip(
             modifier = Modifier
                 .background(
                     color = if (active) LocalMigoExtra.current.navActive else Color.White.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(9.dp),
+                    shape = RoundedCornerShape(MigoRadius.md),
                 )
                 .padding(horizontal = 14.dp, vertical = 7.dp),
         ) {
@@ -200,7 +208,7 @@ private fun NavChip(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.labelMedium,
-                    fontSize = 13.sp,
+                    fontSize = MigoType.body,
                     fontWeight = FontWeight.SemiBold,
                     color = if (active) activeInk else idleInk,
                     maxLines = 1,
@@ -224,7 +232,7 @@ private fun NavChip(
                     .height(2.5.dp)
                     .background(
                         color = if (active) activeInk else Color.Transparent,
-                        shape = RoundedCornerShape(999.dp),
+                        shape = RoundedCornerShape(MigoRadius.pill),
                     ),
             )
         }
@@ -257,7 +265,7 @@ private fun WindowChip(
             modifier = Modifier
                 .background(
                     color = if (active) LocalMigoExtra.current.navActive else Color.White.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(9.dp),
+                    shape = RoundedCornerShape(MigoRadius.md),
                 )
                 .padding(horizontal = 14.dp, vertical = 7.dp),
         ) {
@@ -267,7 +275,7 @@ private fun WindowChip(
                 Text(
                     text = tab.title,
                     style = MaterialTheme.typography.labelMedium,
-                    fontSize = 13.sp,
+                    fontSize = MigoType.body,
                     fontWeight = FontWeight.SemiBold,
                     color = if (active) activeInk else idleInk,
                     maxLines = 1,
@@ -289,7 +297,7 @@ private fun WindowChip(
                     .height(2.5.dp)
                     .background(
                         color = if (active) activeInk else Color.Transparent,
-                        shape = RoundedCornerShape(999.dp),
+                        shape = RoundedCornerShape(MigoRadius.pill),
                     ),
             )
         }
@@ -307,13 +315,13 @@ private fun ReopenChip(onClick: () -> Unit, modifier: Modifier = Modifier) {
     ) {
         Box(
             modifier = Modifier
-                .background(color = Color.White.copy(alpha = 0.08f), shape = RoundedCornerShape(9.dp))
+                .background(color = Color.White.copy(alpha = 0.08f), shape = RoundedCornerShape(MigoRadius.md))
                 .padding(horizontal = 12.dp, vertical = 7.dp),
         ) {
             Text(
                 text = "+",
                 style = MaterialTheme.typography.labelMedium,
-                fontSize = 14.sp,
+                fontSize = MigoType.titleSm,
                 fontWeight = FontWeight.Bold,
                 color = idleInk,
             )
@@ -328,12 +336,12 @@ private fun StripBadge(count: Long) {
     Surface(
         color = Color(0xFFE5503C),
         contentColor = Color.White,
-        shape = RoundedCornerShape(999.dp),
+        shape = RoundedCornerShape(MigoRadius.pill),
     ) {
         Text(
             text = if (count > 9) "9+" else count.toString(),
             style = MaterialTheme.typography.labelMedium,
-            fontSize = 8.5.sp,
+            fontSize = MigoGlyph.badge,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.dp),
@@ -354,7 +362,7 @@ private fun CloseGlyph(onClose: () -> Unit, tint: Color) {
         Text(
             text = "✕",
             style = MaterialTheme.typography.labelMedium,
-            fontSize = 11.sp,
+            fontSize = MigoType.bodySm,
             color = tint,
         )
     }

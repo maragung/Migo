@@ -35,7 +35,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.migo.app.call.ActiveCall
 import com.migo.app.call.CallUiState
@@ -374,7 +373,7 @@ private fun VideoStage(
                     .align(Alignment.BottomEnd)
                     .padding(end = 12.dp, bottom = 140.dp)
                     .size(width = 120.dp, height = 160.dp)
-                    .clip(RoundedCornerShape(8.dp)),
+                    .clip(RoundedCornerShape(MigoRadius.md)),
                 contentDescription = "Your video",
             )
         }
@@ -491,6 +490,6 @@ private fun CallActionButton(
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = glyph, color = contentColor, fontSize = 26.sp)
+        Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
     }
 }

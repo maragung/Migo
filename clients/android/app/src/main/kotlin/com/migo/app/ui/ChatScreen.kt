@@ -952,7 +952,7 @@ private fun HeaderGlyphButton(
             .size(48.dp)
             .semantics { contentDescription = description },
     ) {
-        Text(text = glyph, fontSize = 18.sp)
+        Text(text = glyph, fontSize = MigoGlyph.inline)
     }
 }
 
@@ -1187,7 +1187,7 @@ private fun GuessCard(
                     onValueChange = { field.value = it },
                     placeholder = { Text("Enter your guess ($low-$high)") },
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(MigoRadius.lg),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Number,
                         imeAction = ImeAction.Send,
@@ -1306,7 +1306,7 @@ private fun MessageLine(
         // the acceptance.
         val stamp = if (message.pending) "Sending…" else clockTime(message.at)
         if (stamp.isNotEmpty() || message.mine || message.editedAt != null) {
-            withStyle(SpanStyle(fontSize = 9.5.sp, color = stampInk)) {
+            withStyle(SpanStyle(fontSize = MigoType.micro, color = stampInk)) {
                 if (stamp.isNotEmpty()) append("  $stamp")
                 if (message.editedAt != null) append("  (edited)")
                 if (message.mine && !message.pending) append(" ✓")
@@ -1340,7 +1340,7 @@ private fun MessageLine(
             } else {
                 Text(
                     text = line,
-                    fontSize = 12.sp,
+                    fontSize = MigoType.body,
                     lineHeight = 17.sp,
                 )
                 message.attachment?.let { attachment ->
@@ -1412,7 +1412,7 @@ private fun LineActions(
         Row {
             for (emoji in QUICK_REACTIONS) {
                 TextButton(onClick = { onReact(emoji) }, modifier = Modifier.size(40.dp)) {
-                    Text(text = emoji, fontSize = 18.sp)
+                    Text(text = emoji, fontSize = MigoGlyph.inline)
                 }
             }
         }
@@ -1519,7 +1519,7 @@ private fun ImageBubble(
     val bitmap = (mediaObject as? MediaObject.Ready)?.bytes?.let {
         BitmapFactory.decodeByteArray(it, 0, it.size)
     }
-    val shape = RoundedCornerShape(12.dp)
+    val shape = RoundedCornerShape(MigoRadius.lg)
     // The lightbox: a tap on the rendered image opens it fullscreen, the same second look the web
     // client's overlay gives. A dialog rather than a navigation so back closes only the picture.
     var lightboxOpen by remember { mutableStateOf(false) }
@@ -1643,14 +1643,14 @@ private fun DocumentRow(
     }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(MigoRadius.lg),
         modifier = Modifier.padding(top = 4.dp).widthIn(max = 280.dp),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
         ) {
-            Text(text = "📄", fontSize = 20.sp)
+            Text(text = "📄", fontSize = MigoType.display)
             Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 // One line, and ended by an ellipsis rather than the default hard cut: a file
@@ -1790,7 +1790,7 @@ private fun VoiceBubble(
     val heard = listened && !playing
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(MigoRadius.lg),
         modifier = Modifier.padding(top = 4.dp).widthIn(max = 280.dp),
     ) {
         Row(
@@ -1852,7 +1852,7 @@ private fun VoiceBubble(
                     mediaObject !is MediaObject.Ready && !autoFetchMedia -> "⬇"
                     else -> "▶"
                 },
-                fontSize = 16.sp,
+                fontSize = MigoType.title,
                 color = if (heard) heardInk else LocalContentColor.current,
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -1899,7 +1899,7 @@ private fun VoiceBubble(
                 style = MaterialTheme.typography.labelSmall,
                 color = if (heard) heardInk else MaterialTheme.colorScheme.primary,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(MigoRadius.md))
                     .clickable { onSpeedChange(speed.next()) }
                     .padding(horizontal = 6.dp, vertical = 4.dp)
                     .semantics { contentDescription = "Playback speed ${speed.label}" },
@@ -2017,7 +2017,7 @@ private fun Composer(
                         }
                     },
             ) {
-                Text(text = if (emoticonsOpen) "😀" else "😊", fontSize = 18.sp)
+                Text(text = if (emoticonsOpen) "😀" else "😊", fontSize = MigoGlyph.inline)
             }
             // The attach control stands for four ways to pick what the next message carries, each
             // named in the menu it opens; the picking itself is the shell's, because the system
@@ -2039,7 +2039,7 @@ private fun Composer(
                             .size(52.dp)
                             .semantics { contentDescription = "Attach a file, photo, video, or image" },
                     ) {
-                        Text(text = "📎", fontSize = 18.sp)
+                        Text(text = "📎", fontSize = MigoGlyph.inline)
                     }
                 }
             }
@@ -2056,7 +2056,7 @@ private fun Composer(
                     Text(
                         text = if (heldPaused) "⏸" else "●",
                         color = MaterialTheme.colorScheme.error,
-                        fontSize = 14.sp,
+                        fontSize = MigoType.titleSm,
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
@@ -2092,7 +2092,7 @@ private fun Composer(
                     onValueChange = onDraft,
                     placeholder = { Text("Message") },
                     maxLines = 5,
-                    shape = RoundedCornerShape(24.dp),
+                    shape = RoundedCornerShape(MigoRadius.lg),
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                         imeAction = ImeAction.Send,
@@ -2167,7 +2167,7 @@ private fun Composer(
             ) {
                 Text(
                     text = if (recordingHeld) "⏺" else "🎤",
-                    fontSize = 18.sp,
+                    fontSize = MigoGlyph.inline,
                     color = if (recordingHeld) MaterialTheme.colorScheme.error else Color.Unspecified,
                 )
             }
@@ -2222,7 +2222,7 @@ private fun RecordingBar(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(text = if (paused) "⏸" else "●", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+            Text(text = if (paused) "⏸" else "●", color = MaterialTheme.colorScheme.error, fontSize = MigoType.titleSm)
             Spacer(modifier = Modifier.width(8.dp))
             // The clock the model drives: the state's own elapsed, which stands still through a
             // pause exactly as the recording does.
@@ -2273,7 +2273,7 @@ private fun PreviewBar(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(text = "♪", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
+            Text(text = "♪", color = MaterialTheme.colorScheme.primary, fontSize = MigoType.title)
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = formatDuration(preview.durationMs),
@@ -2387,7 +2387,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGlyphSend(
 private fun SystemNotice(text: String) {
     Text(
         text = text,
-        fontSize = 11.sp,
+        fontSize = MigoType.bodySm,
         fontStyle = FontStyle.Italic,
         color = Color(0xFF7BA3AD),
         textAlign = TextAlign.Center,
@@ -2636,7 +2636,7 @@ private fun GroupInviteRow(
         if (picked) {
             Text(
                 text = "✓",
-                fontSize = 15.sp,
+                fontSize = MigoGlyph.small,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -2710,7 +2710,7 @@ private fun GroupMemberRow(
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
         }
         if (!member.departed) {
-            Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+            Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
         }
     }
 
@@ -2944,7 +2944,7 @@ private fun MemberRow(
         if (acting) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
         }
-        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
     }
 
     if (menuOpen.value) {
