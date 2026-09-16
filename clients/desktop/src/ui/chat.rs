@@ -234,6 +234,15 @@ pub struct ChatState {
     /// control, and one at a time on the whole screen like the new-group form — two pickers
     /// would be two gifts half-chosen.
     pub gifting: Option<GiftPick>,
+    /// The report sheet that stands, when one stands: what the reporter pointed at, the reason
+    /// they chose, and the words they wrote. One at a time on the whole screen, like the gift
+    /// picker and the new-group form, and for the same reason — two sheets would be two reports
+    /// half-written, and the Send button would belong to whichever one was drawn last.
+    ///
+    /// The sheet carries its conversation the way the picker does, because a conversation is a
+    /// window of its own here: a report opened from one thread's message is that window's to
+    /// draw, and a second window on screen draws nothing of it.
+    pub reporting: Option<ReportSheet>,
     /// The member profile a roster menu opened, when the card has answered: the card itself,
     /// the conversation whose window asked for it — the window that draws it, so a view
     /// never outlives the group it was opened from — and the standing facts that arrive on
@@ -306,6 +315,46 @@ pub struct GiftPick {
     /// charge. The picker closes after a send — one pick is one gift — so the key is one
     /// intent's whole life.
     pub key: String,
+}
+
+/// The report sheet's own state, as a door opens it.
+///
+/// A report is the one act on this screen that leaves the device and cannot be taken back, so
+/// the sheet states what it is about before it offers the list — and the list is the one place
+/// in the client that draws the whole reason vocabulary at once.
+#[derive(Clone)]
+pub struct ReportSheet {
+    /// The conversation whose window opened the sheet — the window that draws it, the same
+    /// ownership rule the gift picker and the profile view keep. A sheet is not a screen of its
+    /// own: it belongs to the thread whose message, member, or room it is about, and an
+    /// overlay that outlived its window would be a report with nowhere to belong.
+    pub conversation_id: Id,
+    /// What is being reported, with the reporter's own phrasing for it.
+    pub target: crate::report::ReportTarget,
+    /// The reason chosen, or `None` while the reporter is still reading the list.
+    ///
+    /// `None` is what keeps Send dark, and that is the Android sheet's decision taken again for
+    /// the same reason it took it: a list drawn with a row already chosen is a list nobody
+    /// reads, and a report filed under a reason the reporter never picked is worse than no
+    /// report at all. The web dialog defaults to the first reason and can therefore be sent
+    /// without the list being read once; this one cannot.
+    pub reason: Option<crate::report::ReportReason>,
+    /// The reporter's own words, if they wrote any — the only field in the whole path a human
+    /// wrote. Capped at [`crate::report::REPORT_NOTE_MAX_LEN`] by the field itself, so the
+    /// ceiling is enforced by the widget rather than checked after the fact.
+    pub note: String,
+}
+
+impl ReportSheet {
+    /// A sheet on `target`, opened from `conversation_id`'s window with nothing chosen yet.
+    pub fn on(conversation_id: Id, target: crate::report::ReportTarget) -> Self {
+        Self {
+            conversation_id,
+            target,
+            reason: None,
+            note: String::new(),
+        }
+    }
 }
 
 /// The load-earlier row's state for one conversation.
@@ -981,12 +1030,14 @@ fn thread_pane(
             });
     }
 
-    // The member menu's two overlays, drawn after the panes they were opened from: the gift
-    // picker over everything, and the profile card the wire answered, over the window whose
-    // roster asked for it. Both are this window's only while their conversation matches — a
-    // picker asked for in one group is not another group's picker, and neither is a card.
+    // The member menu's overlays, drawn after the panes they were opened from: the gift
+    // picker over everything, the profile card the wire answered, and the report sheet — each
+    // over the window whose roster or thread asked for it. All three are this window's only
+    // while their conversation matches — a picker asked for in one group is not another
+    // group's picker, and neither is a card nor a sheet.
     gift_picker(ui, context, state, conversation_id);
     member_profile_window(ui, context, state, conversation_id);
+    report_window(ui, context, state, conversation_id);
 
     // The search's needle, taken as an owned value before the scroll area borrows `state`:
     // the thread's loop asks it per row with no borrow of the panel map behind it. `None` is
@@ -1122,6 +1173,7 @@ fn thread_pane(
                         &mut state.media,
                         &mut state.reactions,
                         &mut state.edits,
+                        &mut state.reporting,
                     );
                     ui.add_space(space::SM);
                 }
@@ -1526,10 +1578,11 @@ fn group_roster_panel(
     let mut vote_send: Option<Id> = None;
     let mut leave = false;
     // The member menu's own intents: a row clicked (open or close its options), a profile
-    // asked for, and a gift picker asked for.
+    // asked for, a gift picker asked for, and a report sheet asked for.
     let mut menu_toggle: Option<Id> = None;
     let mut profile_ask: Option<Id> = None;
     let mut gift_ask: Option<Id> = None;
+    let mut report_ask: Option<Id> = None;
 
     egui::Frame::new()
         .fill(colors.surface_raised)
@@ -1873,6 +1926,21 @@ fn group_roster_panel(
                                     {
                                         gift_ask = Some(member.account_id);
                                     }
+                                    // The report, the one act in this menu that leaves the group
+                                    // for the node: a vote is the members' own recourse and the
+                                    // levers are the founder's, while a report is a case the node
+                                    // keeps and rules on. Offered on every row but this account's
+                                    // own — which draws no menu at all — because the node refuses
+                                    // a report about its own reporter as a client bug, and a door
+                                    // that can only fail is not a door.
+                                    if quiet_action(ui, "Report", colors.text_muted)
+                                        .on_hover_text(
+                                            "Send this account to the node's moderators.",
+                                        )
+                                        .clicked()
+                                    {
+                                        report_ask = Some(member.account_id);
+                                    }
                                     // The vote, every member's lever, never aimed at this account
                                     // and never at a founder: the same gates the server holds,
                                     // mirrored so the option says what the wire would allow.
@@ -1959,6 +2027,20 @@ fn group_roster_panel(
             key: gift_intent_key(),
         });
         context.issue(Command::GiftCatalogue);
+    }
+    // The report sheet opens on the name this panel's row already drew: the sheet's whole
+    // sentence is built from it, so a person the roster has no name for falls back to the
+    // short id every other nameless row here uses rather than to a blank.
+    if let Some(user_id) = report_ask {
+        let label = state
+            .names
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| model::short_id(user_id));
+        state.reporting = Some(ReportSheet::on(
+            conversation_id,
+            crate::report::ReportTarget::user(user_id, label),
+        ));
     }
     // The profile view opens with its card ask and its standing asks together: the card is
     // the face, and the progression, badges, board rank, and social edge are the facts that
@@ -2095,6 +2177,12 @@ fn room_roster_panel(
     let mut menu_toggle: Option<Id> = None;
     let mut profile_ask: Option<Id> = None;
     let mut gift_ask: Option<Id> = None;
+    let mut report_ask: Option<Id> = None;
+    // The room's own report, deferred like the rest: the room is a subject distinct from
+    // every member of it — section 49 names a room as one of the four things a report can
+    // point at — so the panel's foot offers it beside the leave, where the room's own levers
+    // already live.
+    let mut report_room = false;
 
     egui::Frame::new()
         .fill(colors.surface_raised)
@@ -2153,6 +2241,17 @@ fn room_roster_panel(
                     // — the click is the confirmation, the same as the group's leave.
                     if ui.button("Leave room").clicked() {
                         leave = true;
+                    }
+                    // The room as a subject of its own, beside that leave: reporting a room
+                    // and leaving it are the two things a member can say about the room
+                    // itself rather than about somebody in it, and the panel's foot is where
+                    // the room's own controls already are. Quiet, because it is not an act
+                    // anyone should reach by accident.
+                    if quiet_action(ui, "Report this room", colors.text_muted)
+                        .on_hover_text("Send this room to the node's moderators.")
+                        .clicked()
+                    {
+                        report_room = true;
                     }
                 });
 
@@ -2256,6 +2355,20 @@ fn room_roster_panel(
                                     {
                                         gift_ask = Some(member.account_id);
                                     }
+                                    // The report, beside the room's own levers and a different
+                                    // kind of act: the vote and the sanctions are the room
+                                    // settling its own business, while a report is a case the
+                                    // node keeps and rules on. Never on this account's own row,
+                                    // which draws no menu — the node refuses a report about its
+                                    // own reporter as a client bug.
+                                    if quiet_action(ui, "Report", colors.text_muted)
+                                        .on_hover_text(
+                                            "Send this account to the node's moderators.",
+                                        )
+                                        .clicked()
+                                    {
+                                        report_ask = Some(member.account_id);
+                                    }
                                     // The vote, every member's lever: the members' own
                                     // recourse, free, and answered by the tally the whole
                                     // room watches climb.
@@ -2349,6 +2462,34 @@ fn room_roster_panel(
             key: gift_intent_key(),
         });
         context.issue(Command::GiftCatalogue);
+    }
+    // The report sheet opens on the room's own name — the title the window header draws — so
+    // the sheet's sentence names the room the reader is looking at rather than an id.
+    if report_room {
+        let label = state
+            .conversations
+            .iter()
+            .find(|c| c.conversation_id == conversation_id)
+            .and_then(|c| c.title.clone())
+            .unwrap_or_else(|| model::short_id(room_id));
+        state.reporting = Some(ReportSheet::on(
+            conversation_id,
+            crate::report::ReportTarget::room(room_id, label),
+        ));
+    }
+    // The report sheet opens on the name this panel's row already drew — the same rule the
+    // group panel's report ask follows, and the same fallback for a row the roster has no
+    // name for.
+    if let Some(user_id) = report_ask {
+        let label = state
+            .names
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| model::short_id(user_id));
+        state.reporting = Some(ReportSheet::on(
+            conversation_id,
+            crate::report::ReportTarget::user(user_id, label),
+        ));
     }
     // The profile view opens with its card ask and its standing asks together — the same
     // bundle of facts the group panel's profile ask opens.
@@ -2654,6 +2795,174 @@ fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
 /// absence: a profile without its standing lines is still a profile, the same rule the web
 /// card draws by. The social line is the view's one lever: the friend acts it offers issue
 /// their command and re-read the edge, so the line always states what the wire says.
+/// The report sheet: the one surface in this client that offers the whole reason vocabulary.
+///
+/// It states the subject in the reporter's own words and never quotes it — "this message", a
+/// display name, "this room" — because this thread is end-to-end encrypted and a sheet that
+/// rendered the thing being reported would render it on a screen with no mute, no filter, and
+/// no way to look away. The one thing the sheet does say about the subject is which *kind* of
+/// thing it is, and even that only in the sentence the title is built from.
+///
+/// Two decisions are the Android sheet's, taken again because they hold with a mouse exactly
+/// as they hold with a thumb. Send stays dark until a reason is chosen: a list drawn with a
+/// row already picked is a list nobody reads, and a report filed under a reason its reporter
+/// never chose is worse than no report. And the door is never offered on this account's own
+/// message or its own row, because the node refuses a report about its own reporter as a
+/// client bug — a button that can only fail is not a button.
+///
+/// Nothing here is optimistic about what was sent: the sheet closes on the click and the word
+/// comes back from the node as a toast, so a report that was refused says so instead of
+/// standing there looking filed.
+fn report_window(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
+    // This window's sheet only: the sheet files against the conversation whose window opened
+    // it, so a report raised from one thread's message is never drawn over another's.
+    let Some(current) = state.reporting.as_ref() else {
+        return;
+    };
+    if current.conversation_id != conversation_id {
+        return;
+    }
+    let target = current.target.clone();
+    // The choices, drawn as locals and written back once the window's borrows have closed —
+    // the same patience every other panel here gives its frame.
+    let mut reason = current.reason;
+    let mut note = current.note.clone();
+
+    let colors = palette(context.theme);
+    let mut send = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new(format!("Report {}", target.label))
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .resizable(false)
+        .collapsible(false)
+        .open(&mut open)
+        .min_width(380.0)
+        .max_width(460.0)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "What is wrong with {}? This helps us send it to the right person.",
+                    target.label
+                ))
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+            );
+            ui.add_space(space::SM);
+
+            // The reasons a person can judge for themselves, one row each with the line that
+            // says what the code means in practice. The scroll is a ceiling rather than a
+            // page-turn: the list is short enough to read whole on a desktop window, and a
+            // sheet that clipped its last option would be hiding exactly the escape hatch a
+            // reporter whose reason is not listed is looking for.
+            egui::ScrollArea::vertical()
+                .id_salt("report-reasons")
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for option in &crate::report::REPORT_REASONS {
+                        // A radio in all but name: `selectable_value` writes the choice and
+                        // draws the selection state itself, so there is one place that decides
+                        // what "chosen" looks like rather than one per row.
+                        ui.selectable_value(
+                            &mut reason,
+                            Some(option.reason),
+                            RichText::new(option.label)
+                                .font(egui::FontId::proportional(font::BODY)),
+                        );
+                        ui.label(
+                            RichText::new(option.hint)
+                                .font(egui::FontId::proportional(font::TINY))
+                                .color(colors.text_muted),
+                        );
+                        ui.add_space(space::XS);
+                    }
+                });
+
+            ui.add_space(space::SM);
+            ui.label(
+                RichText::new("Anything to add (optional)")
+                    .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                    .color(colors.text_muted),
+            );
+            ui.add_space(space::XS);
+            // The ceiling is the field's own, not a check after the fact: `char_limit` stops
+            // the typing at the character the node would refuse, so the reporter never spends
+            // a sentence on words that cannot be sent.
+            ui.add(
+                egui::TextEdit::multiline(&mut note)
+                    .hint_text("What happened, in your own words.")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .char_limit(crate::report::REPORT_NOTE_MAX_LEN)
+                    .margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8)),
+            );
+            ui.add_space(space::XS);
+            // The honesty line, because the alternative is a reporter assuming the moderators
+            // will read the thread. They will not: a report is a pointer, and the only words
+            // that leave this device are the ones typed here.
+            ui.label(
+                RichText::new(
+                    "Only the reason and the note are sent. This conversation is encrypted, \
+                     so nothing said in it is quoted.",
+                )
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+            );
+
+            ui.add_space(space::MD);
+            // No "Sending…" state: the sheet closes on the click and the node's word comes
+            // back as a toast, so a button that said it was sending would be a second, less
+            // honest account of a report that is already on its way.
+            if widgets::primary_button(ui, context.theme, "Send report", reason.is_some()).clicked()
+                && reason.is_some()
+            {
+                send = true;
+            }
+            ui.add_space(space::XS);
+            if widgets::ghost_button(ui, context.theme, "Cancel").clicked() {
+                cancel = true;
+            }
+        });
+
+    // The send is decided first and the draft is written back after, because the outgoing note is
+    // carved out of the draft and the two cannot both own the string. The order costs nothing: a
+    // sent sheet is cleared below, so the write-back it skips is a write-back to nothing.
+    if send {
+        if let Some(chosen) = reason {
+            // Trimmed here rather than in the worker, because this is the surface that knows what
+            // the reporter meant by a field they left blank: whitespace they typed and then
+            // changed their mind about is not a note, and sending it as one would put an empty
+            // string in the queue where the wire has a word for its absence.
+            let outgoing = {
+                let trimmed = note.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            };
+            context.issue(Command::Report {
+                target: target.clone(),
+                reason: chosen,
+                note: outgoing,
+            });
+            state.reporting = None;
+        }
+    }
+    // The draft survives the frame in every other case: a press the sheet's own gate refused, or
+    // no press at all, leaves the chosen reason and the typed words standing rather than costing
+    // the reporter the sentence they just wrote.
+    if let Some(sheet) = state.reporting.as_mut() {
+        sheet.reason = reason;
+        sheet.note = note;
+    }
+    if cancel || !open {
+        state.reporting = None;
+    }
+}
+
 fn member_profile_window(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -2974,6 +3283,10 @@ fn thread_header(
     // header's borrows close.
     let mut peer_mute_toggle: Option<(Id, bool)> = None;
     let mut peer_block: Option<Id> = None;
+    // The report sheet, deferred for the same reason — the same patience, and the last of
+    // them: opening the sheet writes `state.reporting` while `conversation` above still
+    // borrows `state`, so the write waits for the frame's borrows to close.
+    let mut peer_report = false;
     // The header's gift ask, deferred for the same reason — the patience, five times: opening
     // the picker writes `state.gifting` and `state.emoticon_pickers` while `conversation` above
     // still borrows `state`, so the write waits for the frame's borrows to close.
@@ -3107,6 +3420,27 @@ fn thread_header(
                             peer_block = Some(*peer);
                         }
                         ui.add_space(space::XS);
+                        // The report, beside the two personal verdicts and a different kind of
+                        // act entirely: a mute and a block are this account's own silence,
+                        // while a report is a case the node keeps and rules on. The label is
+                        // the title the header already drew — a display name in a direct
+                        // chat — so the sheet names the person the way the window does.
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Report")
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text("Send this account to the node's moderators")
+                            .clicked()
+                        {
+                            peer_report = true;
+                        }
+                        ui.add_space(space::XS);
                     }
                 }
             }
@@ -3170,6 +3504,21 @@ fn thread_header(
     }
     if let Some(peer) = peer_block {
         context.issue(Command::BlockUser { user_id: peer });
+    }
+    if peer_report {
+        // The peer's own id, found again here rather than carried out of the frame, because
+        // the header's one borrow of `conversation` is what named them the first time. A
+        // direct chat has exactly one other member, which is what makes the lookup total.
+        if let Some(peer) = context
+            .account
+            .map(|account| account.account_id)
+            .and_then(|me| conversation.members.iter().find(|id| **id != me).copied())
+        {
+            state.reporting = Some(ReportSheet::on(
+                conversation_id,
+                crate::report::ReportTarget::user(peer, title),
+            ));
+        }
     }
     if want_search_panel {
         let panel = state.searches.entry(conversation_id).or_default();
@@ -3273,6 +3622,7 @@ fn message_row(
     media: &mut MediaState,
     reactions: &mut HashMap<Id, Vec<(Id, String)>>,
     edits: &mut HashMap<Id, EditDraft>,
+    reporting: &mut Option<ReportSheet>,
 ) {
     // The disappearing mark rides the meta line as a glyph, so the promise is visible on the
     // row itself rather than learned only when the row vanishes — the web's ExpiryMark, the
@@ -3409,6 +3759,7 @@ fn message_row(
                 }
                 reaction_chips(ui, context, message, reactions);
                 own_message_actions(ui, context, message, edits);
+                peer_message_actions(ui, context, message, reporting);
                 voice_note_actions(ui, context, message, media);
             },
         );
@@ -3535,6 +3886,58 @@ fn own_message_actions(
                 conversation_id: message.conversation_id,
                 message_id: message.message_id,
             });
+        }
+    });
+}
+
+/// The quiet action on somebody else's message: Report, and nothing else.
+///
+/// Offered on a message as it was received, never on this account's own — the node refuses a
+/// report about its own reporter as a client bug, so a door drawn there could only fail. It
+/// rides beside `own_message_actions` rather than inside it, because the two rows are about
+/// different things and share no gate: one is the sender's power over their own words, the
+/// other is a recipient's recourse against somebody else's.
+///
+/// The door never quotes the message and never shows it back. What it opens names the row
+/// "this message" and the report carries the message's id — a pointer, not a copy — because
+/// the words on it are sealed for everyone but the people in this thread, and a report that
+/// reproduced them would be handing the node a plaintext it is not supposed to hold. The
+/// moderator follows the pointer with their own eyes; there is nothing here for this client to
+/// paraphrase.
+///
+/// A tombstone is skipped: a deleted message has nothing left to point at, and a report about
+/// it would be a case about a row the server has already emptied. A message still sending is
+/// skipped for own messages' reason in reverse — it has no server sequence yet, so the id the
+/// report would carry names nothing the node can look up.
+fn peer_message_actions(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    message: &Message,
+    reporting: &mut Option<ReportSheet>,
+) {
+    if message.outgoing || message.deleted || message.delivery == Delivery::Sending {
+        return;
+    }
+    let colors = palette(context.theme);
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new("Report")
+                        .font(egui::FontId::proportional(font::TINY))
+                        .color(colors.text_muted),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE),
+            )
+            .on_hover_text("Send this message to the node's moderators")
+            .clicked()
+        {
+            *reporting = Some(ReportSheet::on(
+                message.conversation_id,
+                crate::report::ReportTarget::message(message.message_id),
+            ));
         }
     });
 }

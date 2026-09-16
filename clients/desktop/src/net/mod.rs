@@ -360,6 +360,23 @@ pub enum Command {
         action: migo_protocol::SanctionAction,
         reason: Option<String>,
     },
+    /// File a report with the node's moderation queue: a message, an account, a room, or a bot.
+    ///
+    /// Carries the target and the reason in this client's own vocabulary rather than as raw wire
+    /// numbers, and the worker does the numbering — the same division [`Command::RoomSanction`]
+    /// makes for its action code, and the one that keeps a screen from having to know that a bot
+    /// is 3 on the wire and 4 in the store. `note` is the reporter's own words, if they wrote
+    /// any, and is the only human-written field in the whole path; the sheet has already refused
+    /// one over [`crate::report::REPORT_NOTE_MAX_LEN`], because a refusal that arrives after the
+    /// reporter typed the whole thing has already cost them the typing.
+    ///
+    /// The answer is a bare acknowledgement, so this is fire-and-forget with a word at the end:
+    /// see `crate::report`'s note on why the node says nothing more than "taken".
+    Report {
+        target: crate::report::ReportTarget,
+        reason: crate::report::ReportReason,
+        note: Option<String>,
+    },
     /// Read the account's global standing — whether it is this deployment's owner or one of its
     /// admins — over REST, for the room roster's moderation gates: a global admin may sanction
     /// a room member whatever room rank they hold, so the panel asks before it draws levers
@@ -2255,6 +2272,12 @@ struct Worker {
     /// which arrives as an error frame, with no opcode to say whose ask it refuses — can retire
     /// the ask as precisely as the ack consumes it.
     pending_room_sanction: Option<(u32, Id)>,
+    /// The report awaiting its acknowledgement: the correlation its ask carried, and the
+    /// reporter's own phrasing for what it points at, because the bare ack names nothing and the
+    /// sentence read back has to name the thing. Retired by a refusal the same way the room
+    /// sanction's is, for the same reason — an error frame carries no opcode to say whose ask it
+    /// refuses, so the correlation is the one exact key here too.
+    pending_report: Option<(u32, String)>,
     /// People asks in flight, keyed by the correlation the reply will carry, saying which pane
     /// asked: the search answer and the suggestion answer share one opcode and one event shape
     /// with the friends pane's own ask, and only the ask's correlation can say whose answer a
@@ -2329,6 +2352,7 @@ impl Worker {
             group_rosters: HashMap::new(),
             room_roster_asks: HashMap::new(),
             pending_room_sanction: None,
+            pending_report: None,
             people_asks: HashMap::new(),
             group_leave: None,
             pending_vote: None,
@@ -2607,6 +2631,11 @@ impl Worker {
             } => {
                 self.room_sanction(room_id, target_id, action, reason).await;
             }
+            Command::Report {
+                target,
+                reason,
+                note,
+            } => self.report(target, reason, note).await,
             Command::AdminStanding => self.read_admin_standing().await,
             Command::SearchPeopleForFriends { query } => {
                 self.search_people_for_friends(query).await;
@@ -7179,6 +7208,29 @@ impl Worker {
         }
     }
 
+    /// Files a report with the node's moderation queue.
+    ///
+    /// Fire-and-forget with a word at the end: the reply is a bare acknowledgement (see
+    /// `crate::report`), so nothing here waits on it. The target's label is remembered against
+    /// the correlation anyway, because the sentence a reporter should read back names *what* was
+    /// reported — the sheet that opened this is already closed, and "Report sent" says less than
+    /// "Thanks — this message has been reported" does.
+    ///
+    /// A refusal never reaches the ack arm: the node answers a bad filing with an error frame,
+    /// which the loop's own refusal arm toasts. That arm also retires the label this stored, so a
+    /// discarded one cannot answer a later report's ack with the wrong subject.
+    async fn report(
+        &mut self,
+        target: crate::report::ReportTarget,
+        reason: crate::report::ReportReason,
+        note: Option<String>,
+    ) {
+        let filing = report_filing(&target, reason, note);
+        if let Some(correlation) = self.send_and_remember(Opcode::ReportCreate, &filing).await {
+            self.pending_report = Some((correlation, target.label));
+        }
+    }
+
     /// Reads the account's global standing — owner or admin — over REST, for the room panel's
     /// moderation gates. A failure is folded into the safe default rather than an event: the
     /// gates fall back to room rank alone, the same default the web panel falls back to, and
@@ -7425,6 +7477,39 @@ impl Worker {
         };
         if acknowledged.ok {
             self.request_room_roster(room_id).await;
+        }
+    }
+
+    /// A report's acknowledgement: the node took it, or it did not.
+    ///
+    /// The reply names nothing — not the case, not whether this was a duplicate of a filing
+    /// already in the queue — so the sentence is built from the target's label, remembered when
+    /// the ask went out, plus the one fact the ack does carry. A correlation that matches nothing
+    /// remembered is a late or foreign frame and is left alone rather than toasted: it has no
+    /// label to name, and a success sentence about nothing would be worse than silence.
+    ///
+    /// The refusal path is a different frame entirely — an error, which the loop's own arm toasts
+    /// — so `ok == false` here is the node's explicit no, and it says so without inventing a
+    /// reason the wire did not carry.
+    fn on_report_filed(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
+            return;
+        };
+        let Some(label) = self
+            .pending_report
+            .take_if(|(correlation, _)| *correlation == frame.header.correlation)
+            .map(|(_, label)| label)
+        else {
+            return;
+        };
+        if acknowledged.ok {
+            self.sink.toast(
+                format!("Thanks — {label} has been reported. Our moderators will review it."),
+                ToastKind::Success,
+            );
+        } else {
+            self.sink
+                .toast("The server refused the report", ToastKind::Error);
         }
     }
 
@@ -8344,7 +8429,8 @@ impl Worker {
             // just not the page the pane asked for, and an ask left standing would hold its
             // correlation against a reply that never comes. A refused sanction retires the same
             // way — an error frame carries no opcode to say whose ask it refuses, so the
-            // correlation is the one exact key here too.
+            // correlation is the one exact key here too — and a refused report alongside it, so
+            // that the label it remembered cannot be spent on a later report's ack.
             self.room_roster_asks.remove(&frame.header.correlation);
             self.people_asks.remove(&frame.header.correlation);
             if self
@@ -8353,6 +8439,13 @@ impl Worker {
                 .is_some_and(|(correlation, _)| *correlation == frame.header.correlation)
             {
                 self.pending_room_sanction = None;
+            }
+            if self
+                .pending_report
+                .as_ref()
+                .is_some_and(|(correlation, _)| *correlation == frame.header.correlation)
+            {
+                self.pending_report = None;
             }
             self.sink.toast(error.to_string(), ToastKind::Error);
             return;
@@ -8455,6 +8548,10 @@ impl Worker {
             Opcode::RoomVoteKick => self.on_room_vote_reply(&frame),
             Opcode::RoomVoteEvent => self.on_room_vote_event(&frame),
             Opcode::RoomSanction => self.on_room_sanction_ack(&frame).await,
+            // The report queue's one answer. It names the case nowhere — see `crate::report` on
+            // why the node keeps the reply bare — so the arm's whole job is the word to the
+            // reporter, built from the label the ask remembered.
+            Opcode::ReportCreate => self.on_report_filed(&frame),
             Opcode::RoomMemberEvent => self.on_room_member(&frame).await,
             Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),
@@ -9595,6 +9692,29 @@ fn is_membership_change(change: migo_protocol::MemberChange) -> bool {
     )
 }
 
+/// Composes the `REPORT_CREATE` body from this client's own report vocabulary.
+///
+/// A free function rather than three lines inside the worker, because the numbering it performs is
+/// the whole contract: `crate::report` pins what each code *means*, and this pins that the meaning
+/// lands in the field the node reads it from. The two are different mistakes — a renumbered reason
+/// rewrites history, a swapped field files every report about the wrong thing — and only the second
+/// one lives here.
+///
+/// The note is passed through as given: the sheet has already trimmed it and dropped an empty one,
+/// and a second trim here would be a second opinion about what the reporter wrote.
+fn report_filing(
+    target: &crate::report::ReportTarget,
+    reason: crate::report::ReportReason,
+    note: Option<String>,
+) -> migo_protocol::ReportFile {
+    migo_protocol::ReportFile {
+        subject_kind: target.kind.wire(),
+        subject_id: target.id,
+        reason: reason.wire(),
+        note,
+    }
+}
+
 /// Projects decrypted [`Content`] onto the UI's [`Body`] — and the sealed disappearing
 /// lifetime, when one is present, onto the deadline the UI's own sweep reads.
 ///
@@ -10481,5 +10601,44 @@ mod tests {
         // A conversation with no draft bytes at all reads back as nothing, encoded or not.
         assert!(voice_draft_note(&store, id_of(0x7B)).is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The filing puts each half of the vocabulary in the field the node reads it from. `crate::report`
+    /// already pins what the numbers mean; this pins that they arrive labelled — a swap of subject and
+    /// reason here would be accepted by the wire, charged to the account, and queued as a report about
+    /// the wrong thing by the wrong name.
+    #[test]
+    fn a_filing_carries_the_kind_the_id_and_the_reason_in_their_own_fields() {
+        let subject = id_of(0x21);
+        let target = crate::report::ReportTarget::user(subject, "Ana");
+        let filing = report_filing(
+            &target,
+            crate::report::ReportReason::Impersonation,
+            Some("a copy of my profile".to_owned()),
+        );
+        assert_eq!(0, filing.subject_kind, "an account is kind 0 on the wire");
+        assert_eq!(
+            subject, filing.subject_id,
+            "the id, not the label, is the key"
+        );
+        assert_eq!(9, filing.reason, "impersonation is code 9");
+        assert_eq!(
+            Some("a copy of my profile".to_owned()),
+            filing.note,
+            "the reporter's own words travel as given"
+        );
+
+        // A message is a different kind and a different id, and the two never borrow each other's
+        // field — the shape a copy-paste between the five doors would break.
+        let message = id_of(0x22);
+        let filing = report_filing(
+            &crate::report::ReportTarget::message(message),
+            crate::report::ReportReason::Spam,
+            None,
+        );
+        assert_eq!(1, filing.subject_kind);
+        assert_eq!(message, filing.subject_id);
+        assert_eq!(0, filing.reason);
+        assert_eq!(None, filing.note, "an absent note stays absent, not empty");
     }
 }
