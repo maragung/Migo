@@ -21,9 +21,20 @@
 
 use std::sync::Arc;
 
-use migo_core::metrics::{Counter, Registry};
+use migo_core::metrics::{Counter, Histogram, Registry};
 
 use crate::model::EndReason;
+
+/// Bucket bounds for `migo_call_setup_seconds`, in seconds.
+///
+/// The observation is the client's own `setup_ms` from `CALL_STATS` — initiation to media
+/// up, as the one party that can see both ends measures it — so the bounds span what that
+/// number can honestly be: a sub-second local answer at the bottom, a human taking the
+/// call at a ring's length in the middle, and the long tail a satellite link earns at the
+/// top. No bound is fine enough to tell one call from another; only transport scale.
+const SETUP_SECONDS_BUCKETS: &[f64] = &[
+    0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0,
+];
 
 /// How an invite ended up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +214,8 @@ pub(crate) struct Meters {
     relayed: Vec<Arc<Counter>>,
     connected: Arc<Counter>,
     expired: Arc<Counter>,
+    setup_seconds: Arc<Histogram>,
+    turn_fallback: Arc<Counter>,
     group_join: Vec<Arc<Counter>>,
     group_left: Arc<Counter>,
     group_relayed: Arc<Counter>,
@@ -271,6 +284,23 @@ impl Meters {
                 "Invites retired by the expiry sweep or on answer.",
                 &[],
             ),
+            setup_seconds: registry.histogram(
+                "migo_call_setup_seconds",
+                "Call setup latency in seconds, as the client reports it over CALL_STATS: \
+                 from its own initiation to media being up. The server cannot measure this \
+                 itself — it never sees the media — so the number is the one party that can \
+                 see both ends.",
+                &[],
+                SETUP_SECONDS_BUCKETS,
+            ),
+            turn_fallback: registry.counter(
+                "migo_call_turn_fallback_total",
+                "Calls whose client reported the media fell back from P2P to a TURN relay. \
+                 Reported, not observed: the relay is between the two devices and this \
+                 server never sees the media, so the count is the client's own used_turn \
+                 claim from CALL_STATS.",
+                &[],
+            ),
             group_join: GroupJoinKind::ALL
                 .iter()
                 .map(|outcome| {
@@ -335,6 +365,22 @@ impl Meters {
         if let Some(counter) = self.ended.get(EndReason::NoAnswer.to_wire() as usize) {
             counter.add(count as u64);
         }
+    }
+
+    /// Records one client-reported setup latency, in milliseconds, on the setup histogram.
+    ///
+    /// The value is the client's own measurement, accepted as-is: a number this node could
+    /// not check is still the number an operator pages on, and the alternative — deriving
+    /// something from the call row's timestamps — would measure a different thing (invite
+    /// to connected on the server's clock) and answer a different question.
+    pub(crate) fn setup_observed(&self, setup_ms: u32) {
+        // A u32 of milliseconds widened to f64 loses nothing below 24 days.
+        self.setup_seconds.observe(f64::from(setup_ms) / 1000.0);
+    }
+
+    /// Counts one client-reported TURN fallback: media that left P2P for a relay.
+    pub(crate) fn turn_fallback(&self) {
+        self.turn_fallback.inc();
     }
 
     pub(crate) fn group_join(&self, outcome: GroupJoinKind) {

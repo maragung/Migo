@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::Opcode;
+use migo_protocol::{CallStats, Opcode};
 
 use crate::model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, Caller, GroupCall, GroupJoinOutcome,
@@ -237,6 +237,16 @@ pub trait Callkeeper: Send + Sync {
     /// per-call, and a caller who can name a call id they are not in learns
     /// nothing from an empty list.
     async fn turn_servers(&self, call_id: Id) -> Result<Vec<TurnServerWire>>;
+
+    /// Records one client-reported quality sample (`CALL_STATS`).
+    ///
+    /// Metrics only: the setup latency histogram and the TURN-fallback
+    /// counter are fed here, and nothing else moves. The caller must be a
+    /// party to the call for the sample to count — a stranger naming ids is
+    /// answered silence rather than an error, because a Droppable metrics
+    /// frame has no answer of its own to protect and the endpoint must not
+    /// become a probe for which call ids exist.
+    async fn stats(&self, caller: &Caller, stats: CallStats) -> Result<()>;
 
     /// Ends every invite whose deadline has passed, returning the retired
     /// calls.

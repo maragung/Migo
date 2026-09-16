@@ -1289,6 +1289,15 @@ async fn a_ranged_fetch_for_a_purged_range_is_answered_sequence_gap() {
         .expect("a range below the watermark is a no-op");
     assert!(noop.messages.is_empty());
     assert_eq!(noop.status, SyncStatus::Ok);
+
+    // Two detections, one series: the ranged fetch the sweeper had already taken,
+    // and the un-ranged page that reported the hole through the Truncated status.
+    // The survivor range and the no-op range moved nothing.
+    assert_eq!(
+        harness.metric("migo_conversation_seq_gap_total"),
+        Some(2.0),
+        "one SEQUENCE_GAP answer and one Truncated page, and nothing else, are gaps"
+    );
 }
 
 #[tokio::test]
@@ -2122,6 +2131,7 @@ async fn every_series_is_registered_before_anything_happens() {
         "migo_messaging_conversation_pages_total",
         "migo_messaging_receipts_ignored_total",
         "migo_messaging_expired_total",
+        "migo_conversation_seq_gap_total",
     ] {
         assert_eq!(
             harness.metric(series),

@@ -1649,6 +1649,9 @@ impl<T: Transport> Connection<'_, T> {
         );
         if let Err(error) = self.gateway.dispatcher.dispatch(&context, frame).await {
             // The handler chose to let the driver send the error (section 139 reply rules).
+            // Counted before the reply so an error that cannot be written still lands on the
+            // series an operator pages on.
+            self.gateway.meters.error(&error);
             let _ = context.reply_error(&error);
         }
         FrameOutcome::Continue
@@ -1706,6 +1709,9 @@ impl<T: Transport> Connection<'_, T> {
                 false
             }
             Err(error) => {
+                // The limiter itself failed — not a verdict, an error — so it is counted on
+                // the error series the same way a handler error is, and never as a rejection.
+                meters.error(&error);
                 push_error(
                     outbound,
                     meters,

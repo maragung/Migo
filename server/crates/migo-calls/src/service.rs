@@ -72,7 +72,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::{codes, fault, CallInviteEvent, CallStateEvent, Opcode};
+use migo_protocol::{codes, fault, CallInviteEvent, CallStateEvent, CallStats, Opcode};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 
 use crate::group_store::{
@@ -773,6 +773,33 @@ where
         // the answer a client can act on (relay off, direct connection only)
         // rather than a promise pointing at nothing.
         Ok(self.config.turn_servers.clone())
+    }
+
+    async fn stats(&self, caller: &Caller, stats: CallStats) -> Result<()> {
+        if stats.call_id.is_nil() {
+            return Err(fault::field_required("call_id"));
+        }
+        // The party check `call` makes, answered with silence instead of
+        // NOT_FOUND: a stats frame is Droppable metrics with no state to
+        // protect, and a stranger probing call ids must not be told which
+        // ones exist by a frame whose entire purpose is to be counted.
+        let Some(call) = self.store.get(stats.call_id).await? else {
+            return Ok(());
+        };
+        if call.other_party(caller.account_id).is_none() {
+            return Ok(());
+        }
+        // The numbers are the client's own claims about its own call, taken
+        // as-is: this node never sees the media, so it cannot check either —
+        // and a client that over-reports TURN usage only pollutes a series
+        // about itself in the aggregate, never anybody else's.
+        if let Some(setup_ms) = stats.setup_ms {
+            self.meters.setup_observed(setup_ms);
+        }
+        if stats.used_turn == Some(true) {
+            self.meters.turn_fallback();
+        }
+        Ok(())
     }
 
     async fn sweep(&self, now: Timestamp) -> Result<Vec<Call>> {

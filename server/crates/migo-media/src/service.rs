@@ -524,6 +524,14 @@ where
             .await
             .inspect_err(|_| self.meters.refused(Refused::Storage))?
             .unwrap_or(0);
+        // The resume moment, counted where it happens: storage holds some of the
+        // bytes but not all of them, so this answer is the point a client that
+        // lost its connection continues from (section 168). A blank answer is a
+        // client asking before it started; a complete one is a client about to
+        // commit — neither is a resume, and neither counts.
+        if uploaded_bytes > 0 && uploaded_bytes < claim.byte_size {
+            self.meters.resumed();
+        }
         Ok(Progress {
             media_id: claim.media_id,
             uploaded_bytes,

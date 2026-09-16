@@ -38,7 +38,7 @@ use migo_calls::{Calls, MemoryGroupCallStore};
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Timestamp};
-use migo_protocol::{codes, Opcode, TurnServer};
+use migo_protocol::{codes, CallStats, Opcode, TurnServer};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 
 const SECOND: i64 = 1_000;
@@ -1115,6 +1115,84 @@ async fn turn_servers_is_configured_and_empty_by_default() {
 }
 
 #[tokio::test]
+async fn stats_from_a_party_count_and_stats_from_a_stranger_do_not() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .expect("the call rings");
+
+    // A party's sample, with both quality numbers the series care about.
+    harness
+        .calls
+        .stats(
+            &alice(NOW),
+            CallStats {
+                call_id: id(CALL),
+                setup_ms: Some(2_500),
+                used_turn: Some(true),
+                ..CallStats::default()
+            },
+        )
+        .await
+        .expect("a party may report quality numbers");
+    assert_eq!(setup_samples(&harness.registry), 1);
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_turn_fallback_total", "", &[])
+            .get(),
+        1
+    );
+
+    // A stranger naming the same id: answered silence, and no series moves —
+    // a metrics frame must not become a probe for which calls exist.
+    harness
+        .calls
+        .stats(
+            &caller(CAROL, CAROL_PHONE, NOW),
+            CallStats {
+                call_id: id(CALL),
+                setup_ms: Some(9_999),
+                used_turn: Some(true),
+                ..CallStats::default()
+            },
+        )
+        .await
+        .expect("a stranger is not refused, only uncounted");
+    assert_eq!(setup_samples(&harness.registry), 1);
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_turn_fallback_total", "", &[])
+            .get(),
+        1
+    );
+
+    // A nil id is a shape error, the same as every other method here.
+    let error = harness
+        .calls
+        .stats(
+            &alice(NOW),
+            CallStats {
+                call_id: Id::NIL,
+                ..CallStats::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::FIELD_REQUIRED);
+}
+
+/// How many observations the setup histogram holds.
+fn setup_samples(registry: &Registry) -> u64 {
+    registry
+        .histogram("migo_call_setup_seconds", "", &[], &[1.0])
+        .count()
+}
+
+#[tokio::test]
 async fn turn_servers_returns_what_was_configured() {
     let settings = Config::default();
     let registry = Registry::new();
@@ -1162,6 +1240,8 @@ async fn every_series_is_registered_at_zero() {
         "migo_calls_relayed_total",
         "migo_calls_connected_total",
         "migo_calls_expired_total",
+        "migo_call_setup_seconds",
+        "migo_call_turn_fallback_total",
     ] {
         assert!(
             rendered.contains(series),

@@ -1824,6 +1824,11 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
     assert_eq!(fresh.media_id, ticket.media_id);
     assert_eq!(fresh.expires_at, ticket.expires_at);
     assert!(!fresh.is_complete());
+    assert_eq!(
+        harness.plain("migo_media_upload_resume_total"),
+        0,
+        "a blank answer is a client asking before it started, not a resume"
+    );
 
     // Eight thousand of ten thousand.
     harness.push_bytes(&payload(PNG, 8_000));
@@ -1834,6 +1839,11 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
         .expect("status answers");
     assert_eq!(partial.uploaded_bytes, 8_000);
     assert!(!partial.is_complete());
+    assert_eq!(
+        harness.plain("migo_media_upload_resume_total"),
+        1,
+        "the partial answer is the resume point the client continues from"
+    );
 
     // The rest.
     harness.push_bytes(&payload(PNG, 10_000));
@@ -1843,6 +1853,11 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
         .await
         .expect("status answers");
     assert!(done.is_complete());
+    assert_eq!(
+        harness.plain("migo_media_upload_resume_total"),
+        1,
+        "a complete answer is a client about to commit, not a resume"
+    );
 }
 
 #[tokio::test]

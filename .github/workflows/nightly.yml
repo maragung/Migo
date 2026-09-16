@@ -307,6 +307,18 @@ jobs:
   # still reproduces exactly: re-run with that date's SIM_SEED and FUZZ_CASES.
   # Unbounded continuous fuzz stays SPEC — it needs the nightly toolchain and
   # deliberately lives outside every gate.
+  #
+  # Failure reporting: nothing in this repository notifies anyone on red (the
+  # audit job below is the precedent — "reports, does not gate"), so a fuzz
+  # finding's reporting mechanism is the run itself. This job deliberately
+  # does NOT set continue-on-error: a finding fails the whole nightly run,
+  # which is the loudest signal GitHub gives without wiring a notifier — a red
+  # run in the Actions tab, plus the scheduled-run failure email GitHub sends
+  # the workflow's author by default. Annotating the failure away with
+  # continue-on-error would make the run green with a footnote, and a green
+  # nightly is exactly the "silently passing" a fuzz find must never be. A
+  # finding reproduces by re-running this job manually with the failed run's
+  # date substituted into SIM_SEED at the same FUZZ_CASES.
   fuzz-long:
     name: Longer seeded fuzz (brief section 172, the daily run)
     runs-on: ubuntu-latest
