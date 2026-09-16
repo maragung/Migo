@@ -3282,10 +3282,18 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The honest one-liner under the count: this build carries the roster, not the media. */
-.call-roster-note {
+/* A seat's state word: Connecting…, Degraded, Audio only — a fact, never a spinner alone. */
+.group-call-seat-state {
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* The self-view: a small, dim-cornered tile above the roster, muted by construction. */
+.group-call-self-video {
+  width: min(160px, 40vw);
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+  z-index: 1;
 }
 
 /* --- settings, profiles, rooms, presence, gifts: the expanded feature surfaces --- */

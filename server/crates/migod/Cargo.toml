@@ -65,6 +65,11 @@ tracing      = { workspace = true }
 quinn        = { workspace = true }
 rustls       = { workspace = true }
 rcgen        = { workspace = true }
+# The mandatory TLS 1.3 channel on the mesh links (section 7): tokio-rustls wraps the
+# tokio TCP streams the mesh transport dials and accepts, and rustls-webpki reads a
+# presented leaf's public key for the allow-list pin.
+tokio-rustls  = { workspace = true }
+rustls-webpki = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
