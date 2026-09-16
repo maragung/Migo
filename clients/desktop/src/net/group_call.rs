@@ -1234,7 +1234,7 @@ mod tests {
         // A second listing adds nothing: the entry is held, and it is not re-said. A seat this
         // device holds is the roster's, a direct call's screen reads the invite stream, and a
         // conversation already announced is never overwritten by an older answer.
-        calls.spectate(spectator_event(other, other_call, Some(2)));
+        calls.spectate(&spectator_event(other, other_call, Some(2)));
         assert!(calls
             .spectate_listing(&[
                 listed_entry(conversation, call, 1, 0, 3),

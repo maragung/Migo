@@ -63,6 +63,7 @@ import type {
   CallStats,
   TurnServer,
   CallListEntry,
+  CallListQuery,
 } from '@migo/protocol';
 
 import { newId } from '../ids.js';
@@ -395,9 +396,15 @@ export class CallsDomain {
    * a reconnect should attach to rather than place a second one beside.
    */
   async listCalls(conversationId?: Id): Promise<CallListEntry[]> {
-    const response = await this.#rpc.call(OP.CALL_LIST, encodeCallListQuery, decodeCallListResult, {
-      conversationId,
-    });
+    // The optional field is left *absent* rather than set to `undefined`: the query's own type
+    // says `conversationId?: Id`, and an absent field is what the encoder reads as "no scope".
+    const query: CallListQuery = conversationId === undefined ? {} : { conversationId };
+    const response = await this.#rpc.call(
+      OP.CALL_LIST,
+      encodeCallListQuery,
+      decodeCallListResult,
+      query,
+    );
     return response.calls;
   }
 

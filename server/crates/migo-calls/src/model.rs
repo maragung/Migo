@@ -272,8 +272,11 @@ impl Call {
     /// Whoever `account_id` is not — which is the only answer a two-party row
     /// can give, and the one a listing needs: a client showing "call with X"
     /// asks the row who X is, and the row is the only thing that knows.
+    ///
+    /// Not `const`: `Id`'s equality is derived, so the comparison is an operator
+    /// call the compiler will not admit into a constant function.
     #[must_use]
-    pub const fn peer_of(&self, account_id: Id) -> Id {
+    pub fn peer_of(&self, account_id: Id) -> Id {
         if self.caller_id == account_id {
             self.callee_id
         } else {
