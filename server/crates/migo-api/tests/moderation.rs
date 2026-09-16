@@ -74,8 +74,9 @@ const NOW_MS: i64 = 1_800_000_000_000;
 /// bucket — a registration is the expensive thing a spam operation needs thousands of — and the
 /// endpoint surface is half the anonymous budget, so ten is the ceiling a single registration can
 /// cost without being refused outright. This suite registers several accounts, so it pays a small
-/// constant instead. The limiter is still present and still charged, and every registration below
-/// comes from a distinct /24 so no two share a network bucket.
+/// constant instead, and [`Harness::account`] gives each of them a network of its own: the bucket is
+/// keyed on the truncated network, so two registrations from one /24 queue behind one another while
+/// two from different /24s do not. The limiter is still present and still charged either way.
 const REGISTRATION_COST: u32 = 4;
 
 /// The node identity the surface reports at `/v1/config`.
@@ -137,6 +138,8 @@ struct Harness {
     roster: Arc<TestRoster>,
     warden: SharedWarden,
     store: Arc<MemoryStore>,
+    /// Hands every registered account a network of its own. See [`Harness::account`].
+    networks: std::sync::atomic::AtomicU8,
 }
 
 impl Harness {
@@ -205,6 +208,7 @@ impl Harness {
             roster,
             warden,
             store,
+            networks: std::sync::atomic::AtomicU8::new(1),
         }
     }
 
@@ -226,9 +230,16 @@ impl Harness {
 
     /// Registers an account and returns its id and access token.
     ///
-    /// The address is distinct per call and the registration price is small, so several accounts
-    /// can be created in one test without colliding in the anonymous bucket.
-    async fn account(&self, ip: &str, username: &str) -> (Id, String) {
+    /// Each call gets a network of its own. The anonymous bucket that guards registration is keyed
+    /// on the truncated network rather than on the address, so a test that registers three accounts
+    /// from one /24 is asking one bucket for three registrations and is refused the third — which
+    /// says something about the limiter and nothing about the surface under test. Walking the third
+    /// octet keeps every test's registrations in buckets that cannot see each other.
+    async fn account(&self, username: &str) -> (Id, String) {
+        let network = self
+            .networks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ip = format!("203.0.{network}.10");
         let body = json!({
             "username": username,
             "passphrase": GOOD_PASSPHRASE,
@@ -238,7 +249,7 @@ impl Harness {
             .send(build_req(
                 Method::POST,
                 "/v1/auth/register",
-                Some(ip),
+                Some(&ip),
                 None,
                 Some(&body),
             ))
@@ -416,7 +427,7 @@ async fn whoami_answers_an_ordinary_account_with_no_powers() {
     // The answer, not an error: a dashboard calls this before it renders, and an account with no
     // powers has to be told so rather than shown a page of buttons that refuse.
     let h = Harness::new();
-    let (account_id, token) = h.account("203.0.113.1", "alice").await;
+    let (account_id, token) = h.account("alice").await;
     let resp = h.send(get("/v1/moderation/whoami", &token)).await;
     assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
     let body = resp.json();
@@ -432,7 +443,7 @@ async fn whoami_answers_an_ordinary_account_with_no_powers() {
 #[tokio::test]
 async fn whoami_answers_a_staff_account_with_its_powers() {
     let h = Harness::new();
-    let (account_id, token) = h.account("203.0.113.2", "bob").await;
+    let (account_id, token) = h.account("bob").await;
     h.appoint(account_id, Powers::TRIAGE.with(Powers::TAKEDOWN));
 
     let resp = h.send(get("/v1/moderation/whoami", &token)).await;
@@ -463,7 +474,7 @@ async fn whoami_without_a_token_is_unauthenticated() {
 #[tokio::test]
 async fn the_queue_refuses_an_ordinary_account() {
     let h = Harness::new();
-    let (_account_id, token) = h.account("203.0.113.3", "carol").await;
+    let (_account_id, token) = h.account("carol").await;
     let resp = h.send(get("/v1/moderation/queue", &token)).await;
     expect_error(&resp, StatusCode::FORBIDDEN, codes::PERMISSION_DENIED);
 }
@@ -471,9 +482,9 @@ async fn the_queue_refuses_an_ordinary_account() {
 #[tokio::test]
 async fn the_queue_lists_what_was_filed_longest_waiting_first() {
     let h = Harness::new();
-    let (reporter, token) = h.account("203.0.113.4", "dave").await;
-    let (first_subject, _) = h.account("203.0.113.5", "erin").await;
-    let (second_subject, _) = h.account("203.0.113.29", "finn").await;
+    let (reporter, token) = h.account("dave").await;
+    let (first_subject, _) = h.account("erin").await;
+    let (second_subject, _) = h.account("finn").await;
     h.appoint(reporter, Powers::TRIAGE);
 
     let first = h
@@ -514,8 +525,8 @@ async fn a_queue_row_states_the_reason_it_was_filed_under_and_no_words_it_was_no
     // the message would be rendering content on a screen with no mute, and the reason a report is a
     // pointer is the same reason this is short.
     let h = Harness::new();
-    let (reporter, token) = h.account("203.0.113.6", "frank").await;
-    let (subject, _subject_token) = h.account("203.0.113.7", "grace").await;
+    let (reporter, token) = h.account("frank").await;
+    let (subject, _subject_token) = h.account("grace").await;
     h.appoint(reporter, Powers::TRIAGE);
     h.file(reporter, Subject::User(subject), Reason::Impersonation)
         .await;
@@ -533,8 +544,8 @@ async fn a_queue_row_states_the_reason_it_was_filed_under_and_no_words_it_was_no
 #[tokio::test]
 async fn one_case_answers_the_report_it_names() {
     let h = Harness::new();
-    let (reporter, token) = h.account("203.0.113.8", "heidi").await;
-    let (subject, _subject_token) = h.account("203.0.113.9", "ivan").await;
+    let (reporter, token) = h.account("heidi").await;
+    let (subject, _subject_token) = h.account("ivan").await;
     h.appoint(reporter, Powers::TRIAGE);
     let report_id = h.file(reporter, Subject::User(subject), Reason::Scam).await;
 
@@ -561,7 +572,7 @@ async fn an_unknown_report_is_not_found_rather_than_forbidden() {
     // report about somebody is exactly that, so a caller who may read the queue learns nothing from
     // an id it guessed wrong.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.10", "judy").await;
+    let (staff, token) = h.account("judy").await;
     h.appoint(staff, Powers::TRIAGE);
 
     let unknown = Id::from_bytes([0xAB; 16]);
@@ -576,8 +587,8 @@ async fn an_unknown_report_is_not_found_rather_than_forbidden() {
 #[tokio::test]
 async fn resolving_a_case_closes_it_and_records_who_ruled() {
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.11", "kim").await;
-    let (subject, _subject_token) = h.account("203.0.113.12", "liam").await;
+    let (staff, token) = h.account("kim").await;
+    let (subject, _subject_token) = h.account("liam").await;
     h.appoint(staff, Powers::TRIAGE);
     let report_id = h
         .file(staff, Subject::User(subject), Reason::Harassment)
@@ -610,11 +621,17 @@ async fn resolving_a_case_closes_it_and_records_who_ruled() {
         .await;
     assert_eq!(trail.status, StatusCode::OK, "body={}", trail.text());
     let entries = trail.json()["entries"].as_array().expect("a list").clone();
-    assert_eq!(1, entries.len());
+    // Two rows stand on this target and not one: filing a report is itself an audited act, so the
+    // trail an auditor reads here is the whole life of the report rather than only its ending. The
+    // newer row is first, which is what makes the head of the list the ruling.
+    assert_eq!(2, entries.len());
     assert_eq!(entries[0]["action"], "moderation.report.resolve");
     assert_eq!(entries[0]["target_kind_name"], "report");
     assert_eq!(entries[0]["actor_kind_name"], "operator");
     assert_eq!(entries[0]["reason"], "warned, first offence");
+    // And behind it, the filing, with the reporter on it rather than the operator.
+    assert_eq!(entries[1]["action"], "moderation.report.create");
+    assert_eq!(entries[1]["actor_kind_name"], "user");
 }
 
 #[tokio::test]
@@ -622,8 +639,8 @@ async fn a_second_ruling_on_the_same_case_is_a_conflict() {
     // Two moderators opening the same report is normal; both of them deciding it is not, and the
     // second one is told rather than having their verdict silently overwrite the first.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.13", "mona").await;
-    let (subject, _subject_token) = h.account("203.0.113.30", "nate").await;
+    let (staff, token) = h.account("mona").await;
+    let (subject, _subject_token) = h.account("nate").await;
     h.appoint(staff, Powers::TRIAGE);
     let report_id = h.file(staff, Subject::User(subject), Reason::Other).await;
     let path = format!("/v1/moderation/case/{report_id}/resolve");
@@ -641,8 +658,8 @@ async fn a_stale_session_cannot_rule() {
     // signed in on Monday morning and left the tab open can read the queue and cannot close a case
     // until they prove a factor again.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.14", "nina").await;
-    let (subject, _subject_token) = h.account("203.0.113.31", "olive").await;
+    let (staff, token) = h.account("nina").await;
+    let (subject, _subject_token) = h.account("olive").await;
     h.appoint(staff, Powers::TRIAGE);
     let report_id = h.file(staff, Subject::User(subject), Reason::Spam).await;
 
@@ -671,7 +688,7 @@ async fn an_ordinary_stale_account_is_refused_for_being_ordinary() {
     // it: a caller who is not staff must not learn that a freshness rule exists. The answer is the
     // one they would have got a second after signing in.
     let h = Harness::new();
-    let (_account_id, token) = h.account("203.0.113.15", "omar").await;
+    let (_account_id, token) = h.account("omar").await;
     h.advance(STALE_MS);
     let resp = h
         .send(post(
@@ -688,8 +705,8 @@ async fn an_ordinary_stale_account_is_refused_for_being_ordinary() {
 #[tokio::test]
 async fn suspending_an_account_records_it_and_names_the_action_it_took() {
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.16", "pia").await;
-    let (target, _target_token) = h.account("203.0.113.17", "quinn").await;
+    let (staff, token) = h.account("pia").await;
+    let (target, _target_token) = h.account("quinn").await;
     h.appoint(staff, Powers::ALL);
 
     let resp = h
@@ -732,8 +749,8 @@ async fn a_triage_moderator_may_warn_and_may_not_suspend() {
     // The split the roster makes: reading the queue and warning ride together, closing an account
     // does not. The refusal names no power, which is the same rule the queue's own refusal follows.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.18", "rosa").await;
-    let (target, _target_token) = h.account("203.0.113.19", "sam").await;
+    let (staff, token) = h.account("rosa").await;
+    let (target, _target_token) = h.account("sam").await;
     h.appoint(staff, Powers::TRIAGE);
 
     let warn = h
@@ -762,7 +779,7 @@ async fn a_content_takedown_delivers_no_notice_and_that_is_the_answer() {
     // who wrote the message — rather than a decision about what a user deserves. The route reports
     // it as null rather than inventing an audience, and the takedown itself still goes through.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.20", "tara").await;
+    let (staff, token) = h.account("tara").await;
     h.appoint(staff, Powers::ALL);
     let conversation_id = Id::from_bytes([2u8; 16]);
     let message_id = Id::from_bytes([3u8; 16]);
@@ -802,7 +819,7 @@ async fn a_takedown_of_something_that_is_not_there_is_not_found() {
     // The message is gone or was never there, and the answer is the same either way: the action did
     // not happen, so no audit row claims it did.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.28", "vito").await;
+    let (staff, token) = h.account("vito").await;
     h.appoint(staff, Powers::ALL);
 
     let resp = h
@@ -822,7 +839,7 @@ async fn a_takedown_of_something_that_is_not_there_is_not_found() {
 #[tokio::test]
 async fn an_unknown_action_word_is_refused() {
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.21", "uma").await;
+    let (staff, token) = h.account("uma").await;
     h.appoint(staff, Powers::ALL);
 
     let resp = h
@@ -848,8 +865,8 @@ async fn the_audit_route_needs_the_audit_power() {
     // should not need the ability to do it themselves. The converse is the part worth pinning — the
     // power to act is not the power to read the trail.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.22", "vera").await;
-    let (target, _target_token) = h.account("203.0.113.23", "walt").await;
+    let (staff, token) = h.account("vera").await;
+    let (target, _target_token) = h.account("walt").await;
     h.appoint(
         staff,
         Powers::TRIAGE.with(Powers::TAKEDOWN).with(Powers::SUSPEND),
@@ -867,8 +884,8 @@ async fn the_audit_route_needs_the_audit_power() {
 #[tokio::test]
 async fn an_auditor_who_may_not_act_can_still_read_the_trail() {
     let h = Harness::new();
-    let (auditor, token) = h.account("203.0.113.24", "xena").await;
-    let (target, _target_token) = h.account("203.0.113.25", "yuri").await;
+    let (auditor, token) = h.account("xena").await;
+    let (target, _target_token) = h.account("yuri").await;
     h.appoint(auditor, Powers::AUDIT);
 
     let trail = h
@@ -899,7 +916,7 @@ async fn an_auditor_who_may_not_act_can_still_read_the_trail() {
 #[tokio::test]
 async fn an_unknown_audit_target_kind_is_a_validation_error() {
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.26", "zoe").await;
+    let (staff, token) = h.account("zoe").await;
     h.appoint(staff, Powers::ALL);
 
     let resp = h
@@ -920,7 +937,7 @@ async fn every_audit_kind_the_table_names_is_a_route_this_build_answers() {
     // *reported* must be a kind that can be *asked about*. A name that only went one way would
     // leave a dashboard unable to follow up on a row it had just been shown.
     let h = Harness::new();
-    let (staff, token) = h.account("203.0.113.27", "ada").await;
+    let (staff, token) = h.account("ada").await;
     h.appoint(staff, Powers::ALL);
     let target = Id::from_bytes([6u8; 16]);
 
