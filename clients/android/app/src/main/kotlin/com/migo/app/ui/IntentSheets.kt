@@ -27,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.RoomLiveInfo
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RoomSummary
@@ -96,14 +95,14 @@ fun MigoSheet(
                         .size(32.dp)
                         .background(
                             MaterialTheme.colorScheme.surfaceVariant,
-                            RoundedCornerShape(9.dp),
+                            RoundedCornerShape(MigoRadius.md),
                         )
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = "✕",
-                        fontSize = 14.sp,
+                        fontSize = MigoType.titleSm,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -141,13 +140,13 @@ fun SheetAction(
                 .size(36.dp)
                 .background(
                     if (danger) scheme.errorContainer else scheme.surfaceVariant,
-                    RoundedCornerShape(10.dp),
+                    RoundedCornerShape(MigoRadius.md),
                 ),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = glyph,
-                fontSize = 16.sp,
+                fontSize = MigoType.title,
                 color = if (danger) scheme.onErrorContainer else scheme.onSurfaceVariant,
             )
         }
@@ -171,7 +170,7 @@ fun SheetAction(
                 )
             }
         }
-        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
+        Text(text = "›", fontSize = MigoGlyph.inline, color = LocalMigoExtra.current.faint)
     }
 }
 
@@ -188,7 +187,7 @@ fun SheetPrimaryAction(
     Button(
         onClick = onClick,
         enabled = enabled,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(MigoRadius.lg),
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.tertiary,
             contentColor = MaterialTheme.colorScheme.onTertiary,
@@ -324,13 +323,13 @@ fun RoomIntentSheet(
                     .size(44.dp)
                     .background(
                         MaterialTheme.colorScheme.surfaceVariant,
-                        RoundedCornerShape(12.dp),
+                        RoundedCornerShape(MigoRadius.lg),
                     ),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = "#",
-                    fontSize = 20.sp,
+                    fontSize = MigoType.display,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

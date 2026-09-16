@@ -49,7 +49,7 @@ fun PanelBar(
             val pillInk = Color(0xFF0D6373)
             Row(
                 modifier = Modifier
-                    .background(color = extra.navActive, shape = RoundedCornerShape(8.dp))
+                    .background(color = extra.navActive, shape = RoundedCornerShape(MigoRadius.md))
                     .clickable(onClick = onBack)
                     // The back control is the panel's only way out, so its touch target clears
                     // the 48dp minimum even though its visible text is a short label row.

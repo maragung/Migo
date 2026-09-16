@@ -53,7 +53,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.net.CaptchaChallenge
 import com.migo.core.store.GatewayScheme
@@ -194,7 +193,7 @@ fun SignInScreen(
                 Surface(
                     color = Color(0xFF0B6F82),
                     contentColor = Color.White,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(MigoRadius.lg),
                     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -223,7 +222,7 @@ fun SignInScreen(
                             placeholder = { Text(identifierLabel) },
                             singleLine = true,
                             enabled = !form.busy,
-                            shape = RoundedCornerShape(8.dp),
+                            shape = RoundedCornerShape(MigoRadius.md),
                             colors = authFieldColors(),
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Email,
@@ -243,7 +242,7 @@ fun SignInScreen(
                             singleLine = true,
                             enabled = !form.busy,
                             visualTransformation = PasswordVisualTransformation(),
-                            shape = RoundedCornerShape(8.dp),
+                            shape = RoundedCornerShape(MigoRadius.md),
                             colors = authFieldColors(),
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Password,
@@ -297,7 +296,7 @@ fun SignInScreen(
                                 }
                             },
                             enabled = !form.busy && (!restoring || containerUri != null),
-                            shape = RoundedCornerShape(8.dp),
+                            shape = RoundedCornerShape(MigoRadius.md),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = extra.bannerA,
                                 contentColor = extra.bannerInk,
@@ -376,7 +375,7 @@ fun SignInScreen(
                             Text(
                                 text = "Your identity key is generated here and never sent to the server. " +
                                     "Signing out destroys it.",
-                                fontSize = 12.sp,
+                                fontSize = MigoType.body,
                                 color = Color.White.copy(alpha = 0.82f),
                                 textAlign = TextAlign.Center,
                             )
@@ -385,7 +384,7 @@ fun SignInScreen(
                             Text(
                                 text = "The backup carries your account root. This device joins the account " +
                                     "as a new device, with a fresh identity of its own.",
-                                fontSize = 12.sp,
+                                fontSize = MigoType.body,
                                 color = Color.White.copy(alpha = 0.82f),
                                 textAlign = TextAlign.Center,
                             )
@@ -402,7 +401,7 @@ fun SignInScreen(
 private fun AuthLabel(text: String) {
     Text(
         text = text,
-        fontSize = 13.sp,
+        fontSize = MigoType.label,
         fontWeight = FontWeight.Bold,
         color = Color.White,
     )
@@ -443,7 +442,7 @@ private fun CaptchaField(
         Spacer(modifier = Modifier.height(6.dp))
         Surface(
             color = Color.White,
-            shape = RoundedCornerShape(8.dp),
+            shape = RoundedCornerShape(MigoRadius.md),
             modifier = Modifier.fillMaxWidth(),
         ) {
             if (picture != null) {
@@ -479,7 +478,7 @@ private fun CaptchaField(
                 placeholder = { Text("Type the code") },
                 singleLine = true,
                 enabled = enabled,
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(MigoRadius.md),
                 colors = authFieldColors(),
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Ascii,
@@ -763,7 +762,7 @@ private fun ServerDisclosure(
                     placeholder = { Text("migo.example.com") },
                     singleLine = true,
                     enabled = enabled,
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RoundedCornerShape(MigoRadius.md),
                     colors = authFieldColors(),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
@@ -780,7 +779,7 @@ private fun ServerDisclosure(
                         placeholder = { Text("18080") },
                         singleLine = true,
                         enabled = enabled,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = RoundedCornerShape(MigoRadius.md),
                         colors = authFieldColors(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Number,
@@ -796,7 +795,7 @@ private fun ServerDisclosure(
                         placeholder = { Text("(REST + 1)") },
                         singleLine = true,
                         enabled = enabled,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = RoundedCornerShape(MigoRadius.md),
                         colors = authFieldColors(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Number,

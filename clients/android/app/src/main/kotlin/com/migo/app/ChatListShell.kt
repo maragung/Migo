@@ -36,7 +36,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.app.model.ConversationRow
 import com.migo.app.ui.ErrorBanner
@@ -45,6 +44,8 @@ import com.migo.app.ui.ListRowLine
 import com.migo.app.ui.ListRowName
 import com.migo.app.ui.LoadingRow
 import com.migo.app.ui.LocalMigoExtra
+import com.migo.app.ui.MigoRadius
+import com.migo.app.ui.MigoType
 import com.migo.app.ui.MobileHome
 import com.migo.app.ui.PanelBar
 import com.migo.app.ui.Placeholder
@@ -268,7 +269,7 @@ private fun ChatListRow(row: ConversationRow, onOpen: () -> Unit) {
         if (row.updatedAt > 0) {
             Text(
                 text = DateUtils.getRelativeTimeSpanString(row.updatedAt).toString(),
-                fontSize = 11.sp,
+                fontSize = MigoType.bodySm,
                 color = LocalMigoExtra.current.faint,
             )
         }
@@ -343,7 +344,7 @@ private fun ListNavItem(
             modifier = Modifier
                 .background(
                     color = if (active) extra.navActive else Color.White.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(9.dp),
+                    shape = RoundedCornerShape(MigoRadius.md),
                 )
                 .padding(horizontal = 12.dp, vertical = 7.dp),
         ) {
@@ -353,7 +354,7 @@ private fun ListNavItem(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.labelMedium,
-                    fontSize = 12.sp,
+                    fontSize = MigoType.body,
                     fontWeight = FontWeight.SemiBold,
                     color = ink,
                     maxLines = 1,

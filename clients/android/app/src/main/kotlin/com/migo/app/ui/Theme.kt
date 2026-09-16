@@ -1,7 +1,9 @@
 package com.migo.app.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -10,6 +12,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
@@ -114,6 +117,17 @@ private val DarkScheme = darkColorScheme(
 data class MigoExtra(
     /** The tertiary ink: hints, placeholders, timestamps' fainter sibling. */
     val faint: Color,
+    /**
+     * The list rows' name ink: the teal head the reference puts on a row's first line.
+     *
+     * A token rather than a value read from the system's dark setting, which is what the row
+     * helpers used to do: with the colours here, a screen rendered under an explicit
+     * `MigoTheme(dark = false)` keeps light ink even on a dark device, instead of the rows
+     * disagreeing with every other surface around them.
+     */
+    val rowName: Color,
+    /** The list rows' second line: the quieter ink under a name. */
+    val rowLine: Color,
     /** The gold of badges and honours — tertiary's own colour, stated as a plain value. */
     val gold: Color,
     /** The bubble an incoming message sits in: the sunken surface. */
@@ -138,6 +152,8 @@ data class MigoExtra(
 
 private val ExtraLight = MigoExtra(
     faint = Color(0xFF8FB0BB),
+    rowName = Color(0xFF0D6373),
+    rowLine = Color(0xFF5F8A99),
     gold = Color(0xFFF0A912),
     bubbleIn = PageGroundLight,
     coin = Color(0xFFF0A912),
@@ -154,6 +170,8 @@ private val ExtraLight = MigoExtra(
 
 private val ExtraDark = MigoExtra(
     faint = Color(0xFF7BA3AD),
+    rowName = Color(0xFF9ADCE8),
+    rowLine = Color(0xFFA3C4CD),
     gold = Color(0xFFF0A912),
     bubbleIn = SurfaceVariantDark,
     coin = Color(0xFFF0A912),
@@ -170,6 +188,110 @@ private val ExtraDark = MigoExtra(
 
 /** Reads the extra tokens like a `colorScheme` colour: `LocalMigoExtra.current.gold`. */
 val LocalMigoExtra = staticCompositionLocalOf { ExtraDark }
+
+/**
+ * The corner radii, named after the web client's own tokens so the two clients round the same
+ * things by the same amount.
+ *
+ * The web stylesheet declares exactly three radii — `--radius-sm: 4px`, `--radius: 6px`, and
+ * `--radius-lg: 12px` — plus a fully-rounded pill, and this object is those four by their web
+ * names. The reason a named scale exists at all is that the screens had eight different corner
+ * values between them (8, 9, 10, 12, 14, 16, 24 and the pill, as bare literals), which is not a
+ * design decision anybody made: it is what happens when every screen picks its own number.
+ *
+ * [pill] is 999 rather than 50% because Compose clamps a corner radius to half the shorter side, so
+ * the two spell the same shape while this one needs no measurement to write.
+ */
+object MigoRadius {
+    /** Inputs, buttons and the small chips — the web's `--radius-sm`. */
+    val sm = 4.dp
+
+    /** The default surface corner — the web's `--radius`. */
+    val md = 6.dp
+
+    /** Cards, sheets, dialogs and bubbles — the web's `--radius-lg`. */
+    val lg = 12.dp
+
+    /** Badges, avatars and anything that should read as a pill. */
+    val pill = 999.dp
+}
+
+/**
+ * The Material shape slots, pointed at [MigoRadius].
+ *
+ * This is the one place where not saying anything was itself a visible choice: with no `shapes`
+ * handed to [MaterialTheme], every Material 3 component falls back to the library's own scale
+ * (4/8/12/16/28dp), and that scale is far rounder than this product's. A filled `Button` drew at a
+ * 12dp corner while every hand-built chip beside it was drawn at 8 or 9 — so a screen holding both
+ * showed two corner languages at once, and the Material half was the one that did not look like the
+ * web client, whose buttons are 4px. Wiring the slots here is what makes a `Button`, a `Card`, a
+ * `TextField` and an `AlertDialog` round like the rest of Migo instead of like Material's demo.
+ */
+private val MigoShapes = Shapes(
+    extraSmall = RoundedCornerShape(MigoRadius.sm),
+    small = RoundedCornerShape(MigoRadius.sm),
+    medium = RoundedCornerShape(MigoRadius.md),
+    large = RoundedCornerShape(MigoRadius.lg),
+    extraLarge = RoundedCornerShape(MigoRadius.lg),
+)
+
+/**
+ * The type scale, as the web client names it.
+ *
+ * The web stylesheet declares seven steps — micro 10.5, meta 11.5, bodySm 11, body 12, titleSm 14,
+ * title 16, display 20 — and the screens here had drifted into thirteen sizes of their own
+ * (8.5, 9.5, 11, 11.5, 12, 13, 13.5, 14, 15, 16, 18, 20, 26) with no rule saying which was which.
+ * This is the web's seven plus one: [label], which the front door's form captions need and the web
+ * solves with its own 13px literal. A size is now a name a reader can look up rather than a number
+ * each screen re-decided.
+ */
+object MigoType {
+    /** Micro-labels: the smallest step, for counts and dense chrome. */
+    val micro = 10.5.sp
+
+    /** Metadata: timestamps, quiet second lines. */
+    val meta = 11.5.sp
+
+    /** The small body step, for dense secondary text. */
+    val bodySm = 11.sp
+
+    /** The body step: message text and ordinary copy. */
+    val body = 12.sp
+
+    /** A form label: the bold caption above an input, a step up from body for weight's sake. */
+    val label = 13.sp
+
+    /** A small title: list-row names and section headers. */
+    val titleSm = 14.sp
+
+    /** A title: conversation headers and panel titles. */
+    val title = 16.sp
+
+    /** The display step: screen and empty-state headings. */
+    val display = 20.sp
+}
+
+/**
+ * The sizes for characters used *as icons* — an emoji, a chevron, a check mark, the "✕" on a tab.
+ *
+ * These are not type steps and forcing them onto [MigoType] would be a mistake: a chevron is sized
+ * to sit optically beside a line of text, not to be read as text, and the two scales move for
+ * different reasons. They are collected here because they had the same problem the type scale did —
+ * the same glyph written at 15, 18 and 26sp across a dozen files, every one of them a bare number.
+ */
+object MigoGlyph {
+    /** A mark inside a list row or a chip: the check on a picked row, a sheet's row glyph. */
+    val small = 15.sp
+
+    /** The workhorse: chevrons, emoji and the glyphs that lead into a row. */
+    val inline = 18.sp
+
+    /** A call-control button's glyph, sized for a thumb rather than a line of text. */
+    val control = 26.sp
+
+    /** A count inside a badge — the strip's "9+", matching the web client's own 8.5px badge. */
+    val badge = 8.5.sp
+}
 
 /**
  * Material 3's type scale, with the three styles this app actually sets adjusted.
@@ -196,6 +318,7 @@ fun MigoTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> 
     MaterialTheme(
         colorScheme = if (dark) DarkScheme else LightScheme,
         typography = MigoTypography,
+        shapes = MigoShapes,
     ) {
         androidx.compose.runtime.CompositionLocalProvider(
             LocalMigoExtra provides if (dark) ExtraDark else ExtraLight,

@@ -4,7 +4,6 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,7 +41,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.core.ConnectionState
 import com.migo.core.protocol.RoomSummary
 import java.time.Instant
@@ -192,13 +190,16 @@ fun Avatar(name: String, bytes: ByteArray?, size: Dp = 44.dp, modifier: Modifier
  * A stable colour for a name.
  *
  * `hashCode` rather than anything cryptographic: this picks one of eight colours for a monogram, and
- * nothing about it needs to be unpredictable. The palette is drawn from the Migo design system's
- * teal-anchored family and status hues, and every entry carries white text.
+ * nothing about it needs to be unpredictable. All eight are real Migo tokens — the teal family, the
+ * two status hues a row shows, and the gold the badges use — and every entry carries white text, so
+ * a monogram never depends on which theme is set. The list used to hold a violet (`#7C3AED`) that is
+ * a token in no client, which made one in eight strangers' monograms a hue the product does not own;
+ * it is now the gold, and the eight stay eight distinct colours rather than seven plus a repeat.
  */
 private fun tintFor(name: String): Color {
     val palette = listOf(
-        Color(0xFF1287A0), Color(0xFF0D6373), Color(0xFF157A92), Color(0xFF1D9CB5),
-        Color(0xFF3FCE6B), Color(0xFFF5820C), Color(0xFF7C3AED), Color(0xFFE5503C),
+        Color(0xFF1287A0), Color(0xFF0D6373), Color(0xFF1D9CB5), Color(0xFF134E5E),
+        Color(0xFF3FCE6B), Color(0xFFF5820C), Color(0xFFF0A912), Color(0xFFE5503C),
     )
     val index = (name.hashCode().toLong() and 0xffffffffL).mod(palette.size.toLong()).toInt()
     return palette[index]
@@ -213,12 +214,10 @@ private fun tintFor(name: String): Color {
 
 /** The list rows' ink pair: the teal-head name colour and the quieter second line's. */
 @Composable
-private fun rowInk(): Pair<Color, Color> =
-    if (isSystemInDarkTheme()) {
-        Color(0xFF9ADCE8) to Color(0xFFA3C4CD)
-    } else {
-        Color(0xFF0D6373) to Color(0xFF5F8A99)
-    }
+private fun rowInk(): Pair<Color, Color> {
+    val extra = LocalMigoExtra.current
+    return extra.rowName to extra.rowLine
+}
 
 /**
  * The row's avatar: the 38dp monogram, the 2dp presence ring around it (green when here, grey when
@@ -262,12 +261,12 @@ fun ListRowAvatar(
     }
 }
 
-/** The row's name: 13.5sp bold, in the teal head. */
+/** The row's name: the small-title step, bold, in the teal head. */
 @Composable
 fun ListRowName(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
-        fontSize = 13.5.sp,
+        fontSize = MigoType.titleSm,
         fontWeight = FontWeight.Bold,
         color = rowInk().first,
         maxLines = 1,
@@ -276,12 +275,12 @@ fun ListRowName(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** The row's second line: 11.5sp, the quiet teal-grey the reference puts under a name. */
+/** The row's second line: the metadata step, the quiet teal-grey the reference puts under a name. */
 @Composable
 fun ListRowLine(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
-        fontSize = 11.5.sp,
+        fontSize = MigoType.meta,
         color = rowInk().second,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -295,7 +294,7 @@ fun UnreadPill(count: Long, modifier: Modifier = Modifier) {
     Surface(
         color = Color(0xFFE5503C),
         contentColor = Color.White,
-        shape = RoundedCornerShape(999.dp),
+        shape = RoundedCornerShape(MigoRadius.pill),
         modifier = modifier,
     ) {
         Text(
@@ -314,7 +313,7 @@ fun SectionLabel(text: String, modifier: Modifier = Modifier) {
         text = text,
         style = MaterialTheme.typography.labelMedium,
         color = LocalMigoExtra.current.faint,
-        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        fontWeight = FontWeight.Bold,
         modifier = modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
     )
 }

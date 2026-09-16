@@ -29,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
@@ -344,7 +343,7 @@ private fun ChoicePill(
             .heightIn(min = 40.dp)
             .background(
                 if (selected) scheme.primaryContainer else scheme.surfaceVariant,
-                RoundedCornerShape(10.dp),
+                RoundedCornerShape(MigoRadius.md),
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -352,7 +351,7 @@ private fun ChoicePill(
     ) {
         Text(
             text = label,
-            fontSize = 12.sp,
+            fontSize = MigoType.body,
             fontWeight = FontWeight.SemiBold,
             color = if (selected) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
             maxLines = 1,

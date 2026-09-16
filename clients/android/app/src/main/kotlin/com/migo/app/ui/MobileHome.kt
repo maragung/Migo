@@ -48,7 +48,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.AppViewModel
 import com.migo.app.model.AppState
 import com.migo.core.ConnectionState
@@ -298,7 +297,7 @@ private fun MeCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = username,
-                        fontSize = 14.sp,
+                        fontSize = MigoType.titleSm,
                         fontWeight = FontWeight.Bold,
                         color = extra.bannerInk,
                         maxLines = 1,
@@ -309,7 +308,7 @@ private fun MeCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .background(Color.White.copy(alpha = 0.26f), RoundedCornerShape(999.dp))
+                                .background(Color.White.copy(alpha = 0.26f), RoundedCornerShape(MigoRadius.pill))
                                 .padding(horizontal = 10.dp, vertical = 3.dp),
                         ) {
                             BasicTextField(
@@ -317,7 +316,7 @@ private fun MeCard(
                                 onValueChange = { draft = it },
                                 textStyle = TextStyle(
                                     color = Color.White,
-                                    fontSize = 11.5.sp,
+                                    fontSize = MigoType.meta,
                                     fontStyle = FontStyle.Italic,
                                 ),
                                 singleLine = true,
@@ -335,7 +334,7 @@ private fun MeCard(
                     // wording, shown until the account writes one of its own.
                     Text(
                         text = status?.takeIf { it.isNotBlank() } ?: "New here! Say hi :)",
-                        fontSize = 11.5.sp,
+                        fontSize = MigoType.meta,
                         fontStyle = FontStyle.Italic,
                         color = extra.bannerInk.copy(alpha = 0.95f),
                         maxLines = 1,
@@ -354,7 +353,7 @@ private fun MeCard(
             Surface(
                 color = Color.White.copy(alpha = 0.2f),
                 contentColor = extra.bannerInk,
-                shape = RoundedCornerShape(999.dp),
+                shape = RoundedCornerShape(MigoRadius.pill),
                 modifier = Modifier.semantics {
                     contentDescription = "Connection: " + connectionLabel(connection)
                 },
@@ -386,7 +385,7 @@ private fun MeCard(
                     Surface(
                         color = Color.White.copy(alpha = 0.2f),
                         contentColor = extra.bannerInk,
-                        shape = RoundedCornerShape(999.dp),
+                        shape = RoundedCornerShape(MigoRadius.pill),
                     ) {
                         Text(
                             text = "$balance \$MIG",
@@ -403,13 +402,13 @@ private fun MeCard(
                         Box(
                             modifier = Modifier
                                 .size(30.dp)
-                                .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
+                                .background(Color(0xFFD2690B), RoundedCornerShape(MigoRadius.md))
                                 .clickable(onClick = onOpenMail),
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
                                 text = "✉",
-                                fontSize = 14.sp,
+                                fontSize = MigoType.titleSm,
                                 color = Color.White,
                                 textAlign = TextAlign.Center,
                             )
@@ -418,12 +417,12 @@ private fun MeCard(
                             Surface(
                                 color = Color(0xFFE5503C),
                                 contentColor = Color.White,
-                                shape = RoundedCornerShape(999.dp),
+                                shape = RoundedCornerShape(MigoRadius.pill),
                                 modifier = Modifier.align(Alignment.TopEnd),
                             ) {
                                 Text(
                                     text = if (unread > 9) "9+" else unread.toString(),
-                                    fontSize = 8.5.sp,
+                                    fontSize = MigoGlyph.badge,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.dp),
                                 )
@@ -435,13 +434,13 @@ private fun MeCard(
                     Box(
                         modifier = Modifier
                             .size(30.dp)
-                            .background(Color(0xFFD2690B), RoundedCornerShape(9.dp))
+                            .background(Color(0xFFD2690B), RoundedCornerShape(MigoRadius.md))
                             .clickable(onClick = onOpenMe),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text = "⚙",
-                            fontSize = 14.sp,
+                            fontSize = MigoType.titleSm,
                             color = Color.White,
                             textAlign = TextAlign.Center,
                         )
@@ -491,7 +490,7 @@ private fun MeSheet(
                     Text(
                         text = presenceLabel(presence) +
                             (if (balance != null) " · $balance \$MIG" else ""),
-                        fontSize = 11.5.sp,
+                        fontSize = MigoType.meta,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -614,7 +613,7 @@ private fun PresencePill(
             .heightIn(min = 42.dp)
             .background(
                 if (selected) scheme.primaryContainer else scheme.surface,
-                RoundedCornerShape(10.dp),
+                RoundedCornerShape(MigoRadius.md),
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -625,7 +624,7 @@ private fun PresencePill(
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = label,
-                fontSize = 12.sp,
+                fontSize = MigoType.body,
                 fontWeight = FontWeight.SemiBold,
                 color = if (selected) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
             )
@@ -633,7 +632,7 @@ private fun PresencePill(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "✓",
-                    fontSize = 12.sp,
+                    fontSize = MigoType.body,
                     fontWeight = FontWeight.Bold,
                     color = scheme.onPrimaryContainer,
                 )

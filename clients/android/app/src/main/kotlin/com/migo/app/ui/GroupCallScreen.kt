@@ -35,7 +35,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.migo.app.call.ActiveGroupCall
 import com.migo.app.call.GroupCallPhase
 import com.migo.app.call.GroupCallUiState
@@ -309,6 +308,6 @@ private fun GroupCallActionButton(
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = glyph, color = contentColor, fontSize = 26.sp)
+        Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
     }
 }
