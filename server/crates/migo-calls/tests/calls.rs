@@ -222,7 +222,7 @@ impl Harness {
         // The service seats its rosters behind the shared trait object; the
         // concrete handle travels on, because the stale-write test must reach
         // the memory backend's own `put`.
-        let shared: SharedGroupCallStore = Arc::clone(&groups);
+        let shared: SharedGroupCallStore = groups.clone();
         let calls = Calls::with_group_store(
             Arc::clone(&store),
             shared,
