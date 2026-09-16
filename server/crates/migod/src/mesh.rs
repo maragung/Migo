@@ -30,6 +30,13 @@
 //! [`migo_federation::Mesh::mark_delivered`] needs, because delivery is at least once and the consuming
 //! surfaces are idempotent (section 153).
 //!
+//! The stream itself is TLS 1.3, mandatory, with no plaintext mode — section 7 gives the
+//! mesh no exception for development or staging. Both the listener and every dial wrap
+//! their TCP stream in the channel [`crate::mesh_tls`] builds from the node's Ed25519
+//! identity key before a single MWP byte moves: a peer whose leaf does not carry an
+//! allow-listed key is refused at the TLS handshake, and a plaintext client cannot
+//! handshake at all. The frames inside are unchanged byte for byte.
+//!
 //! The handshake is the one [`migo_crypto`] already implements: both sides send
 //! `FED_HELLO` (node id, region, routing epoch, fresh 32-byte nonce), then both send
 //! `FED_AUTH` carrying [`migo_crypto::NodeProof`] — a signature over the domain-separated
@@ -84,8 +91,12 @@ use migo_protocol::{fault, from_frame, to_frame, Encode, Frame, Opcode};
 use migo_wire::limits::MAX_FRAME_BYTES;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+use crate::mesh_tls::MeshTls;
 
 /// How long a delivery session may stay quiet before the sender gives up on its acks and
 /// reschedules the batch. A link that cannot ack five seconds' worth of frames is not a
@@ -2013,6 +2024,23 @@ fn endpoint_of(base_url: &str) -> Result<String> {
     Ok(authority.to_string())
 }
 
+/// The TLS server name a dial of `endpoint` presents.
+///
+/// TLS wants a name, not an address; the mesh wants neither — the pin is the peer's key,
+/// and the verifier below never reads the name. The host half of the endpoint satisfies
+/// the structure TLS 1.3 requires, IPv6 brackets stripped, and nothing more: a hostname
+/// that cannot even parse as a name is a misconfigured `base_url`, failed here rather
+/// than inside the handshake.
+fn server_name_of(
+    endpoint: &str,
+) -> std::result::Result<rustls::pki_types::ServerName<'static>, String> {
+    let host = endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| {
+        format!("the peer endpoint {endpoint:?} does not name a host the TLS client can call")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------
@@ -2022,6 +2050,10 @@ fn endpoint_of(base_url: &str) -> Result<String> {
 /// budget every handshake it starts runs under.
 pub struct MeshTransport {
     mesh: SharedMesh,
+    /// The node's TLS 1.3 identity, from which every channel this transport opens is
+    /// built — the listener's server configs and every dial's client config alike
+    /// (section 7: encrypted and authenticated, no exceptions).
+    tls: MeshTls,
     router: Arc<IngestRouter>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
@@ -2036,9 +2068,14 @@ impl MeshTransport {
     /// One optional service per fan-out the ingest path can publish into, plus the store the
     /// revocation half reads — ten facts the composition root holds at once, and grouping them
     /// behind a struct would only move the list, not shorten it.
+    ///
+    /// `tls` must be minted from the same node identity key the mesh service signs with:
+    /// the channel's pin is the allow-list key, so a mismatched pair would have every
+    /// peer refuse the TLS handshake before the application handshake could say why.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mesh: SharedMesh,
+        tls: MeshTls,
         gateway: Option<Arc<Gateway>>,
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
         conversations: Option<Arc<crate::conversation_relay::ConversationRelay>>,
@@ -2063,6 +2100,7 @@ impl MeshTransport {
             )),
             meters: MeshMeters::new(registry),
             mesh,
+            tls,
             clock,
             budget,
             probe_schedule: Mutex::new(HashMap::new()),
@@ -2081,6 +2119,12 @@ impl MeshTransport {
 
     /// Binds the mesh listener and spawns its accept loop, returning the bound address —
     /// port zero binds an ephemeral port, which is how tests keep off each other's sockets.
+    ///
+    /// Every accepted connection is wrapped in the TLS 1.3 channel before the session
+    /// starts: the allow-list is read fresh per connection so a peer admitted or removed
+    /// a moment ago is honoured on the next dial, and a dialer whose leaf does not carry
+    /// an allow-listed key is refused inside the TLS handshake, before any mesh byte is
+    /// read (section 7: refusal at the handshake, before a session forms).
     ///
     /// # Errors
     ///
@@ -2104,9 +2148,19 @@ impl MeshTransport {
                             let mesh = Arc::clone(&transport.mesh);
                             let router = Arc::clone(&transport.router);
                             let budget = transport.budget.clone();
-                            if let Err(error) =
-                                serve_session(stream, mesh, router, now, budget).await
-                            {
+                            let io = match transport.accept_tls(stream).await {
+                                Ok(io) => io,
+                                Err(error) => {
+                                    // A dialer that cannot pass the TLS gate is not a
+                                    // mesh session and never becomes one; the warn is
+                                    // the operator's evidence that something dialed and
+                                    // was refused, because the handshake itself leaves
+                                    // no other trace.
+                                    tracing::warn!(%error, "mesh TLS handshake refused");
+                                    return;
+                                }
+                            };
+                            if let Err(error) = serve_session(io, mesh, router, now, budget).await {
                                 tracing::warn!(%error, "mesh session ended");
                             }
                         });
@@ -2119,6 +2173,43 @@ impl MeshTransport {
             }
         });
         Ok(bound)
+    }
+
+    /// Wraps one accepted TCP stream in the node's TLS 1.3 channel.
+    ///
+    /// The handshake runs under the same ten-second budget a dial does: a client that
+    /// connects and then stalls costs one bounded wait, never a task and a connection
+    /// parked on a half-open socket.
+    async fn accept_tls(
+        &self,
+        stream: TcpStream,
+    ) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
+        let allowed = self.allowed_peer_keys().await?;
+        let config = self.tls.server_config(&allowed)?;
+        let acceptor = TlsAcceptor::from(config);
+        match timeout(CONNECT_TIMEOUT, acceptor.accept(stream)).await {
+            Ok(Ok(io)) => Ok(io),
+            Ok(Err(error)) => Err(fault::internal(format!(
+                "the mesh TLS 1.3 handshake failed: {error}"
+            ))),
+            Err(_) => Err(fault::internal("the mesh TLS 1.3 handshake timed out")),
+        }
+    }
+
+    /// The allow-list snapshot the TLS gate pins against: every peer row's public key,
+    /// whatever its status — pausing and blocking stay the application handshake's to
+    /// enforce, because they are runtime policy, while the TLS gate's one job is key
+    /// membership.
+    ///
+    /// The read rides the store's shared page clamp, so a mesh larger than that clamp
+    /// sees the keys beyond it refused until the store grows an unpaginated key query —
+    /// fail-closed, never open, and far past any topology this deployment runs.
+    async fn allowed_peer_keys(&self) -> Result<Vec<[u8; 32]>> {
+        let peers = self.mesh.peers(u16::MAX).await?;
+        Ok(peers
+            .iter()
+            .filter_map(|peer| <[u8; 32]>::try_from(peer.public_key.as_slice()).ok())
+            .collect())
     }
 
     /// Spawns the outbox runner.
@@ -2301,6 +2392,11 @@ impl MeshTransport {
     /// one bounded wait, never the kernel's two-minute retry ladder — and the session runs
     /// under the transport's handshake budget, so a peer that accepts the connection and
     /// never speaks costs one bounded wait rather than a parked drain.
+    ///
+    /// The TCP connection is wrapped in TLS 1.3 before the session starts, pinned to the
+    /// key this node's allow-list entry names for the peer. A TLS failure is not partition
+    /// evidence — the peer answered the TCP dial — so it fails the batch without touching
+    /// the link's reachability mark, exactly like an application-handshake refusal.
     async fn deliver_to(
         &self,
         endpoint: &str,
@@ -2331,6 +2427,12 @@ impl MeshTransport {
                 )));
             }
         };
+        let stream = match self.dial_tls(stream, endpoint, &peer.public_key).await {
+            Ok(stream) => stream,
+            Err(why) => {
+                return Err(SessionFailure::Failed(fault::internal(why)));
+            }
+        };
         deliver_batch(
             stream,
             &self.mesh,
@@ -2341,6 +2443,36 @@ impl MeshTransport {
             &self.budget,
         )
         .await
+    }
+
+    /// Wraps one dialed TCP stream in the node's TLS 1.3 client channel, pinned to
+    /// `public_key` — the allow-list entry's key for the peer being dialed.
+    ///
+    /// The handshake runs under the same ten-second budget the dial does, so a peer that
+    /// accepts the connection and then stalls inside the TLS exchange costs one bounded
+    /// wait rather than a parked drain.
+    async fn dial_tls(
+        &self,
+        stream: TcpStream,
+        endpoint: &str,
+        public_key: &[u8],
+    ) -> std::result::Result<TlsStream<TcpStream>, String> {
+        let expected: [u8; 32] = public_key.try_into().map_err(|_| {
+            "the peer's allow-list entry does not name a 32-byte Ed25519 key".to_owned()
+        })?;
+        let config = self
+            .tls
+            .client_config(expected)
+            .map_err(|error| error.to_string())?;
+        let connector = TlsConnector::from(config);
+        let name = server_name_of(endpoint)?;
+        match timeout(CONNECT_TIMEOUT, connector.connect(name, stream)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(error)) => Err(format!(
+                "the TLS 1.3 handshake with the peer failed: {error}"
+            )),
+            Err(_) => Err("the TLS 1.3 handshake with the peer timed out".to_owned()),
+        }
     }
 
     /// Reads one peer's backlog depth and records the slow-link marking it implies.
@@ -2433,7 +2565,14 @@ impl MeshTransport {
                 return Err("the dial to the peer timed out".to_owned());
             }
         };
-        let mut io = stream;
+        // The probe rides the same TLS 1.3 channel a delivery does, so a probe's success
+        // proves the same thing a delivered batch proves — and a peer whose TLS gate
+        // refuses this node's key is logged here rather than marked down, like any other
+        // post-connect stumble.
+        let mut io = match self.dial_tls(stream, &endpoint, &peer.public_key).await {
+            Ok(io) => io,
+            Err(why) => return Err(why),
+        };
         handshake(&mut io, &self.mesh, self.mesh.region(), now, &self.budget)
             .await
             .map_err(|failure| format!("the probe handshake failed: {failure}"))?;
@@ -2538,6 +2677,18 @@ mod tests {
     use migo_store::model::NewRoom;
     use migo_store::{MemoryStore, SharedStore};
     use tokio::io::duplex;
+
+    /// The TLS 1.3 identity for `node(name)`, minted from the same seed its mesh service
+    /// signs with — the same pairing the composition root and the integration suites use.
+    /// The duplex pairs below join the two sides without a socket, so the channel itself
+    /// is exercised over real listeners in the integration suites; the identity is still
+    /// the right node's, because the transport owns it either way.
+    fn tls_for(name: u8) -> MeshTls {
+        MeshTls::from_secret(
+            &NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"),
+        )
+        .expect("the node identity key mints a TLS leaf")
+    }
 
     const NOW: i64 = 1_700_000_000_000;
 
@@ -2703,6 +2854,7 @@ mod tests {
         let registry = registry();
         let transport = MeshTransport::new(
             mesh_a,
+            tls_for(1),
             None,
             None,
             None,
@@ -2748,6 +2900,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             None,
@@ -2828,6 +2981,7 @@ mod tests {
         let registry = registry();
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            tls_for(1),
             None,
             None,
             None,
@@ -2885,6 +3039,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             None,
@@ -3019,6 +3174,7 @@ mod tests {
         ));
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             Some(Arc::clone(&relay_b)),
             None,
@@ -3101,6 +3257,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             None,
@@ -3185,6 +3342,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            tls_for(1),
             None,
             None,
             None,
@@ -3271,6 +3429,7 @@ mod tests {
         let relay_b = Arc::new(crate::presence_relay::PresenceRelay::new(mesh_b.clone()));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            tls_for(1),
             None,
             None,
             None,
@@ -3368,6 +3527,7 @@ mod tests {
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
+            tls_for(1),
             None,
             None,
             None,
@@ -3535,6 +3695,7 @@ mod tests {
         // assertion about this batch could see it.
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             Some(relay_b.clone()),
             None,
@@ -3672,6 +3833,7 @@ mod tests {
         // ingest clock has to be the test's, or the copy lands in the real present.
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             Some(relay_b.clone()),
@@ -3838,6 +4000,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             None,
@@ -3910,6 +4073,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            tls_for(2),
             None,
             None,
             None,

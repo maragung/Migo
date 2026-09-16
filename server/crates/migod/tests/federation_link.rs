@@ -1,12 +1,13 @@
-//! A queued federation event crossing a real TCP link between two independent nodes.
+//! A queued federation event crossing a real TLS 1.3 link between two independent nodes.
 //!
 //! What this test proves end to end: an event queued in node B's durable outbox reaches
-//! node A over a real loopback socket — the handshake (both `FED_HELLO`s, both `FED_AUTH`
-//! proofs over the transcript), one sequence-numbered `FED_FORWARD`, the server's
-//! cumulative `FED_ACK` watermark, and node B's outbox settling so the event never comes
-//! due again. It drives the real [`MeshTransport`] tasks — node A's listener and node B's
-//! runner — not a mirror of them, so a regression in the transport's wire behavior lands
-//! here and not in a copy that still passes.
+//! node A over a real loopback socket wrapped in the mesh's mandatory TLS 1.3 channel —
+//! the mutual certificate pin on both sides, then the application handshake (both
+//! `FED_HELLO`s, both `FED_AUTH` proofs over the transcript), one sequence-numbered
+//! `FED_FORWARD`, the server's cumulative `FED_ACK` watermark, and node B's outbox
+//! settling so the event never comes due again. It drives the real [`MeshTransport`]
+//! tasks — node A's listener and node B's runner — not a mirror of them, so a regression
+//! in the transport's wire behavior lands here and not in a copy that still passes.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +39,16 @@ async fn bare_mesh(name: u8, region: &str) -> SharedMesh {
     )
     .expect("the mesh configuration is valid");
     Arc::new(mesh)
+}
+
+/// The TLS 1.3 identity for one node, minted from the same seed its mesh service signs
+/// with — the pairing section 7's pin depends on, because the certificate is a carrier
+/// for the identity key the peer's allow-list names.
+fn tls_for(name: u8) -> migod::mesh_tls::MeshTls {
+    migod::mesh_tls::MeshTls::from_secret(
+        &NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"),
+    )
+    .expect("the node identity key mints a TLS leaf")
 }
 
 /// Admits `peer` to the allow-list, naming where its listener is and which key signs for it.
@@ -79,6 +90,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
     let mesh_a = bare_mesh(1, "region-a").await;
     let transport_a = Arc::new(migod::mesh::MeshTransport::new(
         mesh_a.clone(),
+        tls_for(1),
         None,
         None,
         None,
@@ -119,6 +131,7 @@ async fn an_outbox_event_flows_from_one_node_to_another_over_real_tcp() {
     admit(&mesh_b, a_id, &key_a, format!("wss://{bound}"), "region-a").await;
     let transport_b = Arc::new(migod::mesh::MeshTransport::new(
         mesh_b.clone(),
+        tls_for(2),
         None,
         None,
         None,

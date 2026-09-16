@@ -30,6 +30,7 @@ pub mod typing_sweep;
 
 mod compose;
 pub mod mesh;
+pub mod mesh_tls;
 pub mod quic;
 mod serve;
 pub mod tcp;

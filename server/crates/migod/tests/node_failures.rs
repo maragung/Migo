@@ -83,9 +83,13 @@ use migo_store::model::NewRoom;
 use migo_store::{MemoryStore, SharedStore};
 use migo_wire::Writer;
 use migod::mesh::MeshTransport;
+use migod::mesh_tls::MeshTls;
 use migod::room_relay::RoomRelay;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::client::TlsStream as ClientTlsStream;
+use tokio_rustls::server::TlsStream as ServerTlsStream;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 /// How long a test waits for an asynchronous condition before failing.
 const WAIT_LIMIT: Duration = Duration::from_secs(10);
@@ -133,6 +137,33 @@ fn key_bytes(name: u8) -> Vec<u8> {
         .to_vec()
 }
 
+/// The public key of `node(name)` in the fixed-width form the TLS pin takes.
+fn key32(name: u8) -> [u8; 32] {
+    NodeSecret::from_seed(&[name; 32])
+        .expect("a 32-byte seed builds a key")
+        .public()
+        .to_bytes()
+}
+
+/// The TLS 1.3 identity of `node(name)`, minted from the same seed its mesh service
+/// signs with — the channel every link in these scenarios rides in, built the same way
+/// the composition root builds it.
+fn tls_for(name: u8) -> MeshTls {
+    MeshTls::from_secret(&NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"))
+        .expect("the node identity key mints a TLS leaf")
+}
+
+/// The keys a fixture node's TLS gate accepts: exactly the peers its mesh allow-list
+/// names, read the same way the production listener reads them.
+async fn allowed_keys(mesh: &SharedMesh) -> Vec<[u8; 32]> {
+    mesh.peers(u16::MAX)
+        .await
+        .expect("the allow-list reads")
+        .iter()
+        .filter_map(|peer| <[u8; 32]>::try_from(peer.public_key.as_slice()).ok())
+        .collect()
+}
+
 /// Admits `peer` to the node's allow-list, naming where its listener is.
 async fn admit(mesh: &SharedMesh, peer: Id, peer_key: &[u8], base_url: String, region: &str) {
     mesh.add_peer(
@@ -149,10 +180,13 @@ async fn admit(mesh: &SharedMesh, peer: Id, peer_key: &[u8], base_url: String, r
 }
 
 /// A node's transport, with no gateway and no room relay behind it: these tests assert on
-/// the link and the outbox, which the ingest window already exposes.
-fn transport(mesh: &SharedMesh) -> Arc<MeshTransport> {
+/// the link and the outbox, which the ingest window already exposes. `name` must match
+/// the node the mesh was built from — the transport's TLS leaf and the mesh's signing
+/// key are pinned to the same identity.
+fn transport(name: u8, mesh: &SharedMesh) -> Arc<MeshTransport> {
     Arc::new(MeshTransport::new(
         mesh.clone(),
+        tls_for(name),
         None,
         None,
         None,
@@ -280,13 +314,17 @@ async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 }
 
 // ---------------------------------------------------------------------------
-// Raw-socket helpers — the test as an independent peer implementation
+// Stream helpers — the test as an independent peer implementation, speaking over
+// the same TLS 1.3 channels a real link rides
 // ---------------------------------------------------------------------------
 
 /// Writes one length-prefixed MWP frame, the way every stream transport in the system
 /// does. A write failure (the peer tearing the link mid-handshake) surfaces as an
 /// error the caller may read as a refusal.
-async fn send_frame(stream: &mut TcpStream, frame: &Frame) -> std::io::Result<()> {
+async fn send_frame<S>(stream: &mut S, frame: &Frame) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let wire = frame
         .encode_length_prefixed()
         .expect("a scripted frame encodes");
@@ -295,7 +333,10 @@ async fn send_frame(stream: &mut TcpStream, frame: &Frame) -> std::io::Result<()
 
 /// Reads one length-prefixed frame, or `None` when the peer closed — at a frame
 /// boundary or not, because a refusal is a close however it lands.
-async fn read_frame(stream: &mut TcpStream) -> Option<Frame> {
+async fn read_frame<S>(stream: &mut S) -> Option<Frame>
+where
+    S: AsyncRead + Unpin,
+{
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await.ok()?;
     let len = u32::from_be_bytes(head) as usize;
@@ -389,7 +430,7 @@ async fn events_bound_for_a_dead_node_survive_and_arrive_after_recovery_without_
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     let now = Timestamp::now();
     for note_len in 0..5usize {
@@ -434,7 +475,7 @@ async fn events_bound_for_a_dead_node_survive_and_arrive_after_recovery_without_
         "region-b",
     )
     .await;
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     transport_a
         .spawn_listener(&format!("127.0.0.1:{port}"))
         .await
@@ -549,7 +590,7 @@ async fn a_partitioned_room_is_read_only_until_the_link_heals() {
 
     // The partition is discovered: an event bound for the home node cannot connect.
     queue(&mesh_b, node_id(1), 1, now).await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
     transport_b
         .drain_once(now)
         .await
@@ -604,7 +645,7 @@ async fn a_partitioned_room_is_read_only_until_the_link_heals() {
     // The link heals — the home node answers at the address again — and the held event
     // delivers. A delivered batch is proof the peer is back, so the read-only mark
     // lifts and the very write that was refused succeeds.
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     transport_a
         .spawn_listener(&format!("127.0.0.1:{port}"))
         .await
@@ -640,13 +681,13 @@ async fn a_partitioned_room_is_read_only_until_the_link_heals() {
 // Scenario 3 — a slow link, not a dead one
 // ---------------------------------------------------------------------------
 
-/// One connection to the slow peer: the handshake answered by hand — the peer speaks
-/// first, both hellos and both proofs, exactly the transcript `serve_session` runs —
-/// and then a read loop that swallows every `FED_FORWARD` and acknowledges only when
-/// the gate is open. This is a node whose link works but whose acks are late enough
-/// to starve the sender's watermark.
+/// One connection to the slow peer, already past its TLS gate: the application handshake
+/// answered by hand — the peer speaks first, both hellos and both proofs, exactly the
+/// transcript `serve_session` runs — and then a read loop that swallows every
+/// `FED_FORWARD` and acknowledges only when the gate is open. This is a node whose link
+/// works but whose acks are late enough to starve the sender's watermark.
 async fn serve_slow_session(
-    mut stream: TcpStream,
+    mut stream: ServerTlsStream<TcpStream>,
     mesh: SharedMesh,
     ack_gate: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<Vec<u32>>>>,
@@ -732,9 +773,14 @@ async fn serve_slow_session(
         .push(session);
 }
 
-/// Binds the slow peer: a listener whose sessions are [`serve_slow_session`], plus the
-/// ack gate and the per-session sequence log the test reads.
+/// Binds the slow peer: a listener whose every connection is the same TLS 1.3 gate a real
+/// node runs — the fixture completes the handshake so the slowness being tested is the
+/// link's, not the channel's — and whose sessions are [`serve_slow_session`], plus the
+/// ack gate and the per-session sequence log the test reads. `name` is the fixture's node
+/// name: its TLS leaf is minted from the same identity key its mesh signs with, and the
+/// allow-list snapshot pins the dialers it will admit.
 async fn spawn_slow_peer(
+    name: u8,
     mesh: SharedMesh,
 ) -> (SocketAddr, Arc<AtomicBool>, Arc<Mutex<Vec<Vec<u32>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -746,6 +792,11 @@ async fn spawn_slow_peer(
     let ack_gate = Arc::new(AtomicBool::new(false));
     let log = Arc::new(Mutex::new(Vec::new()));
 
+    let acceptor = TlsAcceptor::from(
+        tls_for(name)
+            .server_config(&allowed_keys(&mesh).await)
+            .expect("the slow peer mints its TLS gate from its own identity and its dialers' keys"),
+    );
     let accept_gate = Arc::clone(&ack_gate);
     let accept_log = Arc::clone(&log);
     tokio::spawn(async move {
@@ -753,12 +804,19 @@ async fn spawn_slow_peer(
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
-            tokio::spawn(serve_slow_session(
-                stream,
-                Arc::clone(&mesh),
-                Arc::clone(&accept_gate),
-                Arc::clone(&accept_log),
-            ));
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                serve_slow_session(
+                    stream,
+                    Arc::clone(&mesh),
+                    Arc::clone(&accept_gate),
+                    Arc::clone(&accept_log),
+                )
+                .await;
+            });
         }
     });
     (bound, ack_gate, log)
@@ -781,7 +839,7 @@ async fn a_peer_that_never_acks_fails_the_batch_backs_off_and_loses_nothing() {
         "region-b",
     )
     .await;
-    let (slow_addr, ack_gate, log) = spawn_slow_peer(Arc::clone(&mesh_slow)).await;
+    let (slow_addr, ack_gate, log) = spawn_slow_peer(3, Arc::clone(&mesh_slow)).await;
     admit(
         &mesh_b,
         node_id(3),
@@ -790,7 +848,7 @@ async fn a_peer_that_never_acks_fails_the_batch_backs_off_and_loses_nothing() {
         "region-c",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     let now = Timestamp::now();
     for note_len in 0..3usize {
@@ -897,7 +955,7 @@ async fn a_slow_peer_is_marked_degraded_and_still_receives_everything_it_is_owed
         "region-e",
     )
     .await;
-    let (slow_addr, ack_gate, log) = spawn_slow_peer(Arc::clone(&mesh_slow)).await;
+    let (slow_addr, ack_gate, log) = spawn_slow_peer(4, Arc::clone(&mesh_slow)).await;
     admit(
         &mesh_b,
         node_id(4),
@@ -906,7 +964,7 @@ async fn a_slow_peer_is_marked_degraded_and_still_receives_everything_it_is_owed
         "region-d",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(5, &mesh_b);
 
     let now = Timestamp::now();
     for note_len in 0..5usize {
@@ -989,15 +1047,23 @@ async fn a_slow_peer_is_marked_degraded_and_still_receives_everything_it_is_owed
 // The handshake budget — a peer that accepts but never speaks
 // ---------------------------------------------------------------------------
 
-/// Binds a peer that accepts TCP connections and then says nothing, ever. Every
-/// accepted stream is held for the task's lifetime — never read, never written, never
-/// dropped — because dropping one would close it, and a close is a clean EOF the
-/// handshake already treats as an ordinary failure. The peer this is exists to be the
-/// other thing: connected, silent, and so a hang for any handshake without a budget.
+/// Binds a peer that answers its TLS gate and then says nothing, ever, at the
+/// application layer. `name` is the peer's node name — its TLS leaf is minted from that
+/// identity, and `dialers` are the keys its gate admits — because the silence being
+/// tested is a link that is up, encrypted and authenticated, and still mute: if the
+/// fixture stopped at the TCP accept the drain would sit in the transport's dial budget
+/// instead of the handshake budget this scenario is about. Every accepted TLS stream is
+/// held for the task's lifetime — never read, never written, never dropped — because
+/// dropping one would close it, and a close is a clean EOF the handshake already treats
+/// as an ordinary failure. The peer this is exists to be the other thing: connected,
+/// silent, and so a hang for any handshake without a budget.
 ///
-/// The watch channel counts accepts, so a test can wait until the drain's connection
-/// has genuinely landed before it moves the clock.
-async fn spawn_silent_peer() -> (SocketAddr, tokio::sync::watch::Receiver<u32>) {
+/// The watch channel counts completed handshakes, so a test can wait until the drain's
+/// connection has genuinely landed before it moves the clock.
+async fn spawn_silent_peer(
+    name: u8,
+    dialers: &[[u8; 32]],
+) -> (SocketAddr, tokio::sync::watch::Receiver<u32>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("the silent peer binds");
@@ -1006,10 +1072,20 @@ async fn spawn_silent_peer() -> (SocketAddr, tokio::sync::watch::Receiver<u32>) 
         .expect("the silent peer knows its address");
     let (accepted_tx, accepted_rx) = tokio::sync::watch::channel(0_u32);
     tokio::spawn(async move {
-        let mut held: Vec<TcpStream> = Vec::new();
+        let acceptor = TlsAcceptor::from(
+            tls_for(name)
+                .server_config(dialers)
+                .expect("the silent peer mints its TLS gate"),
+        );
+        let mut held: Vec<ServerTlsStream<TcpStream>> = Vec::new();
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
+            };
+            // The gate answers; the application never speaks. A TLS failure here would
+            // fail the dial as an ordinary error, which is a different scenario.
+            let Ok(stream) = acceptor.accept(stream).await else {
+                continue;
             };
             held.push(stream);
             let count = u32::try_from(held.len()).expect("a test accepts few connections");
@@ -1038,7 +1114,7 @@ async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_o
     let deadline = Timestamp::from_millis(NOW_MS + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64);
 
     let (mesh_b, _) = node(2, "region-b").await;
-    let (silent_addr, accepted_rx) = spawn_silent_peer().await;
+    let (silent_addr, accepted_rx) = spawn_silent_peer(3, &[key32(2)]).await;
     admit(
         &mesh_b,
         node_id(3),
@@ -1050,6 +1126,7 @@ async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_o
     let clock = Arc::new(ManualClock::new(now));
     let transport_b = Arc::new(MeshTransport::new(
         Arc::clone(&mesh_b),
+        tls_for(2),
         None,
         None,
         None,
@@ -1158,15 +1235,41 @@ async fn a_silent_peer_fails_its_handshake_at_the_deadline_and_the_drain_moves_o
 // Scenario 7 — clock skew between nodes
 // ---------------------------------------------------------------------------
 
-/// Runs the client half of a mesh handshake over a raw socket, stamping the proof at
-/// `signed_at`. Returns the server's `FED_AUTH` when the handshake completes, or
-/// `None` when the listener refused it — by closing at any point.
-async fn client_handshake(
-    stream: &mut TcpStream,
+/// Dials node A's listener the way the transport's own dialer does: TCP to the bound
+/// address, then the TLS 1.3 channel as node B, whose client pin names node A's key —
+/// so what crosses the socket below is the same encrypted, authenticated link every
+/// production dial rides.
+async fn dial_as_node_b(addr: SocketAddr) -> ClientTlsStream<TcpStream> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .expect("the listener accepts the TCP dial");
+    let connector = TlsConnector::from(
+        tls_for(2)
+            .client_config(key32(1))
+            .expect("the client config mints from the node identity"),
+    );
+    connector
+        .connect(
+            rustls::pki_types::ServerName::IpAddress(addr.ip().into()),
+            stream,
+        )
+        .await
+        .expect("the TLS 1.3 channel completes against the pinned listener")
+}
+
+/// Runs the client half of a mesh handshake over an established stream — the test's
+/// TLS channels below — stamping the proof at `signed_at`. Returns the server's
+/// `FED_AUTH` when the handshake completes, or `None` when the listener refused it —
+/// by closing at any point.
+async fn client_handshake<S>(
+    stream: &mut S,
     mesh: &SharedMesh,
     secret: &NodeSecret,
     signed_at: Timestamp,
-) -> Option<Frame> {
+) -> Option<Frame>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let local = mesh.hello();
     let hello = to_frame(
         Opcode::FedHello.to_wire(),
@@ -1228,6 +1331,7 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
 
     let transport_a = Arc::new(MeshTransport::new(
         Arc::clone(&mesh_a),
+        tls_for(1),
         None,
         None,
         None,
@@ -1246,10 +1350,9 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
     // The control: a proof stamped at the listener's own clock completes the
     // handshake. Without this, the refusal below could be about keys, the allow-list,
     // or the transcript — anything but the skew.
-    let mut in_window = tokio::time::timeout(WAIT_LIMIT, TcpStream::connect(bound))
+    let mut in_window = tokio::time::timeout(WAIT_LIMIT, dial_as_node_b(bound))
         .await
-        .expect("connecting does not stall")
-        .expect("the listener accepts");
+        .expect("connecting does not stall");
     let reply = client_handshake(&mut in_window, &mesh_b, &secret_b, now).await;
     assert!(
         reply.is_some(),
@@ -1262,10 +1365,9 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
     // over a real transcript — and the refusal is still correct, because the mesh
     // trust model starts with agreeing on when now is.
     let skewed = Timestamp::from_millis(now.as_millis() - MAX_CLOCK_SKEW_MS - 1);
-    let mut out_of_window = tokio::time::timeout(WAIT_LIMIT, TcpStream::connect(bound))
+    let mut out_of_window = tokio::time::timeout(WAIT_LIMIT, dial_as_node_b(bound))
         .await
-        .expect("connecting does not stall")
-        .expect("the listener accepts");
+        .expect("connecting does not stall");
     let reply = client_handshake(&mut out_of_window, &mesh_b, &secret_b, skewed).await;
     assert!(
         reply.is_none(),
@@ -1301,7 +1403,7 @@ async fn a_frame_carrying_a_future_optional_field_crosses_the_link_unrefused() {
         "region-b",
     )
     .await;
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
         .await
@@ -1314,7 +1416,7 @@ async fn a_frame_carrying_a_future_optional_field_crosses_the_link_unrefused() {
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     // The payload a future build would write: region and digest as this build reads
     // them, then one optional field — id 999, chosen because no protocol version has
@@ -1392,7 +1494,7 @@ async fn a_stale_view_is_refused_the_transport_refreshes_and_the_event_arrives()
         "region-b",
     )
     .await;
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
         .await
@@ -1405,7 +1507,7 @@ async fn a_stale_view_is_refused_the_transport_refreshes_and_the_event_arrives()
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     // The control: with both views current, delivery works.
     let now = Timestamp::now();
@@ -1508,7 +1610,7 @@ async fn a_moved_room_hands_its_members_a_reconnect_hint_naming_the_new_node() {
 
     // Both nodes listen, and each names the other in its allow-list by the address
     // the hint will carry — B's endpoint is what the members are told to reconnect to.
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
     let bound_b = transport_b
         .spawn_listener("127.0.0.1:0")
         .await
@@ -1523,6 +1625,7 @@ async fn a_moved_room_hands_its_members_a_reconnect_hint_naming_the_new_node() {
     .await;
     let transport_a = Arc::new(MeshTransport::new(
         mesh_a.clone(),
+        tls_for(1),
         None,
         Some(Arc::clone(&relay_a)),
         None,
@@ -1656,7 +1759,7 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
         "region-b",
     )
     .await;
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
         .await
@@ -1669,7 +1772,7 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     let now = Timestamp::now();
     for note_len in 0..300usize {
@@ -1776,7 +1879,7 @@ async fn a_probe_marks_a_silent_peer_down_without_a_federated_write() {
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     // Silence about a peer reads as reachable — the permissive default the link state
     // starts from, and exactly why a dead peer was invisible before the probe existed.
@@ -1824,7 +1927,7 @@ async fn a_probe_lifts_the_mark_on_a_peer_that_recovered() {
         "region-a",
     )
     .await;
-    let transport_b = transport(&mesh_b);
+    let transport_b = transport(2, &mesh_b);
 
     // One failed delivery takes the mark, exactly as scenario 1 already pins.
     let now = Timestamp::now();
@@ -1839,7 +1942,7 @@ async fn a_probe_lifts_the_mark_on_a_peer_that_recovered() {
     );
 
     // Node A comes back at its old address — the same restart landing scenario 1 uses.
-    let transport_a = transport(&mesh_a);
+    let transport_a = transport(1, &mesh_a);
     transport_a
         .spawn_listener(&format!("127.0.0.1:{port}"))
         .await
