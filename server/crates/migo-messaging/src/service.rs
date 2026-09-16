@@ -954,6 +954,7 @@ where
                 // the Truncated status, which is section 158's half of the
                 // same promise.
                 if to > request.have_seq && page.is_empty() && conversation.last_seq > have {
+                    self.meters.seq_gap();
                     return Err(fault::error(
                         codes::SEQUENCE_GAP,
                         "sync asked for a range the expiry sweeper has already taken",
@@ -988,6 +989,12 @@ where
         } else {
             SyncOutcome::Complete
         };
+        if truncated {
+            // The hole the page just told the client about is a detected gap in the
+            // stream, on its own series so an operator does not have to divide sync
+            // outcomes by status to find how much history the sweeper is taking.
+            self.meters.seq_gap();
+        }
         self.meters.synced(outcome, messages.len());
 
         // The byte budget. The page is bounded by rows, but a row's envelope is

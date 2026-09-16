@@ -4180,3 +4180,48 @@ async fn a_message_body_that_will_not_decode_is_counted_by_error_symbol() {
     );
     assert_eq!(h.sessions_closed("protocol_violation"), 1);
 }
+
+/// A dispatcher whose every application frame fails, standing in for a domain that
+/// refuses a request — the shape the error series exists to count.
+#[derive(Clone, Copy, Debug, Default)]
+struct AlwaysFails;
+
+#[async_trait]
+impl Dispatcher for AlwaysFails {
+    async fn dispatch(&self, _context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        Err(fault::not_found("conversation"))
+    }
+}
+
+/// An error a handler returns is counted by its symbol and class, and the client
+/// still gets the opaque reply — the series is the operator's half of that split
+/// (section 174: the client must not learn why, the operator must).
+#[tokio::test]
+async fn an_error_returned_to_a_client_is_counted_by_symbol_and_class() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(AlwaysFails);
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    // PROFILE_FETCH because it is the cheapest user-level opcode and carries no
+    // feature bit; the body is never read — the dispatcher fails before decoding.
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 2, &ProfileRequest::default());
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        h.counter(
+            "migo_errors_total",
+            &[("error", "NOT_FOUND"), ("class", "state")]
+        ),
+        1,
+        "the refusal is counted under the symbol and class of its code"
+    );
+    let error = sole_error(&pipe.sent());
+    assert_eq!(error.code, codes::NOT_FOUND);
+}

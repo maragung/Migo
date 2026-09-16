@@ -23,7 +23,7 @@
 //! | `CALL_ICE`         | `CallIce`          | `relay_ice` / `group_relay` | `Acknowledged`    | relayed frame → target   |
 //! | `CALL_RENEGOTIATE` | `CallRenegotiate`  | `relay_sdp` (projected) / `group_relay` | `Acknowledged` | relayed frame → target |
 //! | `CALL_KEY_UPDATE`  | `CallKeyUpdate`    | `group_key_audience` / `call` | `Acknowledged`  | key update → other party, or the whole roster |
-//! | `CALL_STATS`       | `CallStats`        | — (metrics only)          | `Acknowledged`      | —                        |
+//! | `CALL_STATS`       | `CallStats`        | `stats`                   | `Acknowledged`      | —                        |
 //! | `CALL_TURN_FETCH`  | `CallTurnFetch`    | `turn_servers`            | `CallTurnResponse`  | —                        |
 //! | `CALL_SFU_JOIN`    | `CallInvite`       | `group_join`              | `CallTurnResponse`  | roster → joiner; join → conversation |
 //!
@@ -520,12 +520,21 @@ pub(crate) async fn handle_key_update(
 
 /// Accepts aggregate call quality numbers.
 ///
-/// Metrics only: the frame is `Droppable` by declaration, nothing is
-/// computed server-side, and no event follows. The decode is still done — a
-/// body that will not parse is a framing violation the client should hear
-/// about, not silently drop.
-pub(crate) async fn handle_stats(ctx: &ClientContext<'_>, frame: &Frame) -> Result<(), Error> {
-    let _request: CallStats = from_frame(frame).map_err(fault::from_wire)?;
+/// The frame is `Droppable` by declaration and no event follows, but it is not
+/// nothing: the setup latency and the TURN fallback it carries are the only
+/// view this server ever gets of the media plane, because the media itself
+/// never crosses it. The sample is handed to the service, which counts it only
+/// for a party to the call — a stranger naming ids is answered the same
+/// acknowledgement and moves no series. The decode is still done — a body that
+/// will not parse is a framing violation the client should hear about, not
+/// silently drop.
+pub(crate) async fn handle_stats(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedCallkeeper,
+) -> Result<(), Error> {
+    let request: CallStats = from_frame(frame).map_err(fault::from_wire)?;
+    svc.stats(&caller_of(ctx), request).await?;
     ctx.reply(&Acknowledged { ok: true })
 }
 

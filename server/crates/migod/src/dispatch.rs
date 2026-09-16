@@ -1457,7 +1457,7 @@ impl Dispatcher for AppDispatcher {
             Opcode::CallKeyUpdate => {
                 calls::handle_key_update(context, frame, &self.calls, &self.presence_relay).await
             }
-            Opcode::CallStats => calls::handle_stats(context, frame).await,
+            Opcode::CallStats => calls::handle_stats(context, frame, &self.calls).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
             Opcode::CallSfuJoin => {
                 calls::handle_sfu_join(

@@ -1,6 +1,7 @@
 //! Counters and gauges for the transport: sessions opened and closed, frames in and out,
 //! frames dropped under backpressure, resume attempts, handshakes refused, reconnects served,
-//! decode failures, and the byte size of inbound frames.
+//! decode failures, the byte size of inbound frames, and every error a handler handed back
+//! to a client.
 //!
 //! # What may label a series here, and what may never
 //!
@@ -17,10 +18,13 @@
 //! away, but an operator must, because a spike of `version_unsupported` and a spike of
 //! `overloaded` are different incidents.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use migo_core::metrics::{Counter, Gauge, Histogram, Registry};
 use migo_core::Error as CoreError;
+use migo_protocol::fault::kind_of;
+use migo_protocol::{codes, error_symbol};
 
 /// Why a session ended, for the `migo_gateway_sessions_closed_total` series.
 ///
@@ -347,6 +351,8 @@ pub(crate) struct Meters {
     subscriptions_refused: Vec<Arc<Counter>>,
     reconnect: Vec<Arc<Counter>>,
     decode_errors: Vec<Arc<Counter>>,
+    errors: HashMap<u32, Arc<Counter>>,
+    unlisted_error: Arc<Counter>,
     frame_bytes: Arc<Histogram>,
     sessions_live: Arc<Gauge>,
     subscriptions_live: Arc<Gauge>,
@@ -366,6 +372,42 @@ fn per_variant<T>(
         .iter()
         .map(|variant| registry.counter(name, help, &[(key, label(variant))]))
         .collect()
+}
+
+/// Registers the section-174 error series — one counter per protocol error code, labelled
+/// by the code's symbol and its behavioural class — and hands them back for `Meters::new`
+/// to store. Split out so the constructor stays under clippy's line budget.
+///
+/// The symbol and the class are both derived from the generated tables, keyed by code, so
+/// the series can never disagree with the `ERROR` frame the client was handed — the same
+/// one-place derivation `migo_protocol::fault` exists for. Every code in the table is
+/// registered at zero, because the series an operator pages on (`class="server"`) must
+/// exist before the first incident, not after it.
+fn error_series(registry: &Registry) -> (HashMap<u32, Arc<Counter>>, Arc<Counter>) {
+    const HELP: &str = "Errors handed back to clients, by error symbol and class.";
+    let errors = codes::ALL
+        .iter()
+        .map(|code| {
+            let symbol = error_symbol(*code).unwrap_or("UNKNOWN_ERROR");
+            (
+                *code,
+                registry.counter(
+                    "migo_errors_total",
+                    HELP,
+                    &[("error", symbol), ("class", kind_of(*code).as_str())],
+                ),
+            )
+        })
+        .collect();
+    // A code the table does not know is our own table being out of date, which is our
+    // fault — `fault::error` names such a code `UNKNOWN_ERROR` and classes it `server`
+    // for exactly that reason, and the fallback series keeps the same pair.
+    let unlisted = registry.counter(
+        "migo_errors_total",
+        HELP,
+        &[("error", "UNKNOWN_ERROR"), ("class", "server")],
+    );
+    (errors, unlisted)
 }
 
 /// Registers the three section-174 series — reconnects by cause, decode failures by error
@@ -406,6 +448,7 @@ impl Meters {
     /// Registers every series at zero up front.
     pub(crate) fn new(registry: &Registry) -> Self {
         let (reconnect, decode_errors, frame_bytes) = section_174_series(registry);
+        let (errors, unlisted_error) = error_series(registry);
         Self {
             sessions_opened: registry.counter(
                 "migo_gateway_sessions_opened_total",
@@ -476,6 +519,8 @@ impl Meters {
             ),
             reconnect,
             decode_errors,
+            errors,
+            unlisted_error,
             frame_bytes,
             sessions_live: registry.gauge(
                 "migo_gateway_sessions_live",
@@ -563,6 +608,20 @@ impl Meters {
     pub(crate) fn decode_failed(&self, failure: DecodeFailure) {
         if let Some(counter) = self.decode_errors.get(failure.index()) {
             counter.inc();
+        }
+    }
+
+    /// Counts one error a handler returned to a client, by the error's code.
+    ///
+    /// The label pair is resolved through the generated tables rather than read off the
+    /// error, so a hand-assembled `Error` whose symbol and code disagree still lands on
+    /// the series the `ERROR` frame the client actually receives will carry. A code the
+    /// table does not know falls to the `UNKNOWN_ERROR`/`server` series, the same pair
+    /// `fault::error` gives it.
+    pub(crate) fn error(&self, error: &CoreError) {
+        match self.errors.get(&error.code()) {
+            Some(counter) => counter.inc(),
+            None => self.unlisted_error.inc(),
         }
     }
 

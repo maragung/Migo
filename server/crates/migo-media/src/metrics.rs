@@ -157,6 +157,7 @@ pub(crate) struct Meters {
     scans: Vec<Arc<Counter>>,
     formats: Vec<Arc<Counter>>,
     unidentified: Arc<Counter>,
+    resumed: Arc<Counter>,
     deleted: Arc<Counter>,
     aborted: Arc<Counter>,
 }
@@ -252,6 +253,14 @@ impl Meters {
                 "Objects committed with the MIME type the client declared, because the bytes named no format and the kind allows that.",
                 &[],
             ),
+            resumed: registry.counter(
+                "migo_media_upload_resume_total",
+                "Upload resumes served: status checks that found a partially uploaded \
+                 object and so answered a resume point rather than a blank or a complete \
+                 one (section 168's failure-at-80-percent requirement). Counted per \
+                 check, because each check is a client re-anchoring an interrupted upload.",
+                &[],
+            ),
             deleted: registry.counter(
                 "migo_media_objects_deleted_total",
                 "Objects tombstoned at their owner's request.",
@@ -314,6 +323,14 @@ impl Meters {
 
     pub(crate) fn deleted(&self) {
         self.deleted.inc();
+    }
+
+    /// Counts one served resume: a status check that found an upload part-way
+    /// through, which is the moment section 168's "continue from around eighty
+    /// percent" actually happens — the client asked where it got to, and the
+    /// answer was neither nothing nor everything.
+    pub(crate) fn resumed(&self) {
+        self.resumed.inc();
     }
 
     pub(crate) fn aborted(&self) {
