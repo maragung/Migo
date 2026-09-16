@@ -253,7 +253,34 @@ pub struct Call {
     pub ended_at: Option<Timestamp>,
 }
 
+/// The `CallListEntry.kind` vocabulary.
+///
+/// Two numbers, and no third yet: a client reads one to pick a screen, and a
+/// kind with no screen behind it would be a number the client has to guess
+/// about. A conference that is neither of these gets its own number when it
+/// gets its own screen.
+pub mod call_kind {
+    /// A 1:1 call, the two named parties a [`Call`] row holds.
+    pub const DIRECT: u32 = 0;
+    /// A group call, the roster a [`GroupCall`] row holds.
+    pub const GROUP: u32 = 1;
+}
+
 impl Call {
+    /// The other party, from `account_id`'s side.
+    ///
+    /// Whoever `account_id` is not — which is the only answer a two-party row
+    /// can give, and the one a listing needs: a client showing "call with X"
+    /// asks the row who X is, and the row is the only thing that knows.
+    #[must_use]
+    pub const fn peer_of(&self, account_id: Id) -> Id {
+        if self.caller_id == account_id {
+            self.callee_id
+        } else {
+            self.caller_id
+        }
+    }
+
     /// Whether an invite still has time left at `now`.
     #[must_use]
     pub const fn invite_is_live(&self, now: Timestamp) -> bool {

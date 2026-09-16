@@ -11,11 +11,12 @@
 //!
 //! What is asserted is the refusal contract, not the implementation:
 //!
-//! * **The reserved span is terminal.** Every opcode in 247..=255 — not a
+//! * **The reserved span is terminal.** Every opcode in 248..=255 — not a
 //!   sample, the whole span — is answered `UNKNOWN_OPCODE` with the public
 //!   hint "reserved opcode", and the connection is closed.
-//! * **240 is not in that span.** It is allocated (`ENTITLEMENTS`, section
-//!   145's carve-out), so from an unauthenticated session it is refused by the
+//! * **The allocated head is not in that span.** 240 (`ENTITLEMENTS`, section
+//!   145's store carve-out) and 247 (`CALL_LIST`, the same section's latest) are
+//!   both allocated, so from an unauthenticated session each is refused by the
 //!   *phase* gate with `UNEXPECTED_OPCODE` and **no message at all** — whether
 //!   this build even knows the opcode is opt-in disclosure, and a stranger
 //!   gets neither the fact nor the reason. The conversation-federation pair
@@ -210,7 +211,7 @@ async fn assert_error_then_close(
     error
 }
 
-/// Every opcode in the never-allocated span 247-255 is refused with the public
+/// Every opcode in the never-allocated span 248-255 is refused with the public
 /// hint "reserved opcode" and closes the connection. The whole span, not a
 /// sample: a regression that frees one number at the tail is exactly as wrong
 /// as one at the head.
@@ -218,7 +219,7 @@ async fn assert_error_then_close(
 async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_connection() {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    for raw in 247u32..=255 {
+    for raw in 248u32..=255 {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
         send_frame(&mut stream, &frame).await;
@@ -232,29 +233,34 @@ async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_conn
     }
 }
 
-/// Opcode 240 is allocated (ENTITLEMENTS), so it is *not* the range gate's to
-/// refuse: from an unauthenticated session it is the phase gate that answers,
-/// with `UNEXPECTED_OPCODE` and no message at all — whether this build knows
-/// the opcode is opt-in disclosure, and a stranger gets neither the fact nor
-/// the reason.
+/// The two numbers at the allocated head of the reserved range — 240
+/// (`ENTITLEMENTS`) and 247 (`CALL_LIST`) — are each allocated, so neither is
+/// the range gate's to refuse: from an unauthenticated session it is the phase
+/// gate that answers, with `UNEXPECTED_OPCODE` and no message at all — whether
+/// this build knows the opcode is opt-in disclosure, and a stranger gets
+/// neither the fact nor the reason. Both are walked, because the head moving is
+/// exactly what a new allocation does here, and a test that pinned only the old
+/// head would keep passing while the gate quietly swallowed the new one.
 #[tokio::test]
 async fn the_allocated_head_of_the_reserved_range_is_refused_by_the_phase_gate_without_disclosure()
 {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    let (mut stream, _welcome) = handshake(addr).await;
-    let frame = Frame::new(migo_wire::FrameHeader::new(240, 7), Bytes::from_static(&[]));
-    send_frame(&mut stream, &frame).await;
-    let error = assert_error_then_close(
-        &mut stream,
-        codes::UNEXPECTED_OPCODE,
-        "the allocated head of the reserved span, before authentication",
-    )
-    .await;
-    assert_eq!(
-        error.message, None,
-        "the phase gate discloses nothing: not the opcode, not the state"
-    );
+    for raw in [240u32, 247] {
+        let (mut stream, _welcome) = handshake(addr).await;
+        let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
+        send_frame(&mut stream, &frame).await;
+        let error = assert_error_then_close(
+            &mut stream,
+            codes::UNEXPECTED_OPCODE,
+            "the allocated head of the reserved span, before authentication",
+        )
+        .await;
+        assert_eq!(
+            error.message, None,
+            "the phase gate discloses nothing about opcode {raw}: not the opcode, not the state"
+        );
+    }
 }
 
 /// A never-allocated opcode is answered, not punished: the same connection

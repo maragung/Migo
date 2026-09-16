@@ -1246,7 +1246,7 @@ async fn a_reserved_opcode_is_refused_and_closes_the_connection() {
 #[tokio::test]
 async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate() {
     // 240 is ENTITLEMENTS — the first number carved from the reserved head (section
-    // 145's store carve-out). The range gate must police 247-255 and leave the
+    // 145's store carve-out). The range gate must police 248-255 and leave the
     // allocated head alone.
     let h = Harness::new();
     let pipe = Pipe::new();
@@ -1293,12 +1293,51 @@ async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gat
 }
 
 #[tokio::test]
+async fn the_call_listing_at_the_new_reserved_head_is_not_caught_by_the_range_gate() {
+    // 247 is CALL_LIST — the number the call block's last free question took from the
+    // reserved head (section 145's latest carve-out), which moved the head of the
+    // allocated span up by one. The gate must police 248-255 and leave 247 alone, and
+    // the way to know it did is that the *phase* gate answered instead: an allocated
+    // opcode is refused for the session's phase, a reserved one for its number.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    // A listing request out of session state. The scope argument is empty because the
+    // request never reaches the listing handler.
+    pipe.client(
+        Opcode::CallList,
+        2,
+        &migo_protocol::CallListQuery {
+            conversation_id: None,
+        },
+    );
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "247 reaches the phase gate and is answered for its phase, not its range"
+    );
+    assert_ne!(
+        error.message.as_deref(),
+        Some("reserved opcode"),
+        "the refusal is the phase gate's — proof the range gate let 247 through"
+    );
+    assert_eq!(h.sessions_closed("protocol_violation"), 1);
+    assert_eq!(h.sessions_live(), 0);
+}
+
+#[tokio::test]
 async fn the_conversation_federation_pair_passes_the_range_gate_and_hits_the_server_auth_gate() {
     // 241-242 are FED_CONVERSATION_SUBSCRIBE and FED_CONVERSATION_EVENT — the
     // conversation-federation tier's carve-out from the reserved head (section 145,
     // the same written-decision path the store carve-out at 239-240 took). Two
     // gates could refuse them from a client socket: the range gate (which now
-    // polices 247-255) and the server-auth gate every FED_* opcode already answers
+    // polices 248-255) and the server-auth gate every FED_* opcode already answers
     // to. The proof this test pins is the *ordering*: the refusal the client
     // hears is the server-auth one — UNEXPECTED_OPCODE, connection closed as a
     // protocol violation — and not the range gate's "reserved opcode" hint, which
@@ -1348,7 +1387,7 @@ async fn the_row_replication_tier_passes_the_range_gate_and_hits_the_server_auth
     // FED_CONVERSATION_ROWS — the row-replication tier's carve-out from the reserved
     // head (section 145, the same written-decision path the store carve-out at 239-240
     // and the conversation-federation carve-out at 241-242 took). The range gate now
-    // polices 247-255, so each of the four must survive it and be answered by the
+    // polices 248-255, so each of the four must survive it and be answered by the
     // server-auth gate every FED_* opcode answers to. Unlike the pair test above, the
     // refusal is terminal so only the first frame of a session is ever answered — each
     // number gets its own session here, or the proof would cover one number and claim

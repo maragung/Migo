@@ -1,5 +1,6 @@
 package com.migo.core.domain
 
+import com.migo.core.protocol.CallListEntry
 import com.migo.core.wire.Id
 
 /**
@@ -82,6 +83,36 @@ class GroupCallProgressTracker {
         calls.remove(conversationId)
     }
 
+    /**
+     * Folds a *listing* -- the server's answer to `CALL_LIST` -- into the map: the calls this
+     * session never heard announced because it was not connected to hear them.
+     *
+     * The announcements above are the map's source while a session is up, and they are the newer
+     * one: they are the conversation's own news. What they cannot do is survive a session that was
+     * absent -- a member offline through a whole call hears no join, and no departure is coming,
+     * so the entry would stay missing until the *next* movement, which for a call already running
+     * never comes. So the fold adds and never replaces: a conversation already held is left alone,
+     * whatever the listing says. Only calls this device is offered but is not in (`joined` 0) are
+     * taken -- a seat this device holds is the roster's, not the affordance's -- and only group
+     * calls (`kind` 1), because a direct call's screen reads the invite stream for itself.
+     */
+    fun onListing(entries: List<CallListEntry>) {
+        for (entry in entries) {
+            if (entry.kind != CALL_LIST_GROUP || entry.joined != 0L) continue
+            if (calls.containsKey(entry.conversationId)) continue
+            calls[entry.conversationId] =
+                GroupCallInProgress(
+                    callId = entry.callId,
+                    participantCount = entry.participantCount,
+                )
+        }
+    }
+
     /** The running calls the affordance can offer, keyed by conversation. */
     fun snapshot(): Map<Id, GroupCallInProgress> = LinkedHashMap(calls)
+
+    private companion object {
+        /** `CallListEntry.kind`: 1 is a group call's roster, 0 a direct call. */
+        const val CALL_LIST_GROUP = 1L
+    }
 }

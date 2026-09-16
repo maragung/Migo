@@ -63,8 +63,8 @@ use migo_core::id::ID_BYTE_LEN;
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_crypto::CallKeyState;
 use migo_protocol::{
-    CallEnd, CallInvite, CallKeyUpdate, CallRenegotiate, CallSdp, CallSfuParticipant,
-    CallStateEvent, KeyBundleRequest, Opcode,
+    CallEnd, CallInvite, CallKeyUpdate, CallListEntry, CallListResult, CallRenegotiate, CallSdp,
+    CallSfuParticipant, CallStateEvent, KeyBundleRequest, Opcode,
 };
 
 use super::call_signal::{self, CallEndReason};
@@ -78,6 +78,9 @@ use crate::model::ToastKind;
 /// channel the two devices already share. The distributor recognises the ask by this name the
 /// way the message layer recognises "sender-key" — one vocabulary per sealed channel.
 const KEY_ASK_EVENT: &str = "call-key-ask";
+
+/// The `CallListEntry.kind` vocabulary: 1 is a group call's roster, 0 a direct call.
+const CALL_LIST_GROUP: u32 = 1;
 
 /// The wire's `Connected` state, the state a join announcement carries.
 const STATE_CONNECTED: u32 = 2;
@@ -250,6 +253,48 @@ impl GroupCalls {
             }
             None => None,
         }
+    }
+
+    /// Records a *listing* — the server's answer to `CALL_LIST` — as spectator news, and
+    /// returns one [`Spectated::Running`] per call the ledger did not already hold so the
+    /// worker can say each as an event.
+    ///
+    /// This is the half the announcements cannot cover. They reach a client that is
+    /// connected to hear them, so a member who was offline through a whole group call heard
+    /// no join — and no departure is coming, so the ledger would stay empty and the header
+    /// would offer no way into a call that is still running.
+    ///
+    /// Additions only: the announcements are the conversation's own news and cannot be older
+    /// than an answer that raced them, so a conversation the ledger already holds is left
+    /// alone. Only group calls the account is not in are taken — a seat this device holds
+    /// belongs to the roster, and a 1:1 call's screen reads the invite stream for itself.
+    fn spectate_listing(&mut self, entries: &[CallListEntry]) -> Vec<Spectated> {
+        let mut found = Vec::new();
+        for entry in entries {
+            if entry.kind != CALL_LIST_GROUP || entry.joined != 0 {
+                continue;
+            }
+            let conversation_id = entry.conversation_id;
+            let bound = self
+                .seat
+                .as_ref()
+                .is_some_and(|seat| seat.conversation_id == conversation_id)
+                || self
+                    .joining
+                    .as_ref()
+                    .is_some_and(|ask| ask.conversation_id == conversation_id);
+            if bound || self.in_progress.contains_key(&conversation_id) {
+                continue;
+            }
+            self.in_progress
+                .insert(conversation_id, (entry.call_id, entry.participant_count));
+            found.push(Spectated::Running {
+                conversation_id,
+                call_id: entry.call_id,
+                count: entry.participant_count,
+            });
+        }
+        found
     }
 }
 
@@ -449,6 +494,30 @@ impl Worker {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The answer to this session's one `CALL_LIST` ask: the calls the announcements could not
+    /// have told it about. Each newly-learned call is said as the same event an announcement
+    /// would have produced, because the UI's reading of the two is identical — a call is
+    /// running in a conversation this device is not in, and the header knows how to offer it.
+    pub(super) async fn on_call_list(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<CallListResult>(frame) else {
+            return;
+        };
+        for spectated in self.group_calls.spectate_listing(&response.calls) {
+            if let Spectated::Running {
+                conversation_id,
+                call_id,
+                count,
+            } = spectated
+            {
+                self.sink.send(Event::GroupCallInProgress {
+                    conversation_id,
+                    call_id,
+                    count,
+                });
+            }
         }
     }
 
@@ -1112,6 +1181,99 @@ mod tests {
             None
         );
         assert!(!calls.in_progress.contains_key(&conversation));
+    }
+
+    /// A listing-shaped entry: the three fields the ledger reads, with the rest filled in the
+    /// way the server fills them for a group call the account is not in.
+    fn listed_entry(
+        conversation_id: Id,
+        call_id: Id,
+        kind: u32,
+        joined: u32,
+        count: u32,
+    ) -> CallListEntry {
+        CallListEntry {
+            call_id,
+            conversation_id,
+            kind,
+            state: STATE_CONNECTED,
+            peer_id: id_of(9),
+            participant_count: count,
+            joined,
+            media_kind: None,
+            expires_at: None,
+            started_at: Some(Timestamp::from_millis(0)),
+            answered_at: None,
+        }
+    }
+
+    /// The listing's own half of the spectator ledger: the calls a session that was not
+    /// connected to hear the announcements would otherwise never learn of (section 165).
+    /// Additions only — the announcements are the conversation's own news and cannot be
+    /// older than an answer that raced them — and only group calls this account is not in.
+    #[test]
+    fn a_listing_seeds_the_calls_the_session_never_heard_announced() {
+        let mut calls = GroupCalls::new();
+        let conversation = id_of(1);
+        let other = id_of(2);
+        let call = id_of(3);
+        let other_call = id_of(4);
+
+        // The session was offline for the whole call: no announcement ever named it, and none
+        // is coming, so the ledger's own entry is the header's only way into a running call.
+        assert_eq!(
+            calls.spectate_listing(&[listed_entry(conversation, call, 1, 0, 3)]),
+            vec![Spectated::Running {
+                conversation_id: conversation,
+                call_id: call,
+                count: 3,
+            }]
+        );
+        assert_eq!(calls.in_progress.get(&conversation), Some(&(call, 3)));
+
+        // A second listing adds nothing: the entry is held, and it is not re-said. A seat this
+        // device holds is the roster's, a direct call's screen reads the invite stream, and a
+        // conversation already announced is never overwritten by an older answer.
+        calls.spectate(spectator_event(other, other_call, Some(2)));
+        assert!(calls
+            .spectate_listing(&[
+                listed_entry(conversation, call, 1, 0, 3),
+                listed_entry(other, other_call, 1, 0, 9),
+                listed_entry(id_of(5), id_of(6), 1, 1, 2),
+                listed_entry(id_of(7), id_of(8), 0, 0, 2),
+            ])
+            .is_empty());
+        assert_eq!(calls.in_progress.get(&other), Some(&(other_call, 2)));
+
+        // A listing naming a conversation the ledger has never held is news, and only that one.
+        let third = id_of(10);
+        let third_call = id_of(11);
+        assert_eq!(
+            calls.spectate_listing(&[
+                listed_entry(conversation, call, 1, 0, 3),
+                listed_entry(third, third_call, 1, 0, 4),
+            ]),
+            vec![Spectated::Running {
+                conversation_id: third,
+                call_id: third_call,
+                count: 4,
+            }]
+        );
+
+        // And a conversation this device holds a seat in is not the ledger's, whatever the
+        // listing says: the seat is the header's whole truth for the conversation.
+        calls.in_progress.remove(&third);
+        calls.seat = Some(GroupSeat {
+            call_id: third_call,
+            conversation_id: third,
+            seats: vec![(id_of(3), id_of(4))],
+            key: None,
+            key_ask_waiting: false,
+        });
+        assert!(calls
+            .spectate_listing(&[listed_entry(third, third_call, 1, 0, 2)])
+            .is_empty());
+        assert!(!calls.in_progress.contains_key(&third));
     }
 
     /// The join's target id, in precedence order: an ask already in flight is the

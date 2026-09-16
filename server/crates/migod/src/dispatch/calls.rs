@@ -105,8 +105,9 @@ use migo_gateway::ClientContext;
 use migo_notify::{Event as NotificationEvent, SharedNotifier};
 use migo_protocol::{
     fault, from_frame, Acknowledged, CallAnswer, CallCancel, CallDecline, CallEnd, CallIce,
-    CallInvite, CallInviteResult, CallKeyUpdate, CallRenegotiate, CallSdp, CallStats,
-    CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic, TopicKind,
+    CallInvite, CallInviteResult, CallKeyUpdate, CallListQuery, CallListResult, CallRenegotiate,
+    CallSdp, CallStats, CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic,
+    TopicKind,
 };
 
 use crate::conversation_relay::ConversationRelay;
@@ -536,6 +537,23 @@ pub(crate) async fn handle_stats(
     let request: CallStats = from_frame(frame).map_err(fault::from_wire)?;
     svc.stats(&caller_of(ctx), request).await?;
     ctx.reply(&Acknowledged { ok: true })
+}
+
+/// Answers what calls the caller can see.
+///
+/// The one call frame that publishes nothing: every other handler here replies
+/// *and* fans an event out to a topic, because it moved a call and somebody had
+/// to hear about it. A listing moves nothing, so it answers on the connection
+/// it arrived on and stops — a broadcast would be the read telling every one of
+/// the account's other devices about a screen they did not ask for.
+pub(crate) async fn handle_list(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedCallkeeper,
+) -> Result<(), Error> {
+    let request: CallListQuery = from_frame(frame).map_err(fault::from_wire)?;
+    let calls = svc.list(&caller_of(ctx), request.conversation_id).await?;
+    ctx.reply(&CallListResult { calls })
 }
 
 /// Answers a TURN fetch with the configured relays.

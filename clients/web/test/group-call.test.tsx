@@ -33,7 +33,13 @@ import { isValidElement } from 'react';
 import type { ReactNode } from 'react';
 
 import { CallMediaKind } from '@migo/sdk';
-import type { GroupCallJoinedEvent, GroupCallLeftEvent, GroupCallRoster, Id } from '@migo/sdk';
+import type {
+  CallListEntry,
+  GroupCallJoinedEvent,
+  GroupCallLeftEvent,
+  GroupCallRoster,
+  Id,
+} from '@migo/sdk';
 
 import { GroupCallButton } from '../src/components/call-buttons.js';
 import {
@@ -51,6 +57,7 @@ import {
   groupCallNoteLabel,
   inProgressArrived,
   inProgressDeparted,
+  inProgressFromListing,
   isCallRetired,
   namesOwnSeat,
   placeholderSealedOffer,
@@ -441,6 +448,47 @@ test('the last seat retires the tracked call; a fresh call replaces the entry', 
   // source this device has, and it names the call it names.
   tracked = inProgressArrived(tracked, joined({ callId: 'call_next' as Id, participantCount: 1 }));
   assert.deepEqual(tracked.get(CONVERSATION), { callId: 'call_next' as Id, participantCount: 1 });
+});
+
+/** A `CallListEntry` as the server sends it, for the cases below that do not pin every field. */
+function listed(overrides: Partial<CallListEntry> = {}): CallListEntry {
+  return {
+    callId: CALL,
+    conversationId: CONVERSATION,
+    kind: 1,
+    state: 2,
+    peerId: BEN,
+    participantCount: 2,
+    joined: 0,
+    ...overrides,
+  };
+}
+
+test('a listing seeds the call a member was offline through', () => {
+  // Section 165's gap, closed from the client side: a member who was offline through the *whole*
+  // call heard no join — and no departure is coming, so the announcement stream alone would leave
+  // the map empty forever, with the header offering no way into a call still running.
+  const tracked = inProgressFromListing(new Map(), [listed()]);
+  assert.deepEqual(tracked.get(CONVERSATION), { callId: CALL, participantCount: 2 });
+});
+
+test('a listing adds only what the session has not heard, and only calls it is not in', () => {
+  // A seat this device holds belongs to the roster screen, not the header's join affordance.
+  assert.equal(inProgressFromListing(new Map(), [listed({ joined: 1 })]).size, 0);
+  // A direct call's screen reads the invite stream for itself; the header has no entry to seed.
+  assert.equal(inProgressFromListing(new Map(), [listed({ kind: 0 })]).size, 0);
+  // The announcements are the newer source, so a listing in flight beside them cannot overwrite
+  // what they already said — the fold adds, it never replaces.
+  const heard = inProgressArrived(new Map(), joined({ participantCount: 3 }));
+  const folded = inProgressFromListing(heard, [listed({ participantCount: 9 })]);
+  assert.deepEqual(folded.get(CONVERSATION), { callId: CALL, participantCount: 3 });
+  // A listing that names a second conversation adds exactly that one, and leaves the heard entry.
+  const other = 'conv_other' as Id;
+  const widened = inProgressFromListing(heard, [
+    listed({ conversationId: other, callId: 'call_other' as Id, participantCount: 4 }),
+  ]);
+  assert.deepEqual(widened.get(other), { callId: 'call_other' as Id, participantCount: 4 });
+  assert.deepEqual(widened.get(CONVERSATION), { callId: CALL, participantCount: 3 });
 });
 
 test('a call in progress turns the join buttons into joining the running call, by its id', () => {

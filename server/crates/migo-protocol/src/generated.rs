@@ -9789,6 +9789,190 @@ impl Decode for CallSfuParticipant {
     }
 }
 
+/// Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallListQuery {
+    /// When set, only the calls belonging to this conversation are listed.
+    pub conversation_id: Option<Id>,
+}
+
+impl Encode for CallListQuery {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        let present = usize::from(self.conversation_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.conversation_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallListQuery {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.conversation_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One call the listing account can see, as much of it as the server owns. Nothing here is sealed material: the listing answers which calls exist and where they are, and every description inside one still arrives over the relay that already carries it. The optional fields are exactly the row facts each kind of call keeps — a direct call records a ring deadline and an answer time and no start, because the ring's beginning is the caller's own clock and not something this node stored; a group call records its first seat and no deadline, because no timer retires it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallListEntry {
+    /// The id an answer or a join must name; the call's idempotency key.
+    pub call_id: Id,
+    /// The conversation the call belongs to.
+    pub conversation_id: Id,
+    /// 0=Direct (a 1:1 call), 1=Group (an SFU roster). A client picks its call screen from this.
+    pub kind: u32,
+    /// CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected.
+    pub state: u32,
+    /// Direct: the other party's account. Group: the account that founded the call by joining first.
+    pub peer_id: Id,
+    /// Direct: 2 — both parties, whether or not both have connected. Group: the roster's size now.
+    pub participant_count: u32,
+    /// 1 when this account is a party to the call or holds a seat on its roster, 0 when the call is only being offered to it. A client that must not ring twice reads this to tell a call it is already in from one it is being invited into.
+    pub joined: u32,
+    /// Direct: 0=Audio, 1=Video. Absent for a group call, whose media each seat negotiates for itself and whose roster therefore carries no single kind.
+    pub media_kind: Option<u32>,
+    /// A ringing direct call: when the ring gives up. Absent once the callee has answered, and absent for a group call, which no deadline retires.
+    pub expires_at: Option<Timestamp>,
+    /// A group call: when the first seat was taken. Absent for a direct call, whose row keeps no start.
+    pub started_at: Option<Timestamp>,
+    /// A direct call the callee picked up.
+    pub answered_at: Option<Timestamp>,
+}
+
+impl Encode for CallListEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.conversation_id);
+        w.write_u32(self.kind);
+        w.write_u32(self.state);
+        w.write_id(&self.peer_id);
+        w.write_u32(self.participant_count);
+        w.write_u32(self.joined);
+        let present = usize::from(self.media_kind.is_some())
+            + usize::from(self.expires_at.is_some())
+            + usize::from(self.started_at.is_some())
+            + usize::from(self.answered_at.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.media_kind {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.expires_at {
+            w.optional(2, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.started_at {
+            w.optional(3, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.answered_at {
+            w.optional(4, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallListEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.kind = r.read_u32()?;
+        out.state = r.read_u32()?;
+        out.peer_id = r.read_id()?;
+        out.participant_count = r.read_u32()?;
+        out.joined = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.media_kind = Some(sub.read_u32()?),
+                2 => out.expires_at = Some(sub.read_timestamp()?),
+                3 => out.started_at = Some(sub.read_timestamp()?),
+                4 => out.answered_at = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The calls the listing account can see, most urgent first: ringing before connecting before connected, and within one state the call that has been waiting longest — for a direct call the one whose ring went out earliest, which its deadline orders, and for a group call the one whose first seat was taken earliest. The order is total and stable, so a client that redraws from a second listing does not reshuffle a screen it already showed.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallListResult {
+    pub calls: Vec<CallListEntry>,
+}
+
+impl Encode for CallListResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.calls.len())?;
+            for item in self.calls.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallListResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.calls = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(CallListEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Renegotiates codecs/streams mid-call (e.g. ICE restart, add video).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallRenegotiate {
@@ -11307,6 +11491,8 @@ pub enum Opcode {
     CallSfuJoin = 237,
     /// SFU group call state.
     CallSfuEvent = 238,
+    /// Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear.
+    CallList = 247,
     /// Group metadata moved: a rename. Deltas only, coalesced per conversation.
     ConversationStateEvent = 52,
     /// Buys a store item for the caller; the ledger and the entitlement are written together.
@@ -11452,6 +11638,7 @@ impl Opcode {
             236 => Self::CallTurnFetch,
             237 => Self::CallSfuJoin,
             238 => Self::CallSfuEvent,
+            247 => Self::CallList,
             52 => Self::ConversationStateEvent,
             239 => Self::StorePurchase,
             240 => Self::Entitlements,
@@ -11589,6 +11776,7 @@ impl Opcode {
             Self::CallTurnFetch => "CALL_TURN_FETCH",
             Self::CallSfuJoin => "CALL_SFU_JOIN",
             Self::CallSfuEvent => "CALL_SFU_EVENT",
+            Self::CallList => "CALL_LIST",
             Self::ConversationStateEvent => "CONVERSATION_STATE_EVENT",
             Self::StorePurchase => "STORE_PURCHASE",
             Self::Entitlements => "ENTITLEMENTS",
@@ -11726,6 +11914,7 @@ impl Opcode {
             Self::CallTurnFetch => 10,
             Self::CallSfuJoin => 20,
             Self::CallSfuEvent => 0,
+            Self::CallList => 2,
             Self::ConversationStateEvent => 0,
             Self::StorePurchase => 5,
             Self::Entitlements => 1,
@@ -11862,6 +12051,7 @@ impl Opcode {
             Self::CallTurnFetch => DeliveryClass::Critical,
             Self::CallSfuJoin => DeliveryClass::Critical,
             Self::CallSfuEvent => DeliveryClass::Coalescable,
+            Self::CallList => DeliveryClass::Droppable,
             Self::ConversationStateEvent => DeliveryClass::Coalescable,
             Self::StorePurchase => DeliveryClass::Critical,
             Self::Entitlements => DeliveryClass::Droppable,
@@ -12002,6 +12192,7 @@ impl Opcode {
             Self::CallTurnFetch => false,
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
+            Self::CallList => false,
             Self::ConversationStateEvent => false,
             Self::StorePurchase => false,
             Self::Entitlements => false,
@@ -12146,6 +12337,7 @@ impl Opcode {
             Self::CallTurnFetch => AuthLevel::User,
             Self::CallSfuJoin => AuthLevel::User,
             Self::CallSfuEvent => AuthLevel::User,
+            Self::CallList => AuthLevel::User,
             Self::ConversationStateEvent => AuthLevel::User,
             Self::StorePurchase => AuthLevel::User,
             Self::Entitlements => AuthLevel::User,
@@ -12230,6 +12422,7 @@ impl Opcode {
             Self::CallKeyUpdate => Some(features::CALLS),
             Self::CallStats => Some(features::CALLS),
             Self::CallTurnFetch => Some(features::CALLS),
+            Self::CallList => Some(features::CALLS),
             Self::StorePurchase => Some(features::ECONOMY),
             Self::Entitlements => Some(features::ECONOMY),
             Self::KickPointsBuy => Some(features::ECONOMY),
@@ -12366,6 +12559,7 @@ impl Opcode {
             Self::CallTurnFetch => Direction::ClientToServer,
             Self::CallSfuJoin => Direction::ClientToServer,
             Self::CallSfuEvent => Direction::ServerToClient,
+            Self::CallList => Direction::ClientToServer,
             Self::ConversationStateEvent => Direction::ServerToClient,
             Self::StorePurchase => Direction::ClientToServer,
             Self::Entitlements => Direction::ClientToServer,
@@ -12503,6 +12697,7 @@ impl Opcode {
             Self::CallTurnFetch => false,
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
+            Self::CallList => false,
             Self::ConversationStateEvent => false,
             Self::StorePurchase => false,
             Self::Entitlements => false,
@@ -12647,6 +12842,7 @@ impl Opcode {
         Self::CallTurnFetch,
         Self::CallSfuJoin,
         Self::CallSfuEvent,
+        Self::CallList,
         Self::ConversationStateEvent,
         Self::StorePurchase,
         Self::Entitlements,

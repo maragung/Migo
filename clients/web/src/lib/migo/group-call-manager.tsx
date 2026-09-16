@@ -55,6 +55,7 @@ import type { GroupMediaLink } from './group-media.js';
 import {
   inProgressArrived,
   inProgressDeparted,
+  inProgressFromListing,
   isCallRetired,
   namesOwnSeat,
   placeholderSealedOffer,
@@ -591,7 +592,31 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         planeRef.current?.onIce(event);
       }),
     ];
+    // The calls this session cannot have heard about. The announcements below only reach a client
+    // that was connected to hear them, so a member who was offline through an *entire* group call
+    // would keep an empty map until the next join or departure — which, for a call that is already
+    // running, never comes. One listing at session start asks the server which calls this account
+    // can see, and the fold (see {@link inProgressFromListing}) adds whichever ones this session
+    // never heard announced. Without it, the header's "join the running call" is missing for
+    // exactly the member who just came back.
+    //
+    // The answer is dropped if the effect was torn down first: a listing that lands after the
+    // session it was asked on is a fact about a session that no longer exists. A server that does
+    // not know the opcode yet is the same shape of non-fact — the map simply stays as the event
+    // stream keeps it, which is what this client did before the listing existed.
+    let sessionCurrent = true;
+    void client.calls
+      .listCalls()
+      .then((entries) => {
+        if (sessionCurrent) {
+          setTracked(inProgressFromListing(trackedRef.current, entries));
+        }
+      })
+      .catch(() => {
+        // Nothing to do: the announcements remain the map's source, as they were.
+      });
     return () => {
+      sessionCurrent = false;
       for (const off of offs) {
         off();
       }

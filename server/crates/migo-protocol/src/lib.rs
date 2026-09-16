@@ -142,17 +142,18 @@ mod tests {
     #[test]
     fn no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range() {
         // Section 146: the reserved range is enforced at the gateway, which refuses
-        // anything in 247-255 from a client. A generated variant landing inside that
+        // anything in 248-255 from a client. A generated variant landing inside that
         // span would make the gateway refuse an opcode this build claims to speak —
         // the gateway gate and this registry must agree, so every allocation decision
         // (section 145 records the store carve-out at 239-240, the
-        // conversation-federation carve-out at 241-242, and the row-replication
-        // carve-out at 243-246, the only ones ever made from the reserved head) has
-        // to be re-read before a number in 247-255 is given out, not after.
+        // conversation-federation carve-out at 241-242, the row-replication
+        // carve-out at 243-246, and the call-listing carve-out at 247, the only ones
+        // ever made from the reserved head) has to be re-read before a number in
+        // 248-255 is given out, not after.
         for &opcode in Opcode::ALL {
             let number = opcode.to_wire();
             assert!(
-                !(247..=255).contains(&number),
+                !(248..=255).contains(&number),
                 "{} is allocated at {}, inside the never-allocated reserved span; \
                  a written decision must precede any allocation there",
                 opcode.name(),

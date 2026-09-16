@@ -8005,6 +8005,167 @@ data class CallSfuParticipant(
     }
 }
 
+/** Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing. */
+data class CallListQuery(
+    /** When set, only the calls belonging to this conversation are listed. */
+    val conversationId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        var present = 0
+        if (conversationId != null) present++
+        w.u32(present)
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallListQuery {
+            r.enter()
+            var conversationId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> conversationId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallListQuery(conversationId)
+        }
+    }
+}
+
+/** One call the listing account can see, as much of it as the server owns. Nothing here is sealed material: the listing answers which calls exist and where they are, and every description inside one still arrives over the relay that already carries it. The optional fields are exactly the row facts each kind of call keeps — a direct call records a ring deadline and an answer time and no start, because the ring's beginning is the caller's own clock and not something this node stored; a group call records its first seat and no deadline, because no timer retires it. */
+data class CallListEntry(
+    /** The id an answer or a join must name; the call's idempotency key. */
+    val callId: Id,
+    /** The conversation the call belongs to. */
+    val conversationId: Id,
+    /** 0=Direct (a 1:1 call), 1=Group (an SFU roster). A client picks its call screen from this. */
+    val kind: Long,
+    /** CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected. */
+    val state: Long,
+    /** Direct: the other party's account. Group: the account that founded the call by joining first. */
+    val peerId: Id,
+    /** Direct: 2 — both parties, whether or not both have connected. Group: the roster's size now. */
+    val participantCount: Long,
+    /** 1 when this account is a party to the call or holds a seat on its roster, 0 when the call is only being offered to it. A client that must not ring twice reads this to tell a call it is already in from one it is being invited into. */
+    val joined: Long,
+    /** Direct: 0=Audio, 1=Video. Absent for a group call, whose media each seat negotiates for itself and whose roster therefore carries no single kind. */
+    val mediaKind: Long? = null,
+    /** A ringing direct call: when the ring gives up. Absent once the callee has answered, and absent for a group call, which no deadline retires. */
+    val expiresAt: Long? = null,
+    /** A group call: when the first seat was taken. Absent for a direct call, whose row keeps no start. */
+    val startedAt: Long? = null,
+    /** A direct call the callee picked up. */
+    val answeredAt: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(conversationId)
+        w.u32(kind)
+        w.u32(state)
+        w.id(peerId)
+        w.u32(participantCount)
+        w.u32(joined)
+        var present = 0
+        if (mediaKind != null) present++
+        if (expiresAt != null) present++
+        if (startedAt != null) present++
+        if (answeredAt != null) present++
+        w.u32(present)
+        if (mediaKind != null) {
+            val value = mediaKind
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (expiresAt != null) {
+            val value = expiresAt
+            w.optional(2) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (startedAt != null) {
+            val value = startedAt
+            w.optional(3) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (answeredAt != null) {
+            val value = answeredAt
+            w.optional(4) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallListEntry {
+            r.enter()
+            val callId = r.id()
+            val conversationId = r.id()
+            val kind = r.u32()
+            val state = r.u32()
+            val peerId = r.id()
+            val participantCount = r.u32()
+            val joined = r.u32()
+            var mediaKind: Long? = null
+            var expiresAt: Long? = null
+            var startedAt: Long? = null
+            var answeredAt: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> mediaKind = sub.u32()
+                    2L -> expiresAt = sub.timestamp()
+                    3L -> startedAt = sub.timestamp()
+                    4L -> answeredAt = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallListEntry(callId, conversationId, kind, state, peerId, participantCount, joined, mediaKind, expiresAt, startedAt, answeredAt)
+        }
+    }
+}
+
+/** The calls the listing account can see, most urgent first: ringing before connecting before connected, and within one state the call that has been waiting longest — for a direct call the one whose ring went out earliest, which its deadline orders, and for a group call the one whose first seat was taken earliest. The order is total and stable, so a client that redraws from a second listing does not reshuffle a screen it already showed. */
+data class CallListResult(
+    val calls: List<CallListEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(calls.size)
+        for (item in calls) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallListResult {
+            r.enter()
+            val calls = run { val n = r.listLen(); val acc = ArrayList<CallListEntry>(n); for (i in 0 until n) acc.add(CallListEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallListResult(calls)
+        }
+    }
+}
+
 /** Renegotiates codecs/streams mid-call (e.g. ICE restart, add video). */
 data class CallRenegotiate(
     val callId: Id,
@@ -9287,6 +9448,8 @@ object Op {
     const val CALL_SFU_JOIN: Long = 237L
     /** SFU group call state. */
     const val CALL_SFU_EVENT: Long = 238L
+    /** Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear. */
+    const val CALL_LIST: Long = 247L
     /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
     const val CONVERSATION_STATE_EVENT: Long = 52L
     /** Buys a store item for the caller; the ledger and the entitlement are written together. */
@@ -9440,6 +9603,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null, false, listOf(), "CALLS"),
     237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null, false, listOf(), null),
     238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id", false, listOf(), null),
+    247L to OpcodeMeta(247L, "CALL_LIST", 2, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallListQuery", "CallListResult", null, false, listOf(), "CALLS"),
     52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id", false, listOf(), null),
     239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null, false, listOf(), "ECONOMY"),
     240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null, false, listOf(), "ECONOMY"),
