@@ -69,12 +69,12 @@ fn ed25519_spki(key: &[u8; 32]) -> SubjectPublicKeyInfoDer<'static> {
 
 /// Reads a presented leaf's subject public key.
 ///
-/// The parse is [`rustls_webpki`]'s — the same X.509 reader rustls hands every
+/// The parse is [`webpki`]'s — the same X.509 reader rustls hands every
 /// certificate to — so a leaf too malformed to read here is too malformed to have a
 /// place in a mesh handshake at all.
 fn leaf_spki(end_entity: &CertificateDer<'_>) -> Result<SubjectPublicKeyInfoDer<'static>> {
     let owned = end_entity.to_owned();
-    let cert = rustls_webpki::EndEntityCert::try_from(&owned)
+    let cert = webpki::EndEntityCert::try_from(&owned)
         .map_err(|_| fault::internal("the peer's mesh certificate is not a readable X.509 leaf"))?;
     Ok(cert.subject_public_key_info())
 }
@@ -170,7 +170,7 @@ impl MeshTls {
             .with_client_cert_verifier(Arc::new(verifier))
             .with_single_cert(
                 vec![self.certificate.clone()],
-                PrivateKeyDer::Pkcs8(self.private_key.clone()),
+                PrivateKeyDer::Pkcs8(self.private_key.clone_key()),
             )
             .map_err(|error| fault::internal(format!("cannot load the mesh TLS leaf: {error}")))?;
         Ok(Arc::new(config))
@@ -196,7 +196,7 @@ impl MeshTls {
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_client_auth_cert(
                 vec![self.certificate.clone()],
-                PrivateKeyDer::Pkcs8(self.private_key.clone()),
+                PrivateKeyDer::Pkcs8(self.private_key.clone_key()),
             )
             .map_err(|error| fault::internal(format!("cannot load the mesh TLS leaf: {error}")))?;
         Ok(Arc::new(config))
@@ -325,7 +325,7 @@ impl rustls::server::danger::ClientCertVerifier for AllowListClientCert {
         _message: &[u8],
         _cert: &CertificateDer<'_>,
         _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::server::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Err(rustls::Error::General(
             "a mesh link speaks TLS 1.3 only; a TLS 1.2 signature has no business appearing"
                 .to_owned(),
@@ -337,7 +337,7 @@ impl rustls::server::danger::ClientCertVerifier for AllowListClientCert {
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::server::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(
             message,
             cert,
