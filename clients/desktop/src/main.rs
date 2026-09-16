@@ -28,6 +28,7 @@ mod config;
 mod crypto;
 mod model;
 mod net;
+mod report;
 mod settings;
 mod theme;
 mod ui;
