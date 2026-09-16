@@ -34,7 +34,7 @@ use migo_calls::model::{
 };
 use migo_calls::store::{CallStore, MemoryCallStore};
 use migo_calls::traits::{CallGate, Callkeeper};
-use migo_calls::Calls;
+use migo_calls::{Calls, GroupCallStore, MemoryGroupCallStore, SharedGroupCallStore};
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Timestamp};
@@ -201,6 +201,46 @@ impl Harness {
                 seat_grace_ms: grace_ms,
                 ..CallsConfig::default()
             },
+        )
+    }
+
+    /// The same harness, handing back the group store the service seats its
+    /// rosters in, for the tests that must write to it directly — the stale
+    /// roster clones a retirement has to outlive.
+    fn with_exposed_group_store(grace_ms: i64) -> (Self, Arc<MemoryGroupCallStore>) {
+        let settings = Config::default();
+        let store = Arc::new(MemoryCallStore::new());
+        let groups = Arc::new(MemoryGroupCallStore::new());
+        let registry = Registry::new();
+        let policies =
+            Policies::from_config(&settings.rate_limit).expect("the default policies are valid");
+        let limiter = Arc::new(CacheRateLimiter::new(
+            Arc::new(MemoryCache::new()),
+            policies,
+            &registry,
+        ));
+        // The service seats its rosters behind the shared trait object; the
+        // concrete handle travels on, because the stale-write test must reach
+        // the memory backend's own `put`.
+        let shared: SharedGroupCallStore = groups.clone();
+        let calls = Calls::with_group_store(
+            Arc::clone(&store),
+            shared,
+            limiter,
+            Arc::new(TestGate::open()),
+            &registry,
+            CallsConfig {
+                seat_grace_ms: grace_ms,
+                ..CallsConfig::default()
+            },
+        );
+        (
+            Self {
+                calls,
+                store,
+                registry,
+            },
+            groups,
         )
     }
 
@@ -1914,6 +1954,161 @@ async fn a_rejoin_inside_the_grace_keeps_the_seat() {
         .await
         .unwrap();
     assert_eq!(call.participants.len(), 2);
+}
+
+#[tokio::test]
+async fn two_sweeps_that_race_retire_the_seat_once() {
+    let harness = Harness::with_seat_grace(SECOND);
+    for who in [alice(NOW), bob(NOW)] {
+        harness
+            .calls
+            .group_join(
+                &who,
+                id(GROUP_CALL),
+                id(CONVERSATION),
+                0,
+                b"sealed".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+    harness
+        .calls
+        .group_session_ended(id(BOB), id(BOB_PHONE), ts(NOW + SECOND))
+        .await
+        .unwrap();
+
+    // Two sweeps inside the same grace-expired instant, the timer's tick and
+    // an opportunistic pass: both read the same stamped roster, and only the
+    // one whose retirement took the seat may announce it — one death, one
+    // departure, whichever won.
+    let (first, second) = tokio::join!(
+        harness.calls.group_sweep(ts(NOW + 3 * SECOND)),
+        harness.calls.group_sweep(ts(NOW + 3 * SECOND)),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        first.len() + second.len(),
+        1,
+        "the racing sweeps retire the seat exactly once between them"
+    );
+    let event = first
+        .iter()
+        .chain(second.iter())
+        .next()
+        .expect("one of the two sweeps took the seat");
+    assert_eq!(event.user_id, Some(id(BOB)));
+    assert_eq!(event.reason, Some(EndReason::Network.to_wire()));
+
+    // And the roster one reader holds afterwards names one seat.
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + 3 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(call.participants.len(), 1);
+}
+
+#[tokio::test]
+async fn a_retired_seat_cannot_come_back_through_a_stale_roster_write() {
+    let (harness, groups) = Harness::with_exposed_group_store(SECOND);
+    for who in [alice(NOW), bob(NOW)] {
+        harness
+            .calls
+            .group_join(
+                &who,
+                id(GROUP_CALL),
+                id(CONVERSATION),
+                0,
+                b"sealed".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // The stale clone: a writer that read the roster before the retirement —
+    // captured here as the roster a duplicate re-join hands back, the one
+    // read every writer's own read-modify-write begins with.
+    let (_, stale, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.participants.len(), 2);
+
+    harness
+        .calls
+        .group_session_ended(id(BOB), id(BOB_PHONE), ts(NOW + SECOND))
+        .await
+        .unwrap();
+    let departures = harness
+        .calls
+        .group_sweep(ts(NOW + 3 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(departures.len(), 1, "the dead seat is retired");
+
+    // The stale writer's put: the clone still carries Bob's seat at the
+    // `joined_at` it was seated with, and the store must refuse exactly that
+    // seat — the roster the retirement already shrunk stays shrunk, and the
+    // next sweep has no second death to announce.
+    groups.put(&stale).await.unwrap();
+    let again = harness
+        .calls
+        .group_sweep(ts(NOW + 10 * SECOND))
+        .await
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "a retired seat cannot be resurrected only to die twice"
+    );
+    let (_, call, _) = harness
+        .calls
+        .group_join(
+            &alice(NOW + 10 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        call.participants.len(),
+        1,
+        "the stale write did not put the retired seat back"
+    );
+    assert_eq!(call.participants[0].account_id, id(ALICE));
+
+    // A fresh join re-seats the device: the tombstone refuses the dead seat,
+    // not the member, so the return is the arrival it is announced as.
+    let (outcome, call, events) = harness
+        .calls
+        .group_join(
+            &bob(NOW + 10 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"sealed-anew".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, GroupJoinOutcome::Joined);
+    assert_eq!(call.participants.len(), 2);
+    assert_eq!(events.len(), 1, "the return is announced as an arrival");
 }
 
 #[tokio::test]
