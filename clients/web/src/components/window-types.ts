@@ -23,6 +23,7 @@ export type WinKind =
   | 'settings'
   | 'checkup'
   | 'admins'
+  | 'moderation'
   | 'store'
   | 'games';
 
@@ -55,6 +56,7 @@ export const KIND_LABEL: Readonly<Record<WinKind, string>> = {
   settings: 'Settings',
   checkup: 'Security',
   admins: 'Admins',
+  moderation: 'Moderation',
   store: 'Store',
   games: 'Games',
 };
@@ -70,6 +72,10 @@ export const KIND_ICON: Readonly<Record<WinKind, IconName>> = {
   settings: 'settings',
   checkup: 'shield',
   admins: 'shield',
+  // The eye and not a fourth shield: three of these tabs already carry a shield, and a taskbar
+  // whose moderation window is indistinguishable from the account window beside it has no icon
+  // worth drawing. Moderation watches, so it reads as watching.
+  moderation: 'eye',
   store: 'gift',
   games: 'game',
 };
