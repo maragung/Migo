@@ -34,7 +34,7 @@ use migo_calls::model::{
 };
 use migo_calls::store::{CallStore, MemoryCallStore};
 use migo_calls::traits::{CallGate, Callkeeper};
-use migo_calls::{Calls, MemoryGroupCallStore};
+use migo_calls::{Calls, GroupCallStore, MemoryGroupCallStore, SharedGroupCallStore};
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Timestamp};
@@ -219,9 +219,13 @@ impl Harness {
             policies,
             &registry,
         ));
+        // The service seats its rosters behind the shared trait object; the
+        // concrete handle travels on, because the stale-write test must reach
+        // the memory backend's own `put`.
+        let shared: SharedGroupCallStore = Arc::clone(&groups);
         let calls = Calls::with_group_store(
             Arc::clone(&store),
-            Arc::clone(&groups),
+            shared,
             limiter,
             Arc::new(TestGate::open()),
             &registry,
