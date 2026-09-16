@@ -619,7 +619,7 @@ const fn ogg_crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut entry = 0;
     while entry < 256 {
-        let mut value = u32::from(entry as u8) << 24;
+        let mut value = (entry as u32) << 24;
         let mut bit = 0;
         while bit < 8 {
             value = if value & 0x8000_0000 != 0 {
