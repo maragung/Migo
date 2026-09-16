@@ -462,6 +462,9 @@ class FakePeerConnection {
 
   close(): void {
     this.connectionState = 'closed';
+    // A connection that closes without ever sending steps out of the queue rather than standing in
+    // front of the next send: a dial that failed to describe itself leaves no connection behind.
+    this.mesh.forget(this);
     this.onconnectionstatechange?.();
   }
 
@@ -500,7 +503,14 @@ class VirtualMesh {
   readonly planes = new Map<Id, GroupMediaPlane>();
   readonly keys = new Map<Id, CallKeyState>();
   readonly pcs = new Map<Id, FakePeerConnection[]>();
-  private readonly lastPc = new Map<Id, FakePeerConnection>();
+  /**
+   * The connections built for a device that have not sent yet, oldest first. A send carries only the
+   * device, never the link, so this wire has to work out which connection a description belongs to.
+   * The newest one for the device is not an answer: a rotation re-dials every stranded link without
+   * awaiting, so two connections are built before either send resumes. The sends resume in the order
+   * the connections were built, so the oldest unsent connection is the one this send belongs to.
+   */
+  private readonly unsent = new Map<Id, FakePeerConnection[]>();
   private readonly links = new Map<string, FakeLink>();
   private readonly queue: Array<() => void> = [];
   hold = false;
@@ -513,17 +523,37 @@ class VirtualMesh {
     const mine = this.pcs.get(device) ?? [];
     mine.push(pc);
     this.pcs.set(device, mine);
-    this.lastPc.set(device, pc);
+    const waiting = this.unsent.get(device) ?? [];
+    waiting.push(pc);
+    this.unsent.set(device, waiting);
     return pc as unknown as RTCPeerConnection;
   };
 
+  /** The connection a send from `device` belongs to — see {@link unsent}. */
+  private takeSender(device: Id): FakePeerConnection | undefined {
+    const waiting = this.unsent.get(device);
+    if (waiting === undefined) {
+      return undefined;
+    }
+    const sender = waiting.shift();
+    this.unsent.set(device, waiting);
+    return sender;
+  }
+
+  /** Drops a connection that closed without sending, so it cannot stand in front of a later send. */
+  forget(pc: FakePeerConnection): void {
+    for (const [device, waiting] of this.unsent) {
+      const at = waiting.indexOf(pc);
+      if (at >= 0) {
+        waiting.splice(at, 1);
+        this.unsent.set(device, waiting);
+      }
+    }
+  }
+
   sendSdp = async (from: Id, to: Id, sealed: Uint8Array): Promise<void> => {
     this.relayed.push({ from, to, kind: 'sdp', sealed });
-    // The connection this send belongs to, captured now: a plane builds a connection and sends in
-    // the same turn, so the newest one for `from` is this link's. Reading it at delivery time would
-    // be wrong whenever two sends are in flight together — a held wire delivers them interleaved,
-    // and the newest connection then belongs to whichever link was built last.
-    const sender = this.lastPc.get(from);
+    const sender = this.takeSender(from);
     if (this.hold) {
       this.queue.push(() => void this.deliverSdp(from, to, sealed, sender));
       return;
