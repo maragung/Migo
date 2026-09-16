@@ -112,6 +112,7 @@ export function ContactsWindow({
   const [statusEditing, setStatusEditing] = useState(false);
   const [statusDraft, setStatusDraft] = useState('');
   const [owner, setOwner] = useState(false);
+  const [staff, setStaff] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
 
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -131,6 +132,17 @@ export function ContactsWindow({
       .then((standing) => {
         if (!cancelled) {
           setOwner(standing.owner);
+        }
+      })
+      .catch(() => {});
+    // The moderation queue's door is a different answer to a different question — `triage` is not
+    // an appointment the owner holds — so it is asked separately and a refusal on one surface
+    // never withholds the other's entry.
+    client
+      .moderationStanding()
+      .then((standing) => {
+        if (!cancelled) {
+          setStaff(standing.staff);
         }
       })
       .catch(() => {});
@@ -522,6 +534,19 @@ export function ContactsWindow({
                 >
                   <Icon name="shield" size={14} />
                   Global Admins
+                </button>
+              ) : null}
+              {staff ? (
+                <button
+                  type="button"
+                  className="retro-menu-item"
+                  onClick={() => {
+                    setMenu(false);
+                    onOpenWindow('moderation');
+                  }}
+                >
+                  <Icon name="eye" size={14} />
+                  Moderation
                 </button>
               ) : null}
               <div className="retro-menu-sep" />

@@ -18,7 +18,7 @@
  * just proved its identity; a caller may hold them but must never write them to a log (section 145).
  */
 
-import { parseId } from '@migo/wire';
+import { fromWire, parseId, toWire } from '@migo/wire';
 import type { Id } from '@migo/wire';
 import { Platform } from '@migo/protocol';
 
@@ -243,6 +243,123 @@ export interface AdminStanding {
   admin: boolean;
 }
 
+/**
+ * What the signed-in account may do about reports, in the words the server uses for it.
+ *
+ * The counterpart of {@link AdminStanding} for the moderation surface, and deliberately not the
+ * same call: being a global admin is one way to hold moderation powers and the deployment's owner
+ * is another, so a client that gated a moderator's screen on the admin surface would hide it from
+ * the owner and from every triager appointed without a public-room mandate.
+ */
+export interface ModerationStanding {
+  accountId: Id;
+  /** The raw bitmask, for a client that would rather compare numbers. */
+  bits: number;
+  /** The powers by name — `triage`, `takedown`, `suspend`, `audit`. */
+  powers: string[];
+  /** Whether the caller holds any power at all. */
+  staff: boolean;
+}
+
+/**
+ * One report, as the operator surface states it.
+ *
+ * Note that `subjectKind`, `reason`, and `resolution` are the *store's* numbers and not the wire's:
+ * the store numbers a media object 3 and a bot 4, while the report opcode numbers a bot 3 and has no
+ * media kind at all. The server sends both the number and its name for each, and a client should
+ * render the name — the numbers are there for a client that stores them, not for one that guesses.
+ */
+export interface ModerationCase {
+  reportId: Id;
+  reporterId: Id;
+  subjectKind: number;
+  subjectKindName: string;
+  subjectId: Id;
+  roomId?: Id;
+  reason: number;
+  reasonName: string;
+  note?: string;
+  evidenceRef?: Id;
+  status: number;
+  /** Whether the case is still waiting for a decision. */
+  open: boolean;
+  createdAtMs: number;
+  resolvedAtMs?: number;
+  resolvedBy?: Id;
+  resolution?: number;
+  resolutionName?: string;
+}
+
+/**
+ * What an account will be told about an action taken on it.
+ *
+ * Carried because an operator acting on somebody should be able to see what that person will read;
+ * `undefined` for a content takedown is a fact about what the server knows rather than a decision.
+ */
+export interface ModerationNotice {
+  audience: Id;
+  outcome: string;
+  untilMs?: number;
+  reason?: number;
+  reasonName?: string;
+  atMs: number;
+}
+
+/** What an action did: its own stable name, and the notice it raised if it raised one. */
+export interface ModerationActResult {
+  action: string;
+  notice?: ModerationNotice;
+}
+
+/** One entry of the audit trail for a target. */
+export interface AuditEntryView {
+  auditId: Id;
+  actorId?: Id;
+  actorKind: number;
+  actorKindName: string;
+  /** The stable dotted action name, e.g. `moderation.report.resolve`. */
+  action: string;
+  targetKind: number;
+  targetKindName: string;
+  targetId?: Id;
+  summary: string;
+  reason?: string;
+  requestId?: string;
+  /** The truncated network class the actor came from, never a full address. */
+  ipClass?: string;
+  createdAtMs: number;
+}
+
+/**
+ * A ruling on a case: the decision code, and the operator's own words if they wrote any.
+ *
+ * The codes are the store's `report.resolution` values. A code the server does not recognise reads
+ * as "no action" rather than being refused, so a client sends a number it knows and lets the server
+ * name the ruling back: a decision is the one thing on this surface that must never be guessed at
+ * by the side that is guessing.
+ */
+export interface ResolveCaseOptions {
+  resolution: number;
+  reason?: string;
+}
+
+/**
+ * An action an operator may take, tagged by its own name.
+ *
+ * The tag is the word the server's tagged body uses and the word the audit row's metric carries, so
+ * there is one vocabulary rather than three. Ids are the store's ids, except that a suspension's
+ * `untilMs` is Unix milliseconds like every other time in this module and is converted on the way
+ * out.
+ */
+export type ModerationAction =
+  | { action: 'warn'; accountId: Id; reason?: string }
+  | { action: 'suspend'; accountId: Id; untilMs?: number; reason?: string }
+  | { action: 'reinstate'; accountId: Id; reason?: string }
+  | { action: 'remove_message'; conversationId: Id; messageId: Id; reason?: string }
+  | { action: 'remove_media'; mediaId: Id; reason?: string }
+  | { action: 'archive_room'; roomId: Id; reason?: string }
+  | { action: 'disable_bot'; botId: Id; reason?: string };
+
 /** The node's identity, as a client needs to display and route to it. */
 export interface NodeConfig {
   id: string;
@@ -439,6 +556,159 @@ function parseAdminView(row: Record<string, unknown>): AdminView {
 /** Maps an `AdminStanding` JSON row into the SDK's typed view. */
 function parseAdminStanding(row: Record<string, unknown>): AdminStanding {
   return { owner: Boolean(row['owner']), admin: Boolean(row['admin']) };
+}
+
+/** Maps a `ModerationStanding` JSON row into the SDK's typed view. */
+function parseModerationStanding(row: Record<string, unknown>): ModerationStanding {
+  const powers = row['powers'];
+  return {
+    accountId: parseId(String(row['account_id'])),
+    bits: Number(row['bits']),
+    powers: Array.isArray(powers) ? powers.map((name) => String(name)) : [],
+    staff: Boolean(row['staff']),
+  };
+}
+
+/** An optional field, present only when the server actually sent one. */
+function optional<T>(
+  value: unknown,
+  map: (input: unknown) => T,
+): { present: true; value: T } | { present: false } {
+  return value === undefined || value === null
+    ? { present: false }
+    : { present: true, value: map(value) };
+}
+
+/** Maps a `ModerationCase` JSON row into the SDK's typed view. */
+function parseModerationCase(row: Record<string, unknown>): ModerationCase {
+  const roomId = optional(row['room_id'], (v) => parseId(String(v)));
+  const note = optional(row['note'], String);
+  const evidenceRef = optional(row['evidence_ref'], (v) => parseId(String(v)));
+  const resolvedAt = optional(row['resolved_at'], (v) => fromWire(Number(v)));
+  const resolvedBy = optional(row['resolved_by'], (v) => parseId(String(v)));
+  const resolution = optional(row['resolution'], Number);
+  const resolutionName = optional(row['resolution_name'], String);
+  return {
+    reportId: parseId(String(row['report_id'])),
+    reporterId: parseId(String(row['reporter_id'])),
+    subjectKind: Number(row['subject_kind']),
+    subjectKindName: String(row['subject_kind_name']),
+    subjectId: parseId(String(row['subject_id'])),
+    reason: Number(row['reason']),
+    reasonName: String(row['reason_name']),
+    status: Number(row['status']),
+    open: Boolean(row['open']),
+    createdAtMs: fromWire(Number(row['created_at'])),
+    ...(roomId.present ? { roomId: roomId.value } : {}),
+    ...(note.present ? { note: note.value } : {}),
+    ...(evidenceRef.present ? { evidenceRef: evidenceRef.value } : {}),
+    ...(resolvedAt.present ? { resolvedAtMs: resolvedAt.value } : {}),
+    ...(resolvedBy.present ? { resolvedBy: resolvedBy.value } : {}),
+    ...(resolution.present ? { resolution: resolution.value } : {}),
+    ...(resolutionName.present ? { resolutionName: resolutionName.value } : {}),
+  };
+}
+
+/** Maps a `ModerationNotice` JSON row into the SDK's typed view. */
+function parseModerationNotice(row: Record<string, unknown>): ModerationNotice {
+  const until = optional(row['until'], (v) => fromWire(Number(v)));
+  const reason = optional(row['reason'], Number);
+  const reasonName = optional(row['reason_name'], String);
+  return {
+    audience: parseId(String(row['audience'])),
+    outcome: String(row['outcome']),
+    atMs: fromWire(Number(row['at'])),
+    ...(until.present ? { untilMs: until.value } : {}),
+    ...(reason.present ? { reason: reason.value } : {}),
+    ...(reasonName.present ? { reasonName: reasonName.value } : {}),
+  };
+}
+
+/** Maps an `ActResponse` JSON row into the SDK's typed view. */
+function parseModerationAct(row: Record<string, unknown>): ModerationActResult {
+  const notice = row['notice'];
+  const parsed =
+    notice === undefined || notice === null
+      ? undefined
+      : parseModerationNotice(notice as Record<string, unknown>);
+  return {
+    action: String(row['action']),
+    ...(parsed !== undefined ? { notice: parsed } : {}),
+  };
+}
+
+/** Maps one `AuditDto` JSON row into the SDK's typed view. */
+function parseAuditEntry(row: Record<string, unknown>): AuditEntryView {
+  const actorId = optional(row['actor_id'], (v) => parseId(String(v)));
+  const targetId = optional(row['target_id'], (v) => parseId(String(v)));
+  const reason = optional(row['reason'], String);
+  const requestId = optional(row['request_id'], String);
+  const ipClass = optional(row['ip_class'], String);
+  return {
+    auditId: parseId(String(row['audit_id'])),
+    actorKind: Number(row['actor_kind']),
+    actorKindName: String(row['actor_kind_name']),
+    action: String(row['action']),
+    targetKind: Number(row['target_kind']),
+    targetKindName: String(row['target_kind_name']),
+    summary: String(row['summary']),
+    createdAtMs: fromWire(Number(row['created_at'])),
+    ...(actorId.present ? { actorId: actorId.value } : {}),
+    ...(targetId.present ? { targetId: targetId.value } : {}),
+    ...(reason.present ? { reason: reason.value } : {}),
+    ...(requestId.present ? { requestId: requestId.value } : {}),
+    ...(ipClass.present ? { ipClass: ipClass.value } : {}),
+  };
+}
+
+/** The tagged body the server's action endpoint expects, from this module's camelCase view. */
+function moderationActionBody(action: ModerationAction): Record<string, unknown> {
+  switch (action.action) {
+    case 'warn':
+      return {
+        action: 'warn',
+        account_id: action.accountId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'suspend':
+      return {
+        action: 'suspend',
+        account_id: action.accountId,
+        ...(action.untilMs !== undefined ? { until: toWire(action.untilMs) } : {}),
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'reinstate':
+      return {
+        action: 'reinstate',
+        account_id: action.accountId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'remove_message':
+      return {
+        action: 'remove_message',
+        conversation_id: action.conversationId,
+        message_id: action.messageId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'remove_media':
+      return {
+        action: 'remove_media',
+        media_id: action.mediaId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'archive_room':
+      return {
+        action: 'archive_room',
+        room_id: action.roomId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+    case 'disable_bot':
+      return {
+        action: 'disable_bot',
+        bot_id: action.botId,
+        ...(action.reason !== undefined ? { reason: action.reason } : {}),
+      };
+  }
 }
 
 /** Maps a `DeviceSummary` JSON row into the SDK's typed view. */
@@ -928,6 +1198,109 @@ export class BootstrapClient {
    */
   async revokeGlobalAdmin(accessToken: string, accountId: Id): Promise<void> {
     await this.#delete(`/v1/admins/${accountId}`, accessToken);
+  }
+
+  // --- the moderation surface -------------------------------------------------
+  //
+  // The operator's side of reporting, over HTTP rather than the socket. The two opcodes that
+  // carry a report and an action — REPORT_CREATE and MODERATION_ACTION — are a client *sending*
+  // something; the queue, a case, and the audit trail are lists a person reads, and a list is what
+  // HTTP is for. Every call here is refused for an account holding no powers, and the refusals are
+  // the server's: a client hides what it cannot use, it never decides what it may use.
+
+  /**
+   * `GET /v1/moderation/whoami` — what the caller may do about reports.
+   *
+   * Never fails on standing: an ordinary account is answered with `staff: false`, which is the
+   * answer rather than an error, so a client can hide the surface without a round trip that
+   * discloses anything.
+   */
+  async moderationStanding(accessToken: string): Promise<ModerationStanding> {
+    const body = (await this.#get('/v1/moderation/whoami', accessToken)) as Record<string, unknown>;
+    return parseModerationStanding(body);
+  }
+
+  /**
+   * `GET /v1/moderation/queue` — the open reports, longest-waiting first.
+   *
+   * A window and not a cursor: the server clamps `limit` into its own ceiling and there is no
+   * `next_cursor`, because the domain has no cursor to honour and one invented here would be a
+   * promise this surface could not keep.
+   */
+  async moderationQueue(accessToken: string, limit?: number): Promise<ModerationCase[]> {
+    const query = limit === undefined ? '' : `?limit=${limit}`;
+    const body = (await this.#get(`/v1/moderation/queue${query}`, accessToken)) as {
+      cases?: Record<string, unknown>[];
+    };
+    return (body.cases ?? []).map(parseModerationCase);
+  }
+
+  /** `GET /v1/moderation/case/{report_id}` — one case, open or already ruled on. */
+  async moderationCase(accessToken: string, reportId: Id): Promise<ModerationCase> {
+    const body = (await this.#get(`/v1/moderation/case/${reportId}`, accessToken)) as Record<
+      string,
+      unknown
+    >;
+    return parseModerationCase(body);
+  }
+
+  /**
+   * `POST /v1/moderation/case/{report_id}/resolve` — rule on one case.
+   *
+   * The same path the `MODERATION_ACTION` opcode reaches, so a decision made here lands on the same
+   * audit row and closes the case for the socket too. A case another moderator has already ruled on
+   * is a conflict, not a second ruling.
+   */
+  async resolveModerationCase(
+    accessToken: string,
+    reportId: Id,
+    options: ResolveCaseOptions,
+  ): Promise<ModerationCase> {
+    const body = (await this.#post(
+      `/v1/moderation/case/${reportId}/resolve`,
+      {
+        resolution: options.resolution,
+        ...(options.reason !== undefined ? { reason: options.reason } : {}),
+      },
+      accessToken,
+    )) as Record<string, unknown>;
+    return parseModerationCase(body);
+  }
+
+  /**
+   * `POST /v1/moderation/act` — take an action on an account, a message, a media object, a room, or
+   * a bot.
+   *
+   * Answers with what the action did and, for the actions that raise one, the notice the affected
+   * account will be told — so an operator can see the sentence before the person it is about does.
+   */
+  async moderationAct(accessToken: string, action: ModerationAction): Promise<ModerationActResult> {
+    const body = (await this.#post(
+      '/v1/moderation/act',
+      moderationActionBody(action),
+      accessToken,
+    )) as Record<string, unknown>;
+    return parseModerationAct(body);
+  }
+
+  /**
+   * `GET /v1/moderation/audit/{target_kind}/{target_id}` — the trail for one target, newest first.
+   *
+   * `targetKind` is the name the queue's own rows carry, so a kind a dashboard was shown is a kind
+   * it can ask about without a second table.
+   */
+  async moderationAudit(
+    accessToken: string,
+    targetKind: string,
+    targetId: Id,
+    limit?: number,
+  ): Promise<AuditEntryView[]> {
+    const query = limit === undefined ? '' : `?limit=${limit}`;
+    const body = (await this.#get(
+      `/v1/moderation/audit/${targetKind}/${targetId}${query}`,
+      accessToken,
+    )) as { entries?: Record<string, unknown>[] };
+    return (body.entries ?? []).map(parseAuditEntry);
   }
 
   /** `GET /v1/config` — the node identity, feature bits, and policy limits, unauthenticated. */

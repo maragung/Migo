@@ -70,6 +70,7 @@ import type {
   AccountSession,
   AdminStanding,
   AdminView,
+  AuditEntryView,
   CaptchaChallenge,
   CaptchaMode,
   CaptchaProof,
@@ -78,6 +79,10 @@ import type {
   FetchLike,
   Grant,
   LoginParams,
+  ModerationActResult,
+  ModerationAction,
+  ModerationCase,
+  ModerationStanding,
   RegisterParams,
   WalletSummary,
 } from './rest.js';
@@ -1436,6 +1441,81 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     const ctx = this.#requireConnected();
     await this.#bootstrap.revokeGlobalAdmin(ctx.grant.accessToken, params.account_id);
     return { ok: true };
+  }
+
+  // --- the moderation surface -------------------------------------------------
+  //
+  // The operator's side of reporting, over REST. `reportUser` and its siblings are how an
+  // ordinary account files something; these are how somebody with powers reads the queue and
+  // rules on what is in it. Both halves meet on the server: a ruling made here closes the case
+  // for the socket too, on the same audit row.
+
+  /**
+   * What the signed-in account may do about reports. Ask this before fetching anything, so an
+   * account holding no powers is shown no operator surface at all rather than a set of buttons
+   * that refuse.
+   */
+  async moderationStanding(): Promise<ModerationStanding> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.moderationStanding(ctx.grant.accessToken);
+  }
+
+  /** The open reports, longest-waiting first. Requires the `triage` power. */
+  async moderationQueue(params?: { limit?: number }): Promise<ModerationCase[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.moderationQueue(ctx.grant.accessToken, params?.limit);
+  }
+
+  /** One case, open or already ruled on. Requires the `triage` power. */
+  async moderationCase(params: { report_id: Id }): Promise<ModerationCase> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.moderationCase(ctx.grant.accessToken, params.report_id);
+  }
+
+  /**
+   * Rules on a case: closes it, records the decision on the audit row, and tells the reporter.
+   *
+   * `until` is not a parameter here because a ruling is not an action — the sanction that follows
+   * one is a {@link MigoClient.moderationAct} call, and the two are separate decisions.
+   */
+  async resolveModerationCase(params: {
+    report_id: Id;
+    resolution: number;
+    reason?: string;
+  }): Promise<ModerationCase> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.resolveModerationCase(ctx.grant.accessToken, params.report_id, {
+      resolution: params.resolution,
+      ...(params.reason !== undefined ? { reason: params.reason } : {}),
+    });
+  }
+
+  /**
+   * Takes an action: a warning, a suspension, a reinstatement, or a takedown of a message, a
+   * media object, a room, or a bot. The result carries the notice the affected account will be
+   * told, when the action raises one.
+   */
+  async moderationAct(params: ModerationAction): Promise<ModerationActResult> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.moderationAct(ctx.grant.accessToken, params);
+  }
+
+  /**
+   * The audit trail for one target, newest first. `target_kind` is the name the queue's own rows
+   * carry, so a kind the caller was shown is a kind it can ask about. Requires the `audit` power.
+   */
+  async moderationAudit(params: {
+    target_kind: string;
+    target_id: Id;
+    limit?: number;
+  }): Promise<AuditEntryView[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.moderationAudit(
+      ctx.grant.accessToken,
+      params.target_kind,
+      params.target_id,
+      params.limit,
+    );
   }
 
   /**

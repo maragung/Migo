@@ -6752,6 +6752,39 @@ button.activity-row-btn:focus-visible {
   margin-left: auto;
 }
 
+/* --- the moderator's dashboard (§49) --- */
+/* A case's facts are a two-column grid rather than a stack of field-labels, because a moderator
+   reads them by running down the left edge looking for one thing, and a label above its value
+   makes that scan a paragraph each time. The values stay in the ordinary ink: the only line that
+   is somebody's own words is the note, and it is marked as such by name. */
+.case-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 0 0 12px;
+  font-size: var(--fs-body);
+}
+.case-facts dt {
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.case-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* The reporter's own words, set apart from the ids around them so nobody reads a quotation as a
+   field the server filled in. */
+.case-note {
+  white-space: pre-wrap;
+  color: var(--text);
+}
+/* The row whose case is open in the detail pane below it. A left edge rather than a fill, so the
+   selected row keeps its hover colour and the mark survives at any theme's contrast. */
+.person-row-selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* --- the dark theme's own values --- */
 /* The shell's surfaces are white panels in light and the dark family's panels in dark; the
    deep-teal chrome (taskbar, nav, menus, the orange bar) keeps its own ink in both themes,

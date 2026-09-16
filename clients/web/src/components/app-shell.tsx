@@ -43,6 +43,7 @@ import type { ConversationSummary, Id, RoomSummary } from '@migo/sdk';
 
 import { AccountPanel } from './account-panel.js';
 import { AdminsPanel } from './admins-panel.js';
+import { ModerationPanel } from './moderation-panel.js';
 import { ChatActivity } from './chat-activity.js';
 import { ChatWindow } from './chat-window.js';
 import { ConfirmDialog } from './confirm-dialog.js';
@@ -738,6 +739,10 @@ export function AppShell(): ReactNode {
         );
       case 'admins':
         return <AdminsPanel />;
+      case 'moderation':
+        // The door in is gated on standing and so is the panel: a shell that only hid the menu
+        // entry would leave a window reachable by anyone who opened it by name.
+        return <ModerationPanel />;
       case 'store':
         return <StorePanel />;
       case 'games':
