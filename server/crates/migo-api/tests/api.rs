@@ -62,7 +62,7 @@ use migo_protocol::{codes, NodeInfo};
 use migo_ratelimit::{
     BucketKey, CacheRateLimiter, Policies, RateLimiter, SharedRateLimiter, TrustTier, Verdict,
 };
-use migo_store::MemoryStore;
+use migo_store::{MemoryStore, SharedStore};
 
 // --- constants ----------------------------------------------------------------------------
 
@@ -143,6 +143,22 @@ impl Harness {
             Policies::from_config(&config.rate_limit).expect("default policies are valid");
         let real_limiter = Arc::new(CacheRateLimiter::new(cache, policies, &registry));
         let store = Arc::new(MemoryStore::new());
+        // The moderation surface is not what this suite exercises, but it is part of the
+        // surface under test, so it is the real service over the same store, limiter and
+        // registry the rest of the harness uses, with a directory in which nobody is
+        // staff — the posture every operator route below is refused under.
+        // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
+        // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
+        // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
+        // handed — the same reason the limiter below is cast.
+        let moderation = migo_moderation::open(
+            Arc::clone(&store) as SharedStore,
+            Arc::clone(&real_limiter) as SharedRateLimiter,
+            Arc::new(migo_moderation::NoStaff),
+            Box::new(SeededRandom::new(SEED)),
+            migo_moderation::ModerationConfig::default(),
+            &registry,
+        );
         let auth = Auth::new(
             store,
             Arc::clone(&real_limiter),
@@ -166,6 +182,8 @@ impl Harness {
             },
             features: FEATURES,
             media_files,
+            warden: moderation,
+            roster: Arc::new(migo_moderation::NoStaff),
             // The recovery surface is not what this suite exercises; the
             // no-channel refusal the production posture produces is pinned
             // in auth-flow.rs, which is the suite that cares.

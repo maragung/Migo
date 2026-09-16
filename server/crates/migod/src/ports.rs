@@ -11,7 +11,9 @@
 //!   stand-in, honest about being one.
 //! - [`StaffRoster`] implements [`migo_moderation::Roster`]: who, globally, is staff. Moderation
 //!   asks "what may this account do" and refuses to answer it from room membership; the answer is
-//!   an operational directory the composition root owns. The safe default is that nobody is staff.
+//!   an operational directory the composition root owns. The safe default is that nobody is staff,
+//!   and the roster a running node builds derives its grants from the owner designation and the
+//!   global-admin list the deployment already keeps — see [`StaffRoster::appointed`].
 //! - [`EconomyRewards`] implements [`migo_games::Rewards`] over [`migo_economy::SharedTreasurer`]:
 //!   the seam that lets a finished game credit experience and a win confer a badge. It is the one
 //!   place two sibling domains (games and economy) meet, and by layering rule they meet only here,
@@ -49,6 +51,7 @@ use migo_moderation::{Powers, Roster};
 use migo_notify::{Event, RawToken};
 use migo_protocol::{fault, NotificationEvent, Opcode};
 use migo_store::model::NotificationPosition;
+use migo_store::SharedStore;
 
 /// A filesystem-backed [`Storage`]: object bytes as files under one root directory.
 ///
@@ -180,19 +183,42 @@ impl Storage for FsStorage {
 /// The global staff directory: which accounts hold moderator [`Powers`], and how much.
 ///
 /// Moderation calls [`Roster::powers`] on every operator request and treats the absence of a grant
-/// as [`Powers::NONE`] — an ordinary account — never as an error. This implementation answers from
-/// an in-memory map the composition root builds. The development default is [`empty`](Self::empty):
-/// no account is staff, so every operator action is refused, which is the correct posture for a
-/// node with no configured staff.
+/// as [`Powers::NONE`] — an ordinary account — never as an error. Two sources answer, in this order:
+///
+/// 1. An explicit account-to-powers map, for a test or a deployment that wants to pin one account
+///    by hand. It is consulted first and wins outright, because a roster built by hand is a
+///    statement about one account that nothing derived should be able to contradict.
+/// 2. [`appointed`](Self::appointed), which reads the two appointments this deployment already has
+///    and derives the powers that follow from them — see that constructor.
+///
+/// The development default is [`empty`](Self::empty): no account is staff, so every operator action
+/// is refused, which is the correct posture for a node with no configured staff.
 pub struct StaffRoster {
     staff: HashMap<Id, Powers>,
+    appointed: Option<Appointments>,
+}
+
+/// The two appointments that confer moderation powers, and where each is read from.
+///
+/// Both are *existing* facts of a deployment rather than a second notion of staff invented here.
+/// That is the whole point of deriving rather than configuring: `/v1/admins` already grants and
+/// revokes a global admin, that grant is already audited, and the web client already surfaces it —
+/// so a `[moderation] staff = [...]` list beside it would be a second roster that the first one
+/// could silently contradict. The account whose grant was revoked would keep moderating until
+/// somebody remembered to edit the other list.
+struct Appointments {
+    store: SharedStore,
+    owner: Option<Id>,
 }
 
 impl StaffRoster {
     /// Builds a roster from an explicit account-to-powers map.
     #[must_use]
     pub fn new(staff: HashMap<Id, Powers>) -> Self {
-        Self { staff }
+        Self {
+            staff,
+            appointed: None,
+        }
     }
 
     /// A roster in which nobody is staff. Every account resolves to [`Powers::NONE`].
@@ -200,6 +226,54 @@ impl StaffRoster {
     pub fn empty() -> Self {
         Self {
             staff: HashMap::new(),
+            appointed: None,
+        }
+    }
+
+    /// A roster that derives its grants from the appointments the deployment already makes.
+    ///
+    /// The account named by `owner_account_id` — the same one `/v1/admins` lets appoint global
+    /// admins — holds [`Powers::ALL`], and every global admin the store knows holds
+    /// [`Powers::TRIAGE`] together with [`Powers::TAKEDOWN`].
+    ///
+    /// # Why the owner holds everything
+    ///
+    /// Choosing who moderates is a strictly larger power than moderating: an owner who could
+    /// appoint the moderators of every room but not close a room themselves would have to appoint
+    /// themselves first, through a surface that exists for appointing *other* people. `None` — a
+    /// deployment that names no owner — leaves the owner arm unreachable, which is the same closed
+    /// posture the appointment surface itself takes.
+    ///
+    /// # Why a global admin does not hold everything
+    ///
+    /// A global admin is appointed to moderate the public rooms, and `TRIAGE | TAKEDOWN` is exactly
+    /// that reach: read the queue, warn, settle a case, and pull a message, a media object, a room
+    /// or a bot. The two that stay with the owner are the two that leave that reach.
+    ///
+    /// [`Powers::SUSPEND`] closes an *account* — the whole of somebody's presence on the node, every
+    /// conversation in it, including the ones this admin was never appointed over. It is the one
+    /// action whose mistake cannot be repaired by the person who made it, which is why `Action`
+    /// splits the account-level powers away from the content ones in the first place.
+    ///
+    /// [`Powers::AUDIT`] reads every operator's history over any target, not just this admin's own
+    /// rooms. That is a surveillance power rather than a moderation one, and the crate's own note on
+    /// it says which way to err: it is "the one power worth giving to somebody who cannot act" —
+    /// which makes it the last one to hand to somebody who can.
+    ///
+    /// # Why there is no cache
+    ///
+    /// [`Roster`]'s own note suggests caching a grant briefly and the absence of one not at all.
+    /// This implementation does neither, and the reason is that the operator surface is not a hot
+    /// path: a queue read or a ruling is a handful of calls by a handful of people, next to the
+    /// per-message and per-send paths where a store lookup would actually cost something. A cache
+    /// here would buy nothing worth having and would owe the deployment the one guarantee that
+    /// matters — that a revocation lands before the next request. The row is read, so a revoked
+    /// admin is refused on their very next call.
+    #[must_use]
+    pub fn appointed(store: SharedStore, owner: Option<Id>) -> Self {
+        Self {
+            staff: HashMap::new(),
+            appointed: Some(Appointments { store, owner }),
         }
     }
 }
@@ -207,7 +281,19 @@ impl StaffRoster {
 #[async_trait]
 impl Roster for StaffRoster {
     async fn powers(&self, account_id: Id) -> Result<Powers> {
-        Ok(self.staff.get(&account_id).copied().unwrap_or(Powers::NONE))
+        if let Some(powers) = self.staff.get(&account_id) {
+            return Ok(*powers);
+        }
+        let Some(appointed) = self.appointed.as_ref() else {
+            return Ok(Powers::NONE);
+        };
+        if appointed.owner == Some(account_id) {
+            return Ok(Powers::ALL);
+        }
+        if appointed.store.is_global_admin(account_id).await? {
+            return Ok(Powers::TRIAGE.with(Powers::TAKEDOWN));
+        }
+        Ok(Powers::NONE)
     }
 }
 

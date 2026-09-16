@@ -90,7 +90,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, ManualClock, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, NodeInfo};
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter};
-use migo_store::MemoryStore;
+use migo_store::{MemoryStore, SharedStore};
 
 // --- constants ----------------------------------------------------------------------------
 
@@ -193,6 +193,24 @@ impl Harness {
         let real_limiter = Arc::new(CacheRateLimiter::new(cache, policies, &registry));
         let store = Arc::new(MemoryStore::new());
 
+        // The operator surface is mounted on this router too, over the same store
+        // and limiter. This suite never reaches it, so the directory is the one in
+        // which nobody is staff — which is also what makes "an ordinary account is
+        // refused" the default story for any test that wanders in.
+        // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
+        // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
+        // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
+        // handed — the same reason the limiter above is cast.
+        let shared_store = Arc::clone(&store) as SharedStore;
+        let moderation = migo_moderation::open(
+            shared_store,
+            Arc::clone(&real_limiter) as SharedRateLimiter,
+            Arc::new(migo_moderation::NoStaff),
+            Box::new(SeededRandom::new(SEED)),
+            migo_moderation::ModerationConfig::default(),
+            &registry,
+        );
+
         // A dedicated captcha service and store; the store is held alongside
         // the router so the test can look up the answer it just issued.
         let captcha_store = Arc::new(CaptchaStore::new());
@@ -241,6 +259,8 @@ impl Harness {
             features: 0b101,
             // The tests exercise the auth bootstrap surface, not the media byte routes.
             media_files: None,
+            warden: moderation,
+            roster: Arc::new(migo_moderation::NoStaff),
             // The delivery channel the recovery tests observe: it records
             // every row handed to it, so a test can pin what left the
             // server (a token id and a tag, never on the wire) without
