@@ -38,13 +38,15 @@ use migo_core::random::OsRandom;
 use migo_core::{Id, Result, Secret, Timestamp};
 use migo_moderation::model::REPORT_WINDOW_MS;
 use migo_moderation::service::Moderation;
-use migo_moderation::traits::Roster;
+use migo_moderation::traits::{Herald, Roster};
 use migo_moderation::{
     effective_tier, risk_of, score, Action, Assessment, Caller, Filing, ModerationConfig, Notice,
     Operator, Outcome, Powers, Reason, Resolution, Risk, Signals, Subject, Warden, DEFAULT_PAGE,
     MAX_NOTE_LEN, MAX_PAGE, MAX_REASON_LEN,
 };
-use migo_protocol::{codes, ConversationKind, EncryptionMode, MessageKind, RoomKind};
+use migo_protocol::{
+    codes, ConversationKind, EncryptionMode, MessageKind, ModerationEvent, RoomKind,
+};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{
     media_scan, report_status, report_subject, AccountStatus, AuditActorKind, AuditEntry,
@@ -153,13 +155,38 @@ impl Roster for StaffList {
     }
 }
 
-type TestModeration = Moderation<MemoryStore, CacheRateLimiter<MemoryCache>, StaffList>;
+/// A [`Herald`] that keeps what it was told.
+///
+/// The port exists so that a ruling can reach a reporter who is not in the operator's
+/// request and often not on the operator's node; a recorder is the whole of what a test
+/// needs to assert on that, because the frame's journey past this point is the composition
+/// root's business and is tested where the gateway is.
+#[derive(Default)]
+struct Recorder {
+    told: Mutex<Vec<(Id, ModerationEvent)>>,
+}
+
+impl Recorder {
+    /// Everything announced so far, oldest first.
+    fn told(&self) -> Vec<(Id, ModerationEvent)> {
+        self.told.lock().unwrap().clone()
+    }
+}
+
+impl Herald for Recorder {
+    fn announce(&self, recipient: Id, event: &ModerationEvent, _now: Timestamp) {
+        self.told.lock().unwrap().push((recipient, event.clone()));
+    }
+}
+
+type TestModeration = Moderation<MemoryStore, CacheRateLimiter<MemoryCache>, StaffList, Recorder>;
 
 /// Everything a test needs, with the real limiter over a real cache and the real store.
 struct Harness {
     moderation: TestModeration,
     store: Arc<MemoryStore>,
     staff: Arc<StaffList>,
+    herald: Arc<Recorder>,
     registry: Registry,
 }
 
@@ -172,6 +199,7 @@ impl Harness {
         let settings = Config::default();
         let store = Arc::new(MemoryStore::new());
         let staff = Arc::new(StaffList::default());
+        let herald = Arc::new(Recorder::default());
         let registry = Registry::new();
         let policies =
             Policies::from_config(&settings.rate_limit).expect("the default policies are valid");
@@ -184,6 +212,7 @@ impl Harness {
             Arc::clone(&store),
             limiter,
             Arc::clone(&staff),
+            Arc::clone(&herald),
             Box::new(OsRandom),
             config,
             &registry,
@@ -192,6 +221,7 @@ impl Harness {
             moderation,
             store,
             staff,
+            herald,
             registry,
         }
     }
@@ -1645,6 +1675,141 @@ async fn resolving_a_report_a_second_time_conflicts() {
         codes::CONFLICT,
     );
     assert_eq!(h.refusals("already_resolved"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The herald: what the reporter is told, and what they are not.
+//
+// `resolve` returns the case to the operator who closed it, and the reporter is not in
+// that conversation — they are very often not connected to the node that ruled, they
+// cannot read the case, and the answer to their filing was a bare acknowledgement. So the
+// ruling is handed to a port and the composition root decides what telling means. What
+// these tests pin is the part this crate decides: who is told, what the frame says, and
+// the one ruling that says nothing at all.
+
+#[tokio::test]
+async fn a_ruling_tells_the_reporter_which_case_it_was_and_what_became_of_it() {
+    let h = Harness::new();
+    h.staff.grant(TRIAGER, Powers::TRIAGE);
+    h.seed_report(905, ALICE, BOB, NOW).await;
+    h.moderation
+        .resolve(&fresh_operator(TRIAGER), id(905), Resolution::Warned, None)
+        .await
+        .expect("closed");
+
+    let told = h.herald.told();
+    assert_eq!(told.len(), 1, "one ruling, one frame");
+    let (recipient, event) = &told[0];
+    // The reporter, and not the operator who ruled: a moderator does not need telling
+    // about their own decision, and telling them would put somebody else's report in
+    // their own event stream.
+    assert_eq!(*recipient, id(ALICE));
+    assert_eq!(event.case_id, id(905));
+    assert_eq!(
+        event.action,
+        u32::from(Resolution::Warned.to_i16().unsigned_abs()),
+        "the frame carries the ruling code, so a client can word it differently"
+    );
+    assert_eq!(event.state, "actioned");
+}
+
+#[tokio::test]
+async fn a_report_dismissed_tells_the_reporter_it_was_dismissed() {
+    let h = Harness::new();
+    h.staff.grant(TRIAGER, Powers::TRIAGE);
+    h.seed_report(906, ALICE, BOB, NOW).await;
+    h.moderation
+        .resolve(
+            &fresh_operator(TRIAGER),
+            id(906),
+            Resolution::NoAction,
+            None,
+        )
+        .await
+        .expect("closed");
+
+    let told = h.herald.told();
+    assert_eq!(told.len(), 1);
+    // The distinction a reporter can act on: "we looked and there was nothing wrong" is a
+    // different sentence from "we acted", and it is the same distinction `report.status`
+    // stores, read back through the resolution rather than alongside it.
+    assert_eq!(told[0].1.state, "dismissed");
+    assert_eq!(told[0].1.action, 0);
+}
+
+#[tokio::test]
+async fn an_escalation_tells_the_reporter_nothing_because_it_decided_nothing() {
+    let h = Harness::new();
+    h.staff.grant(TRIAGER, Powers::TRIAGE);
+    h.seed_report(907, ALICE, BOB, NOW).await;
+    h.moderation
+        .resolve(
+            &fresh_operator(TRIAGER),
+            id(907),
+            Resolution::Escalated,
+            None,
+        )
+        .await
+        .expect("escalated, still open");
+
+    // The report is still in a queue and somebody is still waiting for an answer. A frame
+    // now would say "your report was reviewed" about a report no one has ruled on yet,
+    // which is worse than silence: the reporter would stop waiting for the wrong reason.
+    assert!(h.herald.told().is_empty());
+}
+
+#[tokio::test]
+async fn the_escalated_report_tells_the_reporter_when_it_is_finally_ruled_on() {
+    let h = Harness::new();
+    h.staff.grant(TRIAGER, Powers::TRIAGE);
+    h.seed_report(908, ALICE, BOB, NOW).await;
+    h.moderation
+        .resolve(
+            &fresh_operator(TRIAGER),
+            id(908),
+            Resolution::Escalated,
+            None,
+        )
+        .await
+        .expect("escalated");
+    assert!(h.herald.told().is_empty());
+
+    h.moderation
+        .resolve(
+            &fresh_operator(TRIAGER),
+            id(908),
+            Resolution::Suspended,
+            None,
+        )
+        .await
+        .expect("and now closed by whoever it was escalated to");
+    let told = h.herald.told();
+    assert_eq!(told.len(), 1, "the ending is told, and told once");
+    assert_eq!(told[0].1.state, "actioned");
+    assert_eq!(
+        told[0].1.action,
+        u32::from(Resolution::Suspended.to_i16().unsigned_abs())
+    );
+}
+
+#[tokio::test]
+async fn a_refused_ruling_tells_the_reporter_nothing() {
+    let h = Harness::new();
+    // No powers granted and no fresh factor: two refusals, and neither of them a ruling.
+    h.seed_report(909, ALICE, BOB, NOW).await;
+    let _ = h
+        .moderation
+        .resolve(&fresh_operator(TRIAGER), id(909), Resolution::Warned, None)
+        .await;
+    let _ = h
+        .moderation
+        .resolve(&operator(ADMIN), id(909), Resolution::Warned, None)
+        .await;
+    assert!(
+        h.herald.told().is_empty(),
+        "a refused ruling is not a ruling, and a frame saying otherwise would be a lie \
+         about a report still sitting in the queue"
+    );
 }
 
 // ---------------------------------------------------------------------------

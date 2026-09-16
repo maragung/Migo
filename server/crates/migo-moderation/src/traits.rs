@@ -51,6 +51,7 @@
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
+use migo_protocol::ModerationEvent;
 use migo_store::model::{AuditEntry, AuditTargetKind};
 
 use crate::model::{
@@ -95,6 +96,48 @@ impl Roster for NoStaff {
         Ok(Powers::NONE)
     }
 }
+
+/// How a ruling reaches the reporter who is owed it.
+///
+/// [`Warden::resolve`] closes a report and returns a [`Case`] to the *operator* who closed
+/// it. The reporter is not in that conversation and cannot be: they are very often not
+/// connected to the node that ruled, they cannot read the case, and the answer to
+/// `REPORT_CREATE` was a bare acknowledgement long before anybody looked at what they
+/// wrote. So the ruling is handed to this port, and the composition root decides what
+/// telling means — in production, a broadcast of `MODERATION_EVENT` onto the reporter's own
+/// user topic through the gateway, which is the same seam `migo_notify`'s bell uses for a
+/// notification, one opcode over; in a test, a recorder.
+///
+/// The payload arrives complete, because the wire event is this crate's to build. It names
+/// the case, the ruling code, and the state the ruling left the report in, and carries
+/// nothing about the subject — what happened to somebody else's account is not the
+/// reporter's to read. The reporter learns that their report was dealt with, not what was
+/// done to the person in it.
+///
+/// Telling is infallible, and deliberately so, for the same reason ringing is: a reporter
+/// who is not told costs a client a line it was never promised, and the audit row that
+/// records the ruling is written either way. A `Result` here would hand `resolve` a failure
+/// it has no way to act on — the ruling has already happened, and un-happening it because a
+/// socket was not there to hear about it would be the wrong trade entirely.
+pub trait Herald: Send + Sync {
+    /// Tells one reporter that their report was ruled on.
+    fn announce(&self, recipient: Id, event: &ModerationEvent, now: Timestamp);
+}
+
+/// A herald that says nothing.
+///
+/// The default for a deployment that has bound no realtime path and for tests that do not
+/// assert on frames: the ruling is still recorded, and the reporter's client hears nothing
+/// it was not already owed by a reply.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoHerald;
+
+impl Herald for NoHerald {
+    fn announce(&self, _recipient: Id, _event: &ModerationEvent, _now: Timestamp) {}
+}
+
+/// A herald, shared.
+pub type SharedHerald = std::sync::Arc<dyn Herald>;
 
 /// Everything moderation does.
 #[async_trait]

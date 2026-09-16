@@ -49,10 +49,12 @@ use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Id, ManualClock, Result, Secret, SeededRandom, Timestamp};
 use migo_moderation::{
-    open, Caller, Filing, ModerationConfig, Powers, Reason, Roster, SharedRoster, SharedWarden,
-    Subject,
+    open, Caller, Filing, Herald, ModerationConfig, Powers, Reason, Roster, SharedHerald,
+    SharedRoster, SharedWarden, Subject,
 };
-use migo_protocol::{codes, ConversationKind, EncryptionMode, MessageKind, NodeInfo};
+use migo_protocol::{
+    codes, ConversationKind, EncryptionMode, MessageKind, ModerationEvent, NodeInfo,
+};
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 use migo_store::model::{report_status, Conversation, NewMessage};
 use migo_store::traits::MessagingStore;
@@ -130,6 +132,34 @@ impl Roster for TestRoster {
 
 // --- harness ------------------------------------------------------------------------------
 
+/// A [`Herald`] that keeps what it was told.
+///
+/// The production herald is the gateway, and the gateway is another suite's subject. What this one
+/// pins is the half that belongs to the surface under test: that a ruling made over HTTP reaches
+/// the port at all, addressed to the reporter, with the ruling on it. A route that resolved a case
+/// and told nobody would look identical from the outside — the case closes, the audit row lands,
+/// the response is a 200 — so without a herald holding the frames there is nothing to assert on.
+#[derive(Default)]
+struct Recorder {
+    told: RwLock<Vec<(Id, ModerationEvent)>>,
+}
+
+impl Recorder {
+    /// Everything announced so far, oldest first.
+    fn told(&self) -> Vec<(Id, ModerationEvent)> {
+        self.told.read().expect("never poisoned").clone()
+    }
+}
+
+impl Herald for Recorder {
+    fn announce(&self, recipient: Id, event: &ModerationEvent, _now: Timestamp) {
+        self.told
+            .write()
+            .expect("never poisoned")
+            .push((recipient, event.clone()));
+    }
+}
+
 /// The router under test plus the handles a test needs to reach behind it: advance the clock,
 /// appoint staff, file a report the way the socket would.
 struct Harness {
@@ -137,6 +167,7 @@ struct Harness {
     clock: Arc<ManualClock>,
     roster: Arc<TestRoster>,
     warden: SharedWarden,
+    herald: Arc<Recorder>,
     store: Arc<MemoryStore>,
     /// Hands every registered account a network of its own. See [`Harness::account`].
     networks: std::sync::atomic::AtomicU8,
@@ -156,15 +187,17 @@ impl Harness {
         let store = Arc::new(MemoryStore::new());
 
         let roster = Arc::new(TestRoster::new());
+        let herald = Arc::new(Recorder::default());
         // Cast, not a bare clone: `open`'s first parameter is already `Arc<dyn Store>`, and
         // `Arc::clone(&store)` in that position is checked with the clone's own type parameter
         // fixed to the trait object, which then refuses the concrete `&Arc<MemoryStore>` it was
-        // handed — the same reason the limiter and the roster below are cast.
+        // handed — the same reason the limiter, the roster and the herald below are cast.
         let shared_store = Arc::clone(&store) as SharedStore;
         let warden = open(
             shared_store,
             Arc::clone(&limiter) as SharedRateLimiter,
             Arc::clone(&roster) as SharedRoster,
+            Arc::clone(&herald) as SharedHerald,
             Box::new(SeededRandom::new(SEED)),
             ModerationConfig::default(),
             &registry,
@@ -207,6 +240,7 @@ impl Harness {
             clock,
             roster,
             warden,
+            herald,
             store,
             networks: std::sync::atomic::AtomicU8::new(1),
         }
@@ -632,6 +666,70 @@ async fn resolving_a_case_closes_it_and_records_who_ruled() {
     // And behind it, the filing, with the reporter on it rather than the operator.
     assert_eq!(entries[1]["action"], "moderation.report.create");
     assert_eq!(entries[1]["actor_kind_name"], "user");
+}
+
+#[tokio::test]
+async fn ruling_on_a_case_tells_the_reporter_over_the_surface() {
+    // The half of a ruling that is not in the response: the case closes and the operator gets a
+    // body, while the reporter — who is not the operator, cannot read the case, and was answered
+    // with a bare acknowledgement when they filed — is told out of band. A route that resolved a
+    // case and told nobody would be indistinguishable from the outside, which is exactly why the
+    // herald is a port a test can hold.
+    let h = Harness::new();
+    let (staff, token) = h.account("opal").await;
+    let (reporter, _reporter_token) = h.account("peter").await;
+    let (subject, _subject_token) = h.account("quinn").await;
+    h.appoint(staff, Powers::TRIAGE);
+    let report_id = h
+        .file(reporter, Subject::User(subject), Reason::Harassment)
+        .await;
+    assert!(h.herald.told().is_empty(), "filing is not a ruling");
+
+    let resp = h
+        .send(post(
+            &format!("/v1/moderation/case/{report_id}/resolve"),
+            &token,
+            &json!({ "resolution": 2 }),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+
+    let told = h.herald.told();
+    assert_eq!(told.len(), 1, "one ruling, one announcement");
+    let (recipient, event) = &told[0];
+    // The reporter and not the operator: a moderator does not need their own decision read back
+    // to them, and addressing it to the operator would put somebody else's report in their stream.
+    assert_eq!(*recipient, reporter);
+    assert_eq!(event.case_id, report_id);
+    // The ruling code the request asked for (2 is content removal), so a client can word the
+    // sentence itself rather than being handed one.
+    assert_eq!(event.action, 2);
+    assert_eq!(event.state, "actioned");
+}
+
+#[tokio::test]
+async fn an_escalation_over_the_surface_tells_the_reporter_nothing() {
+    // The report is handed on and left open. A frame now would say "your report was reviewed"
+    // about one nobody has ruled on, and the reporter would stop waiting for the wrong reason.
+    let h = Harness::new();
+    let (staff, token) = h.account("rita").await;
+    let (reporter, _reporter_token) = h.account("sven").await;
+    let (subject, _subject_token) = h.account("tara").await;
+    h.appoint(staff, Powers::TRIAGE);
+    let report_id = h
+        .file(reporter, Subject::User(subject), Reason::Other)
+        .await;
+
+    let resp = h
+        .send(post(
+            &format!("/v1/moderation/case/{report_id}/resolve"),
+            &token,
+            &json!({ "resolution": 5 }),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+    assert_eq!(resp.json()["open"], true, "an escalation leaves it open");
+    assert!(h.herald.told().is_empty());
 }
 
 #[tokio::test]

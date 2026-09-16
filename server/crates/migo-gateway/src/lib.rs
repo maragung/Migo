@@ -355,27 +355,80 @@ impl Gateway {
         event: &migo_protocol::NotificationEvent,
         now: migo_core::Timestamp,
     ) {
-        use migo_protocol::{to_frame, Opcode, Topic, TopicKind};
+        self.emit_user_event(
+            recipient,
+            migo_protocol::Opcode::NotificationEvent,
+            event,
+            // Keyed on the recipient, so a burst collapses to the latest for a subscriber
+            // whose mailbox is backed up.
+            Some(coalesce_key_for(&recipient)),
+            now,
+        );
+    }
+
+    /// Broadcasts one server-originated moderation event to a reporter's user topic.
+    ///
+    /// The other half of the same seam, and the answer to a question the notification path
+    /// cannot answer: a report is filed by an ordinary account, the ruling on it is made by
+    /// somebody else, very often on another node, and the reporter is not in that
+    /// conversation at all. So the warden hands its ruling out through a port and the
+    /// composition root calls this. The frame names the case, the ruling code, and the state
+    /// the ruling left the report in — and nothing about the subject, because what happened
+    /// to somebody else's account is not the reporter's to read.
+    ///
+    /// Delivered with the opcode's own wire class (`Critical`), and *not* coalesced. Each
+    /// ruling is a fact about one case rather than a state of the recipient, so collapsing a
+    /// burst would lose the ending of one report to deliver another's — which is the same
+    /// reason the mesh carries a friend event and a key distribution whole.
+    pub fn emit_moderation_event(
+        &self,
+        recipient: migo_core::Id,
+        event: &migo_protocol::ModerationEvent,
+        now: migo_core::Timestamp,
+    ) {
+        self.emit_user_event(
+            recipient,
+            migo_protocol::Opcode::ModerationEvent,
+            event,
+            None,
+            now,
+        );
+    }
+
+    /// Encodes one server-originated event and pushes it onto a recipient's user topic.
+    ///
+    /// The shared half of [`Gateway::emit_notification`] and
+    /// [`Gateway::emit_moderation_event`], which differ only in the opcode their frame
+    /// carries and whether a burst for one recipient may collapse to its latest. The event
+    /// is encoded once, fanned out by the subscription hub, and counted in the same
+    /// backpressure series as any other frame the gateway pushes.
+    ///
+    /// The recipient's subscription is the same gate the realtime path uses: only sessions
+    /// that passed the dispatcher-authorized `SUBSCRIBE` for that `User` topic receive the
+    /// event.
+    fn emit_user_event<E: migo_protocol::Encode>(
+        &self,
+        recipient: migo_core::Id,
+        opcode: migo_protocol::Opcode,
+        event: &E,
+        coalesce: Option<u64>,
+        now: migo_core::Timestamp,
+    ) {
+        use migo_protocol::{to_frame, TopicKind};
         let topic = Topic {
             kind: TopicKind::User,
             id: recipient,
         };
-        let bytes = match to_frame(Opcode::NotificationEvent.to_wire(), 0, event) {
+        let bytes = match to_frame(opcode.to_wire(), 0, event) {
             Ok(frame) => match frame.encode() {
                 Ok(bytes) => bytes,
                 Err(_) => return,
             },
             Err(_) => return,
         };
-        self.inner.hub.broadcast(
-            &topic,
-            &bytes,
-            Opcode::NotificationEvent,
-            Opcode::NotificationEvent.class(),
-            Some(coalesce_key_for(&recipient)),
-            now,
-            None,
-        );
+        self.inner
+            .hub
+            .broadcast(&topic, &bytes, opcode, opcode.class(), coalesce, now, None);
     }
 
     /// How many frames this gateway has written to client sockets since it opened.

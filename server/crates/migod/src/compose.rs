@@ -728,10 +728,20 @@ impl App {
             store.clone(),
             config.auth.owner_account_id,
         ));
+        // The warden's word to a reporter rides the same two cells the bell does: one
+        // gateway and one user-topic relay per process, filled at the same two moments, so
+        // a ruling announced in the startup window is dropped in exactly the way a ring is
+        // — the audit row that records it is written either way, and the reporter loses a
+        // line they were never promised rather than the ending of their report.
+        let herald: migo_moderation::SharedHerald = Arc::new(crate::ports::FederatedHerald::new(
+            Arc::new(crate::ports::GatewayHerald::new(Arc::clone(&bell_gateway))),
+            Arc::clone(&bell_relay),
+        ));
         let moderation = migo_moderation::open(
             store.clone(),
             limiter.clone(),
             roster.clone(),
+            herald,
             Box::new(OsRandom),
             migo_moderation::ModerationConfig::default(),
             &registry,
@@ -864,7 +874,9 @@ impl App {
         // The bell's cell can be filled now, ahead of the listener: any ring
         // that lands before this point stayed local by design (the row and
         // the push are the notifier's to finish), and every ring after it
-        // carries the frame to the recipient's watching nodes as well.
+        // carries the frame to the recipient's watching nodes as well. The
+        // herald shares this cell, so the same moment is when a ruling on a
+        // report starts reaching a reporter whose session is on another node.
         bell_relay.set(Arc::clone(&presence_relay));
 
         // The row-replication tier (section 170's account-to-node routing map):
@@ -961,7 +973,9 @@ impl App {
         // they were no-ops, which is correct — no session can have connected yet.
         gateway_handle.set(Arc::clone(&gateway));
         // The notifier's bell was bound to an empty cell before the gateway existed;
-        // from here on, every notification the process raises rings a live topic.
+        // from here on, every notification the process raises rings a live topic. The
+        // herald's half of the same cell goes live with it, so a ruling reached a
+        // reporter's socket as soon as any socket can exist to receive one.
         bell_gateway.set(Arc::clone(&gateway));
 
         // The native clients' default transport: raw TCP, bound only when the operator gave it

@@ -155,6 +155,9 @@ impl Harness {
             Arc::clone(&store) as SharedStore,
             Arc::clone(&real_limiter) as SharedRateLimiter,
             Arc::new(migo_moderation::NoStaff),
+            // No realtime path is bound in this harness, so a ruling has nowhere to be
+            // announced; the routes under test answer over HTTP and never read a frame.
+            Arc::new(migo_moderation::NoHerald),
             Box::new(SeededRandom::new(SEED)),
             migo_moderation::ModerationConfig::default(),
             &registry,

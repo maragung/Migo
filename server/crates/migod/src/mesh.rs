@@ -1410,13 +1410,14 @@ impl IngestRouter {
     /// a user topic's audience is the subject's own devices and their watchers,
     /// and only the frames the origin's own publish path puts on that topic
     /// belong there. Presence started the tier; the bell's notification, the
-    /// social graph's friend hint, and a sealed group-key distribution ride it
-    /// too, each coalesced exactly as the origin's local publish coalesced it
-    /// (section 154) — presence and the bell keyed by the subject, the hint
-    /// and the key distribution delivered whole, because a graph move and a
-    /// sealed envelope are facts, not states. Anything else sealed inside the
-    /// envelope is refused: publishing it would deliver a frame the local
-    /// publish path would never have sent there.
+    /// social graph's friend hint, a sealed group-key distribution, and the
+    /// warden's word to a reporter ride it too, each coalesced exactly as the
+    /// origin's local publish coalesced it (section 154) — presence and the
+    /// bell keyed by the subject, the hint, the key distribution, and the
+    /// moderation event delivered whole, because a graph move, a sealed
+    /// envelope, and the ending of one case are facts, not states. Anything
+    /// else sealed inside the envelope is refused: publishing it would deliver
+    /// a frame the local publish path would never have sent there.
     ///
     /// The coalescing mirrors the origin node's publish path exactly (section 154): keyed
     /// by the subject, so a backed-up consumer keeps only the latest state — which also
@@ -1442,10 +1443,11 @@ impl IngestRouter {
             Opcode::PresenceEvent | Opcode::NotificationEvent => {
                 Some(crate::dispatch::coalesce_key_of(&user_id))
             }
-            // Facts, delivered whole: a graph move names one edge, and a
-            // sealed key distribution names one device's envelope — collapsing
-            // either would lose an arrival, not a stale state.
-            Opcode::FriendEvent | Opcode::GroupKeyDistribute => None,
+            // Facts, delivered whole: a graph move names one edge, a
+            // sealed key distribution names one device's envelope, and a
+            // moderation event is the ending of one case — collapsing
+            // any of them would lose an arrival, not a stale state.
+            Opcode::FriendEvent | Opcode::GroupKeyDistribute | Opcode::ModerationEvent => None,
             _ => {
                 return Err(fault::validation(
                     "opcode",
