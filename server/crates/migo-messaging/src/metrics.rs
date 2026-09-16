@@ -155,6 +155,7 @@ pub(crate) struct Meters {
     send: Vec<Arc<Counter>>,
     sync: Vec<Arc<Counter>>,
     sync_messages: Arc<Histogram>,
+    seq_gaps: Arc<Counter>,
     receipts: Arc<Counter>,
     receipts_ignored: Arc<Counter>,
     deletes: Arc<Counter>,
@@ -200,6 +201,13 @@ impl Meters {
                 "Messages returned by one sync request.",
                 &[],
                 SYNC_BUCKETS,
+            ),
+            seq_gaps: registry.counter(
+                "migo_conversation_seq_gap_total",
+                "Sequence gaps detected in conversation streams: sync answers that found a \
+                 hole the expiry sweeper took (the Truncated status) and ranged fetches \
+                 answered SEQUENCE_GAP. Counted per detection, not per missing sequence.",
+                &[],
             ),
             receipts: registry.counter(
                 "migo_messaging_receipts_total",
@@ -256,6 +264,13 @@ impl Meters {
         }
         // `as f64` on a count that the page cap holds under 201.
         self.sync_messages.observe(messages as f64);
+    }
+
+    /// Counts one detected sequence gap. Called from both places a hole is
+    /// found: the truncated sync answer and the `SEQUENCE_GAP` error, which
+    /// are the same fact told to two different clients.
+    pub(crate) fn seq_gap(&self) {
+        self.seq_gaps.inc();
     }
 
     pub(crate) fn receipt(&self, moved: bool) {
