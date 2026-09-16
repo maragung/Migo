@@ -582,6 +582,21 @@ fn aad_contexts_match_the_vectors() {
         // A context that a reader could not take apart again would still
         // authenticate, so this is not redundant with the comparison above: it
         // pins that the layout is unambiguous rather than merely reproducible.
+        //
+        // Only a version that binds a context has one to take apart. A
+        // version-1 case carries the empty context on purpose — that is the
+        // compatibility rule, and `parse_context` refusing zero bytes is the
+        // rule holding rather than a gap here, so the refusal is asserted
+        // instead of the case being skipped.
+        if !version.binds_context() {
+            assert!(context.is_empty(), "case `{}` binds no context", name(case));
+            assert!(
+                aad::parse_context(&context).is_err(),
+                "case `{}`: an absent context is not a context",
+                name(case)
+            );
+            continue;
+        }
         let parsed = aad::parse_context(&context).unwrap_or_else(|e| {
             panic!("case `{}` produced an unparseable context: {e}", name(case))
         });

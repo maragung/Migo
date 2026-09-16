@@ -732,6 +732,20 @@ test('aad contexts match the vectors', () => {
     // A context a reader could not take apart again would still authenticate, so this is not
     // redundant with the comparison above: it pins that the layout is unambiguous rather than
     // merely reproducible.
+    //
+    // Only a version that binds a context has one to take apart. A version-1 case carries the empty
+    // context on purpose — that is the compatibility rule, and `parseContext` refusing zero bytes is
+    // that rule holding rather than a gap in this test, so the refusal is asserted in this branch
+    // instead of the case being skipped.
+    if (!aad.bindsContext(version as aad.EnvelopeVersion)) {
+      assert.equal(context.length, 0, `case \`${caseName(item)}\` binds no context`);
+      assert.throws(
+        () => aad.parseContext(context),
+        CryptoError,
+        `case \`${caseName(item)}\`: an absent context is not a context`,
+      );
+      continue;
+    }
     const parsed = aad.parseContext(context);
     assert.equal(parsed.version, version, `case \`${caseName(item)}\` version`);
     assert.equal(parsed.scheme, count(item, 'scheme'), `case \`${caseName(item)}\` scheme`);
