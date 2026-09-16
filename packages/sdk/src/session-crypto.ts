@@ -43,10 +43,13 @@
  * identity binding is the anti-UKS protection section 11 cares about most — the server cannot swap
  * the sender's identity or replay a session key into a conversation with a third party without the
  * tag failing. Section 11 additionally lists `conversation_id` and `message_id` among the metadata
- * it would bind; the ratchet in `@migo/crypto` (which mirrors `migo-crypto/src/ratchet.rs` step for
- * step) does not thread per-message associated data, and adding it on the TypeScript side alone
- * would desync from a Rust-side responder and make genuine messages undecryptable. Binding that
- * extra context is therefore a coordinated crypto-layer change, deferred rather than done half-way.
+ * it would bind. That binding is envelope version 2, and the code for both halves of it now exists:
+ * the ratchet in `@migo/crypto` (mirroring `migo-crypto/src/ratchet.rs` step for step) takes a
+ * per-message context, and `@migo/crypto`'s `aad` module builds the same bytes as the Rust `aad`
+ * module, both checked against `shared/protocol/vectors/crypto/aad-context.json`. What has not
+ * happened is the flip: this layer still writes {@link ENVELOPE_VERSION} 1 and seals under
+ * `NO_CONTEXT`, because a writer that moves to version 2 before its peers can read it sends
+ * messages they refuse. The step left is coordination, not code.
  *
  * # The inner plaintext is the caller's
  *
@@ -72,6 +75,24 @@ import { SdkError } from './errors.js';
 
 /** The only envelope version this build writes, and the only one it reads. */
 export const ENVELOPE_VERSION = 1;
+
+/**
+ * The context a version-1 envelope binds: none.
+ *
+ * Section 11's bound context (`@migo/crypto`'s `aad.context`) is a version-2 feature, and a version-1
+ * envelope's associated data is `x3dh_associated_data || ratchet_header` and nothing else. Sealing a
+ * version-1 envelope under a context would produce a message no peer can open, so this layer passes
+ * nothing until the version byte moves — and it moves only when every client can read version 2,
+ * because a writer that moves first is a writer whose messages the readers it is talking to refuse.
+ *
+ * The plumbing exists on both sides already: `RatchetSession.encrypt`/`decrypt` take the context, and
+ * `migo-crypto/src/aad.rs` and `@migo/crypto`'s `aad.ts` build the same bytes, pinned by
+ * `shared/protocol/vectors/crypto/aad-context.json`. What remains is the coordinated flip.
+ *
+ * Nothing may write through this array: it is one shared instance, and a context smeared into it
+ * would be a context every later message silently carried.
+ */
+const NO_CONTEXT = new Uint8Array(0);
 
 /** An established 1:1 Double Ratchet message — no X3DH preamble. */
 export const SCHEME_DOUBLE_RATCHET = 1;
@@ -218,7 +239,7 @@ export class SessionCrypto {
       this.#sessions.set(key, entry);
     }
 
-    const { header, ciphertext } = entry.session.encryptNext(plaintext);
+    const { header, ciphertext } = entry.session.encryptNext(plaintext, NO_CONTEXT);
 
     if (entry.pendingInit !== null) {
       const envelope = encodeEnvelope(
@@ -271,7 +292,7 @@ export class SessionCrypto {
     if (existing !== undefined) {
       // An established session: the ratchet guarantees it is not mutated if the decrypt fails, so a
       // resent prekey preamble or a foreign broadcast that lands on this slot cannot corrupt it.
-      const plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext);
+      const plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext, NO_CONTEXT);
       // We have now heard from the peer, so they hold a working session; stop re-sending X3DH.
       existing.pendingInit = null;
       return plaintext;
@@ -287,7 +308,7 @@ export class SessionCrypto {
     // attempt the decrypt. Only a decrypt that passes the AEAD tag proves this message was sealed
     // for us rather than broadcast for another device.
     const derived = this.#deriveResponder(parsed.init);
-    const plaintext = derived.session.decrypt(parsed.header, parsed.ciphertext);
+    const plaintext = derived.session.decrypt(parsed.header, parsed.ciphertext, NO_CONTEXT);
 
     // Success: this message was ours. Now — and only now — consume the prekey and keep the session.
     if (derived.oneTimePrekeyId !== null) {

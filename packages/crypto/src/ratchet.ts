@@ -44,6 +44,7 @@
 
 import { bytesToHex, equalBytes } from '@noble/ciphers/utils.js';
 
+import { assemble as assembleAad } from './aad.js';
 import { NONCE_LEN, SymmetricKey } from './aead.js';
 import * as aead from './aead.js';
 import { CryptoError } from './errors.js';
@@ -224,12 +225,26 @@ export class RatchetSession {
   }
 
   /**
-   * Encrypts `plaintext`, returning the header and the ciphertext.
+   * Encrypts `plaintext` under `context`, returning the header and the ciphertext.
    *
    * The ciphertext has no nonce prefix: the nonce is derived from the message key, which the
    * receiver reconstructs from the header.
+   *
+   * `context` is appended to the associated data the tag covers, after the session's own associated
+   * data and this message's header. The ratchet does not interpret it and does not need to: the
+   * envelope layer builds it from `aad.context(...)` using the metadata the frame will carry, and a
+   * receiver that builds the same bytes from the metadata it received gets a tag that verifies only
+   * if the two agree. An empty array is what a version-1 envelope does, and it reproduces the
+   * version-1 associated data byte for byte.
+   *
+   * The context belongs to the message, not to the session, which is why it is a parameter here
+   * rather than state on the session: it names a message id, and a session outlives every message it
+   * carries.
    */
-  encrypt(plaintext: Uint8Array): { header: RatchetHeader; ciphertext: Uint8Array } {
+  encrypt(
+    plaintext: Uint8Array,
+    context: Uint8Array,
+  ): { header: RatchetHeader; ciphertext: Uint8Array } {
     const pair = this.#sendingPair;
     const chain = this.#sendingChain;
     if (pair === null || chain === null) {
@@ -240,21 +255,27 @@ export class RatchetSession {
     const header = new RatchetHeader(pair.public(), this.#previousSendingCount, this.#sentCount);
     this.#sentCount += 1;
 
-    const aad = concat(this.#associatedData, header.toBytes());
+    const aad = assembleAad(this.#associatedData, header.toBytes(), context);
     const sealed = aead.sealWithNonce(messageKey.key, messageKey.nonce, aad, plaintext);
     // `sealWithNonce` prefixes the nonce; the receiver derives it, so drop it.
     return { header, ciphertext: sealed.slice(NONCE_LEN) };
   }
 
   /**
-   * Decrypts a message.
+   * Decrypts a message whose tag was computed over `context`.
    *
    * Advances the ratchet only when decryption succeeds. A forged message that claimed a new ratchet
    * key would otherwise destroy the session's ability to decrypt genuine ones — a denial of service
    * from anyone who can inject a frame.
+   *
+   * `context` must be the bytes `aad.context(...)` returns for the metadata this frame arrived with,
+   * built from what the frame *claims* rather than from anything verified, because nothing about the
+   * frame is verified until the tag over these very bytes is. A frame whose claimed context was
+   * edited on the way fails to open, which is the whole point of binding it: a caller that passes
+   * the wrong context does not weaken the check, it only fails it.
    */
-  decrypt(header: RatchetHeader, ciphertext: Uint8Array): Uint8Array {
-    const aad = concat(this.#associatedData, header.toBytes());
+  decrypt(header: RatchetHeader, ciphertext: Uint8Array, context: Uint8Array): Uint8Array {
+    const aad = assembleAad(this.#associatedData, header.toBytes(), context);
 
     // A late message whose key was already derived and set aside.
     const mapKey = skippedMapKey(header.ratchetKey, header.messageNumber);
@@ -416,10 +437,17 @@ export class RatchetSession {
     this.#sendingPair = pair;
   }
 
-  /** Encrypts, turning the DH ratchet first if the last operation was a receive. */
-  encryptNext(plaintext: Uint8Array): { header: RatchetHeader; ciphertext: Uint8Array } {
+  /**
+   * Encrypts, turning the DH ratchet first if the last operation was a receive.
+   *
+   * `context` is passed through to {@link encrypt} unchanged.
+   */
+  encryptNext(
+    plaintext: Uint8Array,
+    context: Uint8Array,
+  ): { header: RatchetHeader; ciphertext: Uint8Array } {
     this.prepareSend();
-    return this.encrypt(plaintext);
+    return this.encrypt(plaintext, context);
   }
 
   /** Stores a skipped key, evicting the oldest once the bound is reached. */
@@ -500,10 +528,6 @@ function saturatingSub(a: number, b: number): number {
   return Math.max(a - b, 0);
 }
 
-/** Concatenates two byte strings into a fresh buffer. */
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
+// The two-byte concatenation this file used to do inline now lives in `aad.assemble`, which is
+// also where the envelope layer's context is appended — one join site for the whole associated
+// data, so a reader and a writer cannot order the halves differently.

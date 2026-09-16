@@ -251,11 +251,28 @@ impl RatchetSession {
         self.skipped.len()
     }
 
-    /// Encrypts `plaintext`, returning the header and the ciphertext.
+    /// Encrypts `plaintext` under `context`, returning the header and the ciphertext.
     ///
     /// The ciphertext has no nonce prefix: the nonce is derived from the message
     /// key, which the receiver reconstructs from the header.
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(RatchetHeader, Vec<u8>)> {
+    ///
+    /// `context` is appended to the associated data the tag covers, after the
+    /// session's own associated data and this message's header. The ratchet does
+    /// not interpret it and does not need to: the envelope layer builds it from
+    /// [`crate::aad::context`] using the metadata the frame will carry, and a
+    /// receiver that builds the same bytes from the metadata it received gets a
+    /// tag that verifies only if the two agree. Passing an empty slice is what a
+    /// version-1 envelope does, and it reproduces the version-1 associated data
+    /// byte for byte.
+    ///
+    /// The context belongs to the message, not to the session, which is why it
+    /// is a parameter here rather than state on the session: it names a message
+    /// id, and a session outlives every message it carries.
+    pub fn encrypt(
+        &mut self,
+        plaintext: &[u8],
+        context: &[u8],
+    ) -> Result<(RatchetHeader, Vec<u8>)> {
         let pair = self.sending_pair.as_ref().ok_or(CryptoError::NoSession)?;
         let chain = self.sending_chain.as_mut().ok_or(CryptoError::NoSession)?;
 
@@ -267,23 +284,34 @@ impl RatchetSession {
         };
         self.sent_count += 1;
 
-        let mut aad = self.associated_data.clone();
-        aad.extend_from_slice(&header.to_bytes());
+        let aad = crate::aad::assemble(&self.associated_data, &header.to_bytes(), context);
         let ciphertext =
             aead::seal_with_nonce(&message_key.key, &message_key.nonce, &aad, plaintext)?;
         // `seal_with_nonce` prefixes the nonce; the receiver derives it, so drop it.
         Ok((header, ciphertext[NONCE_LEN..].to_vec()))
     }
 
-    /// Decrypts a message.
+    /// Decrypts a message whose tag was computed over `context`.
     ///
     /// Advances the ratchet only when decryption succeeds. A forged message that
     /// claimed a new ratchet key would otherwise destroy the session's ability to
     /// decrypt genuine ones — a denial of service from anyone who can inject a
     /// frame.
-    pub fn decrypt(&mut self, header: &RatchetHeader, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let mut aad = self.associated_data.clone();
-        aad.extend_from_slice(&header.to_bytes());
+    ///
+    /// `context` must be the bytes [`crate::aad::context`] returns for the
+    /// metadata this frame arrived with, built from what the frame *claims*
+    /// rather than from anything verified, because nothing about the frame is
+    /// verified until the tag over these very bytes is. A frame whose claimed
+    /// context was edited on the way fails to open, which is the whole point of
+    /// binding it: a caller that passes the wrong context does not weaken the
+    /// check, it only fails it.
+    pub fn decrypt(
+        &mut self,
+        header: &RatchetHeader,
+        ciphertext: &[u8],
+        context: &[u8],
+    ) -> Result<Vec<u8>> {
+        let aad = crate::aad::assemble(&self.associated_data, &header.to_bytes(), context);
 
         // A late message whose key was already derived and set aside.
         if let Some(skipped) = self
@@ -437,13 +465,16 @@ impl RatchetSession {
     }
 
     /// Encrypts, turning the DH ratchet first if the last operation was a receive.
+    ///
+    /// `context` is passed through to [`Self::encrypt`] unchanged.
     pub fn encrypt_next(
         &mut self,
         plaintext: &[u8],
         random: &mut dyn Random,
+        context: &[u8],
     ) -> Result<(RatchetHeader, Vec<u8>)> {
         self.prepare_send(random)?;
-        self.encrypt(plaintext)
+        self.encrypt(plaintext, context)
     }
 
     /// Stores a skipped key, evicting the oldest once the bound is reached.
@@ -490,6 +521,13 @@ fn advance_chain(chain: &mut [u8; 32]) -> MessageKey {
 
 #[cfg(test)]
 mod tests {
+    //! Every call below passes an empty context, which is what a version-1
+    //! envelope hands the ratchet. That is deliberate rather than incidental:
+    //! `encrypt(pt, &[])` must be byte-for-byte the associated data this layer
+    //! computed before it took a context at all, so the tests in this module
+    //! keep pinning the version-1 wire while `a_context_is_bound_to_the_message`
+    //! and its neighbour pin the new parameter.
+
     use super::*;
     use migo_core::SeededRandom;
 
@@ -529,9 +567,9 @@ mod tests {
     #[test]
     fn a_single_message_round_trips() {
         let mut p = pair(1);
-        let (header, ciphertext) = p.alice.encrypt(b"halo Bob").expect("encrypts");
+        let (header, ciphertext) = p.alice.encrypt(b"halo Bob", &[]).expect("encrypts");
         assert_eq!(
-            p.bob.decrypt(&header, &ciphertext).expect("decrypts"),
+            p.bob.decrypt(&header, &ciphertext, &[]).expect("decrypts"),
             b"halo Bob"
         );
     }
@@ -543,16 +581,22 @@ mod tests {
             let sent = format!("alice {round}");
             let (h, c) = p
                 .alice
-                .encrypt_next(sent.as_bytes(), &mut p.random)
+                .encrypt_next(sent.as_bytes(), &mut p.random, &[])
                 .expect("encrypts");
-            assert_eq!(p.bob.decrypt(&h, &c).expect("decrypts"), sent.as_bytes());
+            assert_eq!(
+                p.bob.decrypt(&h, &c, &[]).expect("decrypts"),
+                sent.as_bytes()
+            );
 
             let reply = format!("bob {round}");
             let (h, c) = p
                 .bob
-                .encrypt_next(reply.as_bytes(), &mut p.random)
+                .encrypt_next(reply.as_bytes(), &mut p.random, &[])
                 .expect("encrypts");
-            assert_eq!(p.alice.decrypt(&h, &c).expect("decrypts"), reply.as_bytes());
+            assert_eq!(
+                p.alice.decrypt(&h, &c, &[]).expect("decrypts"),
+                reply.as_bytes()
+            );
         }
     }
 
@@ -560,8 +604,8 @@ mod tests {
     fn every_message_uses_a_different_key() {
         // Identical plaintexts in the same chain must produce different ciphertexts.
         let mut p = pair(3);
-        let (_, first) = p.alice.encrypt(b"same").expect("encrypts");
-        let (_, second) = p.alice.encrypt(b"same").expect("encrypts");
+        let (_, first) = p.alice.encrypt(b"same", &[]).expect("encrypts");
+        let (_, second) = p.alice.encrypt(b"same", &[]).expect("encrypts");
         assert_ne!(first, second);
     }
 
@@ -571,12 +615,12 @@ mod tests {
         let mut sent = Vec::new();
         for index in 0..50u32 {
             let body = format!("burst {index}");
-            sent.push(p.alice.encrypt(body.as_bytes()).expect("encrypts"));
+            sent.push(p.alice.encrypt(body.as_bytes(), &[]).expect("encrypts"));
         }
         for (index, (header, ciphertext)) in sent.iter().enumerate() {
             let expected = format!("burst {index}");
             assert_eq!(
-                p.bob.decrypt(header, ciphertext).expect("decrypts"),
+                p.bob.decrypt(header, ciphertext, &[]).expect("decrypts"),
                 expected.as_bytes()
             );
         }
@@ -588,7 +632,7 @@ mod tests {
         let messages: Vec<_> = (0..5u32)
             .map(|i| {
                 p.alice
-                    .encrypt(format!("m{i}").as_bytes())
+                    .encrypt(format!("m{i}").as_bytes(), &[])
                     .expect("encrypts")
             })
             .collect();
@@ -598,7 +642,7 @@ mod tests {
             let (header, ciphertext) = &messages[index];
             let expected = format!("m{index}");
             assert_eq!(
-                p.bob.decrypt(header, ciphertext).expect("decrypts"),
+                p.bob.decrypt(header, ciphertext, &[]).expect("decrypts"),
                 expected.as_bytes(),
                 "message {index} failed"
             );
@@ -610,28 +654,31 @@ mod tests {
         // The case previous_chain_length exists for: Alice sends three, Bob's
         // reply overtakes the third, and the third arrives afterwards.
         let mut p = pair(6);
-        let first = p.alice.encrypt(b"one").expect("encrypts");
-        let second = p.alice.encrypt(b"two").expect("encrypts");
-        let third = p.alice.encrypt(b"three").expect("encrypts");
+        let first = p.alice.encrypt(b"one", &[]).expect("encrypts");
+        let second = p.alice.encrypt(b"two", &[]).expect("encrypts");
+        let third = p.alice.encrypt(b"three", &[]).expect("encrypts");
 
-        assert_eq!(p.bob.decrypt(&first.0, &first.1).expect("decrypts"), b"one");
+        assert_eq!(
+            p.bob.decrypt(&first.0, &first.1, &[]).expect("decrypts"),
+            b"one"
+        );
 
         let reply = p
             .bob
-            .encrypt_next(b"reply", &mut p.random)
+            .encrypt_next(b"reply", &mut p.random, &[])
             .expect("encrypts");
         assert_eq!(
-            p.alice.decrypt(&reply.0, &reply.1).expect("decrypts"),
+            p.alice.decrypt(&reply.0, &reply.1, &[]).expect("decrypts"),
             b"reply"
         );
 
         // Alice's chain has turned, but Bob must still handle the stragglers.
         assert_eq!(
-            p.bob.decrypt(&third.0, &third.1).expect("decrypts"),
+            p.bob.decrypt(&third.0, &third.1, &[]).expect("decrypts"),
             b"three"
         );
         assert_eq!(
-            p.bob.decrypt(&second.0, &second.1).expect("decrypts"),
+            p.bob.decrypt(&second.0, &second.1, &[]).expect("decrypts"),
             b"two"
         );
     }
@@ -639,13 +686,13 @@ mod tests {
     #[test]
     fn a_replayed_message_is_refused() {
         let mut p = pair(7);
-        let (header, ciphertext) = p.alice.encrypt(b"once").expect("encrypts");
+        let (header, ciphertext) = p.alice.encrypt(b"once", &[]).expect("encrypts");
         assert_eq!(
-            p.bob.decrypt(&header, &ciphertext).expect("decrypts"),
+            p.bob.decrypt(&header, &ciphertext, &[]).expect("decrypts"),
             b"once"
         );
         assert_eq!(
-            p.bob.decrypt(&header, &ciphertext),
+            p.bob.decrypt(&header, &ciphertext, &[]),
             Err(CryptoError::KeyAlreadyUsed),
             "a replayed frame must not deliver the message a second time"
         );
@@ -657,33 +704,33 @@ mod tests {
         let messages: Vec<_> = (0..3u32)
             .map(|i| {
                 p.alice
-                    .encrypt(format!("m{i}").as_bytes())
+                    .encrypt(format!("m{i}").as_bytes(), &[])
                     .expect("encrypts")
             })
             .collect();
         p.bob
-            .decrypt(&messages[2].0, &messages[2].1)
+            .decrypt(&messages[2].0, &messages[2].1, &[])
             .expect("decrypts");
         p.bob
-            .decrypt(&messages[0].0, &messages[0].1)
+            .decrypt(&messages[0].0, &messages[0].1, &[])
             .expect("decrypts");
-        assert!(p.bob.decrypt(&messages[0].0, &messages[0].1).is_err());
+        assert!(p.bob.decrypt(&messages[0].0, &messages[0].1, &[]).is_err());
     }
 
     #[test]
     fn a_tampered_ciphertext_is_refused_and_leaves_the_session_usable() {
         let mut p = pair(9);
-        let (header, ciphertext) = p.alice.encrypt(b"first").expect("encrypts");
+        let (header, ciphertext) = p.alice.encrypt(b"first", &[]).expect("encrypts");
         let mut tampered = ciphertext.clone();
         tampered[0] ^= 1;
         assert_eq!(
-            p.bob.decrypt(&header, &tampered),
+            p.bob.decrypt(&header, &tampered, &[]),
             Err(CryptoError::DecryptionFailed)
         );
         // The genuine message must still decrypt: a forged frame may not break
         // the session.
         assert_eq!(
-            p.bob.decrypt(&header, &ciphertext).expect("decrypts"),
+            p.bob.decrypt(&header, &ciphertext, &[]).expect("decrypts"),
             b"first"
         );
     }
@@ -691,10 +738,10 @@ mod tests {
     #[test]
     fn a_tampered_header_is_refused() {
         let mut p = pair(10);
-        let (header, ciphertext) = p.alice.encrypt(b"body").expect("encrypts");
+        let (header, ciphertext) = p.alice.encrypt(b"body", &[]).expect("encrypts");
         let mut tampered = header;
         tampered.previous_chain_length = 7;
-        assert!(p.bob.decrypt(&tampered, &ciphertext).is_err());
+        assert!(p.bob.decrypt(&tampered, &ciphertext, &[]).is_err());
     }
 
     #[test]
@@ -702,16 +749,18 @@ mod tests {
         // Someone injects a frame with a fresh ratchet key. If the session
         // advanced on that, genuine messages would stop decrypting.
         let mut p = pair(11);
-        let genuine = p.alice.encrypt(b"genuine").expect("encrypts");
+        let genuine = p.alice.encrypt(b"genuine", &[]).expect("encrypts");
         let attacker_pair = KeyPair::generate(&mut p.random);
         let forged = RatchetHeader {
             ratchet_key: attacker_pair.public(),
             previous_chain_length: 0,
             message_number: 0,
         };
-        assert!(p.bob.decrypt(&forged, &genuine.1).is_err());
+        assert!(p.bob.decrypt(&forged, &genuine.1, &[]).is_err());
         assert_eq!(
-            p.bob.decrypt(&genuine.0, &genuine.1).expect("decrypts"),
+            p.bob
+                .decrypt(&genuine.0, &genuine.1, &[])
+                .expect("decrypts"),
             b"genuine"
         );
     }
@@ -719,13 +768,13 @@ mod tests {
     #[test]
     fn an_absurd_message_number_is_refused_without_deriving_keys() {
         let mut p = pair(12);
-        let (header, ciphertext) = p.alice.encrypt(b"body").expect("encrypts");
+        let (header, ciphertext) = p.alice.encrypt(b"body", &[]).expect("encrypts");
         let hostile = RatchetHeader {
             message_number: u32::MAX,
             ..header
         };
         assert_eq!(
-            p.bob.decrypt(&hostile, &ciphertext),
+            p.bob.decrypt(&hostile, &ciphertext, &[]),
             Err(CryptoError::ChainGapTooLarge)
         );
         assert_eq!(
@@ -738,16 +787,16 @@ mod tests {
     #[test]
     fn an_absurd_previous_chain_length_is_refused() {
         let mut p = pair(13);
-        let first = p.alice.encrypt(b"one").expect("encrypts");
-        p.bob.decrypt(&first.0, &first.1).expect("decrypts");
+        let first = p.alice.encrypt(b"one", &[]).expect("encrypts");
+        p.bob.decrypt(&first.0, &first.1, &[]).expect("decrypts");
         let reply = p
             .bob
-            .encrypt_next(b"reply", &mut p.random)
+            .encrypt_next(b"reply", &mut p.random, &[])
             .expect("encrypts");
-        p.alice.decrypt(&reply.0, &reply.1).expect("decrypts");
+        p.alice.decrypt(&reply.0, &reply.1, &[]).expect("decrypts");
         let next = p
             .alice
-            .encrypt_next(b"two", &mut p.random)
+            .encrypt_next(b"two", &mut p.random, &[])
             .expect("encrypts");
 
         let hostile = RatchetHeader {
@@ -755,7 +804,7 @@ mod tests {
             ..next.0
         };
         assert_eq!(
-            p.bob.decrypt(&hostile, &next.1),
+            p.bob.decrypt(&hostile, &next.1, &[]),
             Err(CryptoError::ChainGapTooLarge)
         );
     }
@@ -769,15 +818,15 @@ mod tests {
         for round in 0..30 {
             // Each round skips MAX_CHAIN_GAP-1 messages, then delivers one.
             for _ in 0..100 {
-                let _ = p.alice.encrypt(b"skipped").expect("encrypts");
+                let _ = p.alice.encrypt(b"skipped", &[]).expect("encrypts");
             }
             last = Some(
                 p.alice
-                    .encrypt(format!("round {round}").as_bytes())
+                    .encrypt(format!("round {round}").as_bytes(), &[])
                     .expect("encrypts"),
             );
             let (header, ciphertext) = last.as_ref().expect("just set");
-            p.bob.decrypt(header, ciphertext).expect("decrypts");
+            p.bob.decrypt(header, ciphertext, &[]).expect("decrypts");
         }
         assert!(
             p.bob.skipped_count() <= MAX_SKIPPED_KEYS,
@@ -794,11 +843,17 @@ mod tests {
         let mut p = pair(15);
         let mut roots = Vec::new();
         for round in 0..5u32 {
-            let (h, c) = p.alice.encrypt_next(b"a", &mut p.random).expect("encrypts");
-            p.bob.decrypt(&h, &c).expect("decrypts");
+            let (h, c) = p
+                .alice
+                .encrypt_next(b"a", &mut p.random, &[])
+                .expect("encrypts");
+            p.bob.decrypt(&h, &c, &[]).expect("decrypts");
             roots.push(p.bob.root_key);
-            let (h, c) = p.bob.encrypt_next(b"b", &mut p.random).expect("encrypts");
-            p.alice.decrypt(&h, &c).expect("decrypts");
+            let (h, c) = p
+                .bob
+                .encrypt_next(b"b", &mut p.random, &[])
+                .expect("encrypts");
+            p.alice.decrypt(&h, &c, &[]).expect("decrypts");
             roots.push(p.alice.root_key);
             assert_eq!(roots.len(), (round as usize + 1) * 2);
         }
@@ -817,7 +872,7 @@ mod tests {
     fn a_responder_cannot_send_before_receiving() {
         let mut p = pair(16);
         assert_eq!(
-            p.bob.encrypt(b"too early").err(),
+            p.bob.encrypt(b"too early", &[]).err(),
             Some(CryptoError::NoSession)
         );
     }
@@ -843,6 +898,102 @@ mod tests {
             Err(CryptoError::MalformedHeader)
         );
         assert_eq!(RatchetHeader::parse(&[]), Err(CryptoError::MalformedHeader));
+    }
+
+    /// A context of the shape the envelope layer will build, so these tests
+    /// exercise the real builder rather than an arbitrary byte string.
+    fn a_context() -> Vec<u8> {
+        crate::aad::context(
+            crate::aad::EnvelopeVersion::V2,
+            3,
+            &migo_core::Id::from_bytes([0xa0; 16]),
+            &migo_core::Id::from_bytes([0xc0; 16]),
+            Some(&migo_core::Id::from_bytes([0xe0; 16])),
+        )
+    }
+
+    #[test]
+    fn a_context_is_bound_to_the_message() {
+        let mut p = pair(23);
+        let context = a_context();
+        let (header, ciphertext) = p.alice.encrypt(b"halo", &context).expect("encrypts");
+        assert_eq!(
+            p.bob
+                .decrypt(&header, &ciphertext, &context)
+                .expect("decrypts"),
+            b"halo"
+        );
+    }
+
+    #[test]
+    fn a_message_does_not_open_under_a_different_context() {
+        // One byte apart, because a context that only matched on whole fields
+        // would pass a test that swapped a field and fail in the field on a
+        // version byte. A fresh pair each time: a failed open is not something
+        // this test then retries, since the message key it consumed is gone.
+        let context = a_context();
+        let mut other = context.clone();
+        let last = other.len() - 1;
+        other[last] ^= 0x01;
+        assert_ne!(context, other);
+
+        let mut p = pair(29);
+        let (header, ciphertext) = p.alice.encrypt(b"halo", &context).expect("encrypts");
+        assert_eq!(
+            p.bob.decrypt(&header, &ciphertext, &other),
+            Err(CryptoError::DecryptionFailed),
+            "a context changed by one bit must not authenticate"
+        );
+
+        // And the converse: an empty context is not a wildcard that opens a
+        // message sealed under a real one.
+        let mut q = pair(31);
+        let (header, ciphertext) = q.alice.encrypt(b"halo", &context).expect("encrypts");
+        assert_eq!(
+            q.bob.decrypt(&header, &ciphertext, &[]),
+            Err(CryptoError::DecryptionFailed)
+        );
+    }
+
+    #[test]
+    fn an_empty_context_is_the_version_one_associated_data() {
+        // The compatibility claim, at the layer that would break if it were
+        // false: two sessions that both pass nothing agree, and the bytes on the
+        // wire are the ones a version-1 envelope produced.
+        let mut p = pair(37);
+        let (header, ciphertext) = p.alice.encrypt(b"halo", &[]).expect("encrypts");
+        assert_eq!(
+            p.bob.decrypt(&header, &ciphertext, &[]).expect("decrypts"),
+            b"halo"
+        );
+        assert!(
+            crate::aad::assemble(&p.alice.associated_data, &header.to_bytes(), &[]).len()
+                == p.alice.associated_data.len() + RatchetHeader::ENCODED_LEN,
+            "an empty context must add no bytes to the associated data"
+        );
+    }
+
+    #[test]
+    fn a_context_survives_the_dh_ratchet() {
+        // The context is per message and the ratchet turns between messages, so
+        // a binding that only worked within one chain would look correct in the
+        // test above and fail on the second reply of every conversation.
+        let mut p = pair(41);
+        let first = a_context();
+        let (h, c) = p.alice.encrypt(b"one", &first).expect("encrypts");
+        assert_eq!(p.bob.decrypt(&h, &c, &first).expect("decrypts"), b"one");
+
+        let second = {
+            let mut ctx = first.clone();
+            let last = ctx.len() - 1;
+            ctx[last] = 0xe1;
+            ctx
+        };
+        let (h, c) = p
+            .bob
+            .encrypt_next(b"two", &mut p.random, &second)
+            .expect("encrypts");
+        assert_eq!(p.alice.decrypt(&h, &c, &second).expect("decrypts"), b"two");
     }
 
     #[test]

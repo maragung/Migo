@@ -1,0 +1,196 @@
+{
+  "$comment": "The associated-data context an envelope binds (migo.md section 11): the field layout, the v1 rule that binds nothing, and the version gate every reader must apply.",
+  "provenance": "hand-authored from migo.md section 11; the layout is a field table, so it is written out here rather than derived from any implementation",
+  "note": "`aad` is `associated_data || header || context`, assembled so a runner can compare one value. The v1 cases exist to pin that a v1 envelope's AAD does not move when a caller knows the metadata — reading the version byte before the tag is checked is only safe while that stays true.",
+  "domain": "6d69676f2d656e76656c6f70652d616164",
+  "ascii": "migo-envelope-aad",
+  "field_table": [
+    {
+      "field": "domain",
+      "bytes": 17,
+      "note": "the fixed purpose label"
+    },
+    {
+      "field": "envelope_version",
+      "bytes": 1,
+      "note": "must equal the envelope's own version byte"
+    },
+    {
+      "field": "scheme",
+      "bytes": 1,
+      "note": "must equal the envelope's own scheme byte"
+    },
+    {
+      "field": "sender_device",
+      "bytes": 16,
+      "note": "the device the frame claims to be from"
+    },
+    {
+      "field": "conversation_id",
+      "bytes": 16,
+      "note": "the conversation the frame claims to belong to"
+    },
+    {
+      "field": "flags",
+      "bytes": 1,
+      "note": "bit 0: a message id follows"
+    },
+    {
+      "field": "message_id",
+      "bytes": 16,
+      "note": "present only when flags bit 0 is set"
+    }
+  ],
+  "versions": {
+    "accepted": [
+      1,
+      2
+    ],
+    "refused": "every other u8 value, 0..=255"
+  },
+  "cases": [
+    {
+      "name": "v1_binds_nothing",
+      "envelope_version": 1,
+      "scheme": 1,
+      "sender_device": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": null,
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "",
+      "aad": "1111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v1_binds_nothing_even_with_a_message_id",
+      "envelope_version": 1,
+      "scheme": 1,
+      "sender_device": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "",
+      "aad": "1111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_pairwise_without_a_message_id",
+      "envelope_version": 2,
+      "scheme": 1,
+      "sender_device": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": null,
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c000",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c000",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_pairwise_with_a_message_id",
+      "envelope_version": 2,
+      "scheme": 1,
+      "sender_device": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_prekey_with_a_message_id",
+      "envelope_version": 2,
+      "scheme": 2,
+      "sender_device": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "conversation_id": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+      "message_id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640202b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d001f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640202b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d001f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_prekey_without_a_message_id",
+      "envelope_version": 2,
+      "scheme": 2,
+      "sender_device": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "conversation_id": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+      "message_id": null,
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640202b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d000",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640202b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d000",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_distinguishes_the_sending_device",
+      "envelope_version": 2,
+      "scheme": 1,
+      "sender_device": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640201b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640201b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_distinguishes_the_conversation",
+      "envelope_version": 2,
+      "scheme": 1,
+      "sender_device": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "conversation_id": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+      "message_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d6161640201a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "provenance": "hand-authored from migo.md section 11"
+    },
+    {
+      "name": "v2_all_zero_device",
+      "envelope_version": 2,
+      "scheme": 1,
+      "sender_device": "00000000000000000000000000000000",
+      "conversation_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "message_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "associated_data": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+      "header": "33333333333333333333333333333333333333333333333333333333333333330000000000000007",
+      "context": "6d69676f2d656e76656c6f70652d616164020100000000000000000000000000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "aad": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000000000076d69676f2d656e76656c6f70652d616164020100000000000000000000000000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "provenance": "hand-authored from migo.md section 11"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "envelope_version_0",
+      "envelope_version": 0,
+      "error": "UnsupportedVersion",
+      "why": "no build writes this version, so no reader may assume a layout for it"
+    },
+    {
+      "name": "envelope_version_3",
+      "envelope_version": 3,
+      "error": "UnsupportedVersion",
+      "why": "no build writes this version, so no reader may assume a layout for it"
+    },
+    {
+      "name": "envelope_version_4",
+      "envelope_version": 4,
+      "error": "UnsupportedVersion",
+      "why": "no build writes this version, so no reader may assume a layout for it"
+    },
+    {
+      "name": "envelope_version_255",
+      "envelope_version": 255,
+      "error": "UnsupportedVersion",
+      "why": "no build writes this version, so no reader may assume a layout for it"
+    }
+  ]
+}

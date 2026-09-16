@@ -8,11 +8,13 @@
  * * {@link aead} — XChaCha20-Poly1305 over `nonce || ciphertext || tag`.
  * * {@link mac} — HMAC-SHA256 for tokens and cursors the server signs for itself.
  *
- * And the four modules that build the end-to-end message protocol on top of them:
+ * And the modules that build the end-to-end message protocol on top of them:
  *
  * * {@link identity} — the long-term Ed25519 and X25519 keys, and the signed prekeys they vouch for.
  * * {@link x3dh} — asynchronous session setup, so a message can be sent to an offline device.
  * * {@link ratchet} — the Double Ratchet: a fresh key per message, forward secrecy, self-healing.
+ * * {@link aad} — what a tag authenticates besides the ciphertext: the envelope's bound context
+ *   (§11) and the version gate every reader applies to it.
  * * {@link senderKey} — group messaging at O(1) per message instead of once per recipient.
  * * {@link sealing} — per-object content keys for media, voice notes, and call signaling: the
  *   layer that encrypts for storage rather than for a session.
@@ -37,6 +39,7 @@
  * {@link RatchetSession}, {@link CryptoError}, and the rest) are also available directly.
  */
 
+export * as aad from './aad.js';
 export * as kdf from './kdf.js';
 export * as mac from './mac.js';
 export * as aead from './aead.js';
@@ -64,6 +67,8 @@ export { AccountError } from './account/errors.js';
 export type { AccountErrorKind, AccountErrorDetail } from './account/errors.js';
 export { MacKey, TAG_LEN as MAC_TAG_LEN, MIN_TAG_LEN as MAC_MIN_TAG_LEN } from './mac.js';
 export { SymmetricKey, KEY_LEN, NONCE_LEN, TAG_LEN as AEAD_TAG_LEN } from './aead.js';
+export { EnvelopeVersion, ACCEPTED_VERSIONS, ID_BYTE_LEN as AAD_ID_BYTE_LEN } from './aad.js';
+export type { ParsedContext } from './aad.js';
 export type { Label } from './kdf.js';
 
 export {
