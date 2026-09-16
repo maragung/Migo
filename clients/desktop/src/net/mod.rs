@@ -3395,6 +3395,10 @@ impl Worker {
                 self.subscribe_self().await;
                 self.announce_presence().await;
                 self.request_conversations().await;
+                // The calls the conversation list does not carry: a group call running in one of
+                // those conversations is news the announcements only deliver to a session that
+                // was there to hear them (see `request_call_list`).
+                self.request_call_list().await;
                 // The graph is refreshed on every reconnect for the same reason the conversation
                 // list is: the other devices of this account act on it too, and a client that
                 // never re-reads shows a friendship that ended an hour ago.
@@ -3521,6 +3525,24 @@ impl Worker {
             cursor: None,
         };
         self.request(Opcode::ConversationList, &message).await;
+    }
+
+    /// Asks which calls this account can see, so the header's join-in-progress offer exists for
+    /// the session that was not connected to hear the announcements — a member offline through a
+    /// whole group call, whose call is still running (section 165).
+    ///
+    /// Every reconnect asks, not just the first sign-in: a fresh session's subscribe starts the
+    /// announcements from that moment, and what passed between the old session's death and this
+    /// one's WELCOME is exactly what the ledger is missing. A resumed session skips it with the
+    /// rest of the resync — its ledger survived, and its topics never stopped being watched.
+    async fn request_call_list(&mut self) {
+        self.request(
+            Opcode::CallList,
+            &migo_protocol::CallListQuery {
+                conversation_id: None,
+            },
+        )
+        .await;
     }
 
     /// Starts a catch-up walk for one conversation, bounded or not.
@@ -8466,6 +8488,9 @@ impl Worker {
             Opcode::CallIce => self.on_call_ice(&frame).await,
             Opcode::CallStateEvent => self.on_call_state(&frame).await,
             Opcode::CallTurnFetch => self.on_call_turn(&frame).await,
+            // The one call read: what this session's announcements could not have told it,
+            // folded into the spectator ledger as a join would have been (section 165).
+            Opcode::CallList => self.on_call_list(&frame).await,
             // The group call's own pushes: roster movement off the SFU and the sealed frame
             // key a rotating peer fanned out. The mid-call join's ask and answer ride the
             // `CallSdp` arm above, because that is the frame the server projects both into.

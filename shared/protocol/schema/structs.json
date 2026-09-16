@@ -3737,6 +3737,98 @@
       ]
     },
     {
+      "name": "CallListQuery",
+      "doc": "Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing.",
+      "fields": [
+        {
+          "name": "conversation_id",
+          "type": "id",
+          "optional": true,
+          "id": 1,
+          "doc": "When set, only the calls belonging to this conversation are listed."
+        }
+      ]
+    },
+    {
+      "name": "CallListEntry",
+      "doc": "One call the listing account can see, as much of it as the server owns. Nothing here is sealed material: the listing answers which calls exist and where they are, and every description inside one still arrives over the relay that already carries it. The optional fields are exactly the row facts each kind of call keeps — a direct call records a ring deadline and an answer time and no start, because the ring's beginning is the caller's own clock and not something this node stored; a group call records its first seat and no deadline, because no timer retires it.",
+      "fields": [
+        {
+          "name": "call_id",
+          "type": "id",
+          "doc": "The id an answer or a join must name; the call's idempotency key."
+        },
+        {
+          "name": "conversation_id",
+          "type": "id",
+          "doc": "The conversation the call belongs to."
+        },
+        {
+          "name": "kind",
+          "type": "u32",
+          "doc": "0=Direct (a 1:1 call), 1=Group (an SFU roster). A client picks its call screen from this."
+        },
+        {
+          "name": "state",
+          "type": "u32",
+          "doc": "CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected."
+        },
+        {
+          "name": "peer_id",
+          "type": "id",
+          "doc": "Direct: the other party's account. Group: the account that founded the call by joining first."
+        },
+        {
+          "name": "participant_count",
+          "type": "u32",
+          "doc": "Direct: 2 — both parties, whether or not both have connected. Group: the roster's size now."
+        },
+        {
+          "name": "joined",
+          "type": "u32",
+          "doc": "1 when this account is a party to the call or holds a seat on its roster, 0 when the call is only being offered to it. A client that must not ring twice reads this to tell a call it is already in from one it is being invited into."
+        },
+        {
+          "name": "media_kind",
+          "type": "u32",
+          "optional": true,
+          "id": 1,
+          "doc": "Direct: 0=Audio, 1=Video. Absent for a group call, whose media each seat negotiates for itself and whose roster therefore carries no single kind."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 2,
+          "doc": "A ringing direct call: when the ring gives up. Absent once the callee has answered, and absent for a group call, which no deadline retires."
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 3,
+          "doc": "A group call: when the first seat was taken. Absent for a direct call, whose row keeps no start."
+        },
+        {
+          "name": "answered_at",
+          "type": "timestamp",
+          "optional": true,
+          "id": 4,
+          "doc": "A direct call the callee picked up."
+        }
+      ]
+    },
+    {
+      "name": "CallListResult",
+      "doc": "The calls the listing account can see, most urgent first: ringing before connecting before connected, and within one state the call that has been waiting longest — for a direct call the one whose ring went out earliest, which its deadline orders, and for a group call the one whose first seat was taken earliest. The order is total and stable, so a client that redraws from a second listing does not reshuffle a screen it already showed.",
+      "fields": [
+        {
+          "name": "calls",
+          "type": "list<CallListEntry>"
+        }
+      ]
+    },
+    {
       "name": "CallRenegotiate",
       "doc": "Renegotiates codecs/streams mid-call (e.g. ICE restart, add video).",
       "fields": [

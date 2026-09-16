@@ -6389,6 +6389,133 @@ export function decodeCallSfuParticipant(r: Reader): CallSfuParticipant {
   return out;
 }
 
+/** Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing. */
+export interface CallListQuery {
+  /** When set, only the calls belonging to this conversation are listed. */
+  conversationId?: Id;
+}
+
+export function encodeCallListQuery(w: Writer, v: CallListQuery): void {
+  w.enter();
+  let present = 0;
+  if (v.conversationId !== undefined) present++;
+  w.u32(present);
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeCallListQuery(r: Reader): CallListQuery {
+  r.enter();
+  const out: CallListQuery = {  } as CallListQuery;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.conversationId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One call the listing account can see, as much of it as the server owns. Nothing here is sealed material: the listing answers which calls exist and where they are, and every description inside one still arrives over the relay that already carries it. The optional fields are exactly the row facts each kind of call keeps — a direct call records a ring deadline and an answer time and no start, because the ring's beginning is the caller's own clock and not something this node stored; a group call records its first seat and no deadline, because no timer retires it. */
+export interface CallListEntry {
+  /** The id an answer or a join must name; the call's idempotency key. */
+  callId: Id;
+  /** The conversation the call belongs to. */
+  conversationId: Id;
+  /** 0=Direct (a 1:1 call), 1=Group (an SFU roster). A client picks its call screen from this. */
+  kind: number;
+  /** CallStateEvent's numbering: 0=Ringing, 1=Connecting, 2=Connected. */
+  state: number;
+  /** Direct: the other party's account. Group: the account that founded the call by joining first. */
+  peerId: Id;
+  /** Direct: 2 — both parties, whether or not both have connected. Group: the roster's size now. */
+  participantCount: number;
+  /** 1 when this account is a party to the call or holds a seat on its roster, 0 when the call is only being offered to it. A client that must not ring twice reads this to tell a call it is already in from one it is being invited into. */
+  joined: number;
+  /** Direct: 0=Audio, 1=Video. Absent for a group call, whose media each seat negotiates for itself and whose roster therefore carries no single kind. */
+  mediaKind?: number;
+  /** A ringing direct call: when the ring gives up. Absent once the callee has answered, and absent for a group call, which no deadline retires. */
+  expiresAt?: number;
+  /** A group call: when the first seat was taken. Absent for a direct call, whose row keeps no start. */
+  startedAt?: number;
+  /** A direct call the callee picked up. */
+  answeredAt?: number;
+}
+
+export function encodeCallListEntry(w: Writer, v: CallListEntry): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.conversationId);
+  w.u32(v.kind);
+  w.u32(v.state);
+  w.id(v.peerId);
+  w.u32(v.participantCount);
+  w.u32(v.joined);
+  let present = 0;
+  if (v.mediaKind !== undefined) present++;
+  if (v.expiresAt !== undefined) present++;
+  if (v.startedAt !== undefined) present++;
+  if (v.answeredAt !== undefined) present++;
+  w.u32(present);
+  if (v.mediaKind !== undefined) { const value = v.mediaKind; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.expiresAt !== undefined) { const value = v.expiresAt; w.optional(2, (w) => { w.timestamp(value); }); }
+  if (v.startedAt !== undefined) { const value = v.startedAt; w.optional(3, (w) => { w.timestamp(value); }); }
+  if (v.answeredAt !== undefined) { const value = v.answeredAt; w.optional(4, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeCallListEntry(r: Reader): CallListEntry {
+  r.enter();
+  const callId = r.id();
+  const conversationId = r.id();
+  const kind = r.u32();
+  const state = r.u32();
+  const peerId = r.id();
+  const participantCount = r.u32();
+  const joined = r.u32();
+  const out: CallListEntry = { callId, conversationId, kind, state, peerId, participantCount, joined } as CallListEntry;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.mediaKind = sub.u32(); break;
+      case 2: out.expiresAt = sub.timestamp(); break;
+      case 3: out.startedAt = sub.timestamp(); break;
+      case 4: out.answeredAt = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** The calls the listing account can see, most urgent first: ringing before connecting before connected, and within one state the call that has been waiting longest — for a direct call the one whose ring went out earliest, which its deadline orders, and for a group call the one whose first seat was taken earliest. The order is total and stable, so a client that redraws from a second listing does not reshuffle a screen it already showed. */
+export interface CallListResult {
+  calls: CallListEntry[];
+}
+
+export function encodeCallListResult(w: Writer, v: CallListResult): void {
+  w.enter();
+  { w.listLen(v.calls.length); for (const item of v.calls) { encodeCallListEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallListResult(r: Reader): CallListResult {
+  r.enter();
+  const calls = ((): CallListEntry[] => { const n = r.listLen(); const v: CallListEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeCallListEntry(r)); return v; })();
+  const out: CallListResult = { calls } as CallListResult;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 /** Renegotiates codecs/streams mid-call (e.g. ICE restart, add video). */
 export interface CallRenegotiate {
   callId: Id;
@@ -7538,6 +7665,8 @@ export const OP = {
   CALL_SFU_JOIN: 237,
   /** SFU group call state. */
   CALL_SFU_EVENT: 238,
+  /** Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear. */
+  CALL_LIST: 247,
   /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
   CONVERSATION_STATE_EVENT: 52,
   /** Buys a store item for the caller; the ledger and the entitlement are written together. */
@@ -7691,6 +7820,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse', paced: false, suppressOn: [], feature: 'CALLS' },
   237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse', paced: false, suppressOn: [] },
   238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id', paced: false, suppressOn: [] },
+  247: { code: 247, name: 'CALL_LIST', cost: 2, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallListQuery', response: 'CallListResult', paced: false, suppressOn: [], feature: 'CALLS' },
   52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: [] },
   239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult', paced: false, suppressOn: [], feature: 'ECONOMY' },
   240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse', paced: false, suppressOn: [], feature: 'ECONOMY' },

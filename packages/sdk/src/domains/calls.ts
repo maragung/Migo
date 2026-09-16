@@ -21,7 +21,10 @@
  *
  * It holds no call state. Which calls are ringing, connected, or ended is a *product* projection the
  * application keeps ({@link ActiveCall} is its shape); the server pushes the authoritative
- * transitions through {@link onCallState}. It also never opens or seals anything: the bytes handed
+ * transitions through {@link onCallState}. {@link listCalls} is the one read that exists so that
+ * projection can be rebuilt rather than only maintained: every other fact here arrives as an event,
+ * and a client that was offline when the call started has no event to have missed. It also never
+ * opens or seals anything: the bytes handed
  * to {@link invite}, {@link answer}, {@link sendSdp}, and {@link sendIce} are already sealed by the
  * caller, and the bytes handed back through {@link onIncomingCall} and the relay listeners are
  * passed through verbatim. The end-to-end media encryption is a separate, future layer; until it
@@ -43,6 +46,8 @@ import {
   encodeCallStats,
   encodeCallTurnFetch,
   decodeCallTurnResponse,
+  encodeCallListQuery,
+  decodeCallListResult,
   decodeCallInviteEvent,
   decodeCallStateEvent,
   decodeCallSdp,
@@ -57,6 +62,8 @@ import type {
   CallIce,
   CallStats,
   TurnServer,
+  CallListEntry,
+  CallListQuery,
 } from '@migo/protocol';
 
 import { newId } from '../ids.js';
@@ -372,6 +379,33 @@ export class CallsDomain {
       { callId },
     );
     return response.servers;
+  }
+
+  /**
+   * Every call this account can see right now, most urgent first.
+   *
+   * The one call question a client asks rather than is told: rings are events and answered calls are
+   * events, but a client that has just reconnected was not there to receive them, and a group call
+   * running in a conversation it belongs to announced itself to subscribers it was not among. Pass a
+   * `conversationId` to scope the answer to one conversation, which is the question a screen already
+   * showing one asks.
+   *
+   * `joined` is the field a client must read before acting: an entry with it at 0 is a call being
+   * *offered* to this account — answering it is right, and ringing the account's own other devices on
+   * the strength of it is not — while an entry with it at 1 is a call the account is already in, which
+   * a reconnect should attach to rather than place a second one beside.
+   */
+  async listCalls(conversationId?: Id): Promise<CallListEntry[]> {
+    // The optional field is left *absent* rather than set to `undefined`: the query's own type
+    // says `conversationId?: Id`, and an absent field is what the encoder reads as "no scope".
+    const query: CallListQuery = conversationId === undefined ? {} : { conversationId };
+    const response = await this.#rpc.call(
+      OP.CALL_LIST,
+      encodeCallListQuery,
+      decodeCallListResult,
+      query,
+    );
+    return response.calls;
   }
 
   /**

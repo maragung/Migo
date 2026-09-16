@@ -426,6 +426,26 @@ pub trait Callkeeper: Send + Sync {
     /// as the ring sweep's caller does, because only the composition root
     /// knows which topics reach anyone.
     async fn group_sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>>;
+
+    /// Every call `caller` can see right now, most urgent first.
+    ///
+    /// The one call question that is a *read* rather than a frame: the rest
+    /// of this trait moves a call through its lifecycle and the client learns
+    /// what happened from events, but a client that was not there when the
+    /// call started has no event to have missed and nothing to ask. It is
+    /// the answer to "what am I in", assembled from the scans the two stores
+    /// already offer, and the optional scope narrows it to one conversation
+    /// for the screen that is already showing one.
+    ///
+    /// Group rosters are gated per roster rather than per call: a roster
+    /// crosses only when the membership gate says this account may join its
+    /// conversation, so a listing can never be the path that tells a
+    /// stranger a conversation it cannot enter has a call running.
+    async fn list(
+        &self,
+        caller: &Caller,
+        conversation_id: Option<Id>,
+    ) -> Result<Vec<migo_protocol::CallListEntry>>;
 }
 
 /// The call service, shared.

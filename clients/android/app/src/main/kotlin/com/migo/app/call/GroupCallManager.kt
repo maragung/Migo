@@ -166,12 +166,43 @@ class GroupCallManager(
     /**
      * Bridges the manager onto the client's reconnect-surviving streams. The returned
      * subscriptions are the caller's to cancel; [close] does the rest (the best-effort leave).
+     *
+     * The listing ask goes out here, once per session: the announcements below are the tracker's
+     * source while a session is up, and what they cannot cover is the session that was not there --
+     * a member offline through a whole group call hears no join, and no departure is coming, so
+     * without the ask the header would offer no way into a call that is still running.
      */
-    fun attach(): List<Subscription> = listOf(
-        client.onGroupCallRoster(::handleRoster),
-        client.onGroupCallJoined(::handleParticipantJoined),
-        client.onGroupCallLeft(::handleParticipantLeft),
-    )
+    fun attach(): List<Subscription> {
+        refreshInProgress()
+        return listOf(
+            client.onGroupCallRoster(::handleRoster),
+            client.onGroupCallJoined(::handleParticipantJoined),
+            client.onGroupCallLeft(::handleParticipantLeft),
+        )
+    }
+
+    /**
+     * Asks the server which calls this account can see and folds the answer into the tracker.
+     *
+     * The announcements are the tracker's newer source -- they are the conversation's own news, so
+     * the fold adds and never replaces (see [GroupCallProgressTracker.onListing]) -- which is why
+     * this is safe to run beside a live session, and why it is worth re-running it whenever a fresh
+     * session replaces one the server could not resume. Best effort throughout: an ask that fails,
+     * or a server that does not know the opcode yet, leaves the tracker exactly as the
+     * announcements keep it.
+     */
+    fun refreshInProgress() {
+        scope.launch {
+            try {
+                progress.onListing(client.calls.listCalls())
+                publishProgress()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // See the doc: the announcements remain the tracker's source.
+            }
+        }
+    }
 
     /**
      * Ends everything this manager holds. A call still live is left on the wire first, best

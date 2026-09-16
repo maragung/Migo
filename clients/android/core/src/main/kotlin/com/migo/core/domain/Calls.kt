@@ -9,6 +9,9 @@ import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallInvite
 import com.migo.core.protocol.CallInviteEvent
 import com.migo.core.protocol.CallInviteResult
+import com.migo.core.protocol.CallListEntry
+import com.migo.core.protocol.CallListQuery
+import com.migo.core.protocol.CallListResult
 import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.CallStateEvent
 import com.migo.core.protocol.CallStats
@@ -267,6 +270,22 @@ class CallsDomain(
         val request = CallTurnFetch(callId)
         val response = rpc.call(Op.CALL_TURN_FETCH, { w -> request.encode(w) }, { r -> CallTurnResponse.decode(r) })
         return response.servers
+    }
+
+    /**
+     * Every call this account can see right now: the rings it is being offered, the direct calls it
+     * is a party to, and the group calls running in conversations it belongs to.
+     *
+     * The one *read* in this domain, and it exists for the session that was not there to be told:
+     * a member who was offline through a whole group call heard no join announcement, so without
+     * this ask the header would offer no way into a call that is still running (section 165). The
+     * scope is the conversation when one is named, everything the account can see otherwise.
+     */
+    suspend fun listCalls(conversationId: Id? = null): List<CallListEntry> {
+        val request = CallListQuery(conversationId)
+        val response =
+            rpc.call(Op.CALL_LIST, { w -> request.encode(w) }, { r -> CallListResult.decode(r) })
+        return response.calls
     }
 
     /**

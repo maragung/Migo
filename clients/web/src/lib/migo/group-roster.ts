@@ -31,7 +31,13 @@
  * the same seal carries a real offer and nothing about the wire changes.
  */
 
-import type { GroupCallJoinedEvent, GroupCallLeftEvent, GroupCallRoster, Id } from '@migo/sdk';
+import type {
+  CallListEntry,
+  GroupCallJoinedEvent,
+  GroupCallLeftEvent,
+  GroupCallRoster,
+  Id,
+} from '@migo/sdk';
 
 import { encodeSdpDescription, sealCallSignal } from './call-signal.js';
 
@@ -170,6 +176,46 @@ export function inProgressDeparted(
     next.set(event.conversationId, {
       callId: event.callId,
       participantCount: event.participantCount,
+    });
+  }
+  return next;
+}
+
+/** The `CallListEntry.kind` vocabulary: 1 is a group call's roster, 0 a direct call. */
+const CALL_LIST_GROUP = 1;
+
+/**
+ * Folds the calls a *listing* reports into the in-progress map.
+ *
+ * The announcements above are the map's source while a session is up, and they are the right one:
+ * they are the conversation's own news, so they cannot be older than a listing that was in flight
+ * beside them. What the announcements cannot do is survive a session that was not there to hear
+ * them — a member who was offline through a whole call heard no join and no departure, and without
+ * this fold the map would stay empty until the *next* join or departure, which for a call already
+ * under way never comes. That is section 165's gap exactly: the header would offer no way into a
+ * call that is still running.
+ *
+ * So the fold adds and never overwrites: a conversation the map already holds was observed on this
+ * session's own topic and is left alone, whatever the listing says. Only calls this device is
+ * offered but is not in (`joined` 0) are taken — a seat this device holds belongs to the roster
+ * screen, not to the header's join affordance — and only group calls (`kind` 1), because a direct
+ * call's screen reads the invite event stream for itself and has no header entry to seed.
+ */
+export function inProgressFromListing(
+  tracked: ReadonlyMap<Id, InProgressGroupCall>,
+  entries: readonly CallListEntry[],
+): Map<Id, InProgressGroupCall> {
+  const next = new Map(tracked);
+  for (const entry of entries) {
+    if (entry.kind !== CALL_LIST_GROUP || entry.joined !== 0) {
+      continue;
+    }
+    if (tracked.has(entry.conversationId)) {
+      continue;
+    }
+    next.set(entry.conversationId, {
+      callId: entry.callId,
+      participantCount: entry.participantCount,
     });
   }
   return next;

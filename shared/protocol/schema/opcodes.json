@@ -1458,6 +1458,18 @@
    "coalesce_key": "call_id"
   },
   {
+   "name": "CALL_LIST",
+   "code": 247,
+   "direction": "client_to_server",
+   "payload": "CallListQuery",
+   "response": "CallListResult",
+   "auth": "User",
+   "feature": "CALLS",
+   "cost": 2,
+   "class": "Droppable",
+   "doc": "Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear."
+  },
+  {
    "name": "CONVERSATION_STATE_EVENT",
    "code": 52,
    "direction": "server_to_client",

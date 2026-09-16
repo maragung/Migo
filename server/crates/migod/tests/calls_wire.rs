@@ -51,9 +51,9 @@ use migo_calls::{CallState, EndReason};
 use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_protocol::{
     from_frame, to_frame, CallAnswer, CallDecline, CallInvite, CallInviteEvent, CallInviteResult,
-    CallSdp, CallStateEvent, Encode, Frame, Hello, NotificationEvent, NotificationKind, Opcode,
-    Platform, RoomJoinRequest, RoomKind, SubscribeRequest, SubscribeResponse, Topic, TopicKind,
-    Welcome, PROTOCOL_VERSION,
+    CallListQuery, CallListResult, CallSdp, CallStateEvent, Encode, Frame, Hello,
+    NotificationEvent, NotificationKind, Opcode, Platform, RoomJoinRequest, RoomKind,
+    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -937,5 +937,129 @@ async fn a_session_without_the_calls_bit_is_refused_the_ring_and_keeps_the_conne
     assert!(
         !pong.header.is_error(),
         "a session refused one feature keeps serving the frames it did negotiate"
+    );
+}
+
+/// The listing is the one call question a client that was *absent* can ask.
+///
+/// Every other frame in this suite is a participant telling the node what to
+/// do, and every fact a client learns arrives as an event it had to be
+/// connected to receive. A member who was offline through a whole group call
+/// missed every one of those events and has nothing to replay, which is the gap
+/// `CALL_LIST` closes: the client reconnects, subscribes, asks, and is told what
+/// is running and what is ringing at it. What this test pins is that the answer
+/// travels on the connection that asked — the frame publishes nothing, because a
+/// read must not be the way an account's other devices learn about a screen they
+/// did not ask for.
+#[tokio::test]
+async fn the_listing_answers_the_session_that_asked_and_publishes_nothing() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "listcaller").await;
+    let callee = registered_grant(&app, "listcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "list-room").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut callee_session = LiveSession::connect(addr, &callee).await;
+
+    // Nothing is running yet: an empty answer, and one that arrives as the
+    // reply rather than as an event, which is the whole shape of a read.
+    let empty: CallListResult = caller_session
+        .ask(
+            Opcode::CallList,
+            201,
+            &CallListQuery {
+                conversation_id: None,
+            },
+        )
+        .await;
+    assert!(
+        empty.calls.is_empty(),
+        "an account with no calls is told it has none"
+    );
+
+    // A ring aimed at the callee, placed by the caller.
+    let call_id = Id::from_bytes([0xC4; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            202,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 1,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x55; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+    let _ = next_event_of(&mut callee_session.stream, Opcode::CallInviteEvent, STEP).await;
+
+    // The callee asks: the ring is offered to it, so it is a line it can see
+    // and not one it is in.
+    let listed: CallListResult = callee_session
+        .ask(
+            Opcode::CallList,
+            203,
+            &CallListQuery {
+                conversation_id: None,
+            },
+        )
+        .await;
+    assert_eq!(listed.calls.len(), 1, "the ring is the callee's only call");
+    let entry = &listed.calls[0];
+    assert_eq!(entry.call_id, call_id);
+    assert_eq!(entry.conversation_id, conversation_id);
+    assert_eq!(entry.kind, 0, "a 1:1 call is kind Direct");
+    assert_eq!(entry.state, 0, "the ring reports the ring's own state");
+    assert_eq!(
+        entry.peer_id, caller.account_id,
+        "the peer is the other party"
+    );
+    assert_eq!(entry.participant_count, 2);
+    assert_eq!(entry.joined, 0, "the callee is being offered it, not in it");
+    assert_eq!(
+        entry.media_kind,
+        Some(1),
+        "the ring's own media kind survives the listing"
+    );
+    assert_eq!(entry.expires_at, Some(result.expires_at));
+    assert_eq!(entry.answered_at, None);
+
+    // The caller's own listing, from the session that dialled: the same ring,
+    // and this account is in it.
+    let mine: CallListResult = caller_session
+        .ask(
+            Opcode::CallList,
+            204,
+            &CallListQuery {
+                conversation_id: Some(conversation_id),
+            },
+        )
+        .await;
+    assert_eq!(mine.calls.len(), 1);
+    assert_eq!(mine.calls[0].call_id, call_id);
+    assert_eq!(
+        mine.calls[0].joined, 1,
+        "the account that dialled is in the call"
+    );
+
+    // The read published nothing. The callee's session was owed the invite
+    // event and has had it; a listing that fanned out would put one more frame
+    // on that socket, and the socket's silence is the assertion. This reads the
+    // length prefix by hand because the suite's own receive helper treats
+    // silence as a failure, and here silence is the fact under test.
+    let mut head = [0u8; 4];
+    let quiet = tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio::io::AsyncReadExt::read_exact(&mut callee_session.stream, &mut head),
+    )
+    .await;
+    assert!(
+        quiet.is_err(),
+        "a listing publishes nothing: the callee was owed no further frame"
     );
 }

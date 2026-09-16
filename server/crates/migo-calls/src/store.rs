@@ -32,7 +32,7 @@ use crate::model::{Call, CallState, EndReason};
 
 /// Call persistence, as the service needs it.
 ///
-/// Four operations, deliberately few. A production backend gets to decide
+/// Five operations, deliberately few. A production backend gets to decide
 /// what "expired" means in the face of clock skew (the sweep is handed `now`,
 /// never `Timestamp::now()`), and gets to make [`CallStore::put`] an upsert
 /// whose read-modify-write races are its own to resolve — the in-memory
@@ -58,6 +58,15 @@ pub trait CallStore: Send + Sync {
     /// already killed. Ordered by deadline, so the caller (a "line busy"
     /// check, a call-waiting screen) sees the most urgent ring first.
     async fn active_for_callee(&self, callee_id: Id, now: Timestamp) -> Result<Vec<Call>>;
+
+    /// The rings `caller_id` placed that are still live at `now`.
+    ///
+    /// The caller's own side of [`CallStore::active_for_callee`], and the fifth
+    /// read for one reason: a call list answers "which calls is this account
+    /// in", and a ring the account placed from its phone is exactly such a
+    /// call on its tablet. Ordered by deadline for the same reason, so a
+    /// caller ringing two people sees the ring that expires first at the top.
+    async fn active_for_caller(&self, caller_id: Id, now: Timestamp) -> Result<Vec<Call>>;
 
     /// The answered calls `account_id` is a party to, either side.
     ///
@@ -130,6 +139,18 @@ impl CallStore for MemoryCallStore {
                         CallState::Ended => false,
                     }
             })
+            .cloned()
+            .collect();
+        active.sort_by_key(|call| (call.expires_at, call.call_id));
+        Ok(active)
+    }
+
+    async fn active_for_caller(&self, caller_id: Id, now: Timestamp) -> Result<Vec<Call>> {
+        let mut active: Vec<Call> = self
+            .calls
+            .lock()
+            .values()
+            .filter(|call| call.caller_id == caller_id && call.invite_is_live(now))
             .cloned()
             .collect();
         active.sort_by_key(|call| (call.expires_at, call.call_id));

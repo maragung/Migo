@@ -553,16 +553,16 @@ impl Dispatcher for AppDispatcher {
         let now = context.now();
 
         match context.opcode() {
-            // Section 146 invariant: the reserved span 247-255 is never-allocated, and
+            // Section 146 invariant: the reserved span 248-255 is never-allocated, and
             // the gateway refuses it before a frame can reach this dispatcher (see the
             // range gate in migo-gateway's connection.rs). A variant generated into that
             // span therefore must not be routable here — the migo-protocol registry test
             // (`no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range`) fails
             // the build first, and the allocation needs a written decision per section
             // 145's precedent before any number is taken from the reserved head. The
-            // conversation-federation pair at 241-242 and the row-replication tier at
-            // 243-246 are two such decisions; the span they left never-allocated begins
-            // at 247.
+            // conversation-federation pair at 241-242, the row-replication tier at
+            // 243-246, and the call listing at 247 are three such decisions; the span
+            // they left never-allocated begins at 248.
             // --- messaging ---
             Opcode::MessageSend => {
                 let caller = MessageCaller::new(
@@ -1459,6 +1459,7 @@ impl Dispatcher for AppDispatcher {
             }
             Opcode::CallStats => calls::handle_stats(context, frame, &self.calls).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
+            Opcode::CallList => calls::handle_list(context, frame, &self.calls).await,
             Opcode::CallSfuJoin => {
                 calls::handle_sfu_join(
                     context,

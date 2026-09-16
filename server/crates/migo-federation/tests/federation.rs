@@ -1581,7 +1581,7 @@ async fn the_row_band_pair_is_accepted() {
 
 #[tokio::test]
 async fn the_gaps_around_the_upper_federation_bands_are_refused() {
-    // 240 is a live client opcode (ENTITLEMENTS) and 247 is the reserved span,
+    // 240 is a live client opcode (ENTITLEMENTS) and 248 is the reserved span,
     // so neither may ride the mesh; the upper bands are exactly the 241-242
     // conversation pair plus the 243-246 row tier and nothing wider.
     let h = Harness::new();

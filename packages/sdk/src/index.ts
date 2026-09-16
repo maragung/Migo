@@ -265,6 +265,7 @@ export type {
   CallInviteEvent,
   CallInviteResult,
   CallKeyUpdate,
+  CallListEntry,
   CallRenegotiate,
   CallSdp,
   CallStateEvent,

@@ -1,5 +1,6 @@
 package com.migo.core.domain
 
+import com.migo.core.protocol.CallListEntry
 import com.migo.core.wire.Id
 import com.migo.core.wire.parseId
 import org.junit.Assert.assertEquals
@@ -24,6 +25,8 @@ import org.junit.Test
  *     missing it;
  *   - a stale departure naming a call the tracker does not hold must not retire or resize the
  *     live entry;
+ *   - a *listing* seeds the call a session was offline through, and only adds: what the
+ *     announcements have already said is never overwritten by an answer that raced them;
  *   - [GroupCallProgressTracker.forget] is the join's own correction, dropping the conversation's
  *     entry the moment this device asks for a seat in it.
  */
@@ -136,5 +139,57 @@ class GroupCallProgressTrackerTest {
         tracker.forget(OTHER_GROUP)
         assertNull(tracker.snapshot()[OTHER_GROUP])
         assertEquals(emptyMap<Id, GroupCallInProgress>(), tracker.snapshot())
+    }
+
+    /** One `CallListEntry` as the server sends it, for the cases that do not pin every field. */
+    private fun listed(
+        callId: Id = CALL,
+        conversationId: Id = GROUP,
+        kind: Long = 1,
+        joined: Long = 0,
+        participantCount: Long = 2,
+    ) = CallListEntry(
+        callId = callId,
+        conversationId = conversationId,
+        kind = kind,
+        state = 2,
+        peerId = ADA,
+        participantCount = participantCount,
+        joined = joined,
+    )
+
+    @Test
+    fun aListingSeedsTheCallTheSessionWasOfflineThrough() {
+        val tracker = GroupCallProgressTracker()
+        // No announcement for this call ever reached the session -- it was not connected to hear
+        // one -- so the listing is the only thing that can tell the header a call is running.
+        tracker.onListing(listOf(listed(participantCount = 4)))
+        assertEquals(mapOf(GROUP to GroupCallInProgress(CALL, 4)), tracker.snapshot())
+    }
+
+    @Test
+    fun aListingAddsOnlyWhatTheSessionHasNotHeardAndOnlyCallsItIsNotIn() {
+        val tracker = GroupCallProgressTracker()
+        tracker.onJoined(joined(participantCount = 3))
+        // The listing's count is older than the announcement's: the announcements are the newer
+        // source, so the fold must not overwrite what the session already heard.
+        tracker.onListing(listOf(listed(participantCount = 9)))
+        assertEquals(mapOf(GROUP to GroupCallInProgress(CALL, 3)), tracker.snapshot())
+        // A seat this device holds is the roster's, not the affordance's.
+        tracker.onListing(listOf(listed(conversationId = OTHER_GROUP, joined = 1)))
+        assertNull(tracker.snapshot()[OTHER_GROUP])
+        // A direct call's screen reads the invite stream for itself.
+        tracker.onListing(
+            listOf(listed(callId = LATER_CALL, conversationId = OTHER_GROUP, kind = 0)),
+        )
+        assertNull(tracker.snapshot()[OTHER_GROUP])
+        // A listing naming a second conversation adds exactly that one, and leaves the heard entry.
+        tracker.onListing(
+            listOf(listed(callId = LATER_CALL, conversationId = OTHER_GROUP, participantCount = 5)),
+        )
+        assertEquals(
+            mapOf(GROUP to GroupCallInProgress(CALL, 3), OTHER_GROUP to GroupCallInProgress(LATER_CALL, 5)),
+            tracker.snapshot(),
+        )
     }
 }

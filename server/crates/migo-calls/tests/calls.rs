@@ -2168,3 +2168,262 @@ async fn a_disconnected_last_session_ends_its_established_calls_network() {
         .unwrap();
     assert!(rings.is_empty(), "a ring is the ring sweeper's business");
 }
+
+// --- the listing (section 165: the one call question that is a read) ---------
+
+/// The listing is the union of the scans the stores already offer, and what it
+/// must never be is a way to learn about a call you cannot join: the gates that
+/// protect the ring protect the read, per roster rather than per call.
+#[tokio::test]
+async fn a_listing_reports_the_calls_this_account_can_see_and_nothing_else() {
+    let harness = Harness::new();
+    // A call Alice placed and Bob has answered: Alice is in it.
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .answer(&bob(NOW + SECOND), id(CALL), id(BOB_PHONE))
+        .await
+        .unwrap();
+    // A ring aimed at Alice, which she has not answered: she is being offered
+    // it, not in it.
+    harness
+        .calls
+        .invite(&bob(NOW + 2 * SECOND), invite(CALL + 1, ALICE))
+        .await
+        .unwrap();
+    // A group call in a conversation Alice is a member of, which she has not
+    // joined.
+    harness
+        .calls
+        .group_join(
+            &bob(NOW + 3 * SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    // A group call in a conversation she is not: the same service, a gate that
+    // admits Bob and not Alice, and the row the listing must not carry. The
+    // gate is the one questioned here — the roster exists and holds a seat, so
+    // nothing but the membership read keeps it out of Alice's answer.
+    let closed = id(CONVERSATION + 1);
+    let stranger = Harness::gated(TestGate {
+        members: HashMap::from([(closed, vec![id(BOB)])]),
+        blocked: Vec::new(),
+        unreachable: Vec::new(),
+    });
+    stranger
+        .calls
+        .group_join(
+            &bob(NOW + 3 * SECOND),
+            id(GROUP_CALL + 1),
+            closed,
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stranger
+            .calls
+            .list(&bob(NOW + 4 * SECOND), None)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the roster is real: its own member sees it"
+    );
+    assert!(
+        stranger
+            .calls
+            .list(&alice(NOW + 4 * SECOND), None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a roster in a conversation the account cannot enter is not a listing line"
+    );
+
+    let listed = harness
+        .calls
+        .list(&alice(NOW + 4 * SECOND), None)
+        .await
+        .unwrap();
+    let ids: Vec<Id> = listed.iter().map(|entry| entry.call_id).collect();
+    assert_eq!(
+        ids,
+        vec![id(CALL + 1), id(CALL), id(GROUP_CALL)],
+        "ringing first, then the answered call, then the roster — and nothing else"
+    );
+
+    let offered = &listed[0];
+    assert_eq!(offered.kind, 0, "a 1:1 call is kind Direct");
+    assert_eq!(offered.state, 0, "a ring reports the ring's own state");
+    assert_eq!(offered.peer_id, id(BOB), "the peer is the other party");
+    assert_eq!(offered.participant_count, 2);
+    assert_eq!(
+        offered.joined, 0,
+        "a ring aimed at the account is not a call it is in"
+    );
+    assert_eq!(offered.media_kind, Some(0));
+    assert_eq!(offered.expires_at, Some(ts(NOW + 2 * SECOND + RING_TTL_MS)));
+    assert_eq!(offered.answered_at, None);
+    assert_eq!(offered.started_at, None, "a direct row keeps no start");
+
+    let answered = &listed[1];
+    assert_eq!(answered.call_id, id(CALL));
+    assert_eq!(answered.state, 1, "an answered call is Connecting");
+    assert_eq!(answered.peer_id, id(BOB));
+    assert_eq!(answered.joined, 1, "the account placed this call");
+    assert_eq!(answered.answered_at, Some(ts(NOW + SECOND)));
+    // The deadline survives the answer, which is why the field is documented as
+    // readable only while the state says the call is still ringing.
+    assert_eq!(answered.expires_at, Some(ts(NOW + RING_TTL_MS)));
+
+    let group = &listed[2];
+    assert_eq!(group.kind, 1, "a roster is kind Group");
+    assert_eq!(group.call_id, id(GROUP_CALL));
+    assert_eq!(group.state, 2, "a roster that holds a seat is Connected");
+    assert_eq!(
+        group.peer_id,
+        id(BOB),
+        "the peer is the account that founded it"
+    );
+    assert_eq!(group.participant_count, 1);
+    assert_eq!(
+        group.joined, 0,
+        "the account is a member, not a participant"
+    );
+    assert_eq!(
+        group.media_kind, None,
+        "a roster carries no single media kind"
+    );
+    assert_eq!(group.expires_at, None, "no deadline retires a group call");
+    assert_eq!(group.started_at, Some(ts(NOW + 3 * SECOND)));
+
+    // The scope narrows to one conversation, which is the question a screen
+    // already showing one asks.
+    let scoped = harness
+        .calls
+        .list(&alice(NOW + 4 * SECOND), Some(id(CONVERSATION)))
+        .await
+        .unwrap();
+    assert!(
+        scoped
+            .iter()
+            .all(|entry| entry.conversation_id == id(CONVERSATION)),
+        "every line of a scoped listing belongs to the scope"
+    );
+    assert_eq!(
+        scoped.len(),
+        listed.len(),
+        "and here the scope excludes nothing"
+    );
+}
+
+/// The order is total and it is the listing's own promise, so it is asserted
+/// rather than left to a sort implementation: a client redrawing from a second
+/// listing must not reshuffle a screen it already showed.
+#[tokio::test]
+async fn a_listing_is_ordered_most_urgent_first_and_stably() {
+    let harness = Harness::new();
+    // A ring that expires later, placed first, and one that expires sooner,
+    // placed second: the deadline is what orders them, not the arrival.
+    harness
+        .calls
+        .invite(&bob(NOW), invite(CALL + 1, ALICE))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .invite(&bob(NOW), invite(CALL + 2, ALICE))
+        .await
+        .unwrap();
+    // And an answered call, which is less urgent than any ring.
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .answer(&bob(NOW + SECOND), id(CALL), id(BOB_PHONE))
+        .await
+        .unwrap();
+
+    let first = harness
+        .calls
+        .list(&alice(NOW + 2 * SECOND), None)
+        .await
+        .unwrap();
+    let states: Vec<u32> = first.iter().map(|entry| entry.state).collect();
+    assert_eq!(states, vec![0, 0, 1], "ringing before connecting");
+    // Both rings share a deadline, so the id is the tiebreak — and it is the
+    // same tiebreak on a second listing.
+    assert_eq!(first[0].call_id, id(CALL + 1));
+    assert_eq!(first[1].call_id, id(CALL + 2));
+
+    let again = harness
+        .calls
+        .list(&alice(NOW + 3 * SECOND), None)
+        .await
+        .unwrap();
+    let ids: Vec<Id> = again.iter().map(|entry| entry.call_id).collect();
+    let first_ids: Vec<Id> = first.iter().map(|entry| entry.call_id).collect();
+    assert_eq!(
+        ids, first_ids,
+        "a second listing does not reshuffle the first"
+    );
+
+    // A ring past its deadline is not a line: the sweep has not run, and the
+    // read must not report a ring the clock already killed.
+    let later = harness
+        .calls
+        .list(&alice(NOW + RING_TTL_MS + SECOND), None)
+        .await
+        .unwrap();
+    let ids: Vec<Id> = later.iter().map(|entry| entry.call_id).collect();
+    assert_eq!(
+        ids,
+        vec![id(CALL)],
+        "the expired rings are gone, the answered call is not"
+    );
+}
+
+/// The ring an account placed is a call it is in, on every device it owns —
+/// which is why the caller's own side of the ring scan exists.
+#[tokio::test]
+async fn a_listing_shows_the_account_the_ring_it_placed() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+
+    // Alice's laptop asks, not the phone that dialled: same account, and the
+    // ring is hers.
+    let from_laptop = harness
+        .calls
+        .list(&caller(ALICE, ALICE_PHONE + 1, NOW + SECOND), None)
+        .await
+        .unwrap();
+    assert_eq!(from_laptop.len(), 1);
+    assert_eq!(from_laptop[0].call_id, id(CALL));
+    assert_eq!(from_laptop[0].joined, 1, "the account placed this ring");
+    assert_eq!(from_laptop[0].peer_id, id(BOB));
+
+    // Bob sees the same ring as one aimed at him, and it is not his call yet.
+    let for_bob = harness.calls.list(&bob(NOW + SECOND), None).await.unwrap();
+    assert_eq!(for_bob.len(), 1);
+    assert_eq!(
+        for_bob[0].joined, 0,
+        "the ring is offered to the callee, not in them"
+    );
+    assert_eq!(for_bob[0].peer_id, id(ALICE));
+}

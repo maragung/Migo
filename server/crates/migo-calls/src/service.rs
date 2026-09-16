@@ -72,7 +72,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::{codes, fault, CallInviteEvent, CallStateEvent, CallStats, Opcode};
+use migo_protocol::{
+    codes, fault, CallInviteEvent, CallListEntry, CallStateEvent, CallStats, Opcode,
+};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 
 use crate::group_store::{
@@ -80,9 +82,9 @@ use crate::group_store::{
 };
 use crate::metrics::{AnswerOutcome, GroupJoinKind, InviteOutcome, Meters, RelayKind};
 use crate::model::{
-    Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig, EndReason,
-    GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome as WireOutcome, TurnServerWire,
-    MAX_GROUP_PARTICIPANTS, MAX_SEALED_LEN, MEDIA_VIDEO,
+    call_kind, Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig,
+    EndReason, GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome as WireOutcome,
+    TurnServerWire, MAX_GROUP_PARTICIPANTS, MAX_SEALED_LEN, MEDIA_VIDEO,
 };
 use crate::store::{CallStore, SharedCallStore};
 use crate::traits::{CallGate, Callkeeper, SharedCallGate, SharedCallkeeper};
@@ -1188,6 +1190,156 @@ where
         }
         Ok(departures)
     }
+    async fn list(
+        &self,
+        caller: &Caller,
+        conversation_id: Option<Id>,
+    ) -> Result<Vec<CallListEntry>> {
+        // Charged like every other read that walks the store: the listing is
+        // cheap, but it is cheap *per caller*, and an endpoint a client can
+        // poll is one that needs a bucket whether or not it does any work.
+        self.charge(caller, Opcode::CallList).await?;
+        let mut entries = self.visible(caller).await?;
+        if let Some(scope) = conversation_id {
+            entries.retain(|entry| entry.conversation_id == scope);
+        }
+        entries.sort_by(listing_order);
+        Ok(entries)
+    }
+}
+
+impl<S, L> Calls<S, L>
+where
+    S: CallStore + ?Sized + Send + Sync,
+    L: RateLimiter + ?Sized + Send + Sync,
+{
+    /// The four scans a listing is the union of, each read once.
+    ///
+    /// The union rather than one store method per question, because a call
+    /// list is exactly "everything the stores already know about me" and a
+    /// fifth read per client screen would put the screen's shape into the
+    /// store's interface. A direct call appears under exactly one of the
+    /// three direct scans — a ringing row is a ring, an answered row is a
+    /// live call — so the three are disjoint by state and the only dedupe the
+    /// merge needs is the defensive one below.
+    async fn visible(&self, caller: &Caller) -> Result<Vec<CallListEntry>> {
+        let me = caller.account_id;
+        let mut entries: Vec<CallListEntry> = Vec::new();
+        let mut seen: std::collections::HashSet<Id> = std::collections::HashSet::new();
+
+        // The rings aimed at this account. `joined` is 0: the account is
+        // being offered the call, not in it — which is the distinction a
+        // client needs so that answering it does not ring its own other
+        // devices.
+        for call in self.store.active_for_callee(me, caller.now).await? {
+            if seen.insert(call.call_id) {
+                entries.push(direct_entry(&call, me, 0));
+            }
+        }
+        // The rings this account placed, which its other devices have to be
+        // able to see: a ring is a call the account is in from the moment it
+        // dials, and the phone that dialled is not the only screen the
+        // account owns.
+        for call in self.store.active_for_caller(me, caller.now).await? {
+            if seen.insert(call.call_id) {
+                entries.push(direct_entry(&call, me, 1));
+            }
+        }
+        // The answered calls, either side.
+        for call in self.store.live_for(me).await? {
+            if seen.insert(call.call_id) {
+                entries.push(direct_entry(&call, me, 1));
+            }
+        }
+
+        // The group rosters. The gate is asked per roster, the same question
+        // the join path asks, so a listing cannot report a call in a
+        // conversation this account could not join — the answer for a
+        // stranger is an empty list, not a hint that something is running.
+        for call in self.groups.all().await? {
+            if call.participants.is_empty() || seen.contains(&call.call_id) {
+                continue;
+            }
+            if !self.gate.may_invite(call.conversation_id, me).await {
+                continue;
+            }
+            // Remembered only once the gate has let it through, so a roster
+            // this account may not see leaves no trace in the merge and the
+            // next roster with the same id is judged on its own.
+            seen.insert(call.call_id);
+            entries.push(group_entry(&call, me));
+        }
+
+        Ok(entries)
+    }
+}
+
+/// One direct call as a listing line. `joined` is the caller's own answer
+/// about whether this account is in the call or only being offered it.
+fn direct_entry(call: &Call, me: Id, joined: u32) -> CallListEntry {
+    CallListEntry {
+        call_id: call.call_id,
+        conversation_id: call.conversation_id,
+        kind: call_kind::DIRECT,
+        state: call.state.to_wire(),
+        peer_id: call.peer_of(me),
+        // Both parties, counted whether or not both have connected: the row
+        // names two accounts and a listing that counted only the connected
+        // ones would report a call in progress as empty.
+        participant_count: 2,
+        joined,
+        media_kind: Some(call.media_kind),
+        // The deadline is the row's own fact and survives the answer: a
+        // connected call's deadline is in the past, which is why the client
+        // reads it only when `state` says the call is still ringing.
+        expires_at: Some(call.expires_at),
+        started_at: None,
+        answered_at: call.answered_at,
+    }
+}
+
+/// One group call as a listing line. The store's roster is the whole truth
+/// here, so the line is a projection of it and nothing else.
+fn group_entry(call: &GroupCall, me: Id) -> CallListEntry {
+    CallListEntry {
+        call_id: call.call_id,
+        conversation_id: call.conversation_id,
+        kind: call_kind::GROUP,
+        // A roster that exists and holds seats is connected, by construction:
+        // the store retires a call whose last seat empties, so a roster that
+        // is still here has somebody in it.
+        state: crate::group_store::GROUP_STATE_CONNECTED,
+        peer_id: call.founder_id,
+        participant_count: call.participants.len() as u32,
+        joined: u32::from(call.seat_of(me).is_some()),
+        // A group call has no single media kind: each seat negotiates its
+        // own, and the roster keeps none to report.
+        media_kind: None,
+        expires_at: None,
+        started_at: Some(call.started_at),
+        answered_at: None,
+    }
+}
+
+/// The listing's total order: state, then how long the call has waited,
+/// then the id.
+///
+/// "Most urgent first" has to be total or a client redrawing from a second
+/// listing reshuffles a screen it already showed. `expires_at` is the direct
+/// row's waiting key — it is monotone in the moment the ring went out, which
+/// is the fact a caller wants and the one the row does not keep — and a group
+/// roster's `started_at` is its own. The id breaks every tie, so two calls
+/// that agree on everything the server can order still come back in one
+/// fixed sequence.
+fn listing_order(a: &CallListEntry, b: &CallListEntry) -> std::cmp::Ordering {
+    let key = |e: &CallListEntry| {
+        (
+            e.state,
+            e.expires_at.or(e.started_at).map_or(0, |t| t.as_millis()),
+            e.kind,
+        )
+    };
+    key(a).cmp(&key(b)).then_with(|| a.call_id.cmp(&b.call_id))
 }
 
 /// The name of the sealed payload field `opcode`'s frame carries.

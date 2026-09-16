@@ -5072,6 +5072,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         signedInState?.conversations?.map { it.conversationId } ?: emptyList()
                     },
                 )
+                // And the calls this reset session could not have heard announced: the topic
+                // announcements it missed between the old session's death and this one's
+                // subscribe are exactly what the listing answers.
+                groupCallManager?.refreshInProgress()
             }
         },
     )
