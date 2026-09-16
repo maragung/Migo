@@ -50,7 +50,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, Id, ManualClock, Result, Secret, SeededRandom, Timestamp};
 use migo_moderation::{
     open, Caller, Filing, ModerationConfig, Powers, Reason, Roster, SharedRoster, SharedWarden,
-    Subject, Warden,
+    Subject,
 };
 use migo_protocol::{codes, ConversationKind, EncryptionMode, MessageKind, NodeInfo};
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
