@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import com.migo.app.AppViewModel
 import com.migo.app.model.AppState
 import com.migo.core.ConnectionState
+import com.migo.core.domain.ReportSubject
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RoomSummary
 
@@ -80,6 +81,10 @@ fun MobileHome(
     // The session's avatars, for the Friends view's rows. Collected here because the home screen
     // owns the view that draws the most people; the map is the same one every other surface reads.
     val avatarBytes by model.avatarBytes.collectAsState()
+    // The report sheet's state, collected here because the home screen owns two of the four doors
+    // into it — a friend's intent sheet and a room's — and the sheet is one surface wherever it
+    // was opened from. The chat's own two doors are hosted by the chat, which reads the same flow.
+    val reportSheet by model.reportSheet.collectAsState()
 
     Column(modifier = modifier.fillMaxSize()) {
         MeCard(
@@ -172,6 +177,20 @@ fun MobileHome(
             intentUser = null
             model.blockUser(it.userId)
         },
+        // The person's own report door, closed before the sheet opens so the intent sheet is not
+        // left standing behind it. The two sheets are modal over the same screen, and a stack of
+        // them would leave a person dismissing twice to get back to where they started.
+        //
+        // The subject is read off the state the sheet was opened with rather than handed in:
+        // this door takes no argument of its own, because the sheet already knows who it is
+        // about, and the read happens before the dismiss so the id outlives the sheet.
+        onReport = {
+            val who = intentUser
+            intentUser = null
+            if (who != null) {
+                model.openReport(ReportSubject.User, who.userId, who.name)
+            }
+        },
     )
 
     RoomIntentSheet(
@@ -194,7 +213,32 @@ fun MobileHome(
                 model.joinRoom(room)
             }
         },
+        // The room's own report door. A directory row for a room this account has never joined is
+        // enough to see that the room's name and topic are the problem, so the report is offered
+        // before the join rather than behind it. The room is read off the state the sheet was
+        // opened with, for the same reason the person above is: this door takes no argument.
+        onReport = {
+            val room = intentRoom
+            intentRoom = null
+            if (room != null) {
+                model.openReport(ReportSubject.Room, room.roomId, "“${room.name}”")
+            }
+        },
     )
+
+    // The report sheet, one surface for all four doors into it. Rendered here as well as in the
+    // chat because both screens can open it and only one of them is composed at a time: the home
+    // screen's doors are a person and a room, the chat's are a message and a person, and the state
+    // is the model's either way — so whichever screen is on top draws the same sheet.
+    reportSheet?.let { view ->
+        ReportSheet(
+            view = view,
+            onPickReason = model::setReportReason,
+            onNote = model::setReportNote,
+            onSubmit = model::submitReport,
+            onClose = model::closeReport,
+        )
+    }
 
     // The remove-friend confirmation: the one confirmation the Friends view owes, because the
     // other acts it offers (a request, an answer, an unblock) are all reversible or mere

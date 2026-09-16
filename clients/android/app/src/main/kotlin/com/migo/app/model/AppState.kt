@@ -2,6 +2,8 @@ package com.migo.app.model
 
 import com.migo.core.ConnectionState
 import com.migo.core.crypto.PeerSafetyNumber
+import com.migo.core.domain.ReportReason
+import com.migo.core.domain.ReportSubject
 import com.migo.core.net.AdminView
 import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.DeviceSummary
@@ -875,6 +877,54 @@ data class MemberProfileView(
     val relationship: Long? = null,
     /** True while a friend request or an answer to one is in flight, so its control cannot double-fire. */
     val friendBusy: Boolean = false,
+)
+
+/**
+ * The report sheet's state, or null while nothing is being reported.
+ *
+ * A stable flow beside [MemberProfileView]'s for the same reason: the sheet is opened from several
+ * surfaces — a message's own menu, an account's profile card, a room's menu — and the picks a person
+ * has made must survive the recompositions around it without being refetched or reset.
+ *
+ * [subject] and [subjectId] are the pointer the wire carries, and they are the whole of what a report
+ * says about *what* is being reported. Nothing in this type holds content: the conversations here are
+ * end-to-end encrypted, so the sheet never previews the message it is about, and [note] is the
+ * reporter's own typing rather than a quote of somebody else's.
+ *
+ * [filed] is the outcome, kept on the state rather than in the sheet's own `remember` because the
+ * sheet is dismissed and reopened by the same flow: filing and then closing must not leave a reopen
+ * showing a fresh form for a report that is already in the queue.
+ */
+data class ReportSheetView(
+    /** Which of the four things the report points at. */
+    val subject: ReportSubject,
+    /** The id of that thing, in the vocabulary [ReportSubject] documents. */
+    val subjectId: Id,
+    /**
+     * What the sheet calls it in its own heading — a display name, "this message", a room's name.
+     *
+     * Carried rather than re-derived: the surface that opened the sheet is the one that knew what
+     * the person was looking at, and a sheet that went back to the roster for a name would be
+     * guessing at a label for a message it cannot read.
+     */
+    val label: String,
+    /**
+     * The picked reason, or null until the person picks one.
+     *
+     * Null is the sheet's opening state and means *nothing is sendable yet*, which is deliberately
+     * not the web client's default: the web dialog preselects the first reason, and a mobile sheet
+     * where Send is live before anything was read invites a report filed under a reason the reporter
+     * never chose.
+     */
+    val reason: ReportReason? = null,
+    /** The reporter's own words, exactly as typed. Empty is absent, never an empty note on the wire. */
+    val note: String = "",
+    /** True while the filing is in flight, so Send cannot double-fire a call the registry prices. */
+    val busy: Boolean = false,
+    /** True once the node took the report; the sheet then states the outcome and offers only Close. */
+    val filed: Boolean = false,
+    /** Why the filing could not be made, when it could not. */
+    val failure: String? = null,
 )
 
 /**

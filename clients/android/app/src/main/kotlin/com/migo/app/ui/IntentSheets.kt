@@ -224,6 +224,17 @@ fun UserIntentSheet(
     onAdd: (UserTarget) -> Unit,
     onRemove: (UserTarget) -> Unit,
     onBlock: (UserTarget) -> Unit,
+    /**
+     * Files a report about this account, or null where the surface offers no reporting at all.
+     *
+     * Offered beside Remove & block rather than folded into it, because the two are different
+     * authorities with different audiences: blocking is this person's own silence, while a report
+     * is a grievance the node's moderators keep and decide alone. A person who wants to stop
+     * hearing somebody and a person who wants somebody looked at are two different people, and the
+     * sheet does not make one of them press the other's button. Offered for a friend too: the
+     * friendship is not a reason the node should not hear about them.
+     */
+    onReport: (() -> Unit)? = null,
 ) {
     if (target == null) return
     MigoSheet(title = target.name, onDismiss = onDismiss) {
@@ -284,6 +295,16 @@ fun UserIntentSheet(
                 onClick = { onAdd(target) },
             )
         }
+        if (onReport != null) {
+            SheetAction(
+                glyph = "⚑",
+                label = "Report",
+                sub = "Sends this account to the node's moderators, who decide alone",
+                danger = true,
+                enabled = !busy,
+                onClick = onReport,
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
     }
 }
@@ -301,6 +322,8 @@ fun RoomIntentSheet(
     onDismiss: () -> Unit,
     onJoin: (RoomSummary) -> Unit,
     onOpen: (RoomSummary) -> Unit,
+    /** Files a report about this room, or null where the surface offers no reporting at all. */
+    onReport: (() -> Unit)? = null,
 ) {
     if (room == null) return
     // The live counts, when a stream has said better than the directory page did.
@@ -361,6 +384,18 @@ fun RoomIntentSheet(
                 sub = "Join first — the roster is members-only",
                 enabled = false,
                 onClick = {},
+            )
+        }
+        // The room's own report door, offered joined or not: a directory row is enough to see that
+        // a room's name and topic are the problem, and requiring a join first would ask a person to
+        // enter a room in order to complain about it.
+        if (onReport != null) {
+            SheetAction(
+                glyph = "⚑",
+                label = "Report room",
+                sub = "Sends this room to the node's moderators, who decide alone",
+                danger = true,
+                onClick = onReport,
             )
         }
         Spacer(modifier = Modifier.height(8.dp))

@@ -49,6 +49,7 @@ import com.migo.app.model.GroupMember
 import com.migo.app.model.MediaObject
 import com.migo.app.model.MemberProfileView
 import com.migo.app.model.PreparedChainTx
+import com.migo.app.model.ReportSheetView
 import com.migo.app.model.RoomLiveInfo
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
@@ -83,6 +84,10 @@ import com.migo.core.domain.CallMediaKind
 import com.migo.core.domain.ChatLogLine
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
+import com.migo.core.domain.REPORT_NOTE_MAX_LEN
+import com.migo.core.domain.ReportReason
+import com.migo.core.domain.ReportSubject
+import com.migo.core.domain.ReportTarget
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
 import com.migo.core.domain.TypingTimeouts
@@ -422,6 +427,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _memberProfile = MutableStateFlow<MemberProfileView?>(null)
 
     val memberProfile: StateFlow<MemberProfileView?> = _memberProfile.asStateFlow()
+
+    /**
+     * The report sheet's state, or null while nothing is being reported. A stable flow for the same
+     * reason [memberProfile] is: the sheet is opened from a message's own menu, from an account's
+     * card, and from a room's menu, and the picks a person has made must survive the recompositions
+     * around it — a rotation must not clear a reason they chose or a note they typed.
+     */
+    private val _reportSheet = MutableStateFlow<ReportSheetView?>(null)
+
+    val reportSheet: StateFlow<ReportSheetView?> = _reportSheet.asStateFlow()
 
     /**
      * The account's owned pack SKUs, as the composer's emoticon/sticker picker reads them; null
@@ -5027,6 +5042,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _callState.value = CallUiState()
         _groupCallState.value = GroupCallUiState()
         _memberProfile.value = null
+        // A half-written report dies with the session it was being written in: the next account's
+        // report sheet must open empty, and a note typed by one person must not be sitting in a
+        // field the next person is about to send.
+        _reportSheet.value = null
         // The owned-packs read is per-session too: the next account's entitlements are its own.
         _ownedPacks.value = null
         subscriptions.forEach { it.cancel() }
@@ -6004,6 +6023,90 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Closes the member profile sheet; the state goes with it, so a reopen reads fresh. */
     fun closeMemberProfile() {
         _memberProfile.value = null
+    }
+
+    /**
+     * Opens the report sheet over [subjectId], named [label] in the sheet's own heading.
+     *
+     * One entry point for every surface that offers a report — a message's menu, an account's card,
+     * a room's menu — because filing is one act with one shape on the wire: a kind, an id, a reason,
+     * and the reporter's note. What differs between the surfaces is only [label], and the surface
+     * that opened the sheet is the one that knew what the person was looking at.
+     *
+     * Nothing is read here. Unlike the member profile's sheet, which fetches the account it is about,
+     * this one has nothing to fetch: the report is a pointer the reporter supplies, and the node
+     * answers nothing about a subject a client is not entitled to read back.
+     */
+    fun openReport(subject: ReportSubject, subjectId: Id, label: String) {
+        _reportSheet.value = ReportSheetView(subject = subject, subjectId = subjectId, label = label)
+    }
+
+    /** Closes the report sheet; the picks go with it, so a reopen starts from an empty form. */
+    fun closeReport() {
+        _reportSheet.value = null
+    }
+
+    /**
+     * Records the reason the reporter picked.
+     *
+     * Ignored once the report has been filed: the sheet offers only Close from then on, and a
+     * last-moment change would be a pick that never reached a report already in the queue.
+     */
+    fun setReportReason(reason: ReportReason) {
+        _reportSheet.update { current ->
+            if (current == null || current.filed) current else current.copy(reason = reason)
+        }
+    }
+
+    /**
+     * Records the reporter's note, truncated to the ceiling the domain enforces.
+     *
+     * Truncated rather than refused: a field that silently dropped the tail would be worse, and a
+     * field that let the typing continue past what can be sent would let the refusal arrive after
+     * the whole thing was written. The sheet's own counter reads the truncated length, so what a
+     * person sees is what travels.
+     */
+    fun setReportNote(note: String) {
+        _reportSheet.update { current ->
+            if (current == null || current.filed) current else current.copy(note = note.take(REPORT_NOTE_MAX_LEN))
+        }
+    }
+
+    /**
+     * Files the report the sheet describes.
+     *
+     * Refuses to fire without a reason, which is the one field the sheet insists on: a report filed
+     * under a reason nobody chose would be a queue row a moderator reads as the reporter's opinion.
+     *
+     * The note is trimmed and an empty one is *absent*, not empty — the same rule the web client and
+     * the SDK follow, because a blank note the reporter happened to leave in the field is not words
+     * they wrote. The whole act is one priced call, so [ReportSheetView.busy] guards it and the
+     * sheet's controls stay disabled for its duration.
+     *
+     * A failure lands on the sheet's own error line rather than the shell-wide banner: the act that
+     * failed is this sheet's, and the form is still there to be corrected and sent again.
+     */
+    fun submitReport() {
+        val live = session ?: return
+        val view = _reportSheet.value ?: return
+        val reason = view.reason ?: return
+        if (view.busy || view.filed) return
+        val note = view.note.trim()
+        _reportSheet.update { it?.copy(busy = true, failure = null) }
+        viewModelScope.launch {
+            try {
+                live.client.moderation.report(
+                    ReportTarget(view.subject, view.subjectId),
+                    reason,
+                    note.ifEmpty { null },
+                )
+                _reportSheet.update { it?.copy(busy = false, filed = true) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _reportSheet.update { it?.copy(busy = false, failure = readable(failure)) }
+            }
+        }
     }
 
     /**

@@ -25,6 +25,7 @@ import com.migo.core.domain.ListenerSet
 import com.migo.core.domain.MediaDomain
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.MessagingDomain
+import com.migo.core.domain.ModerationDomain
 import com.migo.core.domain.NotificationsDomain
 import com.migo.core.domain.PeerIdentity
 import com.migo.core.domain.PresenceDomain
@@ -506,6 +507,9 @@ class MigoClient private constructor(
 
     /** The economy domain of the live session. */
     val economy: EconomyDomain get() = requireConnected().economy
+
+    /** File reports about a user, message, room, or bot, and hear when one is ruled on. */
+    val moderation: ModerationDomain get() = requireConnected().moderation
 
     /** The media object plane of the live session: uploads and their URLs. */
     val media: MediaDomain get() = requireConnected().media
@@ -1647,6 +1651,7 @@ class MigoClient private constructor(
             games = GamesDomain(rpc, options.onEventError),
             social = SocialDomain(rpc, options.onEventError),
             economy = EconomyDomain(rpc, options.onEventError),
+            moderation = ModerationDomain(rpc, options.onEventError),
             media = MediaDomain(rpc, rest),
             calls = CallsDomain(rpc, deviceId, options.onEventError),
             groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
@@ -1960,6 +1965,7 @@ private class Session(
     val games: GamesDomain,
     val social: SocialDomain,
     val economy: EconomyDomain,
+    val moderation: ModerationDomain,
     val media: MediaDomain,
     val calls: CallsDomain,
     val groupCalls: GroupCallsDomain,
@@ -1975,6 +1981,7 @@ private class Session(
         notifications.start()
         games.start()
         economy.start()
+        moderation.start()
         social.start()
         calls.start()
         groupCalls.start()
@@ -1991,6 +1998,7 @@ private class Session(
         notifications.stop()
         games.stop()
         economy.stop()
+        moderation.stop()
         social.stop()
         calls.stop()
         groupCalls.stop()

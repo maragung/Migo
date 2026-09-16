@@ -22,6 +22,7 @@ import com.migo.app.model.AttachSource
 import com.migo.app.model.ChatState
 import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.GroupInviteCandidate
+import com.migo.app.ui.ReportSheet
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.RelationshipKind
 import com.migo.core.store.MediaAutoDownload
@@ -97,6 +98,11 @@ internal fun ChatPane(
     // The member profile sheet's state, collected here for the same reason the avatars are: the
     // read is the model's, while the surface belongs to whichever member sheet named the person.
     val memberProfile by model.memberProfile.collectAsState()
+    // The report sheet's state, collected here for the same reason the member profile's is: the
+    // picks are the model's, while the surface is drawn by whichever screen is on top. The chat's
+    // two report doors open it, and the sheet outlives the card it was opened from — a person
+    // reports somebody and then closes their card, and the report is still being written.
+    val reportSheet by model.reportSheet.collectAsState()
     // The group-call affordance's own facts, beside the overlays' state it shares a flow with:
     // which conversations have a call running that this device holds no seat in. The header's call
     // button is the reader, and the entry it names must be as live as the chat it sits in.
@@ -262,8 +268,28 @@ internal fun ChatPane(
         onLoadOwnedPacks = model::loadOwnedPacks,
         onMemberFriendRequest = model::memberFriendRequest,
         onMemberFriendRespond = { accept -> model.memberFriendRespond(accept) },
+        // The chat's two report doors — a line's own menu, and the card of the person who sent
+        // it — both open the one sheet, which lives on the model because it is the model that
+        // files. Handed in as the open, not the file: the sheet collects a reason and a note
+        // before anything is priced, and that collection is what the model's flow holds.
+        onReport = model::openReport,
         modifier = modifier,
     )
+
+    // The report sheet, drawn by the pane rather than the chat because the pane is what holds the
+    // model: the chat is a function of its arguments, and the sheet's state is a flow the model
+    // owns. It sits outside [ChatScreen] so a sheet opened from a line's menu and a sheet opened
+    // from a profile card are the same surface with the same state, and so closing the profile
+    // card does not close the sheet its Report button just opened.
+    reportSheet?.let { view ->
+        ReportSheet(
+            view = view,
+            onPickReason = model::setReportReason,
+            onNote = model::setReportNote,
+            onSubmit = model::submitReport,
+            onClose = model::closeReport,
+        )
+    }
 }
 
 /**
