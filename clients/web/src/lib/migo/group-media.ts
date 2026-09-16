@@ -576,6 +576,12 @@ export class GroupMediaPlane {
       this.#cameraOn = this.#localVideoTrack.enabled;
     } else {
       this.#localVideoTrack?.stop();
+      // The refused track leaves the stream as well: a stopped track still lingers in the
+      // stream's track list, and the roster screen reads that list — what it must never see
+      // is a camera track this seat was refused. The stream stays, honest: audio-only.
+      if (this.#localVideoTrack !== null) {
+        this.#localStream.removeTrack(this.#localVideoTrack);
+      }
       this.#localVideoTrack = null;
     }
     for (const seat of seats) {

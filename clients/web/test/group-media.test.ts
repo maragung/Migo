@@ -26,7 +26,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CallKeyState, CallMediaKind } from '@migo/sdk';
+import { CallKeyState, CallMediaKind, newId } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
 import {
@@ -56,7 +56,9 @@ import type {
 
 const T: AdaptiveThresholds = DEFAULT_ADAPTIVE_THRESHOLDS;
 
-const CALL = 'grp-call' as Id;
+// The call key domain binds real 26-character ids, so the call id is a minted one — the short
+// fixture labels are for the seats, which never enter the key derivations.
+const CALL = newId();
 const CONVERSATION = 'grp-conv' as Id;
 
 const ACC_A = 'acc-a' as Id;
@@ -113,7 +115,9 @@ test('a score lands on its rung at the crate’s own thresholds', () => {
   };
   const at = (score: number): LinkStats => ({
     ...quiet,
-    packetLossPct: score / 4, // loss alone drives the score, so the rung is the threshold's.
+    // Latency alone drives the score, one point per 10 ms past the baseline — whole points, so
+    // the rung named is the threshold's own rather than a fraction the truncation rounds away.
+    rttMs: T.rttBaselineMs + score * 10,
   });
   assert.equal(targetQuality(at(0), T), 'full');
   assert.equal(targetQuality(at(11), T), 'full');
@@ -154,9 +158,10 @@ test('degradation lands on its target at once; recovery climbs one rung per inte
     advanceQuality('frame-rate-lowered', 'full', 4_000, 7_000, RAMP_INTERVAL_MS),
     'resolution-lowered',
   );
-  // A target at or above the current rung is simply the answer.
+  // A climb that has waited its interval lands on the rung above — and when the target is that
+  // rung, the climb and the answer are the same thing.
   assert.equal(
-    advanceQuality('resolution-lowered', 'bitrate-capped', 0, 1, RAMP_INTERVAL_MS),
+    advanceQuality('resolution-lowered', 'bitrate-capped', 0, RAMP_INTERVAL_MS, RAMP_INTERVAL_MS),
     'bitrate-capped',
   );
 });
@@ -361,6 +366,12 @@ class FakeStream {
   }
   getVideoTracks(): FakeTrack[] {
     return this.tracks.filter((track) => track.kind === 'video');
+  }
+  removeTrack(track: FakeTrack): void {
+    const at = this.tracks.indexOf(track);
+    if (at >= 0) {
+      this.tracks.splice(at, 1);
+    }
   }
 }
 
