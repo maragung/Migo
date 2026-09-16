@@ -260,9 +260,9 @@ pub struct Call {
 /// about. A conference that is neither of these gets its own number when it
 /// gets its own screen.
 pub mod call_kind {
-    /// A 1:1 call, the two named parties a [`Call`] row holds.
+    /// A 1:1 call, the two named parties a [`Call`](super::Call) row holds.
     pub const DIRECT: u32 = 0;
-    /// A group call, the roster a [`GroupCall`] row holds.
+    /// A group call, the roster a [`GroupCall`](super::GroupCall) row holds.
     pub const GROUP: u32 = 1;
 }
 
