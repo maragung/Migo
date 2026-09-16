@@ -2930,26 +2930,33 @@ fn report_window(
             }
         });
 
-    // The choices written back, then the click applied — the draft survives a frame in which
-    // nothing was pressed, and a press the sheet's own gate refused leaves the words standing
-    // rather than costing them.
-    if let Some(sheet) = state.reporting.as_mut() {
-        sheet.reason = reason;
-        sheet.note = note;
-    }
+    // The send is decided first and the draft is written back after, because the outgoing note is
+    // carved out of the draft and the two cannot both own the string. The order costs nothing: a
+    // sent sheet is cleared below, so the write-back it skips is a write-back to nothing.
     if send {
         if let Some(chosen) = reason {
-            let note = {
+            // Trimmed here rather than in the worker, because this is the surface that knows what
+            // the reporter meant by a field they left blank: whitespace they typed and then
+            // changed their mind about is not a note, and sending it as one would put an empty
+            // string in the queue where the wire has a word for its absence.
+            let outgoing = {
                 let trimmed = note.trim();
                 (!trimmed.is_empty()).then(|| trimmed.to_owned())
             };
             context.issue(Command::Report {
                 target: target.clone(),
                 reason: chosen,
-                note,
+                note: outgoing,
             });
             state.reporting = None;
         }
+    }
+    // The draft survives the frame in every other case: a press the sheet's own gate refused, or
+    // no press at all, leaves the chosen reason and the typed words standing rather than costing
+    // the reporter the sentence they just wrote.
+    if let Some(sheet) = state.reporting.as_mut() {
+        sheet.reason = reason;
+        sheet.note = note;
     }
     if cancel || !open {
         state.reporting = None;
