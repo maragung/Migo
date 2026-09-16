@@ -8,10 +8,26 @@
 //! parties"; a roster is a set, and forcing it into that shape would give the
 //! service an upsert it cannot express. The trait here is the shape a
 //! production backend has to hold: a keyed upsert of the whole roster, a keyed
-//! read, and a leave that retires an empty call. The in-memory backend is the
-//! honest v1, the same choice the 1:1 store makes: a call that outlives a node
-//! restart is nobody's expectation, because the participants' own clients time
-//! the call and re-join against a new node.
+//! read, a leave that retires an empty call, and a seat retirement the store
+//! decides on its own. The in-memory backend is the honest v1, the same choice
+//! the 1:1 store makes: a call that outlives a node restart is nobody's
+//! expectation, because the participants' own clients time the call and
+//! re-join against a new node.
+//!
+//! # Why the seat retirement is the store's to take
+//!
+//! The sweep runs on a timer and every departure it returns is a membership
+//! fact the roster hears exactly once, so the retirement of a seat must be
+//! one decision, not the outcome of a race between two readers. A service
+//! that read the roster, removed the grace-expired seats itself, and wrote
+//! the roster back would let two overlapping sweeps retire the same seat
+//! twice — two departure events for one death — and would let any other
+//! writer's stale clone put the retired seat back, resurrection by last
+//! write. [`GroupCallStore::retire_gone`] therefore decides *and* removes
+//! under the store's own lock, and [`GroupCallStore::put`] refuses the exact
+//! seat a retirement took: a stale clone still carrying it is corrected on
+//! write, while a fresh join of the same device — a seat whose `joined_at`
+//! the retirement never saw — is seated as the new seat it is.
 //!
 //! # What the store never sees
 //!
@@ -24,23 +40,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use migo_core::{Id, Result};
+use migo_core::{Id, Result, Timestamp};
 use parking_lot::Mutex;
 
 use crate::model::{GroupCall, GroupParticipant};
 
 /// Group-call persistence, as the service needs it.
 ///
-/// Three operations. [`GroupCallStore::put`] is the whole-roster upsert the
+/// Four operations. [`GroupCallStore::put`] is the whole-roster upsert the
 /// service's read-modify-write goes through — a backend that can make it
 /// atomic should, because two racing joins are the traffic a group call
 /// actually gets and the in-memory backend's one lock across the critical
 /// section is the behaviour to match. [`GroupCallStore::retire_if_empty`]
 /// retires a call whose last seat emptied, so an abandoned call does not sit
 /// in the map forever holding the id a re-join would collide with.
+/// [`GroupCallStore::retire_gone`] is the seat retirement the sweep asks
+/// for, taken under the store's own lock so it is a decision rather than a
+/// race.
 #[async_trait]
 pub trait GroupCallStore: Send + Sync {
     /// Writes the call, replacing whatever the id held.
+    ///
+    /// One seat this upsert must never write back: a seat
+    /// [`GroupCallStore::retire_gone`] retired. A stale roster clone — the
+    /// read half of a read-modify-write that began before the retirement —
+    /// still carries the retired seat, and putting it would resurrect a
+    /// death the roster already heard announced. The backend refuses the
+    /// exact retired seat (the same device, at the same `joined_at`) while
+    /// admitting the fresh join of the same device, which is a new seat the
+    /// retirement never saw.
     async fn put(&self, call: &GroupCall) -> Result<()>;
 
     /// Reads the call, if it exists.
@@ -53,21 +81,44 @@ pub trait GroupCallStore: Send + Sync {
     /// last leave is the one event that always knows.
     async fn retire_if_empty(&self, call_id: Id) -> Result<Option<GroupCall>>;
 
+    /// Retires the seats whose grace window passed, atomically, returning
+    /// what the sweep is owed for them.
+    ///
+    /// The grace window is the caller's knob, but the removal is the store's
+    /// fact: a seat goes exactly when `now` is at or past its `gone_since`
+    /// plus `grace_ms`, the decision and the removal happen under one lock,
+    /// and the seats are returned to the one caller that took them — a
+    /// second retirement for the same seat, from a racing sweep or a stale
+    /// roster clone, finds nothing to take and announces nothing. The
+    /// returned seats are in roster order, and a roster the retirement
+    /// empties is stamped and retired in the same critical section, exactly
+    /// as [`GroupCallStore::retire_if_empty`] would.
+    async fn retire_gone(
+        &self,
+        call_id: Id,
+        grace_ms: i64,
+        now: Timestamp,
+    ) -> Result<Vec<GroupParticipant>>;
+
     /// Every roster the store holds, for the sweep.
     ///
     /// The seat sweep cannot name the calls it must look at — a dead session's
     /// account may hold a seat in any of them — so the store hands over the
-    /// whole working set and the service decides per seat. A backend that can
-    /// answer "which rosters hold this account" in one indexed query should
-    /// grow that question instead; the in-memory backend's clone of a handful
-    /// of live calls is the behaviour to beat.
+    /// whole working set and the caller asks [`GroupCallStore::retire_gone`]
+    /// per call. The read is a candidate list, never the authority: whatever
+    /// changed between the read and the retirement is the retirement's own
+    /// lock to arbitrate. A backend that can answer "which rosters hold this
+    /// account" in one indexed query should grow that question instead; the
+    /// in-memory backend's clone of a handful of live calls is the behaviour
+    /// to beat.
     async fn all(&self) -> Result<Vec<GroupCall>>;
 }
 
 /// A shared, fully erased group-call store.
 pub type SharedGroupCallStore = Arc<dyn GroupCallStore>;
 
-/// The in-memory group-call store: a map behind a lock.
+/// The in-memory group-call store: the rosters and the sweep's tombstones
+/// behind one lock.
 ///
 /// One lock for the whole store, the same reasoning as the 1:1 backend: the
 /// working set is one roster per live group call and the critical sections are
@@ -76,7 +127,26 @@ pub type SharedGroupCallStore = Arc<dyn GroupCallStore>;
 /// conversations to hold, and the rate limiter should notice that first.
 #[derive(Debug, Default)]
 pub struct MemoryGroupCallStore {
-    calls: Mutex<HashMap<Id, GroupCall>>,
+    rows: Mutex<GroupCallRows>,
+}
+
+/// What the lock guards: the live rosters, and the seats the sweep retired.
+#[derive(Debug, Default)]
+struct GroupCallRows {
+    calls: HashMap<Id, GroupCall>,
+    /// The seats [`GroupCallStore::retire_gone`] has taken, keyed by the
+    /// `joined_at` that made each seat the seat it was.
+    ///
+    /// The pair is the whole test: a stale roster clone re-putting a retired
+    /// seat carries the seat with its original `joined_at` — the exact pair
+    /// the filter refuses — while a fresh join of the same device carries a
+    /// `joined_at` the retirement never saw and goes through untouched. The
+    /// tombstones outlive the row they came from, because the stale clone
+    /// that could resurrect the seat is just as happy to re-create a removed
+    /// row as to write into a live one; they grow once per retired seat for
+    /// the life of the process, the same bounded growth the presence
+    /// relay's per-subject table accepts.
+    retired: HashMap<Id, HashMap<Id, Timestamp>>,
 }
 
 impl MemoryGroupCallStore {
@@ -90,24 +160,104 @@ impl MemoryGroupCallStore {
 #[async_trait]
 impl GroupCallStore for MemoryGroupCallStore {
     async fn put(&self, call: &GroupCall) -> Result<()> {
-        self.calls.lock().insert(call.call_id, call.clone());
+        let mut rows = self.rows.lock();
+        // The resurrection guard: a seat the sweep retired is gone, and the
+        // only writer that could still name it is one whose read predates the
+        // retirement. Such a clone carries the seat at the very `joined_at`
+        // the tombstone recorded, so the pair identifies the dead seat
+        // exactly where a fresh join's new `joined_at` does not.
+        let mut seated = call.clone();
+        if let Some(tombstones) = rows.retired.get(&call.call_id) {
+            seated.participants.retain(|seat| {
+                !tombstones
+                    .get(&seat.device_id)
+                    .is_some_and(|joined_at| *joined_at == seat.joined_at)
+            });
+        }
+        if seated.participants.is_empty() {
+            // An empty roster is an over call, whether the leaver emptied it
+            // or the guard just did: the id is released for a fresh join, the
+            // same release `retire_if_empty` performs.
+            rows.calls.remove(&call.call_id);
+        } else {
+            rows.calls.insert(call.call_id, seated);
+        }
         Ok(())
     }
 
     async fn get(&self, call_id: Id) -> Result<Option<GroupCall>> {
-        Ok(self.calls.lock().get(&call_id).cloned())
+        Ok(self.rows.lock().calls.get(&call_id).cloned())
     }
 
     async fn retire_if_empty(&self, call_id: Id) -> Result<Option<GroupCall>> {
-        let mut calls = self.calls.lock();
-        match calls.get(&call_id) {
-            Some(call) if call.participants.is_empty() => Ok(calls.remove(&call_id)),
+        let mut rows = self.rows.lock();
+        match rows.calls.get(&call_id) {
+            Some(call) if call.participants.is_empty() => Ok(rows.calls.remove(&call_id)),
             _ => Ok(None),
         }
     }
 
+    async fn retire_gone(
+        &self,
+        call_id: Id,
+        grace_ms: i64,
+        now: Timestamp,
+    ) -> Result<Vec<GroupParticipant>> {
+        // Rebound so the roster and the tombstones borrow as the disjoint
+        // fields they are: a guard's `DerefMut` is opaque, and the removal
+        // below writes a tombstone while the roster borrow is still live.
+        let mut guard = self.rows.lock();
+        let rows = &mut *guard;
+        let mut retired = Vec::new();
+        let mut emptied = false;
+        {
+            let Some(call) = rows.calls.get_mut(&call_id) else {
+                return Ok(Vec::new());
+            };
+            let expired: Vec<usize> = call
+                .participants
+                .iter()
+                .enumerate()
+                .filter_map(|(index, seat)| {
+                    seat.gone_since
+                        .filter(|gone| now.is_at_or_after(gone.saturating_add_millis(grace_ms)))
+                        .map(|_| index)
+                })
+                .collect();
+            if expired.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Removed from the back so the indices collected against the
+            // roster as it stood stay valid as it shrinks, and tombstoned as
+            // they go so the `put` of any clone that still carries one is
+            // corrected on write.
+            for index in expired.iter().rev() {
+                let seat = call.participants.remove(*index);
+                rows.retired
+                    .entry(call_id)
+                    .or_default()
+                    .insert(seat.device_id, seat.joined_at);
+                retired.push(seat);
+            }
+            // Roster order, the order the join announcements taught the
+            // roster to read departures in.
+            retired.reverse();
+            if call.participants.is_empty() {
+                call.ended_at = Some(now);
+                emptied = true;
+            }
+        }
+        if emptied {
+            // The tombstones stay: a stale clone is just as happy to
+            // re-create a removed row as to write into a live one, and the
+            // guard owes the seat its finality either way.
+            rows.calls.remove(&call_id);
+        }
+        Ok(retired)
+    }
+
     async fn all(&self) -> Result<Vec<GroupCall>> {
-        Ok(self.calls.lock().values().cloned().collect())
+        Ok(self.rows.lock().calls.values().cloned().collect())
     }
 }
 
