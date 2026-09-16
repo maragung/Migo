@@ -277,7 +277,7 @@ async fn a_dialer_whose_key_is_not_in_the_allow_list_is_refused_at_the_tls_hands
             .client_config(key32(1))
             .expect("the client config mints from the node identity"),
     );
-    let refused = tokio::time::timeout(
+    let dialed = tokio::time::timeout(
         WAIT_LIMIT,
         connector.connect(
             rustls::pki_types::ServerName::IpAddress(bound.ip().into()),
@@ -286,9 +286,30 @@ async fn a_dialer_whose_key_is_not_in_the_allow_list_is_refused_at_the_tls_hands
     )
     .await
     .expect("the refusal is prompt, not a hang");
+
+    // Where the refusal surfaces depends on the version's flight order. Under TLS 1.3 the
+    // dialer writes its certificate and its finished optimistically — it cannot know the
+    // listener's verdict before sending them — so the dial can complete locally and the
+    // refusal arrive immediately after, as the listener's alert or as a bare close. Both
+    // are the same refusal; the test reads the channel for it rather than trusting the
+    // dial's own result, and what it will not accept is a channel left live and readable.
+    let refused = match dialed {
+        Err(_) => true,
+        Ok(mut channel) => {
+            let mut answered = Vec::new();
+            match tokio::time::timeout(WAIT_LIMIT, channel.read_to_end(&mut answered)).await {
+                // The listener's alert, which the dialer surfaces as a read error.
+                Ok(Err(_)) => true,
+                // A close with nothing behind it: the alert may already have been consumed.
+                Ok(Ok(_)) => answered.is_empty(),
+                // Held open past the whole budget is not a refusal.
+                Err(_) => false,
+            }
+        }
+    };
     assert!(
-        refused.is_err(),
-        "a dialer outside the allow-list must not complete the TLS handshake"
+        refused,
+        "a dialer outside the allow-list must not get a live TLS channel to the listener"
     );
 
     // And nothing of the mesh ran behind the refusal: the server settled its side of
