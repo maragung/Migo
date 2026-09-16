@@ -211,7 +211,9 @@ pub struct NewPeerSpec {
 
 /// A peer as an operator is allowed to see it.
 ///
-/// The raw public key is not here: what an operator verifies out of band is the
+/// The raw public key rides along for the transport layer, which pins the peer's TLS
+/// certificate against exactly those bytes (section 7: the allow-list is keyed by public
+/// key); what an operator verifies out of band is still the
 /// [`fingerprint`](Self::fingerprint), a short human-comparable digest, not 32 bytes of hex
 /// to check by eye. `status` is decoded to the [`PeerStatus`] enum rather than left raw.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,6 +226,10 @@ pub struct PeerView {
     pub base_url: String,
     /// The peer's allow-list state.
     pub status: PeerStatus,
+    /// The peer's raw 32-byte Ed25519 public key, exactly as the allow-list stores it.
+    /// The transport layer pins the peer's TLS leaf against these bytes; the wire never
+    /// carries them.
+    pub public_key: Vec<u8>,
     /// A short, human-comparable digest of the peer's public key, for out-of-band
     /// verification. Empty only if the stored key is corrupt and cannot be parsed.
     pub fingerprint: String,

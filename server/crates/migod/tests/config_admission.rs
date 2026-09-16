@@ -46,6 +46,15 @@ async fn bare_mesh(name: u8, region: &str) -> SharedMesh {
     Arc::new(mesh)
 }
 
+/// The TLS 1.3 identity for one node, minted from the same seed its mesh service signs
+/// with — the pairing the allow-list pin depends on.
+fn tls_for(name: u8) -> migod::mesh_tls::MeshTls {
+    migod::mesh_tls::MeshTls::from_secret(
+        &NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"),
+    )
+    .expect("the node identity key mints a TLS leaf")
+}
+
 /// The Ed25519 public key of node `name`, base64-encoded the way an operator would paste
 /// it into the configuration document.
 fn config_key(name: u8) -> String {
@@ -100,6 +109,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
     let mesh_a = bare_mesh(1, "region-a").await;
     let transport_a = Arc::new(migod::mesh::MeshTransport::new(
         mesh_a.clone(),
+        tls_for(1),
         None,
         None,
         None,
@@ -162,6 +172,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
 
     let transport_b = Arc::new(migod::mesh::MeshTransport::new(
         mesh_b.clone(),
+        tls_for(2),
         None,
         None,
         None,

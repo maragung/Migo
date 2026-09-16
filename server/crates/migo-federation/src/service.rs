@@ -168,6 +168,7 @@ fn view_of(record: PeerRecord) -> Result<PeerView> {
         region: record.region,
         base_url: record.base_url,
         status: PeerStatus::from_i16(record.status),
+        public_key: record.public_key,
         fingerprint,
         added_at: record.added_at,
         last_seen_at: record.last_seen_at,

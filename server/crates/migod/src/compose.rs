@@ -765,6 +765,12 @@ impl App {
         let mut fed_node_id = [0u8; 16];
         let n = node_secret.len().min(16);
         fed_node_id[..n].copy_from_slice(&node_secret[..n]);
+        // The TLS 1.3 channel every mesh link rides in (section 7) is minted from the
+        // same identity key the mesh signs with, before the mesh opens: the certificate
+        // is a carrier for the key the allow-list pins, so it must be this key and no
+        // other. Built here because `fed_secret` moves into the mesh one line down.
+        let mesh_tls = crate::mesh_tls::MeshTls::from_secret(&fed_secret)
+            .context("cannot mint the mesh TLS certificate from the node identity key")?;
         let federation = migo_federation::open(
             store.clone(),
             MeshConfig::default(),
@@ -996,6 +1002,7 @@ impl App {
         // outbox runner always, so a peer added later starts receiving without a restart.
         let mesh_transport = Arc::new(crate::mesh::MeshTransport::new(
             Arc::clone(&federation),
+            mesh_tls,
             Some(Arc::clone(&gateway)),
             Some(Arc::clone(&room_relay)),
             Some(Arc::clone(&conversation_relay)),
