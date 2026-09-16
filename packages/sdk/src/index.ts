@@ -166,6 +166,13 @@ export { SocialDomain } from './domains/social.js';
 export { EconomyDomain } from './domains/economy.js';
 export { GamesDomain } from './domains/games.js';
 export type { SubmitOptions } from './domains/games.js';
+export {
+  ModerationDomain,
+  ReportSubject,
+  ReportReason,
+  REPORT_NOTE_MAX_LEN,
+} from './domains/moderation.js';
+export type { ReportOptions, ReportTarget } from './domains/moderation.js';
 
 // --- the chain domain: JSON-RPC to a pinned public EVM network, not to the Migo server ---
 export { ChainClient, ChainError, AVALANCHE_MAINNET, FUJI_TESTNET } from './domains/chain.js';

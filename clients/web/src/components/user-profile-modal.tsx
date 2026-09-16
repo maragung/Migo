@@ -71,6 +71,7 @@ export function UserProfileCard({
   onFriendRequest,
   onFriendRespond,
   onGift,
+  onReport,
 }: {
   profile: ResolvedProfile;
   /** The person's XP standing, when it loaded; absent is a missing line, not a broken card. */
@@ -103,6 +104,14 @@ export function UserProfileCard({
   onFriendRespond?: (accept: boolean) => void;
   /** Hands the person to the opener's gift flow; offered only where one exists. */
   onGift?: () => void;
+  /**
+   * Files a report about this person; offered only by an opener that can host the report dialog.
+   *
+   * Deliberately not a sibling of the block control's own state machine: a report is not a
+   * personal act the card can reflect (the reporter is never told the outcome and nothing about
+   * the card changes), so this is a plain hand-off with no busy state and no result to show.
+   */
+  onReport?: () => void;
 }): ReactNode {
   const [copied, setCopied] = useState(false);
   const presence = presenceLabel(profile.presence);
@@ -306,6 +315,17 @@ export function UserProfileCard({
             {busy ? <Spinner /> : blocked ? 'Blocked' : 'Block'}
           </button>
         ) : null}
+        {onReport ? (
+          <button
+            type="button"
+            className="btn btn-ghost profile-report-btn"
+            onClick={onReport}
+            aria-label={`Report ${profile.displayName}`}
+            title="Sends a report to this node’s moderators. They are the only ones who read it."
+          >
+            ⚑ Report
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -325,6 +345,7 @@ export function UserProfileModal({
   onMessage,
   onBlock,
   onGift,
+  onReport,
 }: {
   userId: Id;
   /** The opener's current block state for this person, so the control starts honest. */
@@ -338,6 +359,13 @@ export function UserProfileModal({
   onBlock?: (userId: Id) => Promise<void> | void;
   /** Hands the person to the opener's gift flow; offered only where one exists. */
   onGift?: () => void;
+  /**
+   * Opens the opener's report dialog for this person, named as the card names them.
+   *
+   * The display name travels with the id because the dialog puts it in its header ("Report Ada?")
+   * and its acknowledgement sentence, and the opener has no profile of its own to read it from.
+   */
+  onReport?: (userId: Id, displayName: string) => void;
 }): ReactNode {
   const { client } = useMigo();
   const { isMuted, setMuted } = useMuted();
@@ -569,6 +597,7 @@ export function UserProfileModal({
               onFriendRequest={runFriendRequest}
               onFriendRespond={runFriendRespond}
               onGift={onGift}
+              onReport={onReport ? () => onReport(profile.userId, profile.displayName) : undefined}
             />
           ) : null}
         </div>

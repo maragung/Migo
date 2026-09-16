@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ConversationKind, ContentType, EncryptionMode, MemberChange } from '@migo/sdk';
+import {
+  ConversationKind,
+  ContentType,
+  EncryptionMode,
+  MemberChange,
+  ReportSubject,
+} from '@migo/sdk';
 import type {
   ConversationSummary,
   GiftListing,
@@ -50,6 +56,8 @@ import { GroupInfoPanel } from './group-info-panel.js';
 import { DISAPPEARING_MS, MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import type { InterleavedRow } from './message-list.js';
+import { ReportDialog } from './report-dialog.js';
+import type { ReportSubjectRef } from './report-dialog.js';
 import { RoomInfoPanel } from './room-info-panel.js';
 import { RoomNoticeLine } from './room-notice-line.js';
 import { Icon } from './icons.js';
@@ -171,6 +179,10 @@ export function ChatWindow({
   // honest version of it, and it labels itself when it is only searching what is loaded.
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  // What the report dialog is pointed at, or null while it is closed. One piece of state for
+  // both surfaces that report from this window (a message, and the peer through their profile),
+  // because only one dialog can be open at a time.
+  const [reportSubject, setReportSubject] = useState<ReportSubjectRef | null>(null);
   const [giftOpen, setGiftOpen] = useState(false);
   const [giftCatalogue, setGiftCatalogue] = useState<GiftListing[] | null>(null);
   const [giftRecipient, setGiftRecipient] = useState<Id | null>(null);
@@ -697,6 +709,13 @@ export function ChatWindow({
           readUpTo={readUpTo}
           onReply={setReplyTo}
           onDelete={deleteMessage}
+          onReport={(message) =>
+            setReportSubject({
+              kind: ReportSubject.Message,
+              id: message.messageId,
+              label: 'this message',
+            })
+          }
           onEdit={(message, text) => editMessage(message.messageId, text)}
           onReact={(message, emoji) => react(message.messageId, emoji)}
           deleting={deleting}
@@ -796,10 +815,19 @@ export function ChatWindow({
         />
       ) : null}
 
+      <ReportDialog subject={reportSubject} onClose={() => setReportSubject(null)} />
+
       {profileOpen && peerId !== null ? (
         <UserProfileModal
           userId={peerId}
           onClose={() => setProfileOpen(false)}
+          onReport={(userId, displayName) =>
+            setReportSubject({
+              kind: ReportSubject.User,
+              id: userId,
+              label: displayName,
+            })
+          }
           onGift={() => {
             setProfileOpen(false);
             setGiftKey(newIntentKey());

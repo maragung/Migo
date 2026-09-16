@@ -49,7 +49,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
-import { RoomRole, SanctionAction } from '@migo/sdk';
+import { ReportSubject, RoomRole, SanctionAction } from '@migo/sdk';
 import type { AdminStanding, Id, RosterEntry } from '@migo/sdk';
 
 import { formatRelative } from '@/lib/format.js';
@@ -63,6 +63,8 @@ import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
 import { Icon } from './icons.js';
+import { ReportDialog } from './report-dialog.js';
+import type { ReportSubjectRef } from './report-dialog.js';
 import { Spinner } from './spinner.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
@@ -753,6 +755,9 @@ export function RoomInfoPanel({
   const [archiving, setArchiving] = useState(false);
   // The member whose profile a row's "View profile" opened, until the modal closes.
   const [profileId, setProfileId] = useState<Id | null>(null);
+  // What the report dialog points at, when it is open. The panel reports the room itself and any
+  // member it shows a profile for, so one piece of state serves both — only one dialog is open.
+  const [reportSubject, setReportSubject] = useState<ReportSubjectRef | null>(null);
 
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
@@ -1079,6 +1084,21 @@ export function RoomInfoPanel({
             <h2 className="panel-heading">Members ({roster.length})</h2>
             <button
               type="button"
+              className="btn btn-ghost"
+              onClick={() =>
+                setReportSubject({
+                  kind: ReportSubject.Room,
+                  id: roomId,
+                  label: roomRecord?.name ? `“${roomRecord.name}”` : 'this room',
+                })
+              }
+              aria-label="Report room"
+              title="Reports this room to the node’s moderators. Leaving is a separate control: reporting does not remove you from it."
+            >
+              ⚑ Report
+            </button>
+            <button
+              type="button"
               className="btn btn-danger"
               disabled={leaving}
               onClick={leave}
@@ -1116,11 +1136,16 @@ export function RoomInfoPanel({
           />
         </>
       )}
+      <ReportDialog subject={reportSubject} onClose={() => setReportSubject(null)} />
+
       {profileId !== null ? (
         <UserProfileModal
           userId={profileId}
           onClose={() => setProfileId(null)}
           onGift={onGift && profileId !== accountId ? () => onGift(profileId) : undefined}
+          onReport={(userId, displayName) =>
+            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
+          }
         />
       ) : null}
     </div>

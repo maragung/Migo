@@ -31,7 +31,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
-import { ConversationRole, RelationshipKind } from '@migo/sdk';
+import { ConversationRole, RelationshipKind, ReportSubject } from '@migo/sdk';
 import type {
   ConversationRosterEntry,
   ConversationSummary,
@@ -53,6 +53,8 @@ import { voteTally } from './room-info-panel.js';
 import { Avatar } from './avatar.js';
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
+import { ReportDialog } from './report-dialog.js';
+import type { ReportSubjectRef } from './report-dialog.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
 /** The founder role as a plain number, so the gates compare number to number like the room panel's. */
@@ -310,6 +312,9 @@ export function GroupInfoPanel({
   const [renaming, setRenaming] = useState(false);
   // The member whose profile a row's "View profile" opened, until the modal closes.
   const [profileId, setProfileId] = useState<Id | null>(null);
+  // The group panel reports people, not the group: the wire has no subject kind for a group
+  // conversation, and inventing one here would file a report nothing can read back.
+  const [reportSubject, setReportSubject] = useState<ReportSubjectRef | null>(null);
 
   // The invite section's own state: the friends quick-pick, the debounced username search, and the
   // seats already taken.
@@ -809,11 +814,16 @@ export function GroupInfoPanel({
           )}
         </div>
       )}
+      <ReportDialog subject={reportSubject} onClose={() => setReportSubject(null)} />
+
       {profileId !== null ? (
         <UserProfileModal
           userId={profileId}
           onClose={() => setProfileId(null)}
           onGift={onGift && profileId !== accountId ? () => onGift(profileId) : undefined}
+          onReport={(userId, displayName) =>
+            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
+          }
         />
       ) : null}
     </div>

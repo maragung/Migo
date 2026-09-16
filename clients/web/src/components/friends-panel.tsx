@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
-import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
+import { ConversationKind, PresenceState, RelationshipKind, ReportSubject } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
 import { debounce } from '@/lib/debounce.js';
@@ -17,6 +17,8 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { Avatar } from './avatar.js';
 import { ContextMenu } from './context-menu.js';
 import { useContextMenu } from './context-menu.js';
+import { ReportDialog } from './report-dialog.js';
+import type { ReportSubjectRef } from './report-dialog.js';
 import type { ContextAction } from './context-menu.js';
 import { Icon } from './icons.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
@@ -87,6 +89,9 @@ export function FriendsPanel({
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
   // The person whose profile modal is open, if any.
   const [selected, setSelected] = useState<Id | null>(null);
+  // What the report dialog points at, when it is open. Reporting a person is a Friends-tab affair
+  // for the same reason blocking is: this is where a person is named.
+  const [reportSubject, setReportSubject] = useState<ReportSubjectRef | null>(null);
   // Which list the panel is showing: the friends themselves, the username search, or one of
   // the three the header's right-aligned icons switch to. The counts on those icons come
   // from the same reads.
@@ -537,12 +542,17 @@ export function FriendsPanel({
           blocked={blocked.some((entry) => entry.userId === selected)}
           onClose={() => setSelected(null)}
           onBlock={blockFromModal}
+          onReport={(userId, displayName) =>
+            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
+          }
           onMessage={(userId) => {
             setSelected(null);
             void startDirect(userId);
           }}
         />
       ) : null}
+
+      <ReportDialog subject={reportSubject} onClose={() => setReportSubject(null)} />
 
       {dialogOpen ? <NewConversationDialog onClose={() => setDialogOpen(false)} /> : null}
     </div>

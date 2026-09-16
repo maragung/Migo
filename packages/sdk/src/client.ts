@@ -119,6 +119,7 @@ import { NotificationsDomain } from './domains/notifications.js';
 import { SocialDomain } from './domains/social.js';
 import { EconomyDomain } from './domains/economy.js';
 import { GamesDomain } from './domains/games.js';
+import { ModerationDomain } from './domains/moderation.js';
 import type { DeviceAddress, DeviceDirectory, GapFiller } from './domains/messaging.js';
 import type { ConversationKind } from '@migo/protocol';
 import type { ServerEndpoint } from './server-endpoint.js';
@@ -234,6 +235,7 @@ interface Connected {
   social: SocialDomain;
   economy: EconomyDomain;
   games: GamesDomain;
+  moderation: ModerationDomain;
 }
 
 /**
@@ -501,6 +503,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     return this.#requireConnected().games;
   }
 
+  /** File reports about a user, message, room, or bot, and hear when one is ruled on. */
+  get moderation(): ModerationDomain {
+    return this.#requireConnected().moderation;
+  }
+
   // --- bringing the client online ---
 
   /**
@@ -608,6 +615,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.social.stop();
     ctx.games.stop();
     ctx.economy.stop();
+    ctx.moderation.stop();
     ctx.transport.close();
     for (const unsubscribe of this.#unsubscribes.splice(0)) {
       unsubscribe();
@@ -1584,6 +1592,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
       social: new SocialDomain(rpc, this.#options.onEventError),
       economy: new EconomyDomain(rpc, this.#options.onEventError),
       games: new GamesDomain(rpc, this.#options.onEventError),
+      moderation: new ModerationDomain(rpc, this.#options.onEventError),
     };
     this.#ctx = ctx;
 
@@ -1600,6 +1609,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.social.start();
     ctx.games.start();
     ctx.economy.start();
+    ctx.moderation.start();
 
     // Membership movement keeps the membership cache true, so the sender-key audience the next
     // send builds is the group as it stands, not the group as a list row previewed it. A join or

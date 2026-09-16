@@ -243,3 +243,54 @@ test('a rankless person carries no board line, and the gift act appears only whe
   assert.ok(giftable.includes('>Gift<'), 'the gift action is missing where it is offered');
   assert.ok(!bare.includes('>Gift<'), 'a gift action appeared where none was offered');
 });
+
+test('reporting a person is offered only where a dialog can host it, and never as a toggle', () => {
+  const bare = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+    />,
+  );
+  assert.ok(!bare.includes('Report'), 'a report control appeared where no dialog could open');
+
+  const reportable = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked={false}
+      canMessage
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onReport={() => {}}
+    />,
+  );
+  assert.ok(
+    reportable.includes('aria-label="Report Ada Lovelace"'),
+    'the report control lost its accessible name',
+  );
+  // Unlike the block control there is no busy state and no "Reported" — the reporter is never told
+  // the outcome, so a state the card could show would be a state the protocol does not have.
+  assert.ok(
+    !reportable.includes('disabled'),
+    'the report control must stay offered: filing twice is idempotent, not a spent act',
+  );
+  // Reporting and blocking are different acts on different authorities, so both stay available on
+  // the same person — the block is the viewer's own, the report is a moderator's to weigh.
+  const both = renderToStaticMarkup(
+    <UserProfileCard
+      profile={ADA}
+      blocked
+      canMessage={false}
+      busy={false}
+      onMessage={() => {}}
+      onBlock={() => {}}
+      onReport={() => {}}
+    />,
+  );
+  assert.ok(both.includes('aria-label="Report Ada Lovelace"'), 'a blocked person lost reporting');
+  assert.ok(both.includes('>Blocked</button>'), 'the block control lost its state beside it');
+});

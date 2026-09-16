@@ -6638,6 +6638,120 @@ button.activity-row-btn:focus-visible {
   margin-top: 16px;
 }
 
+/* --- filing a report (brief section 49): the confirm frame, one question taller --- */
+
+/* Wider than a yes/no because the reason list is the whole point of the dialog: nine rows of a
+   code and a half-line of prose, and a 340px column wraps every one of them. */
+.report-frame {
+  max-width: 440px;
+}
+.report-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 12px 0 0;
+  padding: 0;
+  border: 0;
+  /* Nine reasons is taller than a short laptop's dialog; the list scrolls so the note and the
+     buttons stay reachable rather than falling off the bottom of the frame. */
+  max-height: 232px;
+  overflow-y: auto;
+}
+.report-legend {
+  padding: 0 0 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.report-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.report-reason:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border-soft);
+}
+.report-reason input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.report-reason-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.report-reason-label {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.report-reason-hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.report-note {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 12px;
+}
+.report-note-label {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.report-note-input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-alt);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.report-note-input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
+}
+.report-note-count {
+  align-self: flex-end;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.report-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* The profile card's report control sits past the block control it must never be confused with,
+   and reads as the quieter of the two because it acts on a moderator's behalf, not the viewer's. */
+.profile-report-btn {
+  margin-left: auto;
+}
+
 /* --- the dark theme's own values --- */
 /* The shell's surfaces are white panels in light and the dark family's panels in dark; the
    deep-teal chrome (taskbar, nav, menus, the orange bar) keeps its own ink in both themes,

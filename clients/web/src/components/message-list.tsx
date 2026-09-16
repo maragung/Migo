@@ -395,6 +395,14 @@ export interface MessageListProps {
   /** Requests a delete-for-everyone for one of our own messages. */
   onDelete: (messageId: Id) => void;
   /**
+   * Reports somebody else's message to the node's moderators (brief section 49).
+   *
+   * Offered only on a message that is not ours — one cannot report oneself, and the node refuses
+   * it — and only when the caller supplies it, which is how a context with no client renders.
+   * A tombstone offers nothing: there is no content left to report.
+   */
+  onReport?: (message: ThreadMessage) => void;
+  /**
    * Commits an edit of one of our own text messages with the replacement text; the caller owns
    * the re-sealing and the `editMessage` call. Optional: without it the Edit control is not
    * offered, which is how a context with no client renders.
@@ -474,6 +482,7 @@ export function MessageList({
   readUpTo,
   onReply,
   onDelete,
+  onReport,
   onEdit,
   onReact,
   deleting,
@@ -674,6 +683,7 @@ export function MessageList({
                         senderName={senderName}
                         onReply={onReply}
                         onDelete={onDelete}
+                        onReport={onReport === undefined ? undefined : () => onReport(message)}
                         deleting={deleting}
                         editable={editable}
                         onEdit={() => setEditingId(message.messageId)}
@@ -797,6 +807,7 @@ function BubbleLine({
   senderName,
   onReply,
   onDelete,
+  onReport,
   deleting,
   editable,
   onEdit,
@@ -811,6 +822,8 @@ function BubbleLine({
   senderName: string;
   onReply: (message: ThreadMessage) => void;
   onDelete: (messageId: Id) => void;
+  /** Reports this message; absent means the control is not offered (see `MessageListProps`). */
+  onReport?: () => void;
   deleting: boolean;
   /** Whether the Edit control is offered at all (own text message, caller can commit edits). */
   editable: boolean;
@@ -845,6 +858,17 @@ function BubbleLine({
         >
           ↩
         </button>
+        {onReport !== undefined && !mine ? (
+          <button
+            type="button"
+            className="row-action-btn"
+            onClick={onReport}
+            aria-label={`Report the message from ${senderName}`}
+            title="Report"
+          >
+            ⚑
+          </button>
+        ) : null}
         {canToggleListen ? <VoiceListenToggle messageId={message.messageId} /> : null}
         {onReact !== undefined ? (
           <ReactionBar targetName={senderName} onReact={(emoji) => onReact(message, emoji)} />
