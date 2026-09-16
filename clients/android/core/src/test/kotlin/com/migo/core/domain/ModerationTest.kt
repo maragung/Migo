@@ -100,7 +100,7 @@ class ModerationTest {
 
     @Test
     fun `a message report carries one id and no conversation`() {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = ModerationDomain(Rpc(fake))
 
         runBlocking {
@@ -122,7 +122,7 @@ class ModerationTest {
 
     @Test
     fun `a report with no note says so rather than sending an empty one`() {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = ModerationDomain(Rpc(fake))
 
         runBlocking { domain.reportUser(ADA, ReportReason.Impersonation) }
@@ -155,14 +155,14 @@ class ModerationTest {
 
     /** Files one report and hands back whatever the domain put on the wire. */
     private fun kindOf(file: suspend (ModerationDomain) -> Unit): ReportFile {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         runBlocking { file(ModerationDomain(Rpc(fake))) }
         return ReportFile.decode(Reader(fake.sent.single().second))
     }
 
     @Test
     fun `a bot is reported by its bot id, which is not an account id`() {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = ModerationDomain(Rpc(fake))
 
         runBlocking { domain.reportBot(BOT, ReportReason.BotAbuse, "it DMs everyone who joins") }
@@ -180,7 +180,7 @@ class ModerationTest {
 
     @Test
     fun `an over-long note is refused locally, and nothing reaches the wire`() {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = ModerationDomain(Rpc(fake))
         val tooLong = "x".repeat(REPORT_NOTE_MAX_LEN + 1)
 
@@ -201,7 +201,7 @@ class ModerationTest {
 
     @Test
     fun `a note exactly at the ceiling is accepted`() {
-        val fake = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val fake = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = ModerationDomain(Rpc(fake))
         val atCeiling = "x".repeat(REPORT_NOTE_MAX_LEN)
 
@@ -217,7 +217,7 @@ class ModerationTest {
         // one back would invite a client to present it as a receipt the reporter could chase. The
         // one thing a client legitimately needs -- that the report arrived -- is what the ack
         // carries, so `report` completes and the frame is the report opcode and nothing else.
-        val ok = ScriptedTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
+        val ok = ScriptedReportTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         runBlocking { ModerationDomain(Rpc(ok)).reportUser(ADA, ReportReason.Spam) }
         assertEquals(1, ok.sent.size)
         assertEquals(Op.REPORT_CREATE, ok.sent.single().first)
@@ -227,7 +227,7 @@ class ModerationTest {
 
     @Test
     fun `moderation events reach handlers only between start and stop`() {
-        val fake = ScriptedTransport()
+        val fake = ScriptedReportTransport()
         val sink = ArrayList<Pair<Long, Throwable>>()
         val rpc = Rpc(fake) { opcode, cause -> sink += opcode to cause }
         val domain = ModerationDomain(rpc) { opcode, cause -> sink += opcode to cause }
@@ -251,7 +251,7 @@ class ModerationTest {
         // handler: a client that stopped listening understood the frame perfectly well.
         domain.stop()
         domain.stop()
-        val afterStop = ScriptedTransport()
+        val afterStop = ScriptedReportTransport()
         val quietRpc = Rpc(afterStop)
         val quiet = ModerationDomain(quietRpc) { opcode, cause -> sink += opcode to cause }
         var after = 0
@@ -268,7 +268,7 @@ class ModerationTest {
 
     @Test
     fun `a frame this build cannot render goes to the error sink, not to a handler`() {
-        val fake = ScriptedTransport()
+        val fake = ScriptedReportTransport()
         val sink = ArrayList<Pair<Long, Throwable>>()
         val rpc = Rpc(fake)
         val domain = ModerationDomain(rpc) { opcode, cause -> sink += opcode to cause }
@@ -293,7 +293,7 @@ class ModerationTest {
  * event is pushed by the test, and the sent frames are kept for asserting on. The domains speak this
  * interface and never a socket, which is what makes the report path testable without a node.
  */
-private class ScriptedTransport(
+private class ScriptedReportTransport(
     /** Encodes the payload every `request` is answered with. */
     private val reply: ((Writer) -> Unit)? = null,
 ) : RealtimeTransport {

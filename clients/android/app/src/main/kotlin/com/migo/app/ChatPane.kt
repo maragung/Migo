@@ -22,6 +22,7 @@ import com.migo.app.model.AttachSource
 import com.migo.app.model.ChatState
 import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.GroupInviteCandidate
+import com.migo.app.ui.ReportSheet
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.RelationshipKind
 import com.migo.core.store.MediaAutoDownload
