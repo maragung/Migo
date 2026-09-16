@@ -56,7 +56,7 @@ use migo_protocol::{codes, ConversationKind, EncryptionMode, MessageKind, NodeIn
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 use migo_store::model::{report_status, Conversation, NewMessage};
 use migo_store::traits::MessagingStore;
-use migo_store::MemoryStore;
+use migo_store::{MemoryStore, SharedStore};
 
 // --- constants ----------------------------------------------------------------------------
 
@@ -153,8 +153,13 @@ impl Harness {
         let store = Arc::new(MemoryStore::new());
 
         let roster = Arc::new(TestRoster::new());
+        // Coerced through a typed binding rather than at the argument: `open`'s first parameter is
+        // already `Arc<dyn Store>`, and a bare `Arc::clone(&store)` in that position is checked
+        // with the clone's own type parameter fixed to the trait object, which then refuses the
+        // concrete `&Arc<MemoryStore>`.
+        let shared_store: SharedStore = Arc::clone(&store);
         let warden = open(
-            Arc::clone(&store),
+            shared_store,
             Arc::clone(&limiter) as SharedRateLimiter,
             Arc::clone(&roster) as SharedRoster,
             Box::new(SeededRandom::new(SEED)),

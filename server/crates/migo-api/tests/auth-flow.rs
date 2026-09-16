@@ -90,7 +90,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, ManualClock, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, NodeInfo};
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter};
-use migo_store::MemoryStore;
+use migo_store::{MemoryStore, SharedStore};
 
 // --- constants ----------------------------------------------------------------------------
 
@@ -197,8 +197,13 @@ impl Harness {
         // and limiter. This suite never reaches it, so the directory is the one in
         // which nobody is staff — which is also what makes "an ordinary account is
         // refused" the default story for any test that wanders in.
+        // The trait object is coerced through a typed binding rather than at the argument:
+        // `open`'s first parameter is already `Arc<dyn Store>`, and a bare `Arc::clone(&store)`
+        // there would be checked with the clone's own type parameter fixed to the trait object,
+        // which refuses the concrete `&Arc<MemoryStore>` it is handed.
+        let shared_store: SharedStore = Arc::clone(&store);
         let moderation = migo_moderation::open(
-            Arc::clone(&store),
+            shared_store,
             Arc::clone(&real_limiter) as SharedRateLimiter,
             Arc::new(migo_moderation::NoStaff),
             Box::new(SeededRandom::new(SEED)),

@@ -11,7 +11,7 @@
 //! moderator does between them.
 //!
 //! The split is not a second implementation, and that is the point of routing
-//! `POST /case/{report_id}/resolve` through [`Warden::resolve`] rather than writing a REST-shaped
+//! `POST /case/{report_id}/resolve` through [`migo_moderation::Warden::resolve`] rather than writing a REST-shaped
 //! copy of it: the opcode and this route reach the same method, so neither can be the door that
 //! skips the audit row, and the powers behind both come from the same roster. A dashboard ruling on
 //! the case it is already showing does not have to open a second connection to say so.
@@ -19,7 +19,7 @@
 //! # The powers are not in the request
 //!
 //! Every handler here builds an [`Operator`] with [`Powers::NONE`] and lets the service overwrite
-//! it — [`Warden`]'s own note says the field is what the roster lookup produced, never something a
+//! it — [`migo_moderation::Warden`]'s own note says the field is what the roster lookup produced, never something a
 //! client sends, and this module is not an exception to that. What the route contributes is the
 //! account, the device, the truncated network, and whether the session proved a factor recently
 //! enough.
@@ -44,7 +44,7 @@
 //!
 //! # The queue is a window, not a cursor
 //!
-//! [`Warden::queue`] returns at most a bounded number of the longest-waiting open reports, so this
+//! [`migo_moderation::Warden::queue`] returns at most a bounded number of the longest-waiting open reports, so this
 //! route offers exactly that: a limit, clamped by the crate into `1..=MAX_PAGE`, defaulting to
 //! `DEFAULT_PAGE` when a client names none. There is no cursor, because the domain has none to
 //! honour — a `next_cursor` invented here would be a promise this layer cannot keep. A client that
@@ -56,9 +56,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use migo_core::{Id, Timestamp};
-use migo_moderation::{
-    Action, Case, Notice, Operator, Outcome, Powers, Reason, Resolution, Roster, Warden,
-};
+use migo_moderation::{Action, Case, Notice, Operator, Outcome, Powers, Reason, Resolution};
 use migo_store::model::{AuditActorKind, AuditEntry, AuditTargetKind};
 
 use crate::extract::Authenticated;
@@ -231,7 +229,7 @@ async fn audit(
 
 /// The `?limit=` these listings accept, or none for the crate's own default.
 ///
-/// A hint rather than a contract: [`Warden::queue`] and [`Warden::audit`] clamp whatever arrives
+/// A hint rather than a contract: [`migo_moderation::Warden::queue`] and [`migo_moderation::Warden::audit`] clamp whatever arrives
 /// into the crate's own ceiling, so an absurd value costs a client nothing to send and gains them
 /// nothing. A value that is not a number at all is refused by the extractor before a handler runs.
 #[derive(Deserialize)]

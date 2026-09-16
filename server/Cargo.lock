@@ -1939,6 +1939,7 @@ dependencies = [
  "migo-captcha",
  "migo-core",
  "migo-media",
+ "migo-moderation",
  "migo-protocol",
  "migo-ratelimit",
  "migo-store",
