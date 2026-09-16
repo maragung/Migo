@@ -805,17 +805,16 @@ async fn spawn_slow_peer(
                 break;
             };
             let acceptor = acceptor.clone();
+            // Each connection takes its own handles: the shared Arcs are cloned on this
+            // side of the inner spawn, so the outer loop lends rather than moves them.
+            let mesh = Arc::clone(&mesh);
+            let accept_gate = Arc::clone(&accept_gate);
+            let accept_log = Arc::clone(&accept_log);
             tokio::spawn(async move {
                 let Ok(stream) = acceptor.accept(stream).await else {
                     return;
                 };
-                serve_slow_session(
-                    stream,
-                    Arc::clone(&mesh),
-                    Arc::clone(&accept_gate),
-                    Arc::clone(&accept_log),
-                )
-                .await;
+                serve_slow_session(stream, mesh, accept_gate, accept_log).await;
             });
         }
     });
@@ -1071,12 +1070,14 @@ async fn spawn_silent_peer(
         .local_addr()
         .expect("the silent peer knows its address");
     let (accepted_tx, accepted_rx) = tokio::sync::watch::channel(0_u32);
+    // The gate is minted on the caller's side of the 'static boundary — the borrowed
+    // dialer keys never have to outlive this function.
+    let acceptor = TlsAcceptor::from(
+        tls_for(name)
+            .server_config(dialers)
+            .expect("the silent peer mints its TLS gate"),
+    );
     tokio::spawn(async move {
-        let acceptor = TlsAcceptor::from(
-            tls_for(name)
-                .server_config(dialers)
-                .expect("the silent peer mints its TLS gate"),
-        );
         let mut held: Vec<ServerTlsStream<TcpStream>> = Vec::new();
         loop {
             let Ok((stream, _)) = listener.accept().await else {
