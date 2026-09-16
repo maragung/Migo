@@ -109,7 +109,11 @@ class ModerationTest {
 
         val sent = fake.sent.single()
         assertEquals(Op.REPORT_CREATE, sent.first)
-        val request = ReportFile.decode(Reader(sent.second))
+        // One reader, decoded and then measured. Measuring a second, fresh Reader would report the
+        // whole payload as left over, because it has read nothing -- a passing-looking line that
+        // can never fail, which is worse than no line at all.
+        val reader = Reader(sent.second)
+        val request = ReportFile.decode(reader)
         assertEquals(ReportSubject.Message.wire, request.subjectKind)
         assertEquals(MESSAGE, request.subjectId)
         assertEquals(ReportReason.MaliciousLink.wire, request.reason)
@@ -117,7 +121,7 @@ class ModerationTest {
 
         // The whole payload is those four fields and nothing else: a message report is one id, so
         // there is no second id on the frame for a conversation to hide in.
-        assertEquals("the frame is the struct and nothing after it", 0, Reader(sent.second).remaining)
+        assertEquals("the frame is the struct and nothing after it", 0, reader.remaining)
     }
 
     @Test
@@ -270,7 +274,12 @@ class ModerationTest {
     fun `a frame this build cannot render goes to the error sink, not to a handler`() {
         val fake = ScriptedReportTransport()
         val sink = ArrayList<Pair<Long, Throwable>>()
-        val rpc = Rpc(fake)
+        // Both sinks, and they are two different ones. The Rpc decodes an event before the domain
+        // ever sees it, so a frame that cannot be rendered fails inside the Rpc and is reported
+        // there; the domain's own sink only hears about a handler that threw. Handing the sink to
+        // the domain alone leaves the interesting failure -- a frame this build cannot render --
+        // swallowed in silence, which is exactly what this test exists to catch.
+        val rpc = Rpc(fake) { opcode, cause -> sink += opcode to cause }
         val domain = ModerationDomain(rpc) { opcode, cause -> sink += opcode to cause }
         val seen = ArrayList<ModerationEvent>()
         domain.onModerationEvent { seen += it }
