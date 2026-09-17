@@ -29,6 +29,7 @@ import {
   ENVELOPE_VERSION,
   GroupCrypto,
   SessionCrypto,
+  decodeContent,
   encodeContent,
 } from '../src/index.js';
 import type { MessageContent } from '../src/index.js';
@@ -92,7 +93,9 @@ test('a distribution relocated to another conversation does not open', async () 
 
   // And the control: in the conversation it was sealed for, the same bytes open.
   const opened = bob.open(CONVERSATION, ALICE_USER, ALICE_DEVICE, sealed.envelope);
-  assert.equal(new TextDecoder().decode(opened.subarray(1)), 'chain');
+  // Decoded rather than read past a prefix: the plaintext carries its own length and is padded to a
+  // bucket, so the raw bytes are longer than the text and only the codec knows where the text stops.
+  assert.deepEqual(decodeContent(opened), text('chain'));
   assert.equal(
     bobStore.oneTimePrekeyPair(oneTimePrekey.keyId),
     null,
@@ -127,7 +130,7 @@ test('the version byte selects the associated data this layer builds', async () 
   // The genuine envelope still opens, so the failure above is the relabelling and not a session the
   // failed attempt damaged — the ratchet commits nothing on a message that does not authenticate.
   const opened = bob.open(CONVERSATION, ALICE_USER, ALICE_DEVICE, sealed.envelope);
-  assert.equal(new TextDecoder().decode(opened.subarray(1)), 'satu');
+  assert.deepEqual(decodeContent(opened), text('satu'));
 });
 
 test('a version no build writes is refused rather than guessed at', async () => {

@@ -44,7 +44,6 @@
 //! constant wherever the associated data is built: a reader has to reproduce the *sender's* bytes.
 
 use bytes::BufMut;
-use migo_crypto::aad;
 use migo_crypto::identity::{IDENTITY_PUBLIC_LEN, PUBLIC_KEY_LEN};
 use migo_crypto::{EnvelopeVersion, IdentityPublic, RatchetHeader};
 use migo_wire::varint;

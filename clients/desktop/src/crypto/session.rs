@@ -772,6 +772,7 @@ mod tests {
         let envelope = alice
             .seal(
                 conversation,
+                alice_device,
                 bob_device,
                 Some(&published_bundle(bob.keys())),
                 b"the first word",

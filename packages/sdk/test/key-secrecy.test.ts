@@ -151,7 +151,15 @@ test('a full messaging send transmits only ciphertext frames, never a private se
       return Promise.resolve([{ userId: BOB_USER, deviceId: BOB_DEVICE }]);
     },
   };
-  const messaging = new MessagingDomain(rpc, sessionCrypto, groupCrypto, directory);
+  const messaging = new MessagingDomain(
+    rpc,
+    sessionCrypto,
+    groupCrypto,
+    directory,
+    undefined,
+    undefined,
+    ALICE_DEVICE,
+  );
 
   await messaging.send(CONV, text('the first message to a fresh conversation'));
 

@@ -44,6 +44,11 @@ import { RecordingTransport, StaticBundleSource, bundleFrom, idOf, newStore } fr
 
 const CONVERSATION = idOf(1);
 const MESSAGE = idOf(2);
+// This rig's own device. The domain asks for it before it reads the directory, because a sender-key
+// distribution is sealed against the device that sends it and the domain refuses to seal under a
+// placeholder rather than mint a stamp the receiver cannot reproduce. Nothing here reaches the wire
+// — the directory below returns no devices — but the id is required on the way in.
+const DEVICE = idOf(3);
 /** Bytes a caller sealed before calling: the domain must pass them through verbatim. */
 const SEALED = new Uint8Array([9, 8, 7, 6, 5]);
 
@@ -75,6 +80,7 @@ function rig(
       directory,
       undefined,
       gapFiller,
+      DEVICE,
     ),
   };
 }
