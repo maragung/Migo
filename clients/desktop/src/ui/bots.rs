@@ -106,6 +106,41 @@ fn scope_hint(slug: &str) -> &str {
         })
 }
 
+/// One bot's permissions, as its row draws them: the labels, in the list's own order, separated
+/// by the product's interpunct.
+///
+/// Written as a loop rather than a map-and-join because the labels are borrowed from a table of
+/// static strings and the row wants one owned line: a map would collect a vector of borrows only
+/// to join them and drop it, and the loop says the same thing without the intermediate.
+#[must_use]
+fn scope_line(scopes: &[String]) -> String {
+    let mut line = String::new();
+    for slug in scopes {
+        if !line.is_empty() {
+            line.push_str(" \u{00B7} ");
+        }
+        line.push_str(scope_label(slug));
+    }
+    line
+}
+
+/// The hint line for every slug in a set, one per line, for the permissions line's hover.
+///
+/// A slug this build cannot describe still gets its own line, so a hover over a set the node chose
+/// and this build does not know says so rather than quietly listing fewer permissions than the
+/// line above it drew.
+#[must_use]
+fn scope_hints(scopes: &[String]) -> String {
+    let mut lines = String::new();
+    for slug in scopes {
+        if !lines.is_empty() {
+            lines.push('\n');
+        }
+        lines.push_str(scope_hint(slug));
+    }
+    lines
+}
+
 /// A token the node minted, on its way to the person who has to save it.
 ///
 /// Built by the shell from [`crate::net::Event::BotChanged`] and never inferred: the pane does not
@@ -519,19 +554,25 @@ fn bot_row(
                 });
             });
             ui.add_space(space::XS);
-            ui.label(
-                RichText::new(match &row.scopes {
-                    None => "This server did not say what this bot may do.".to_owned(),
-                    Some(scopes) if scopes.is_empty() => "No permissions.".to_owned(),
-                    Some(scopes) => scopes
-                        .iter()
-                        .map(|slug| scope_label(slug))
-                        .collect::<Vec<_>>()
-                        .join(" \u{00B7} "),
-                })
-                .font(egui::FontId::proportional(font::SMALL))
-                .color(colors.text_muted),
+            // The line is the set's labels; the hover spells each one out. Two honest words stand
+            // in where there is no set to spell out, and neither of them is "no permissions": a
+            // node that said nothing is not a node that said none.
+            let (permissions, hover) = match &row.scopes {
+                None => (
+                    "This server did not say what this bot may do.".to_owned(),
+                    None,
+                ),
+                Some(scopes) if scopes.is_empty() => ("No permissions.".to_owned(), None),
+                Some(scopes) => (scope_line(scopes), Some(scope_hints(scopes))),
+            };
+            let line = ui.label(
+                RichText::new(permissions)
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text_muted),
             );
+            if let Some(hover) = hover {
+                line.on_hover_text(hover);
+            }
             ui.add_space(space::XS);
             ui.horizontal(|ui| {
                 let label = if row.paused == Some(true) {
@@ -787,5 +828,26 @@ mod tests {
         assert_eq!(scope_label("send_announcements"), "Send announcements");
         assert_eq!(scope_label("teleport"), "teleport");
         assert!(!scope_hint("teleport").is_empty());
+
+        // A slug with no hint is a permission the picker offers with nothing said about it, so
+        // the table is walked rather than sampled.
+        for scope in SCOPES {
+            assert!(
+                !scope_hint(scope.slug).is_empty(),
+                "{} has no hint",
+                scope.slug
+            );
+        }
+
+        // The row's two joined forms: the labels on one line, one hint per line under the hover.
+        // The undescribed slug appears in both, as itself and as the sentence that says so.
+        let held = ["send_messages".to_owned(), "teleport".to_owned()];
+        assert_eq!(scope_line(&held), "Send messages \u{00B7} teleport");
+        assert_eq!(scope_hints(&held).lines().count(), held.len());
+        assert_eq!(
+            scope_line(&[]),
+            "",
+            "a bot holding nothing draws a line with nothing on it, not a stray separator"
+        );
     }
 }
