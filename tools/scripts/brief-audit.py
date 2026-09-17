@@ -654,6 +654,21 @@ def run_audit(root: Path, brief_path: Path, quiet: bool = False) -> Audit:
     a.expect(not unmarked, "every protocol section carries a STATUS marker",
              f"unmarked {unmarked}")
 
+    # The four status words are the whole vocabulary, and a fifth one is not a
+    # stylistic slip: every reader of this document, human or script, decides what
+    # to do with a section by matching on that word, so "STATUS: BUILD" reads as a
+    # status nobody defined -- is it weaker than BUILT, or the same thing spelled
+    # wrong? -- and only the person who wrote it knows. This is the one status
+    # defect no other check here can see: the checks around it ask whether a BUILT
+    # claim has code behind it, and none of them has an opinion about a word that
+    # claims nothing.
+    STATUS_WORDS = ("BUILT", "SCHEMA", "SPEC", "SEBAGIAN")
+    bogus = sorted({w for n in sections
+                    for w in re.findall(r"STATUS: ([A-Z]+)", sections[n][1])
+                    if w not in STATUS_WORDS})
+    a.expect(not bogus, "every STATUS marker uses one of the document's four status words",
+             f"{bogus[:6]}")
+
     # Opcode names used anywhere must be declared in the section 145 registry,
     # not only in the schema — the registry is what a reader consults.
     undeclared = [o["name"] for o in opcode_list
@@ -922,6 +937,10 @@ def selftest() -> int:
             ("a docs subdirectory cites a nonexistent section",
              add_dangling_brief_ref,
              'references resolve'),
+            ("a section invents a fifth status word",
+             edit("migo.md", "STATUS: SPEC. Protokol signaling ada di section 165",
+                  "STATUS: BUILD. Protokol signaling ada di section 165"),
+             "four status words"),
         ]
 
         failures = []
