@@ -302,11 +302,15 @@ private fun BotCard(
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
+            // Bound to a local before the test: scopes is a property of a class from another module,
+            // and Kotlin refuses to smart-cast an open property across a module boundary because the
+            // other module could have been compiled against a different declaration of it.
+            val scopes = bot.scopes
             Text(
                 text = when {
-                    bot.scopes == null -> "This server did not say what this bot may do."
-                    bot.scopes.isEmpty() -> "No permissions."
-                    else -> bot.scopes.joinToString(" · ") { scopeLabel(it) }
+                    scopes == null -> "This server did not say what this bot may do."
+                    scopes.isEmpty() -> "No permissions."
+                    else -> scopes.joinToString(" · ") { scopeLabel(it) }
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

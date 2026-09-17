@@ -108,14 +108,14 @@ import com.migo.core.net.RestError
 import com.migo.core.net.TrackOptions
 import com.migo.core.net.TrackOutcome
 import com.migo.core.net.TrackResult
+import com.migo.core.protocol.BotEvent
+import com.migo.core.protocol.BotView
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationMemberEvent
 import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.ConversationVoteEvent
-import com.migo.core.protocol.BotEvent
-import com.migo.core.protocol.BotView
 import com.migo.core.protocol.EconomyEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.InboxItem

@@ -26,8 +26,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
-import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.BotsScreen
+import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
 import com.migo.app.ui.MobileHome
