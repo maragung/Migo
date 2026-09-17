@@ -1,5 +1,6 @@
 package com.migo.core.session
 
+import com.migo.core.crypto.Aad
 import com.migo.core.crypto.CryptoError
 import com.migo.core.crypto.Envelope
 import com.migo.core.crypto.IdentitySecret
@@ -53,6 +54,21 @@ import kotlinx.coroutines.sync.withLock
  * can see. [SessionPersistence] is how the sealed store is layered underneath without this class
  * knowing anything about files or key wrapping; the default does nothing, which keeps the in-memory
  * behaviour of the reference available for tests.
+ *
+ * # Why every call here passes an empty context
+ *
+ * [seal] and [open] hand the ratchet [Aad.NO_CONTEXT], which is the version-1 associated data and
+ * nothing more. That is not because this layer lacks the metadata: a context names the sending device,
+ * the conversation and the message, and this class is *given* the conversation id and the peer's
+ * device id on every call and holds its own device identity in [keys]. It is because the envelope this
+ * layer writes still declares version 1, and a version-1 associated data is defined not to depend on
+ * that metadata. Binding it here would put this client one version ahead of the peers that have to
+ * read it, and the peers would refuse rather than misread -- which is the correct failure, and still a
+ * conversation that stops.
+ *
+ * So the version byte and the context move together, and neither moves alone. When they do move, the
+ * ids this file already holds are what fills the context in, and the change is confined to the two
+ * scheme constants [seal] chooses between and the [Aad.context] call beside them.
  */
 class SessionCrypto(
     private val keys: LocalKeyStore,
@@ -119,7 +135,7 @@ class SessionCrypto(
             sessions[key] = entry
         }
 
-        val message = entry.session.encryptNext(plaintext)
+        val message = entry.session.encryptNext(plaintext, Aad.NO_CONTEXT)
         val pending = entry.pendingInit
         val envelope = if (pending != null) {
             Envelope.initial(preambleOf(pending), message.header, message.ciphertext).encode()
@@ -183,7 +199,11 @@ class SessionCrypto(
         if (existing != null) {
             // An established session: the ratchet does not mutate itself when a decrypt fails, so a
             // resent prekey preamble or a foreign envelope landing on this slot cannot corrupt it.
-            val plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext)
+            val plaintext = existing.session.decrypt(
+                parsed.header,
+                parsed.ciphertext,
+                Aad.NO_CONTEXT,
+            )
             // We have now heard from the peer, so they hold a working session; stop re-sending X3DH.
             existing.pendingInit = null
             persistence.save(conversationId, senderDeviceId, existing.session, existing.sharedSecret)
@@ -197,7 +217,11 @@ class SessionCrypto(
             ?: throw CryptoError.noSession()
 
         val derived = deriveResponder(preamble)
-        val plaintext = derived.session.decrypt(parsed.header, parsed.ciphertext)
+        val plaintext = derived.session.decrypt(
+            parsed.header,
+            parsed.ciphertext,
+            Aad.NO_CONTEXT,
+        )
 
         // Success: this message was ours. Now -- and only now -- consume the prekey and keep the
         // session.

@@ -2,6 +2,8 @@ package com.migo.core.crypto
 
 import com.goterl.lazysodium.LazySodiumJava
 import com.goterl.lazysodium.SodiumJava
+import com.migo.core.wire.Id
+import com.migo.core.wire.idFromBytes
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -299,6 +301,192 @@ class CryptoVectorsTest {
         }
     }
 
+    // --- aad context --------------------------------------------------------
+    //
+    // The envelope's bound context is the one structure here that four separate implementations
+    // build: the Rust reference the server links, a second Rust build inside the desktop client, the
+    // TypeScript SDK, and this client. None of them call each other, so nothing but this file keeps
+    // their bytes identical — and a disagreement is not a test failure in the field, it is a message
+    // that will not open, reported by a person as "it says delivered but nothing arrives".
+
+    @Test
+    fun aadContextsMatchTheVectors() {
+        val file = load("aad-context.json")
+        assertHex("the domain label", text(file, "domain"), Aad.domain)
+        assertEquals(
+            "the domain label is ascii, which is what lets a reader print it",
+            text(file, "ascii"),
+            String(Aad.domain, Charsets.US_ASCII),
+        )
+
+        for (case in section(file, "cases", "aad-context.json")) {
+            val version = EnvelopeVersion.fromWire(int(case, "envelope_version"))
+                ?: fail("`${name(case)}` names a version this build refuses")
+            val scheme = int(case, "scheme")
+            val sender = idFromBytes(hex(text(case, "sender_device")))
+            val conversation = idFromBytes(hex(text(case, "conversation_id")))
+            val messageId = opt(case, "message_id")
+                ?.jsonPrimitive
+                ?.content
+                ?.let { idFromBytes(hex(it)) }
+
+            val context = Aad.context(version, scheme, sender, conversation, messageId)
+            assertHex("context for `${name(case)}`", text(case, "context"), context)
+
+            // The assembled value is what a ratchet actually authenticates, so the case pins the
+            // whole string and not just the half that is new.
+            assertHex(
+                "associated data for `${name(case)}`",
+                text(case, "aad"),
+                Aad.assemble(
+                    hex(text(case, "associated_data")),
+                    hex(text(case, "header")),
+                    context,
+                ),
+            )
+
+            // A context a reader could not take apart again would still authenticate, so this is not
+            // redundant with the comparison above: it pins that the layout is unambiguous rather than
+            // merely reproducible.
+            //
+            // Only a version that binds a context has one to take apart. A version-1 case carries the
+            // empty context on purpose — that is the compatibility rule, and `parseContext` refusing
+            // zero bytes is the rule holding rather than a gap here, so the refusal is asserted
+            // instead of the case being skipped. An absent context is not a context.
+            if (!version.bindsContext) {
+                assertTrue("`${name(case)}` binds no context", context.isEmpty())
+                assertEquals(
+                    "`${name(case)}`: an absent context is not a context",
+                    "BadLength",
+                    kindOf { Aad.parseContext(context) },
+                )
+                continue
+            }
+
+            val parsed = try {
+                Aad.parseContext(context)
+            } catch (error: CryptoError) {
+                fail("`${name(case)}` produced an unparseable context: ${error.message}")
+            }
+            assertEquals("`${name(case)}` version", version, parsed.version)
+            assertEquals("`${name(case)}` scheme", scheme, parsed.scheme)
+            assertEquals("`${name(case)}` sender", sender, parsed.senderDevice)
+            assertEquals("`${name(case)}` conversation", conversation, parsed.conversationId)
+            assertEquals("`${name(case)}` message id", messageId, parsed.messageId)
+        }
+    }
+
+    @Test
+    fun aVersionOneEnvelopeBindsNoContext() {
+        // The compatibility rule, stated as a test rather than as a comment: a v1 envelope's
+        // associated data must be `associated_data || header` and nothing else, whatever metadata the
+        // caller happens to hold. If this ever stops being true, every v1 message already stored stops
+        // opening, and it fails looking like corruption rather than looking like a version mistake.
+        val file = load("aad-context.json")
+        val sender = idFromBytes(ByteArray(16) { 0xa0.toByte() })
+        val conversation = idFromBytes(ByteArray(16) { 0xc0.toByte() })
+        val message = idFromBytes(ByteArray(16) { 0xe0.toByte() })
+
+        val v1: List<Pair<String, Id?>> = listOf("without a message id" to null, "with one" to message)
+        for ((label, messageId) in v1) {
+            val context = Aad.context(EnvelopeVersion.V1, 1, sender, conversation, messageId)
+            assertTrue(
+                "a v1 context must be empty $label, got ${context.size} bytes",
+                context.isEmpty(),
+            )
+        }
+
+        // The two v1 cases in the file must therefore be byte-identical to the plain concatenation,
+        // which is the claim in one line.
+        val v1 = section(file, "cases", "aad-context.json")
+            .filter { int(it, "envelope_version") == 1 }
+        assertTrue("the file must carry the v1 rule both ways", v1.size >= 2)
+        for (case in v1) {
+            assertEquals(
+                "v1 case `${name(case)}` is not a plain concatenation",
+                text(case, "associated_data") + text(case, "header"),
+                text(case, "aad"),
+            )
+            assertEquals("v1 case `${name(case)}`", "", text(case, "context"))
+        }
+    }
+
+    @Test
+    fun theVersionGateAcceptsExactlyTheVersionsThisBuildWrites() {
+        val file = load("aad-context.json")
+        for (case in section(file, "invalid", "aad-context.json")) {
+            val value = int(case, "envelope_version")
+            assertEquals(
+                "`${name(case)}` (${text(case, "why")})",
+                text(case, "error"),
+                if (EnvelopeVersion.fromWire(value) == null) "UnsupportedVersion" else "accepted",
+            )
+        }
+
+        // The sweep is the part a per-case list cannot express: a reader that accepted, say, only 255
+        // and 0 would pass the cases above. Every byte can hold is checked against the two the
+        // protocol defines, and each accepted version has to survive its own round trip.
+        val declared = (file["versions"] ?: fail("aad-context.json declares no versions"))
+            .jsonObject["accepted"]
+            ?.jsonArray
+            ?.map { it.jsonPrimitive.content.toInt() }
+            ?: fail("aad-context.json declares no accepted versions")
+
+        val writers = ArrayList<Int>()
+        for (value in 0..255) {
+            val version = EnvelopeVersion.fromWire(value) ?: continue
+            writers.add(version.wire)
+            assertEquals("a version must round-trip through its own byte", value, version.wire)
+            assertEquals(
+                "version $value disagrees with itself about binding a context",
+                value == 2,
+                version.bindsContext,
+            )
+        }
+        assertEquals("the gate and the file disagree", declared, writers)
+        assertEquals(
+            "`ACCEPTED` is the gate, spelled out",
+            declared,
+            EnvelopeVersion.ACCEPTED.map { it.wire },
+        )
+    }
+
+    @Test
+    fun aContextCarryingBitsThisBuildDoesNotKnowIsRefused() {
+        // The parser is not on the receive path — a receiver rebuilds the context and lets the tag
+        // decide — but it is what the vectors above read the layout back through, so its two refusal
+        // paths are pinned rather than left to a reader to discover by a wrong answer elsewhere.
+        val context = Aad.context(
+            EnvelopeVersion.V2,
+            1,
+            idFromBytes(ByteArray(16) { 0xa0.toByte() }),
+            idFromBytes(ByteArray(16) { 0xc0.toByte() }),
+        )
+        assertEquals("the flags byte is the last of the fixed part", 52, context.size)
+
+        val unknownFlag = context.copyOf()
+        unknownFlag[unknownFlag.size - 1] = 0x80.toByte()
+        assertEquals("an unknown flag must be refused", "MalformedHeader", kindOf {
+            Aad.parseContext(unknownFlag)
+        })
+
+        val trailing = context + byteArrayOf(0)
+        assertEquals("trailing bytes must be refused", "BadLength", kindOf {
+            Aad.parseContext(trailing)
+        })
+
+        val truncated = context.copyOf(context.size - 1)
+        assertEquals("a truncated context must be refused", "BadLength", kindOf {
+            Aad.parseContext(truncated)
+        })
+
+        val wrongDomain = context.copyOf()
+        wrongDomain[0] = (wrongDomain[0].toInt() xor 0x01).toByte()
+        assertEquals("a context under another domain must be refused", "MalformedHeader", kindOf {
+            Aad.parseContext(wrongDomain)
+        })
+    }
+
     // --- the suite is present at all ----------------------------------------
 
     @Test
@@ -307,6 +495,7 @@ class CryptoVectorsTest {
             "kdf.json" to listOf("cases", "rfc", "pairs"),
             "aead.json" to listOf("cases", "invalid"),
             "mac.json" to listOf("cases", "parts", "distinct_pairs", "rfc", "truncation"),
+            "aad-context.json" to listOf("cases", "invalid"),
         )
         var total = 0
         for ((file, sections) in expected) {
@@ -314,8 +503,16 @@ class CryptoVectorsTest {
             assertTrue("$file must record where its expected bytes came from", loaded.containsKey("provenance"))
             for (entry in sections) total += section(loaded, entry, file).size
         }
-        assertTrue("only $total crypto vector cases, expected at least 40", total >= 40)
+        assertTrue("only $total crypto vector cases, expected at least 50", total >= 50)
     }
+}
+
+/** The [CryptoErrorKind] name [body] fails with, for a refusal the vectors do not label. */
+private fun kindOf(body: () -> Unit): String = try {
+    body()
+    "accepted"
+} catch (error: CryptoError) {
+    error.kind.name
 }
 
 /**

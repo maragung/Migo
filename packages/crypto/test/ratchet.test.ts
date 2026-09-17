@@ -22,6 +22,19 @@
  * previous chain on a DH step. The two tests below are the two shapes, and each fails on the old
  * order for its own reason rather than as a side effect of the other.
  *
+ * # Why the context tests exist
+ *
+ * The context a version-2 envelope binds is what stops a server relocating a ciphertext into another
+ * conversation: the receiver rebuilds the context from the metadata the frame claims, and a tag
+ * computed over different bytes does not verify. `aad` and its conformance vectors pin the *bytes*;
+ * what nothing pinned until these tests is that the ratchet actually feeds them to the AEAD on both
+ * sides rather than accepting the parameter and ignoring it. An ignored parameter is silent: every
+ * vector still passes, every round trip still works, and the protection section 11 asks for is
+ * absent. The four tests below are ports of the four in the Rust reference — the round trip, a
+ * context one bit apart, the empty context's compatibility with version 1, and the binding surviving
+ * a turn of the DH ratchet, which is the case a per-chain bug would leave passing above and failing
+ * in a real conversation's second reply.
+ *
  * # What these tests deliberately do not check
  *
  * That the forged frame is *rejected* is asserted only so the rest of the test means something; a
@@ -39,11 +52,29 @@ import {
   RatchetHeader,
   RatchetSession,
   SignedPrekey,
+  aad,
   x3dh,
 } from '../src/index.js';
 
 /** A version-1 envelope binds no context, which is what every call here passes. */
 const NO_CONTEXT = new Uint8Array(0);
+
+/**
+ * A well-formed version-2 context, the same shape the Rust reference builds.
+ *
+ * Not a random byte string: a context that failed to build at all would make the negative tests
+ * below pass for the wrong reason, so this is produced by `aad.context` — the same function a client
+ * will call — over three fixed ids.
+ */
+function aContext(): Uint8Array {
+  return aad.context(
+    aad.EnvelopeVersion.V2,
+    aad.SCHEME_DOUBLE_RATCHET,
+    new Uint8Array(16).fill(0xa0),
+    new Uint8Array(16).fill(0xc0),
+    new Uint8Array(16).fill(0xe0),
+  );
+}
 
 /** Two sessions that have completed X3DH, ready to exchange messages. */
 interface Pair {
@@ -150,5 +181,113 @@ test('a forged frame does not advance the chain being left behind', () => {
     bob.decrypt(a3.header, a3.ciphertext, NO_CONTEXT),
     encoder.encode('a3'),
     'the new chain still opens',
+  );
+});
+
+test('a context is bound to the message', () => {
+  const { alice, bob } = pair();
+  const context = aContext();
+  const sealed = alice.encrypt(new TextEncoder().encode('halo'), context);
+  assert.deepEqual(
+    bob.decrypt(sealed.header, sealed.ciphertext, context),
+    new TextEncoder().encode('halo'),
+    'a context the receiver rebuilds identically opens the message',
+  );
+});
+
+test('a message does not open under a different context', () => {
+  // One byte apart, because a context that only matched on whole fields would pass a test that
+  // swapped a field and fail in the field on a version byte. A fresh pair each time: a failed open is
+  // not something this test then retries, since the message key it derived is gone.
+  const context = aContext();
+  const other = context.slice();
+  const last = other.length - 1;
+  // `noUncheckedIndexedAccess` is on, so the read is spelled out rather than hidden in a `^=`.
+  other[last] = (other[last] ?? 0) ^ 0x01;
+
+  const first = pair();
+  const sealed = first.alice.encrypt(new TextEncoder().encode('halo'), context);
+  assert.throws(
+    () => first.bob.decrypt(sealed.header, sealed.ciphertext, other),
+    'a context changed by one bit must not authenticate',
+  );
+
+  // And the converse: an empty context is not a wildcard that opens a message sealed under a real
+  // one.
+  const second = pair();
+  const sealedToo = second.alice.encrypt(new TextEncoder().encode('halo'), context);
+  assert.throws(
+    () => second.bob.decrypt(sealedToo.header, sealedToo.ciphertext, NO_CONTEXT),
+    'an empty context must not open a message sealed under a real one',
+  );
+});
+
+test('an empty context is the version one associated data', () => {
+  // The compatibility claim, at the layer that would break if it were false: two sessions that both
+  // pass nothing agree, and an empty context adds no bytes to what a version-1 envelope
+  // authenticated.
+  const { alice, bob } = pair();
+  const encoder = new TextEncoder();
+  const sealed = alice.encrypt(encoder.encode('halo'), NO_CONTEXT);
+  assert.deepEqual(
+    bob.decrypt(sealed.header, sealed.ciphertext, NO_CONTEXT),
+    encoder.encode('halo'),
+    'two sessions that both pass no context still agree',
+  );
+
+  const prefix = new Uint8Array(64).map((_, i) => i);
+  const header = sealed.header.toBytes();
+  const plain = new Uint8Array(prefix.length + header.length);
+  plain.set(prefix, 0);
+  plain.set(header, prefix.length);
+  assert.equal(
+    aad.assemble(prefix, header, NO_CONTEXT).length,
+    prefix.length + RatchetHeader.ENCODED_LEN,
+    'an empty context must add no bytes to the associated data',
+  );
+  assert.deepEqual(
+    aad.assemble(prefix, header, NO_CONTEXT),
+    plain,
+    'and the assembled bytes are the version-1 prefix and header, nothing else',
+  );
+});
+
+test('a context survives the dh ratchet', () => {
+  // The context is per message and the ratchet turns between messages, so a binding that only worked
+  // within one chain would look correct in the test above and fail on the second reply of every real
+  // conversation.
+  const { alice, bob } = pair();
+  const encoder = new TextEncoder();
+  const first = aContext();
+  const one = alice.encrypt(encoder.encode('one'), first);
+  assert.deepEqual(
+    bob.decrypt(one.header, one.ciphertext, first),
+    encoder.encode('one'),
+    'the first chain carries its context',
+  );
+
+  const second = first.slice();
+  const last = second.length - 1;
+  second[last] = 0xe1;
+
+  const two = bob.encryptNext(encoder.encode('two'), second);
+  assert.deepEqual(
+    alice.decrypt(two.header, two.ciphertext, second),
+    encoder.encode('two'),
+    'the next chain carries a different one',
+  );
+
+  // And the binding is per message rather than per session: the context the first chain used must
+  // not open a message the next chain sealed.
+  const other = pair();
+  const sealed = other.bob.encryptNext(encoder.encode('empat'), second);
+  assert.throws(
+    () => other.alice.decrypt(sealed.header, sealed.ciphertext, first),
+    "the previous chain's context must not open a message from the next chain",
+  );
+  assert.deepEqual(
+    other.alice.decrypt(sealed.header, sealed.ciphertext, second),
+    encoder.encode('empat'),
+    'and the context it was sealed under still does',
   );
 });
