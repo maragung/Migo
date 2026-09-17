@@ -40,6 +40,7 @@ import {
   decodeBotRegister,
   decodeBotRotate,
   decodeBotScopes,
+  encodeAcknowledged,
   encodeBotEvent,
   encodeBotListResponse,
   encodeBotView,
@@ -231,7 +232,9 @@ test('every slug the SDK offers is one the node defines, spelled the way it spel
 });
 
 test('command omits args when none are given and carries them in order when they are', async () => {
-  const { transport, bots } = rig(new Map([[OP.BOT_COMMAND, () => new Uint8Array()]]));
+  const { transport, bots } = rig(
+    new Map([[OP.BOT_COMMAND, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
 
   await bots.command(BOT, 'forecast');
   assert.deepEqual(decodeBody(decodeBotCommand, transport.sent[0]!.body), {
