@@ -78,8 +78,10 @@ test('register sends the handle and the display name, and returns the one-time t
   const view = await bots.register('weather', 'Weather');
 
   assert.equal(transport.sent.length, 1);
-  assert.equal(transport.sent[0]?.opcode, OP.BOT_REGISTER);
-  const sent = decodeBody(decodeBotRegister, transport.sent[0]!.body);
+  const frame = transport.sent[0];
+  assert.ok(frame, 'the domain sent the register frame');
+  assert.equal(frame.opcode, OP.BOT_REGISTER);
+  const sent = decodeBody(decodeBotRegister, frame.body);
   assert.deepEqual(sent, { username: 'weather', displayName: 'Weather' });
 
   assert.equal(view.botId, BOT);
@@ -145,8 +147,10 @@ test('rotate sends the bot id alone and returns the replacement token', async ()
 
   const view = await bots.rotate(BOT);
 
-  assert.equal(transport.sent[0]?.opcode, OP.BOT_ROTATE);
-  assert.deepEqual(decodeBody(decodeBotRotate, transport.sent[0]!.body), { botId: BOT });
+  const frame = transport.sent[0];
+  assert.ok(frame, 'the domain sent the rotate frame');
+  assert.equal(frame.opcode, OP.BOT_ROTATE);
+  assert.deepEqual(decodeBody(decodeBotRotate, frame.body), { botId: BOT });
   assert.equal(view.token, 'mgt_replacement');
   // Rotation moves nothing else, and the view says so.
   assert.equal(view.name, 'Weather');
@@ -243,7 +247,10 @@ test('command omits args when none are given and carries them in order when they
   });
 });
 
-test('bot events reach a registered handler and stop reaching it once unsubscribed', async () => {
+// Delivery is synchronous — `emit` walks the transport's subscribers on the calling stack — so
+// this test is deliberately not async: there is nothing to await, and an `async` wrapper here
+// would suggest the event arrives on a later tick when the point is that it does not.
+test('bot events reach a registered handler and stop reaching it once unsubscribed', () => {
   const { transport, bots } = rig(new Map());
   bots.start();
 
