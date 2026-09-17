@@ -124,6 +124,8 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     muted: false,
     degraded: false,
     quality: null,
+    sharingScreen: false,
+    screenStream: null,
     nowMs: NOW,
     endedAt: null,
     localStream: null,
@@ -133,6 +135,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onCancel: () => {},
     onEnd: () => {},
     onToggleMute: () => {},
+    onToggleScreenShare: () => {},
     onDismiss: () => {},
     ...overrides,
   };
@@ -396,6 +399,70 @@ test('the quality indicator shows the measured tier, and nothing before there is
     quality: 'frame-rate-lowered',
   });
   assert.ok(voice.includes('Poor'), 'a voice call reports its link the same way');
+});
+
+test('a connected video call offers screen sharing, and a voice call never does', () => {
+  const video = screen({
+    call: activeCall({
+      state: CallState.Connected,
+      mediaKind: CallMediaKind.Video,
+      startedAt: NOW - 5_000,
+    }),
+  });
+  assert.ok(video.includes('aria-label="Share your screen"'));
+
+  // Section 180 makes screen sharing a video-call capability: a voice call has no video m-line for
+  // a share to ride, so the control that could not do anything is not drawn at all.
+  const voice = screen({
+    call: activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio }),
+  });
+  assert.ok(!voice.includes('Share your screen'), 'a voice call cannot share a screen');
+
+  // And it belongs to the states a live link exists in, like the other connected controls.
+  const ringing = screen({
+    call: activeCall({ state: CallState.Ringing, mediaKind: CallMediaKind.Video }),
+  });
+  assert.ok(!ringing.includes('Share your screen'), 'nothing is shared before a call connects');
+});
+
+test('the sharer keeps reading that the screen is being shared, for as long as it is', () => {
+  const call = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 5_000,
+  });
+  const idle = screen({ call });
+  assert.ok(!idle.includes('call-sharing'), 'no share, no indicator');
+
+  const sharing = screen({ call, sharingScreen: true });
+  // The requirement is not "a notice appears" but "it is still there while the share runs": a
+  // forgotten share is the leak section 180 names, so the indicator is not a toast and does not
+  // depend on any other state to survive.
+  assert.ok(sharing.includes('call-sharing'), 'the sharer must see that it is sharing');
+  assert.ok(sharing.includes('You are sharing your screen'), 'and it must say so in words');
+  assert.ok(sharing.includes('aria-label="Stop sharing your screen"'), 'and offer the way out');
+
+  // It survives the degraded rung, which is the state a share most plausibly outlives the user's
+  // attention in: video is paused for the peer, and the capture is still running.
+  const degraded = screen({ call, sharingScreen: true, degraded: true });
+  assert.ok(degraded.includes('You are sharing your screen'));
+});
+
+test('the self-view shows what is being sent: the screen while sharing, the camera otherwise', () => {
+  const call = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 5_000,
+  });
+  const camera = { id: 'cam' } as unknown as MediaStream;
+  const desktop = { id: 'screen' } as unknown as MediaStream;
+
+  // The label is the only part of this a static render can read, and it is the part that matters:
+  // a self-view labelled "Your video" over a shared desktop tells the user the wrong thing about
+  // what the peer is receiving.
+  assert.ok(screen({ call, localStream: camera }).includes('aria-label="Your video"'));
+  const sharing = screen({ call, localStream: camera, screenStream: desktop, sharingScreen: true });
+  assert.ok(sharing.includes('aria-label="The screen you are sharing"'));
 });
 
 test('a measured rung is not shown while the call is still ringing or already ended', () => {

@@ -45,6 +45,7 @@ import {
   targetQuality,
   videoAdmitted,
   videoSenderParams,
+  videoTrackToSend,
 } from '../src/lib/migo/group-media.js';
 import type {
   AdaptiveThresholds,
@@ -184,6 +185,33 @@ test('each rung shapes the sender with the crate’s own caps', () => {
     maxFramerate: 15, // half of a 30 fps sender — the crate strides by sequence; a sender halves.
   });
   assert.deepEqual(videoSenderParams('video-off', 1000), { enabled: false });
+});
+
+test('a shared screen is what goes on the wire, and the camera is what comes back', () => {
+  // A stream stand-in: the only thing either caller reads off one is its video track.
+  const stream = (id: string): MediaStream =>
+    ({ id, getVideoTracks: () => [{ id: `${id}-track` }] }) as unknown as MediaStream;
+  const camera = stream('cam');
+  const screen = stream('screen');
+
+  assert.equal(videoTrackToSend(null, camera)?.id, 'cam-track', 'no share, the camera sends');
+  assert.equal(videoTrackToSend(screen, camera)?.id, 'screen-track', 'a share replaces it');
+  assert.equal(
+    videoTrackToSend(screen, null)?.id,
+    'screen-track',
+    'a camera that was never acquired does not stop a share',
+  );
+  // No camera and no share is no video: the null is the answer, not an empty track, because
+  // `shapeVideoSender` reads a null track as "send nothing" — which is what such a device does.
+  assert.equal(videoTrackToSend(null, null), null);
+  // A stream with no video track at all is the same fact as no stream: the audio-only case.
+  const audioOnly = { getVideoTracks: () => [] } as unknown as MediaStream;
+  assert.equal(videoTrackToSend(null, audioOnly), null);
+  assert.equal(
+    videoTrackToSend(audioOnly, camera)?.id,
+    'cam-track',
+    'a share with no video falls back',
+  );
 });
 
 test('the delta between two readings is the only honest loss and drop percentage', () => {

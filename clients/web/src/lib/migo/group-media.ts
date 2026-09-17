@@ -438,6 +438,27 @@ export function videoSenderParams(
 }
 
 /**
+ * The video track an endpoint wants on the wire: the screen while one is being shared, the camera
+ * otherwise.
+ *
+ * The two are not alternatives the caller picks between per link — a share replaces the camera for
+ * everything the ladder still carries video to — so this is one answer for the whole endpoint, and
+ * it is the *screen* that wins: a share that lost to a camera would put a face on the wire while the
+ * interface said the desktop was being sent, which is the one failure of this feature a user cannot
+ * see from their own screen.
+ *
+ * `null` for the camera means there is no camera to fall back to, which is the honest answer rather
+ * than an empty track: {@link shapeVideoSender} treats a null track as "send nothing", which is what
+ * a device with no camera does.
+ */
+export function videoTrackToSend(
+  screen: MediaStream | null,
+  camera: MediaStream | null,
+): MediaStreamTrack | null {
+  return screen?.getVideoTracks()[0] ?? camera?.getVideoTracks()[0] ?? null;
+}
+
+/**
  * Shapes one video sender to a rung, and answers whether the sender now carries the track.
  *
  * The one place a rung becomes something a peer connection does, shared by both planes that run the
