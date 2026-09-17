@@ -37,9 +37,18 @@
  * A stored key is deleted the moment it is used. That is what makes a replayed frame fail rather
  * than deliver the same message twice.
  *
- * This mirrors `server/crates/migo-crypto/src/ratchet.rs` step for step — including where the chain
- * key is advanced in place versus on a local copy, which is the difference between a forged frame
- * that is merely rejected and one that corrupts the session.
+ * # Nothing is committed until the tag verifies
+ *
+ * Every field of the header is public, so a frame that fails to authenticate is free to send. That
+ * makes the *order* of operations on the receive path a security property in its own right: deriving
+ * along a chain must happen on a copy, and the session's own state must move only once the message
+ * is proven. Advancing a stored chain first would leave it moved while the counter that indexes it
+ * stayed put, so the genuine message at that number would derive its key from the wrong position and
+ * never open again — one forged frame, and the conversation is broken from then on rather than
+ * merely delayed. Both receive paths follow this rule, and the two `a forged frame does not advance`
+ * tests in `test/ratchet.test.ts` hold them to it.
+ *
+ * This mirrors `server/crates/migo-crypto/src/ratchet.rs` step for step, including that rule.
  */
 
 import { bytesToHex, equalBytes } from '@noble/ciphers/utils.js';
@@ -310,10 +319,22 @@ export class RatchetSession {
     if (gap > MAX_CHAIN_GAP) {
       throw CryptoError.chainGapTooLarge();
     }
-    const chain = this.#receivingChain;
-    if (chain === null) {
+    const stored = this.#receivingChain;
+    if (stored === null) {
       throw CryptoError.noSession();
     }
+
+    // Advance a *copy* of the chain, never the session's own buffer.
+    //
+    // `advanceChain` mutates its argument in place, and `openWithNonce` below can throw. Advancing
+    // the stored chain first would leave it moved while `#receivedCount` still pointed at the old
+    // position, so every later genuine message at that number would be derived from the wrong step
+    // of the chain — permanently undecryptable. What makes that reachable is that the frame needs
+    // no secret to trigger it: the ratchet public key travels in the header, so an attacker replays
+    // the current one with a message number at or past `#receivedCount` and any ciphertext at all,
+    // and the corruption is done before the tag is even consulted. A server relaying this
+    // conversation can therefore break it for both ends at will.
+    const chain = stored.slice();
 
     // Derive and stash the keys for anything skipped, then the key we want.
     const pending: Array<{ number: number; key: MessageKey }> = [];
@@ -324,10 +345,14 @@ export class RatchetSession {
     const target = advanceChain(chain);
     const plaintext = aead.openWithNonce(target.key, target.nonce, aad, ciphertext);
 
-    // Only now, once the message is proven genuine, mutate session state.
+    // Only now, once the message is proven genuine, mutate session state. The chain this frame
+    // advanced past is zeroed rather than left for the collector, because a live chain key derives
+    // every key after it.
     for (const { number, key } of pending) {
       this.#stashSkipped(header.ratchetKey, number, key);
     }
+    stored.fill(0);
+    this.#receivingChain = chain;
     this.#receivedCount = header.messageNumber + 1;
     return plaintext;
   }
@@ -346,11 +371,13 @@ export class RatchetSession {
     }
 
     // Finish the previous chain, so messages still in flight from it can be decrypted when they
-    // arrive. This advances the *old* receiving chain in place; the new chain below is local until
-    // it is proven, so a forged frame cannot corrupt what we already track.
+    // arrive. This advances a *copy*: the frame below can throw, and the advanced form of this
+    // chain is never stored anyway — only the keys it yields are, and only once the frame is
+    // proven — so mutating the session's chain here would corrupt it on a forged frame and buy
+    // nothing.
     const leftovers: Array<{ ratchetKey: Uint8Array; number: number; key: MessageKey }> = [];
     if (this.#receivingChain !== null && this.#receivingKey !== null) {
-      const chain = this.#receivingChain;
+      const chain = this.#receivingChain.slice();
       const previousKey = this.#receivingKey;
       const remaining = saturatingSub(header.previousChainLength, this.#receivedCount);
       if (remaining > MAX_CHAIN_GAP) {
