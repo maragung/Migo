@@ -341,7 +341,11 @@ export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCo
   // no candidate to look up. Collected first, interpreted after.
   const candidateTypes = new Map<string, string>();
   for (const report of stats.values()) {
-    const typed = report as Partial<RTCIceCandidateStats> & { id?: string; type?: string };
+    // Written as a shape rather than as a DOM type on purpose: this TypeScript's `lib.dom` has
+    // `RTCIceCandidatePairStats` and no `RTCIceCandidateStats`, so naming the candidate type here
+    // would be an unresolved name that quietly widens the whole expression to `any` — which lints
+    // as unsafe access everywhere it is used and type-checks as nothing at all.
+    const typed = report as { id?: string; type?: string; candidateType?: string };
     if (typed.type === 'local-candidate' || typed.type === 'remote-candidate') {
       if (typeof typed.id === 'string') {
         candidateTypes.set(typed.id, typed.candidateType ?? '');

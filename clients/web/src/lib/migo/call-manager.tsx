@@ -919,6 +919,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     },
     [
       adoptCallKey,
+      adoptVideoSender,
       armRingTimeout,
       callInProgress,
       createPeer,
@@ -1017,6 +1018,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, [
     answerCall,
     acquireAnswerMedia,
+    adoptVideoSender,
     callInProgress,
     createPeer,
     drainHeldIce,

@@ -284,7 +284,9 @@ interface Caps {
 }
 
 function encodingOf(fake: FakeSender): Caps {
-  return (fake.params.encodings[0] ?? {}) as Caps;
+  // No cast: an `RTCRtpEncodingParameters` already satisfies `Caps`, which is the point of
+  // declaring `Caps` as the three fields this file reads rather than the browser's whole dictionary.
+  return fake.params.encodings[0] ?? {};
 }
 
 function fakeSender(): FakeSender {
