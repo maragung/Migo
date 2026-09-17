@@ -16,6 +16,7 @@
 pub mod admins;
 pub mod alerts;
 pub mod auth;
+pub mod bots;
 pub mod call;
 pub mod captcha;
 pub mod chat;
@@ -103,6 +104,10 @@ pub enum Place {
     Admins,
     /// The games the server referees, and where they are played.
     Games,
+    /// The bot accounts this person runs, and the one-time tokens they sign in with. Offered by
+    /// the account menu, and its own window rather than a tab: running a bot is a developer's
+    /// errand, not a place anybody passes through on the way to a conversation.
+    Bots,
     /// Server, theme, devices, sign-out.
     Settings,
 }
@@ -115,6 +120,7 @@ impl Place {
             Self::Friends => "Friends",
             Self::Rooms => "Rooms",
             Self::Games => "Games",
+            Self::Bots => "Bots",
             Self::Feed => "Feed",
             Self::Alerts => "Alerts",
             Self::Search => "Search",

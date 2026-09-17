@@ -253,6 +253,34 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
             painter.line_segment([p(0.36, 0.48), p(0.46, 0.6)], stroke);
             painter.line_segment([p(0.46, 0.6), p(0.68, 0.32)], stroke);
         }
+        crate::ui::Place::Bots => {
+            // A robot head: a mast, a case, two eyes and a slot for a mouth. The same mark
+            // `bot_badge` wears in text, drawn in the strip's own stroke so a bot account reads
+            // as a program wherever it appears.
+            painter.line_segment([p(0.5, 0.08), p(0.5, 0.22)], stroke);
+            painter.add(egui::Shape::circle_stroke(
+                p(0.5, 0.08),
+                side * 0.05,
+                stroke,
+            ));
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.16, 0.22), p(0.84, 0.76)),
+                4.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.add(egui::Shape::circle_stroke(
+                p(0.36, 0.44),
+                side * 0.06,
+                stroke,
+            ));
+            painter.add(egui::Shape::circle_stroke(
+                p(0.64, 0.44),
+                side * 0.06,
+                stroke,
+            ));
+            painter.line_segment([p(0.36, 0.63), p(0.64, 0.63)], stroke);
+        }
     }
 }
 
