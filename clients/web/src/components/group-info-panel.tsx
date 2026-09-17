@@ -31,7 +31,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
-import { ConversationRole, RelationshipKind, ReportSubject } from '@migo/sdk';
+import { ConversationRole, RelationshipKind } from '@migo/sdk';
 import type {
   ConversationRosterEntry,
   ConversationSummary,
@@ -51,9 +51,11 @@ import { PersonPickRow } from './new-conversation-dialog.js';
 import { voteTally } from './room-info-panel.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { ReportDialog } from './report-dialog.js';
+import { personSubject } from './report-dialog.js';
 import type { ReportSubjectRef } from './report-dialog.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
@@ -106,6 +108,7 @@ export function GroupRosterRow({
   entry,
   name,
   avatarUrl,
+  botId,
   now,
   tally,
   canVote = false,
@@ -121,6 +124,8 @@ export function GroupRosterRow({
   entry: ConversationRosterEntry;
   name: string;
   avatarUrl?: string;
+  /** The bot behind this member, when there is one: a bot can sit in a group. */
+  botId?: Id;
   /** The clock the mute line reads against, passed in so a test can pin the label. */
   now: number;
   /** The live kick-vote tally against this member ("3/5"), when a vote is open. */
@@ -162,7 +167,10 @@ export function GroupRosterRow({
       >
         <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
         <div className="person-main">
-          <span className="person-name">{name}</span>
+          <span className="person-name">
+            {name}
+            <BotBadge botId={botId} compact />
+          </span>
           <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
           {muted && mutedUntil !== undefined ? (
             <span className="person-note">Muted until {formatRelative(mutedUntil)}</span>
@@ -738,6 +746,7 @@ export function GroupInfoPanel({
                   accountId={entry.userId}
                   displayName={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
+                  botId={profiles.get(entry.userId)?.botId}
                   note="Friend"
                   picked={invitingIds.has(entry.userId)}
                   onPick={invite}
@@ -757,6 +766,7 @@ export function GroupInfoPanel({
                   accountId={person.accountId}
                   displayName={person.displayName}
                   username={person.username}
+                  botId={person.botId}
                   note={
                     seated.has(person.accountId)
                       ? 'In group'
@@ -796,6 +806,7 @@ export function GroupInfoPanel({
                     entry={entry}
                     name={profiles.get(entry.accountId)?.displayName ?? 'Someone'}
                     avatarUrl={profiles.get(entry.accountId)?.avatarUrl}
+                    botId={profiles.get(entry.accountId)?.botId}
                     now={now}
                     tally={tallyLabels.get(entry.accountId)}
                     canVote={canVote}
@@ -821,9 +832,7 @@ export function GroupInfoPanel({
           userId={profileId}
           onClose={() => setProfileId(null)}
           onGift={onGift && profileId !== accountId ? () => onGift(profileId) : undefined}
-          onReport={(userId, displayName) =>
-            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
-          }
+          onReport={(profile) => setReportSubject(personSubject(profile))}
         />
       ) : null}
     </div>

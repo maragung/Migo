@@ -51,11 +51,43 @@ import { useMigo } from '@/lib/migo/use-migo.js';
  * `label` is the caller's phrasing and never quoted content: "this message", "this room", a display
  * name. It is what the header and the acknowledgement sentence say, so it has to read as the object
  * of "Report", e.g. "Report this message?" and "Thanks — this message has been reported."
+ *
+ * `reason` is the code the dialog opens on. A caller names one only when it knows something the
+ * reporter does not have to work out — a bot surface points at a bot, so the reason is
+ * {@link ReportReason.BotAbuse} — and the reporter can still change it, because the dialog is the
+ * place the decision is made and this only decides where the reading starts.
  */
 export interface ReportSubjectRef {
   kind: ReportSubject;
   id: Id;
   label: string;
+  reason?: ReportReason;
+}
+
+/**
+ * The subject an account row points at, given the account and the bot it may speak as.
+ *
+ * An account that speaks as a bot is reported as the bot and not as the account behind it, because
+ * `bot.bot_id` is a different id from the account id and is the one the node's bot actions act on:
+ * a report filed under the account id would reach a moderator as a report about a bot that names
+ * something which is not one. Every surface in this client that can report a person goes through
+ * here for that reason — the rule is one branch, and it belongs in one place rather than in each
+ * row that happens to have a bot in it.
+ */
+export function personSubject(person: {
+  userId: Id;
+  displayName: string;
+  botId?: Id;
+}): ReportSubjectRef {
+  if (person.botId !== undefined) {
+    return {
+      kind: ReportSubject.Bot,
+      id: person.botId,
+      label: person.displayName,
+      reason: ReportReason.BotAbuse,
+    };
+  }
+  return { kind: ReportSubject.User, id: person.userId, label: person.displayName };
 }
 
 /**
@@ -66,10 +98,12 @@ export interface ReportSubjectRef {
  *
  * A subset of {@link ReportReason}: the codes a person can actually judge for themselves. The rest
  * — {@link ReportReason.ChildSafety}, {@link ReportReason.SelfHarm}, {@link ReportReason.BotAbuse} —
- * are reachable through {@link ReportSubjectRef} callers that know which they mean (a bot surface
- * reports `BotAbuse`) and are deliberately not a menu item, because a reporter choosing between
- * "child safety" and "sexual content" in a list is being asked to make a legal distinction the
- * queue's own prioritisation should make instead.
+ * are deliberately not a menu item, because a reporter choosing between "child safety" and "sexual
+ * content" in a list is being asked to make a legal distinction the queue's own prioritisation
+ * should make instead, and a reporter asked to judge "bot abuse" over an account this client has
+ * just marked as a bot has been asked a question the mark already answered. A caller that knows
+ * which it means names it through {@link ReportSubjectRef.reason} — {@link personSubject} does
+ * exactly that for a bot — and the picker opens there while still offering every other code.
  */
 export interface ReportReasonOption {
   reason: ReportReason;
@@ -123,6 +157,9 @@ export function ReportDialog({
 }): ReactNode {
   const { client } = useMigo();
   const [reason, setReason] = useState<ReportReason>(ReportReason.Spam);
+  // The reason the caller named, kept beside the pick so the reset below can return to it rather
+  // than to the default: reopening the form on the same bot must not quietly drop to Spam.
+  const seeded = subject?.reason ?? ReportReason.Spam;
   const [note, setNote] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,12 +170,12 @@ export function ReportDialog({
   // in a row must reset the form both times.
   const key = subject === null ? null : `${subject.kind}:${subject.id}`;
   useEffect(() => {
-    setReason(ReportReason.Spam);
+    setReason(seeded);
     setNote('');
     setError(null);
     setSent(false);
     setSending(false);
-  }, [key]);
+  }, [key, seeded]);
 
   useEffect(() => {
     if (subject === null) {

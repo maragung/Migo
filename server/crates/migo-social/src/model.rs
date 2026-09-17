@@ -354,19 +354,34 @@ pub struct Found {
     pub display_name: String,
     /// The avatar, if there is one.
     pub avatar_media_id: Option<Id>,
+    /// The bot this account speaks as, when it is one.
+    ///
+    /// A search is the one listing a stranger reaches a bot through, so it is the one
+    /// listing where naming the bot matters most: a bot found by name and taken for a
+    /// person is a report filed under the wrong reason, if it is filed at all, and a
+    /// client that could see the bot but not name it still could not file the one report
+    /// this field exists for.
+    pub bot_id: Option<Id>,
 }
 
 /// One account's public face.
 ///
 /// # Why this is not `migo_protocol::UserProfile`
 ///
-/// The wire struct has fifteen fields and this crate can honestly fill ten of them.
+/// The wire struct has sixteen fields and this crate can honestly fill eleven of them.
 /// `level` belongs to progression, `presence` to presence, `badges` and `verified` to
 /// moderation, and `avatar_url` to the media service that mints the signed link.
 /// Returning the wire struct from here would mean returning it with those
 /// fields defaulted, and a defaulted `verified: false` on a verified account is not a
 /// missing field, it is a wrong answer that looks like an answer. The composition root
 /// joins the other domains in and leaves absent what is absent.
+///
+/// `bot_id` is the one field this crate fills that belongs to another domain, and it is
+/// filled on purpose. Whether an account is a bot is a fact about the account, one the
+/// store already answers by account id, and the alternative — leaving the composition
+/// root to look it up per profile — would put a second answer in the layer that has no
+/// business holding one; a profile card that says nothing about it, meanwhile, is a card
+/// that draws a bot as a person, which is the state section 49 opened in.
 ///
 /// # What is deliberately missing
 ///
@@ -407,6 +422,14 @@ pub struct ProfileCard {
     /// more personal data than a chat profile needs, and the wire's optional field
     /// keeps "withheld" a distinct statement from any year.
     pub birth_year: Option<i16>,
+    /// The bot this account speaks as, when it is one.
+    ///
+    /// An `Option` and not a flag, here as on the wire, for the reason section 49 gives:
+    /// a client has to be able to *name* the bot it is looking at, because a report about
+    /// a bot carries `bot.bot_id` and not the account the bot signs in as. A flag would
+    /// have shown a client a bot it could not report, which is the complaint the section
+    /// opens with.
+    pub bot_id: Option<Id>,
 }
 
 /// The stricter of two visibility settings.

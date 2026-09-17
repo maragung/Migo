@@ -2056,7 +2056,7 @@ fn wire_bundle(bundle: Bundle) -> WireBundle {
 
 /// Projects a [`ProfileCard`] onto the wire struct.
 ///
-/// Six of the fourteen wire fields are left absent, and absent is not the same as false. `level`
+/// Five of the sixteen wire fields are left absent, and absent is not the same as false. `level`
 /// belongs to progression, `presence` to presence, `badges` and `verified` to moderation, and
 /// `custom_status` to a column the data model does not have; a defaulted `verified: false` on a
 /// verified account would be a wrong answer wearing the shape of an answer. `avatar_url` is absent
@@ -2064,6 +2064,11 @@ fn wire_bundle(bundle: Bundle) -> WireBundle {
 /// the URL is a signed one the media service mints on request, and minting it here would put an
 /// expiring credential inside a response a client may cache — the id is the durable fact the client
 /// resolves at render time.
+///
+/// `bot_id` is carried on the same rule and for the same reason, from the other side: it is
+/// present exactly when the account is a bot, so an absent field is the absence of a claim rather
+/// than a claim of personhood, and it carries the handle a client needs to file the one report
+/// section 49 asks for. A boolean here would show a client a bot it could not name.
 ///
 /// `public_id` is derived rather than stored: it is a lossy display projection of the account id
 /// (`MGO-XXXXXXXXXXXX`), which is why nothing persists it.
@@ -2087,6 +2092,7 @@ fn wire_profile(card: ProfileCard) -> UserProfile {
         verified: None,
         custom_status: card.custom_status,
         birth_year: card.birth_year.map(|year| year as u32),
+        bot_id: card.bot_id,
     }
 }
 

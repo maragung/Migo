@@ -159,6 +159,10 @@ pub(crate) async fn handle_suggestions(
                 username: card.username.clone(),
                 display_name: card.display_name.clone(),
                 mutual_friends: s.mutual_friends,
+                // Read off the card rather than off the suggestion: the card is the read
+                // that already happened, and a second lookup here would be a second answer
+                // to a question the graph has just answered.
+                bot_id: card.bot_id,
             })
         })
         .collect();
@@ -188,6 +192,7 @@ pub(crate) async fn handle_search(
                 username: f.username,
                 display_name: f.display_name,
                 mutual_friends: 0,
+                bot_id: f.bot_id,
             })
             .collect(),
     })
@@ -217,5 +222,11 @@ fn wire_profile(card: migo_social::model::ProfileCard) -> UserProfile {
         verified: None,
         custom_status: card.custom_status,
         birth_year: card.birth_year.map(|year| year as u32),
+        // The handle, not a flag: section 49 files a report about a bot by `bot.bot_id`,
+        // so a projection that answered "yes, a bot" without answering "which one" would
+        // leave every client able to see a bot and unable to report it. Absent for an
+        // account that is not one, which is why a client reads this as an id and not as a
+        // boolean.
+        bot_id: card.bot_id,
     }
 }

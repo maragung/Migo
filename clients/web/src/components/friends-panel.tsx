@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
-import { ConversationKind, PresenceState, RelationshipKind, ReportSubject } from '@migo/sdk';
+import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
 import { debounce } from '@/lib/debounce.js';
@@ -18,6 +18,8 @@ import { Avatar } from './avatar.js';
 import { ContextMenu } from './context-menu.js';
 import { useContextMenu } from './context-menu.js';
 import { ReportDialog } from './report-dialog.js';
+import { BotBadge } from './bot-badge.js';
+import { personSubject } from './report-dialog.js';
 import type { ReportSubjectRef } from './report-dialog.js';
 import type { ContextAction } from './context-menu.js';
 import { Icon } from './icons.js';
@@ -430,6 +432,7 @@ export function FriendsPanel({
                     id={person.accountId}
                     name={person.displayName}
                     username={person.username}
+                    botId={person.botId}
                     note={mutualNote(person)}
                     actions={
                       <button
@@ -463,6 +466,7 @@ export function FriendsPanel({
                   name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
                   avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  botId={profiles.get(entry.userId)?.botId}
                   note="wants to be friends"
                   actions={
                     <>
@@ -493,6 +497,7 @@ export function FriendsPanel({
                   name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
                   avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  botId={profiles.get(entry.userId)?.botId}
                   note="request sent"
                 />
               ))}
@@ -519,6 +524,7 @@ export function FriendsPanel({
                 id={person.accountId}
                 name={person.displayName}
                 username={person.username}
+                botId={person.botId}
                 note={mutualNote(person)}
                 actions={
                   <button
@@ -542,9 +548,7 @@ export function FriendsPanel({
           blocked={blocked.some((entry) => entry.userId === selected)}
           onClose={() => setSelected(null)}
           onBlock={blockFromModal}
-          onReport={(userId, displayName) =>
-            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
-          }
+          onReport={(profile) => setReportSubject(personSubject(profile))}
           onMessage={(userId) => {
             setSelected(null);
             void startDirect(userId);
@@ -586,7 +590,14 @@ export function FriendsSection({
   /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
   profiles: ReadonlyMap<
     Id,
-    { displayName: string; username?: string; avatarUrl?: string; customStatus?: string }
+    {
+      displayName: string;
+      username?: string;
+      avatarUrl?: string;
+      customStatus?: string;
+      /** The bot behind this account, when there is one; see {@link PersonRowProps.botId}. */
+      botId?: Id;
+    }
   >;
   /** Live presence by id, when the caller watches it; absent leaves the rows ambient-free. */
   presence?: ReadonlyMap<Id, PresenceState>;
@@ -609,6 +620,7 @@ export function FriendsSection({
             name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
             username={profiles.get(entry.userId)?.username}
             avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            botId={profiles.get(entry.userId)?.botId}
             note={
               profiles.get(entry.userId)?.customStatus ?? presenceLabel(presence?.get(entry.userId))
             }
@@ -754,7 +766,10 @@ export function BlockedSection({
 }: {
   entries: RelationshipEntry[];
   /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
-  profiles: ReadonlyMap<Id, { displayName: string; username?: string; avatarUrl?: string }>;
+  profiles: ReadonlyMap<
+    Id,
+    { displayName: string; username?: string; avatarUrl?: string; botId?: Id }
+  >;
   /** The ids with an unblock in flight, so a row's button can disable itself. */
   busy?: ReadonlySet<Id>;
   onSelect: (userId: Id) => void;
@@ -773,6 +788,7 @@ export function BlockedSection({
             name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
             username={profiles.get(entry.userId)?.username}
             avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            botId={profiles.get(entry.userId)?.botId}
             note="blocked"
             onSelect={() => onSelect(entry.userId)}
             actions={
@@ -814,7 +830,10 @@ export function MutedSection({
 }: {
   entries: RelationshipEntry[];
   /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
-  profiles: ReadonlyMap<Id, { displayName: string; username?: string; avatarUrl?: string }>;
+  profiles: ReadonlyMap<
+    Id,
+    { displayName: string; username?: string; avatarUrl?: string; botId?: Id }
+  >;
   /** The ids with an unmute in flight, so a row's button can disable itself. */
   busy?: ReadonlySet<Id>;
   onSelect: (userId: Id) => void;
@@ -835,6 +854,7 @@ export function MutedSection({
             name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
             username={profiles.get(entry.userId)?.username}
             avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            botId={profiles.get(entry.userId)?.botId}
             note="muted · room messages hidden"
             onSelect={() => onSelect(entry.userId)}
             actions={
@@ -876,6 +896,14 @@ interface PersonRowProps {
   onMessage?: () => void;
   /** The person's presence, drawn on the avatar — the messenger's ambient information. */
   presence?: PresenceState;
+  /**
+   * The bot this account speaks as, when it is one, drawn beside the name.
+   *
+   * The row is where a bot is met — a suggestion, a search hit, a name on a friend list — so it is
+   * the row that has to say so: a bot taken for a person here is a report filed under the wrong
+   * reason, if it is filed at all.
+   */
+  botId?: Id;
 }
 
 /**
@@ -895,6 +923,7 @@ function PersonRow({
   onSelect,
   onMessage,
   presence,
+  botId,
 }: PersonRowProps): ReactNode {
   const [menu, setMenu] = useState<{ x: number; y: number; touch: boolean } | null>(null);
   const suppressClick = useRef(false);
@@ -946,7 +975,10 @@ function PersonRow({
     >
       <Avatar name={name} id={id} size={36} avatarUrl={avatarUrl} presence={presence} />
       <div className="person-main">
-        <span className="person-name">{name}</span>
+        <span className="person-name">
+          {name}
+          <BotBadge botId={botId} compact />
+        </span>
         {username ? <span className="person-sub">@{username}</span> : null}
         {note ? <span className="person-note">{note}</span> : null}
       </div>

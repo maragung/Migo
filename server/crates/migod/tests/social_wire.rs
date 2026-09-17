@@ -1241,6 +1241,81 @@ async fn a_stock_client_session_writes_a_status_a_peer_reads_back() {
     );
 }
 
+/// A profile fetch names the bot behind an account that is one, and names nothing for the
+/// accounts that are not.
+///
+/// Section 49's last open sentence is that a bot could be reported from the SDK and never
+/// seen on a screen, and the reason is this field: a bot holds an ordinary account row and an
+/// ordinary profile, so a card without it is a card that draws a bot as a person. The unit
+/// tests in `migo-social` pin the graph's answer; what could still go wrong here is the
+/// projection, which would drop the field and leave every client unable to draw the one thing
+/// the field exists for -- and, because the projection is also where a flag would have been
+/// substituted for the handle, unable to name the bot a report about it has to carry.
+#[tokio::test]
+async fn a_profile_fetch_says_which_accounts_are_bots() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let reader_grant = registered_grant(&app, "erin").await;
+
+    // Registered through the service the BOT_REGISTER handler delegates to, so the fixture
+    // is the same three-row write production makes — account, profile, bot row — rather
+    // than a bot row assembled by hand, which is a shape no deployment can produce.
+    let registered = app
+        .bots
+        .register(
+            &migo_bots::model::Caller {
+                account_id: reader_grant.account_id,
+                device_id: reader_grant.device_id,
+                tier: migo_ratelimit::TrustTier::Established,
+                now: app.clock.now(),
+                request_id: None,
+            },
+            migo_bots::model::NewBotSpec {
+                username: "weather".to_string(),
+                display_name: "Weather".to_string(),
+                scopes: migo_bots::model::Scopes::NONE,
+                webhook_url: None,
+                locale: None,
+            },
+        )
+        .await
+        .expect("an account may register a bot");
+    let bot_account = registered.bot.account_id;
+
+    let mut reader = LiveSession::connect(addr, &reader_grant).await;
+    // The caller's own account in the same batch, because the assertion is about which of
+    // the two carries the bit and not about whether the bit can be set at all.
+    let card: ProfileResponse = reader
+        .ask(
+            Opcode::ProfileFetch,
+            10,
+            &ProfileRequest {
+                user_ids: vec![reader_grant.account_id, bot_account],
+            },
+        )
+        .await;
+
+    let bot = card
+        .profiles
+        .iter()
+        .find(|profile| profile.user_id == bot_account)
+        .expect("the bot's card is served");
+    assert_eq!(
+        bot.bot_id,
+        Some(registered.bot.bot_id),
+        "a bot's card names it, which is what a client draws it from and what a report carries"
+    );
+    let person = card
+        .profiles
+        .iter()
+        .find(|profile| profile.user_id == reader_grant.account_id)
+        .expect("the caller can always read their own card");
+    assert_eq!(
+        person.bot_id, None,
+        "and a person's card names no bot at all"
+    );
+}
+
 /// The gate on the other side of the bit: a session that did not negotiate
 /// RICH_PRESENCE is answered FEATURE_NOT_NEGOTIATED for the field — and the session,
 /// and every other field of the opcode, keep working, which is what keeps every
