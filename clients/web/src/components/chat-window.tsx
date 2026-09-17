@@ -57,6 +57,7 @@ import { DISAPPEARING_MS, MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import type { InterleavedRow } from './message-list.js';
 import { ReportDialog } from './report-dialog.js';
+import { personSubject } from './report-dialog.js';
 import type { ReportSubjectRef } from './report-dialog.js';
 import { RoomInfoPanel } from './room-info-panel.js';
 import { RoomNoticeLine } from './room-notice-line.js';
@@ -821,13 +822,7 @@ export function ChatWindow({
         <UserProfileModal
           userId={peerId}
           onClose={() => setProfileOpen(false)}
-          onReport={(userId, displayName) =>
-            setReportSubject({
-              kind: ReportSubject.User,
-              id: userId,
-              label: displayName,
-            })
-          }
+          onReport={(profile) => setReportSubject(personSubject(profile))}
           onGift={() => {
             setProfileOpen(false);
             setGiftKey(newIntentKey());

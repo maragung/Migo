@@ -1725,6 +1725,8 @@ pub struct UserProfile {
     pub avatar_media_id: Option<Id>,
     /// Year of birth, as its owner disclosed it. Year only; absent when withheld.
     pub birth_year: Option<u32>,
+    /// The bot this account speaks as, present exactly when the account is one and absent otherwise. The handle and not a flag, because a flag would let a client see a bot without being able to name it, and REPORT_CREATE 192 files a report about a bot by bot.bot_id rather than by the account it signs in as.
+    pub bot_id: Option<Id>,
 }
 
 impl Encode for UserProfile {
@@ -1744,7 +1746,8 @@ impl Encode for UserProfile {
             + usize::from(self.verified.is_some())
             + usize::from(self.custom_status.is_some())
             + usize::from(self.avatar_media_id.is_some())
-            + usize::from(self.birth_year.is_some());
+            + usize::from(self.birth_year.is_some())
+            + usize::from(self.bot_id.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.avatar_url {
             w.optional(1, |w| {
@@ -1817,6 +1820,12 @@ impl Encode for UserProfile {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.bot_id {
+            w.optional(12, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -1855,6 +1864,7 @@ impl Decode for UserProfile {
                 9 => out.custom_status = Some(sub.read_string()?),
                 10 => out.avatar_media_id = Some(sub.read_id()?),
                 11 => out.birth_year = Some(sub.read_u32()?),
+                12 => out.bot_id = Some(sub.read_id()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -7867,6 +7877,8 @@ pub struct SuggestedUser {
     pub username: String,
     pub display_name: String,
     pub mutual_friends: u32,
+    /// The bot this account speaks as, present exactly when it is one, on the same rule as UserProfile.bot_id.
+    pub bot_id: Option<Id>,
 }
 
 impl Encode for SuggestedUser {
@@ -7876,7 +7888,14 @@ impl Encode for SuggestedUser {
         w.write_str(&self.username)?;
         w.write_str(&self.display_name)?;
         w.write_u32(self.mutual_friends);
-        w.write_u32(0);
+        let present = usize::from(self.bot_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.bot_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7892,9 +7911,12 @@ impl Decode for SuggestedUser {
         out.mutual_friends = r.read_u32()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.bot_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)

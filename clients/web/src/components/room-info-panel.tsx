@@ -62,8 +62,10 @@ import { applyRoomSettings, useRooms } from '@/lib/migo/rooms-provider.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { Icon } from './icons.js';
 import { ReportDialog } from './report-dialog.js';
+import { personSubject } from './report-dialog.js';
 import type { ReportSubjectRef } from './report-dialog.js';
 import { Spinner } from './spinner.js';
 import { UserProfileModal } from './user-profile-modal.js';
@@ -285,6 +287,7 @@ export function RosterRow({
   entry,
   name,
   avatarUrl,
+  botId,
   tally,
   canVote = false,
   canModerate = false,
@@ -301,6 +304,8 @@ export function RosterRow({
   entry: RosterEntry;
   name: string;
   avatarUrl?: string;
+  /** The bot behind this member, when there is one: a bot can sit in a room. */
+  botId?: Id;
   /** The live kick-vote tally against this member ("3/17"), when a vote is open. */
   tally?: string;
   /** Show the "Vote kick" control (every member sees it on others; never self or the owner). */
@@ -346,7 +351,10 @@ export function RosterRow({
       >
         <Avatar name={name} id={entry.accountId} size={32} avatarUrl={avatarUrl} />
         <div className="person-main">
-          <span className="person-name">{name}</span>
+          <span className="person-name">
+            {name}
+            <BotBadge botId={botId} compact />
+          </span>
           <span className="person-sub">joined {formatRelative(entry.joinedAt)}</span>
           {tally !== undefined ? (
             <span className="person-note vote-tally">Vote to kick: {tally}</span>
@@ -558,6 +566,7 @@ export function RosterList({
             entry={entry}
             name={profiles.get(entry.accountId)?.displayName ?? 'Someone'}
             avatarUrl={profiles.get(entry.accountId)?.avatarUrl}
+            botId={profiles.get(entry.accountId)?.botId}
             tally={tallies?.get(entry.accountId)}
             canVote={canVote}
             canModerate={canModerate}
@@ -1143,9 +1152,7 @@ export function RoomInfoPanel({
           userId={profileId}
           onClose={() => setProfileId(null)}
           onGift={onGift && profileId !== accountId ? () => onGift(profileId) : undefined}
-          onReport={(userId, displayName) =>
-            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
-          }
+          onReport={(profile) => setReportSubject(personSubject(profile))}
         />
       ) : null}
     </div>

@@ -3461,6 +3461,30 @@ main {
 .profile-presence {
   color: var(--accent);
 }
+/* The bot mark: the one thing on a name that says the account is a program and not a person.
+   Muted rather than accented, so it reads as a fact about the account and not as a promotion. */
+.bot-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+.bot-badge-compact {
+  margin-left: 4px;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  font-size: 12px;
+}
 .profile-status {
   font-style: italic;
 }

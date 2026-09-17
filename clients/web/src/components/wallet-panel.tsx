@@ -47,6 +47,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { AvaxSection } from './avax-section.js';
 import { BottomSheet } from './bottom-sheet.js';
 import { CoinMark } from './icons.js';
@@ -371,12 +372,15 @@ function RecipientRow({
   id,
   name,
   username,
+  botId,
   busy,
   onPick,
 }: {
   id: Id;
   name: string;
   username?: string;
+  /** The bot behind this account, when there is one: a bot may hold a wallet like anyone. */
+  botId?: Id;
   busy: boolean;
   onPick: (id: Id) => void;
 }): ReactNode {
@@ -384,7 +388,10 @@ function RecipientRow({
     <div className="person-row">
       <Avatar name={name} id={id} size={36} />
       <div className="person-main">
-        <span className="person-name">{name}</span>
+        <span className="person-name">
+          {name}
+          <BotBadge botId={botId} compact />
+        </span>
         {username ? <span className="person-sub">@{username}</span> : null}
       </div>
       <div className="person-actions">
@@ -469,6 +476,7 @@ export function RecipientPicker({
               id={entry.userId}
               name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
               username={profiles.get(entry.userId)?.username}
+              botId={profiles.get(entry.userId)?.botId}
               busy={busy}
               onPick={onPick}
             />
@@ -487,6 +495,7 @@ export function RecipientPicker({
                 id={person.accountId}
                 name={person.displayName}
                 username={person.username}
+                botId={person.botId}
                 busy={busy}
                 onPick={onPick}
               />

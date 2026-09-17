@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ConversationKind, ContentType, ReportSubject } from '@migo/sdk';
+import { ConversationKind, ContentType } from '@migo/sdk';
 import type { Id, RoomSummary, SuggestedUser } from '@migo/sdk';
 
 import { conversationTitle } from '@/lib/conversation-title.js';
@@ -28,6 +28,8 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { useJoinRoom } from '@/lib/migo/use-join-room.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { ReportDialog } from './report-dialog.js';
+import { BotBadge } from './bot-badge.js';
+import { personSubject } from './report-dialog.js';
 import type { ReportSubjectRef } from './report-dialog.js';
 
 import { Avatar } from './avatar.js';
@@ -312,7 +314,10 @@ export function SearchPanel({
                       >
                         <Avatar name={person.displayName} id={person.accountId} size={32} />
                         <span className="digest-main">
-                          <span className="person-name">{person.displayName}</span>
+                          <span className="person-name">
+                            {person.displayName}
+                            <BotBadge botId={person.botId} compact />
+                          </span>
                           <span className="person-sub">
                             @{person.username}
                             {person.mutualFriends > 0 ? ` · ${person.mutualFriends} mutual` : ''}
@@ -372,9 +377,7 @@ export function SearchPanel({
           userId={selected}
           blocked={false}
           onClose={() => setSelected(null)}
-          onReport={(userId, displayName) =>
-            setReportSubject({ kind: ReportSubject.User, id: userId, label: displayName })
-          }
+          onReport={(profile) => setReportSubject(personSubject(profile))}
         />
       ) : null}
 
@@ -430,7 +433,10 @@ function RecentPeople({
             <button type="button" className="digest-row" onClick={() => onSelect(person.accountId)}>
               <Avatar name={person.displayName} id={person.accountId} size={32} />
               <span className="digest-main">
-                <span className="person-name">{person.displayName}</span>
+                <span className="person-name">
+                  {person.displayName}
+                  <BotBadge botId={person.botId} compact />
+                </span>
                 <span className="person-sub">
                   @{person.username}
                   {person.mutualFriends > 0 ? ` · ${person.mutualFriends} mutual` : ''}

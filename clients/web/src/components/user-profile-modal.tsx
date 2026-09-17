@@ -43,6 +43,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useMuted } from '@/lib/migo/muted-provider.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { Spinner } from './spinner.js';
 
 // The relationship kinds the card files its social line under, as plain numbers the wire may
@@ -211,6 +212,7 @@ export function UserProfileCard({
                 ✔
               </span>
             ) : null}
+            <BotBadge botId={profile.botId} />
           </span>
           {profile.username ? <span className="person-sub">@{profile.username}</span> : null}
           {presence ? <span className="person-sub profile-presence">{presence}</span> : null}
@@ -362,10 +364,12 @@ export function UserProfileModal({
   /**
    * Opens the opener's report dialog for this person, named as the card names them.
    *
-   * The display name travels with the id because the dialog puts it in its header ("Report Ada?")
-   * and its acknowledgement sentence, and the opener has no profile of its own to read it from.
+   * The whole card travels rather than a pair of fields, because a card of a bot carries two ids —
+   * the account and the bot — and it is not the opener's job to know which one a report takes. The
+   * display name is wanted for the header ("Report Ada?") and the acknowledgement sentence, and the
+   * opener has no profile of its own to read it from.
    */
-  onReport?: (userId: Id, displayName: string) => void;
+  onReport?: (profile: ResolvedProfile) => void;
 }): ReactNode {
   const { client } = useMigo();
   const { isMuted, setMuted } = useMuted();
@@ -597,7 +601,7 @@ export function UserProfileModal({
               onFriendRequest={runFriendRequest}
               onFriendRespond={runFriendRespond}
               onGift={onGift}
-              onReport={onReport ? () => onReport(profile.userId, profile.displayName) : undefined}
+              onReport={onReport ? () => onReport(profile) : undefined}
             />
           ) : null}
         </div>

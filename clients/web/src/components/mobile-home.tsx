@@ -39,6 +39,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { useRooms } from '@/lib/migo/rooms-provider.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { ConversationList } from './conversation-list.js';
 import { CreateRoomDialog } from './create-room-dialog.js';
 import { FriendsSearch } from './friends-panel.js';
@@ -856,6 +857,8 @@ type PersonProfile = {
   displayName: string;
   username?: string;
   avatarUrl?: string;
+  /** The bot behind this account, when there is one, so the row can say so. */
+  botId?: Id;
 };
 
 /**
@@ -905,6 +908,7 @@ export function FriendRequestsSection({
           <span className="mhome-row-main">
             <span className="mhome-row-name">
               {profiles.get(entry.userId)?.displayName ?? 'Someone'}
+              <BotBadge botId={profiles.get(entry.userId)?.botId} compact />
             </span>
             <span className="mhome-row-sub">wants to be friends</span>
           </span>
@@ -939,6 +943,7 @@ export function FriendRequestsSection({
           <span className="mhome-row-main">
             <span className="mhome-row-name">
               {profiles.get(entry.userId)?.displayName ?? 'Someone'}
+              <BotBadge botId={profiles.get(entry.userId)?.botId} compact />
             </span>
             <span className="mhome-row-sub">request sent</span>
           </span>
@@ -966,7 +971,10 @@ function SuggestionRow({
     <div className="mhome-row">
       <Avatar name={person.displayName} id={person.accountId} size={44} />
       <span className="mhome-row-main">
-        <span className="mhome-row-name">{person.displayName}</span>
+        <span className="mhome-row-name">
+          {person.displayName}
+          <BotBadge botId={person.botId} compact />
+        </span>
         <span className="mhome-row-sub">
           @{person.username}
           {person.mutualFriends > 0 ? ` · ${person.mutualFriends} mutual friends` : ''}

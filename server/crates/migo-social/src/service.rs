@@ -45,6 +45,18 @@
 //! in this file, higher than a listing, because each one is a scan rather than a keyed
 //! read.
 //!
+//! # The one read that leaves the graph
+//!
+//! Every listing here that names an account also names the bot behind it when there is
+//! one, which is the one fact on a profile card this crate reads from another domain's
+//! table. It is read here rather than joined in by the composition root because the read is
+//! per account and sits in the same loop as the profile and the block check, so one pass
+//! answers the whole card; a caller that joined it later would need a second pass over the
+//! same ids. Brief section 49 asks for a bot surface in every client, and no client can
+//! draw one without this handle: a bot is an ordinary account with an ordinary profile, so
+//! without it there is nothing on the wire to tell the two apart, and nothing for the one
+//! report a client can file about a bot to name.
+//!
 //! # What this crate does not do
 //!
 //! It does not write a profile, read a presence, deliver a frame, or walk the graph
@@ -59,7 +71,7 @@ use migo_core::{Error, Id, Result};
 use migo_protocol::{codes, fault, Opcode, RelationshipKind};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{Profile, Relationship, Visibility};
-use migo_store::traits::{AccountStore, SocialStore};
+use migo_store::traits::{AccountStore, BotStore, SocialStore};
 use migo_store::{SharedStore, Store};
 
 use crate::metrics::{EdgeKind, GateOutcome, Meters, RequestOutcome, ResponseOutcome};
@@ -158,7 +170,7 @@ pub fn open(
 
 impl<S, L> Social<S, L>
 where
-    S: AccountStore + SocialStore + ?Sized,
+    S: AccountStore + SocialStore + BotStore + ?Sized,
     L: RateLimiter + ?Sized,
 {
     /// Assembles the service and registers every series at zero.
@@ -620,7 +632,7 @@ where
 #[async_trait]
 impl<S, L> Graph for Social<S, L>
 where
-    S: AccountStore + SocialStore + ?Sized + Send + Sync,
+    S: AccountStore + SocialStore + BotStore + ?Sized + Send + Sync,
     L: RateLimiter + ?Sized + Send + Sync,
 {
     async fn request_friend(
@@ -1462,6 +1474,14 @@ where
                 username: account.username,
                 display_name: profile.display_name,
                 avatar_media_id: profile.avatar_media_id,
+                // One keyed read per result, on a list the store already bounded by
+                // `Self::page`. Section 49's bot report needs a surface, and a search is
+                // how a stranger reaches a bot they have never spoken to.
+                bot_id: self
+                    .store
+                    .bot_by_account(account.account_id)
+                    .await?
+                    .map(|bot| bot.bot_id),
             });
         }
         self.meters.search(out.len());
@@ -1534,6 +1554,14 @@ where
                 country: account.country,
                 locale: account.locale,
                 birth_year: profile.birth_year,
+                // Note that both reads above had to land -- a bot whose profile row is
+                // missing is mid-registration and is skipped like any other account, so
+                // this line is only ever reached for an account that has a face to show.
+                bot_id: self
+                    .store
+                    .bot_by_account(account_id)
+                    .await?
+                    .map(|bot| bot.bot_id),
             });
         }
         self.meters.profiles(asked, out.len());

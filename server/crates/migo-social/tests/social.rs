@@ -46,9 +46,9 @@ use migo_social::notice::Notice;
 use migo_social::service::Social;
 use migo_social::traits::Graph;
 use migo_store::model::{
-    AccountStatus, NewAccount, Profile, ProfilePatch, Relationship, Visibility,
+    AccountStatus, NewAccount, NewBot, Profile, ProfilePatch, Relationship, Visibility,
 };
-use migo_store::traits::{AccountStore, SocialStore};
+use migo_store::traits::{AccountStore, BotStore, SocialStore};
 use migo_store::MemoryStore;
 
 const SECOND: i64 = 1_000;
@@ -61,6 +61,7 @@ const CAROL: u128 = 3;
 const DAVE: u128 = 4;
 const ERIN: u128 = 5;
 const STRANGER: u128 = 9;
+const WEATHER_BOT: u128 = 20;
 
 const ALICE_PHONE: u128 = 101;
 const BOB_LAPTOP: u128 = 102;
@@ -215,6 +216,31 @@ impl Harness {
             })
             .await
             .expect("a fresh username is free");
+    }
+
+    /// A bot, written the one way a bot comes into existence.
+    ///
+    /// Three rows in one call, because that is what `register_bot` is: the backing account,
+    /// its profile, and the bot row. A fixture that wrote only the bot row would be testing
+    /// this crate against a shape no deployment can produce — a bot the store cannot name
+    /// as an account, and therefore one no listing could ever return.
+    async fn bot(&self, account: u128, username: &str, owner: u128) {
+        self.store
+            .register_bot(NewBot {
+                bot_id: id(10_000 + account),
+                owner_id: id(owner),
+                account_id: id(account),
+                username: username.to_string(),
+                display_name: format!("{username} Nusantara"),
+                passphrase_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
+                token_hash: vec![account as u8; 32],
+                scopes: 0,
+                webhook_url: None,
+                locale: "id-ID".to_string(),
+                created_at: ts(SECOND),
+            })
+            .await
+            .expect("a fresh bot username is free");
     }
 
     /// The four people most tests need.
@@ -3822,7 +3848,7 @@ async fn a_search_page_is_clamped() {
 
 /// A batch returns the public face and nothing behind it.
 ///
-/// Seven fields, and no visibility settings, no relationship flags, no last-seen time. A
+/// Eight fields, and no visibility settings, no relationship flags, no last-seen time. A
 /// profile card is what a stranger may see; the other three answers are governed by other
 /// rules and a struct carrying all of them would be filled by whichever caller was
 /// convenient.
@@ -3848,6 +3874,86 @@ async fn a_batch_returns_the_public_face_and_nothing_behind_it() {
     assert_eq!(card.locale, "id-ID");
     assert_eq!(harness.plain("migo_social_profiles_requested_total"), 1);
     assert_eq!(harness.plain("migo_social_profiles_served_total"), 1);
+}
+
+/// A card says which accounts are bots, and says nothing about the ones that are not.
+///
+/// The one field on this struct that comes from a table outside the graph, and the reason
+/// it is read here: brief section 49 asks every client for a bot surface, and a bot holds an
+/// ordinary account row and an ordinary profile, so without this handle there is nothing on
+/// the wire for a client to draw one from -- and nothing to name in a report either.
+///
+/// Both kinds are read in one batch on purpose. A projection that named a bot for every card
+/// would pass a test that only ever asked about a bot, and one that named none would pass a
+/// test that only ever asked about a person; the pair is the whole assertion.
+#[tokio::test]
+async fn a_card_says_which_accounts_are_bots() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.bot(WEATHER_BOT, "weather", ALICE).await;
+
+    let cards = harness
+        .social
+        .profiles(&caller(ALICE, ALICE_PHONE), &[id(BOB), id(WEATHER_BOT)])
+        .await
+        .expect("both cards are readable");
+
+    assert_eq!(cards.len(), 2);
+    let bot = cards
+        .iter()
+        .find(|card| card.account_id == id(WEATHER_BOT))
+        .expect("the bot's own card came back");
+    assert_eq!(
+        bot.bot_id,
+        Some(id(10_000 + WEATHER_BOT)),
+        "a bot's card names the bot, which is the id a report has to carry"
+    );
+    let person = cards
+        .iter()
+        .find(|card| card.account_id == id(BOB))
+        .expect("the person's card came back");
+    assert_eq!(person.bot_id, None, "and a person's card names no bot");
+
+    // The rest of the card is a bot's card like any other account's: the bot has a profile
+    // row because `register_bot` wrote one, and this read is the same read.
+    assert_eq!(bot.username, "weather");
+    assert_eq!(bot.display_name, "weather Nusantara");
+}
+
+/// A search says which results are bots.
+///
+/// The listing this matters most on, because a search is how a stranger reaches an account
+/// they have never spoken to — and section 49's complaint is that a bot could be reported
+/// but never seen, so the reason it is reported under is chosen from what the listing
+/// showed.
+#[tokio::test]
+async fn a_search_says_which_results_are_bots() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.bot(WEATHER_BOT, "weather", ALICE).await;
+
+    let found = harness
+        .social
+        .search(&caller(ALICE, ALICE_PHONE), "wea", None)
+        .await
+        .expect("a search the caller may run");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].account_id, id(WEATHER_BOT));
+    assert_eq!(
+        found[0].bot_id,
+        Some(id(10_000 + WEATHER_BOT)),
+        "the one result names the bot it speaks as"
+    );
+
+    // And the control: the same query shape against a person finds a person, so the handle
+    // above is the account and not the query.
+    let people = harness
+        .social
+        .search(&caller(ALICE, ALICE_PHONE), "bob", None)
+        .await
+        .expect("a search the caller may run");
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].bot_id, None);
 }
 
 /// A repeated id is one card and one charge.

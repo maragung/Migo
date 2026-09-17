@@ -1231,6 +1231,8 @@ data class UserProfile(
     val avatarMediaId: Id? = null,
     /** Year of birth, as its owner disclosed it. Year only; absent when withheld. */
     val birthYear: Long? = null,
+    /** The bot this account speaks as, present exactly when the account is one and absent otherwise. The handle and not a flag, because a flag would let a client see a bot without being able to name it, and REPORT_CREATE 192 files a report about a bot by bot.bot_id rather than by the account it signs in as. */
+    val botId: Id? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -1250,6 +1252,7 @@ data class UserProfile(
         if (customStatus != null) present++
         if (avatarMediaId != null) present++
         if (birthYear != null) present++
+        if (botId != null) present++
         w.u32(present)
         if (avatarUrl != null) {
             val value = avatarUrl
@@ -1318,6 +1321,12 @@ data class UserProfile(
                 w.u32(value)
             }
         }
+        if (botId != null) {
+            val value = botId
+            w.optional(12) { w ->
+                w.id(value)
+            }
+        }
         w.leave()
     }
 
@@ -1339,6 +1348,7 @@ data class UserProfile(
             var customStatus: String? = null
             var avatarMediaId: Id? = null
             var birthYear: Long? = null
+            var botId: Id? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -1354,11 +1364,12 @@ data class UserProfile(
                     9L -> customStatus = sub.str()
                     10L -> avatarMediaId = sub.id()
                     11L -> birthYear = sub.u32()
+                    12L -> botId = sub.id()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus, avatarMediaId, birthYear)
+            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus, avatarMediaId, birthYear, botId)
         }
     }
 }
@@ -6431,6 +6442,8 @@ data class SuggestedUser(
     val username: String,
     val displayName: String,
     val mutualFriends: Long,
+    /** The bot this account speaks as, present exactly when it is one, on the same rule as UserProfile.bot_id. */
+    val botId: Id? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -6438,7 +6451,15 @@ data class SuggestedUser(
         w.str(username)
         w.str(displayName)
         w.u32(mutualFriends)
-        w.u32(0)
+        var present = 0
+        if (botId != null) present++
+        w.u32(present)
+        if (botId != null) {
+            val value = botId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
         w.leave()
     }
 
@@ -6449,12 +6470,17 @@ data class SuggestedUser(
             val username = r.str()
             val displayName = r.str()
             val mutualFriends = r.u32()
+            var botId: Id? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> botId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return SuggestedUser(accountId, username, displayName, mutualFriends)
+            return SuggestedUser(accountId, username, displayName, mutualFriends, botId)
         }
     }
 }

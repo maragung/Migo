@@ -15,6 +15,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { openConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { BotBadge } from './bot-badge.js';
 import { Spinner } from './spinner.js';
 
 /** The relationship kind constants, as plain numbers so the filter compares number to number. */
@@ -57,6 +58,7 @@ export function PersonPickRow({
   displayName,
   username,
   note,
+  botId,
   picked,
   onPick,
 }: {
@@ -64,6 +66,8 @@ export function PersonPickRow({
   displayName: string;
   username?: string;
   note?: string;
+  /** The bot behind this account, when there is one: a bot is a member like any other. */
+  botId?: Id;
   /** True when the person is already selected, so the control says so instead of re-adding. */
   picked?: boolean;
   onPick: (accountId: Id) => void;
@@ -72,7 +76,10 @@ export function PersonPickRow({
     <div className="person-row">
       <Avatar name={displayName} id={accountId} size={32} />
       <div className="person-main">
-        <span className="person-name">{displayName}</span>
+        <span className="person-name">
+          {displayName}
+          <BotBadge botId={botId} compact />
+        </span>
         {username ? <span className="person-sub">@{username}</span> : null}
         {note ? <span className="person-note">{note}</span> : null}
       </div>
@@ -332,6 +339,7 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
                   accountId={entry.userId}
                   displayName={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
+                  botId={profiles.get(entry.userId)?.botId}
                   picked={members.includes(entry.userId)}
                   onPick={toggleMember}
                 />
@@ -351,6 +359,7 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
                     accountId={person.accountId}
                     displayName={person.displayName}
                     username={person.username}
+                    botId={person.botId}
                     note={
                       person.mutualFriends > 0
                         ? `${person.mutualFriends} mutual friends`

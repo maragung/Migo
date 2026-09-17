@@ -768,6 +768,8 @@ export interface UserProfile {
   avatarMediaId?: Id;
   /** Year of birth, as its owner disclosed it. Year only; absent when withheld. */
   birthYear?: number;
+  /** The bot this account speaks as, present exactly when the account is one and absent otherwise. The handle and not a flag, because a flag would let a client see a bot without being able to name it, and REPORT_CREATE 192 files a report about a bot by bot.bot_id rather than by the account it signs in as. */
+  botId?: Id;
 }
 
 export function encodeUserProfile(w: Writer, v: UserProfile): void {
@@ -788,6 +790,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.customStatus !== undefined) present++;
   if (v.avatarMediaId !== undefined) present++;
   if (v.birthYear !== undefined) present++;
+  if (v.botId !== undefined) present++;
   w.u32(present);
   if (v.avatarUrl !== undefined) { const value = v.avatarUrl; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -800,6 +803,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
   if (v.avatarMediaId !== undefined) { const value = v.avatarMediaId; w.optional(10, (w) => { w.id(value); }); }
   if (v.birthYear !== undefined) { const value = v.birthYear; w.optional(11, (w) => { w.u32(value); }); }
+  if (v.botId !== undefined) { const value = v.botId; w.optional(12, (w) => { w.id(value); }); }
   w.leave();
 }
 
@@ -825,6 +829,7 @@ export function decodeUserProfile(r: Reader): UserProfile {
       case 9: out.customStatus = sub.str(); break;
       case 10: out.avatarMediaId = sub.id(); break;
       case 11: out.birthYear = sub.u32(); break;
+      case 12: out.botId = sub.id(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -4999,6 +5004,8 @@ export interface SuggestedUser {
   username: string;
   displayName: string;
   mutualFriends: number;
+  /** The bot this account speaks as, present exactly when it is one, on the same rule as UserProfile.bot_id. */
+  botId?: Id;
 }
 
 export function encodeSuggestedUser(w: Writer, v: SuggestedUser): void {
@@ -5007,7 +5014,10 @@ export function encodeSuggestedUser(w: Writer, v: SuggestedUser): void {
   w.str(v.username);
   w.str(v.displayName);
   w.u32(v.mutualFriends);
-  w.u32(0);
+  let present = 0;
+  if (v.botId !== undefined) present++;
+  w.u32(present);
+  if (v.botId !== undefined) { const value = v.botId; w.optional(1, (w) => { w.id(value); }); }
   w.leave();
 }
 
@@ -5019,9 +5029,13 @@ export function decodeSuggestedUser(r: Reader): SuggestedUser {
   const mutualFriends = r.u32();
   const out: SuggestedUser = { accountId, username, displayName, mutualFriends } as SuggestedUser;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.botId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
