@@ -119,8 +119,8 @@ export function switchCameraId(
 type OutputSink = { setSinkId?: (deviceId: string) => Promise<void> };
 
 /** The prototype reached without the compiler's help, for the same reason as {@link OutputSink}. */
-function outputSinkOf(element: object): OutputSink {
-  return element as unknown as OutputSink;
+function outputSinkOf(element: unknown): OutputSink {
+  return element as OutputSink;
 }
 
 /**
@@ -144,11 +144,11 @@ export function canSelectOutput(): boolean {
  * element, so it has to be re-applied whenever the choice moves. Resolves without doing anything on
  * a browser that has no output selection, and rejects when the device has gone — which the caller
  * treats as "the call keeps playing where it was" rather than as a failed call.
+ *
+ * Takes any object rather than naming a media element, because the only thing it does with one is
+ * look for a method the DOM types do not promise it has; every caller passes an element.
  */
-export async function applyOutputDevice(
-  element: HTMLMediaElement,
-  deviceId: string | null,
-): Promise<void> {
+export async function applyOutputDevice(element: object, deviceId: string | null): Promise<void> {
   const sink = outputSinkOf(element);
   if (typeof sink.setSinkId !== 'function') {
     return;

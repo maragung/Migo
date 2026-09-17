@@ -102,7 +102,7 @@ test('routing the audio takes effect on the element, and is silent where the bro
       asked.push(deviceId);
       return Promise.resolve();
     },
-  } as unknown as HTMLMediaElement;
+  };
 
   await applyOutputDevice(element, 'out-2');
   await applyOutputDevice(element, null);
@@ -110,7 +110,7 @@ test('routing the audio takes effect on the element, and is silent where the bro
 
   // A browser without output selection — Firefox and Safari — must resolve without doing anything
   // rather than throw into a call that has no control to draw the choice from anyway.
-  await applyOutputDevice({} as HTMLMediaElement, 'out-1');
+  await applyOutputDevice({}, 'out-1');
 
   // The gate the control is drawn from is the platform's own, and in Node there is no
   // HTMLMediaElement to ask: the honest answer is no, never a guess that assumes a browser.
