@@ -56,9 +56,9 @@ class RatchetTest {
     }
 
     /** Two sessions that have completed X3DH, ready to exchange messages. */
-    private class Pair(val alice: RatchetSession, val bob: RatchetSession)
+    private data class Sessions(val alice: RatchetSession, val bob: RatchetSession)
 
-    private fun pair(): Pair {
+    private fun pair(): Sessions {
         val aliceIdentity = IdentitySecret.generate()
         val bobIdentity = IdentitySecret.generate()
         val bobSignedPrekey = KeyPair.generate()
@@ -73,7 +73,7 @@ class RatchetTest {
         val initiation = X3dh.initiate(aliceIdentity, bundle)
         val bobSeed = X3dh.respond(bobIdentity, bobSignedPrekey, bobOneTime, initiation.message)
 
-        return Pair(
+        return Sessions(
             RatchetSession.initiator(initiation.seed, bundle.signedPrekey.publicKey),
             RatchetSession.responder(bobSeed, bobSignedPrekey),
         )
