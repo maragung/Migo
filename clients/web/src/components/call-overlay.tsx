@@ -71,6 +71,11 @@ export interface CallScreenProps {
   peerAvatarUrl?: string;
   /** Whether this side's microphone is muted. */
   muted: boolean;
+  /**
+   * Whether this side's camera is on. A video call that started with a camera starts with this
+   * true; it is false for every voice call, where there is no camera to publish.
+   */
+  cameraOn: boolean;
   /** Whether a connected call's quality has paused video (never true for a voice call). */
   degraded: boolean;
   /**
@@ -103,6 +108,7 @@ export interface CallScreenProps {
   onCancel: () => void;
   onEnd: (reason: CallEndReason) => void;
   onToggleMute: () => void;
+  onToggleCamera: () => void;
   onToggleScreenShare: () => void;
   onDismiss: () => void;
 }
@@ -118,6 +124,7 @@ export function CallScreen({
   peerId,
   peerAvatarUrl,
   muted,
+  cameraOn,
   degraded,
   quality,
   sharingScreen,
@@ -131,6 +138,7 @@ export function CallScreen({
   onCancel,
   onEnd,
   onToggleMute,
+  onToggleCamera,
   onToggleScreenShare,
   onDismiss,
 }: CallScreenProps): ReactNode {
@@ -203,10 +211,15 @@ export function CallScreen({
             autoPlay
             playsInline
             muted
-            aria-label={sharingScreen ? 'The screen you are sharing' : 'Your video'}
+            aria-label={
+              sharingScreen ? 'The screen you are sharing' : cameraOn ? 'Your video' : 'Camera off'
+            }
             ref={(element: HTMLVideoElement | null): void => {
               if (element !== null) {
-                element.srcObject = screenStream ?? localStream;
+                // A camera that is off has nothing to show, so the element carries no stream rather
+                // than a black frame: a self-view that keeps rendering a disabled track looks like a
+                // broken camera, which is a different fact from a camera the user turned off.
+                element.srcObject = sharingScreen ? screenStream : cameraOn ? localStream : null;
               }
             }}
           />
@@ -297,6 +310,16 @@ export function CallScreen({
               {muted ? '🔇' : '🎙️'}
             </button>
             {isVideo ? (
+              <button
+                type="button"
+                className={`call-action camera${cameraOn ? '' : ' off'}`}
+                aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+                onClick={onToggleCamera}
+              >
+                {cameraOn ? '📷' : '🚫'}
+              </button>
+            ) : null}
+            {isVideo ? (
               // Only a video call gets the control, because only a video call has a video m-line for
               // a share to ride: section 180 makes screen sharing a video-call capability, and a
               // button that could not do anything is worse than no button.
@@ -371,6 +394,7 @@ export function CallOverlay(): ReactNode {
     activeCall,
     incomingCall,
     muted,
+    cameraOn,
     degraded,
     quality,
     sharingScreen,
@@ -384,6 +408,7 @@ export function CallOverlay(): ReactNode {
     cancelCall,
     endCall,
     toggleMute,
+    toggleCamera,
     toggleScreenShare,
     dismissCall,
   } = useCall();
@@ -420,6 +445,7 @@ export function CallOverlay(): ReactNode {
         peerId={peerId ?? 'peer'}
         peerAvatarUrl={profile?.avatarUrl}
         muted={muted}
+        cameraOn={cameraOn}
         degraded={degraded}
         quality={quality}
         sharingScreen={sharingScreen}
@@ -433,6 +459,7 @@ export function CallOverlay(): ReactNode {
         onCancel={() => void cancelCall()}
         onEnd={(reason) => void endCall(reason)}
         onToggleMute={toggleMute}
+        onToggleCamera={toggleCamera}
         onToggleScreenShare={() => void toggleScreenShare()}
         onDismiss={dismissCall}
       />

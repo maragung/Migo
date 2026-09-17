@@ -3460,6 +3460,16 @@ main {
 .call-action.mute.muted {
   color: var(--text-dim);
 }
+/* The same disc again: dim while the camera is live and only an offer to stop it, accented — the
+   same way mute reads — once the camera is off and the button is the way back. */
+.call-action.camera {
+  background: var(--accent-soft-strong);
+  border-color: var(--accent-border);
+  color: var(--text-dim);
+}
+.call-action.camera.off {
+  color: var(--accent);
+}
 /* The same disc as mute, and the same dimming when the share is off and the button is only an
    offer; while a share runs it takes the accent the indicator takes, so the two read as one fact. */
 .call-action.share {

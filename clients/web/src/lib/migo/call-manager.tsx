@@ -198,6 +198,12 @@ export interface CallManagerValue {
   /** Whether this side's microphone is muted. */
   muted: boolean;
   /**
+   * Whether this side's camera is on. Always false for a voice call and for a device with no
+   * camera, because there is nothing to publish and a toggle that claimed otherwise would be a
+   * control that lies about what it did.
+   */
+  cameraOn: boolean;
+  /**
    * Whether a connected call's quality has fallen far enough to pause video. False until a
    * measurement says otherwise, and false for every voice call however bad the link gets: the
    * bottom rung means this endpoint stopped sending a camera, and a voice call never was.
@@ -247,6 +253,8 @@ export interface CallManagerValue {
   endCall: (reason: CallEndReason) => Promise<void>;
   /** Mutes or unmutes this side's microphone. */
   toggleMute: () => void;
+  /** Turns this side's camera on or off. Does nothing on a call with no camera to turn. */
+  toggleCamera: () => void;
   /**
    * Starts or stops a screen share on a connected video call. Silently does nothing on a voice
    * call: section 180 makes screen sharing a video-call capability, and a voice call has no video
@@ -265,6 +273,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [incomingCall, setIncomingCall] = useState<CallInviteEvent | null>(null);
   const [muted, setMuted] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
   const [degraded, setDegraded] = useState(false);
   const [quality, setQuality] = useState<LinkQuality | null>(null);
   const [sharingScreen, setSharingScreen] = useState(false);
@@ -285,6 +294,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const incomingRef = useRef<CallInviteEvent | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const mutedRef = useRef(false);
+  /**
+   * Whether this side's camera is on, which is the user's wish rather than the ladder's: the rung
+   * decides whether any video is worth sending and this decides whether there is any to send, and
+   * the two are asked separately everywhere they meet.
+   */
+  const cameraOnRef = useRef(false);
   /** The peer device relays are addressed to; null until the answer names it (or the invite did). */
   const peerDeviceRef = useRef<Id | null>(null);
   /** Candidates gathered but not yet relayed, waiting for the batch linger or a target device. */
@@ -465,19 +480,57 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
 
   /**
    * The video track this endpoint wants on the wire: the shared screen while a share runs, the
-   * camera otherwise.
+   * camera while it is on, and nothing otherwise.
    *
-   * One accessor for one question, because two callers ask it — the quality plane shaping a rung and
-   * the screen-share toggle swapping what the sender carries — and two answers to "which track"
-   * would be a bug waiting for the poll that lands while a share is starting. The answer itself is
-   * {@link videoTrackToSend}'s, so a share and the ladder cannot disagree about which track is the
-   * one being sent.
+   * One accessor for one question, because three callers ask it — the quality plane shaping a rung,
+   * the screen-share toggle, and the camera toggle — and three answers to "which track" would be a
+   * bug waiting for the poll that lands while either toggle is being pressed. The answer itself is
+   * {@link videoTrackToSend}'s, so a share, the ladder and the camera cannot disagree about which
+   * track is the one being sent. A screen wins over a camera that is on, and a share still works
+   * with the camera off: the camera's wish is only consulted when there is no screen to prefer.
    */
   const wantedVideoTrack = useCallback(
     (): MediaStreamTrack | null =>
-      videoTrackToSend(screenStreamRef.current, localStreamRef.current),
+      videoTrackToSend(
+        screenStreamRef.current,
+        cameraOnRef.current ? localStreamRef.current : null,
+      ),
     [],
   );
+
+  /**
+   * Turns this side's camera on or off, for every link the ladder still carries video to.
+   *
+   * The track is disabled rather than stopped, which is the group plane's own choice for the same
+   * toggle: the camera stays warm so turning it back on is instant and cannot fail on a device that
+   * another application has since taken, and the peer sees nothing either way because the sender
+   * stops carrying the track at all — a disabled track that is still attached would cost the
+   * encoder to send black frames.
+   */
+  const toggleCamera = useCallback((): void => {
+    const track = localStreamRef.current?.getVideoTracks()[0] ?? null;
+    if (track === null) {
+      // A voice call, or a device with no camera. The control is not drawn for either, so this is
+      // only reachable from a stale screen; doing nothing is the honest answer.
+      return;
+    }
+    const next = !cameraOnRef.current;
+    cameraOnRef.current = next;
+    setCameraOn(next);
+    track.enabled = next;
+    const sender = videoSenderRef.current;
+    if (sender !== null) {
+      // Shaped now rather than at the next poll, so the button does what it says on the press: the
+      // same function the ladder uses, so the camera cannot come back on a link the ladder grounded.
+      videoAttachedRef.current = shapeVideoSender(
+        sender,
+        wantedVideoTrack(),
+        qualityRef.current,
+        lastMeasureRef.current?.stats.sentKbps ?? 0,
+        videoAttachedRef.current,
+      );
+    }
+  }, [wantedVideoTrack]);
 
   /**
    * Samples the call's link once: one reading, one rung, and — when the rung moves — one shaping of
@@ -585,6 +638,10 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         : null;
     videoSenderRef.current = sender;
     videoAttachedRef.current = sender !== null;
+    // A camera that was acquired for this call starts on: the track getUserMedia returned is live,
+    // and a call that opened on a black self-view would look broken rather than private.
+    cameraOnRef.current = sender !== null;
+    setCameraOn(sender !== null);
   }, []);
 
   /**
@@ -609,7 +666,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
 
   /**
    * Stops a screen share: the capture ends, the indicator goes out, and the camera takes the sender
-   * back if the rung still has video in it.
+   * back if the rung still has video in it and the camera is on.
    *
    * Three callers and identical in all of them — the toggle, the browser's own "Stop sharing"
    * control, and the teardown that ends the call — because a share that outlives the call it
@@ -622,15 +679,17 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     endScreenCapture();
     setSharingScreen(false);
     const sender = videoSenderRef.current;
-    const camera = localStreamRef.current?.getVideoTracks()[0] ?? null;
-    // Handing the sender back is the rung's call, exactly as taking it was: at the bottom rung this
-    // endpoint sends no video, and a share *ending* must not be the thing that puts a camera on a
-    // link the ladder grounded. The next poll shapes it either way.
+    // Handing the sender back is the rung's call, exactly as taking it was, and the camera's too:
+    // at the bottom rung this endpoint sends no video, and a share *ending* must not be the thing
+    // that puts a camera on a link the ladder grounded or switches on a camera the user turned off.
+    // Both are read through the one accessor so this cannot drift from what the ladder sends. The
+    // next poll shapes it either way.
+    const next = wantedVideoTrack();
     if (sender !== null && qualityRef.current !== 'video-off') {
-      void sender.replaceTrack(camera).catch(() => {});
-      videoAttachedRef.current = camera !== null;
+      void sender.replaceTrack(next).catch(() => {});
+      videoAttachedRef.current = next !== null;
     }
-  }, [endScreenCapture]);
+  }, [endScreenCapture, wantedVideoTrack]);
 
   /**
    * Starts a screen share on a connected video call, or stops the one running.
@@ -725,6 +784,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     setRemoteStream(null);
     mutedRef.current = false;
     setMuted(false);
+    // Both media wishes belong to the call that just ended; the next call adopts its own camera.
+    cameraOnRef.current = false;
+    setCameraOn(false);
     setDegraded(false);
     setQuality(null);
     // The capture is stopped here rather than handed back to a sender: the sender belongs to a
@@ -1490,6 +1552,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     activeCall,
     incomingCall,
     muted,
+    cameraOn,
     degraded,
     quality,
     sharingScreen,
@@ -1505,6 +1568,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     cancelCall,
     endCall,
     toggleMute,
+    toggleCamera,
     toggleScreenShare,
     dismissCall,
   };
