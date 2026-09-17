@@ -41,6 +41,9 @@ import {
   groupIceServers,
   iKeepMyOffer,
   linkStatsBetween,
+  NO_CAP_FRAMERATE,
+  NO_CAP_KBPS,
+  NO_CAP_SCALE,
   readLinkCounters,
   targetQuality,
   videoAdmitted,
@@ -168,15 +171,26 @@ test('degradation lands on its target at once; recovery climbs one rung per inte
 });
 
 test('each rung shapes the sender with the crate’s own caps', () => {
-  assert.deepEqual(videoSenderParams('full', 1000), { enabled: true });
+  // Every rung that carries the track names all three caps. The top rung names the neutral ones
+  // rather than naming none, because a member left out of the dictionary is a member the sender
+  // keeps: omitting the bitrate here would be exactly how a recovering call stays small forever.
+  assert.deepEqual(videoSenderParams('full', 1000), {
+    enabled: true,
+    maxBitrate: NO_CAP_KBPS,
+    scaleResolutionDownBy: NO_CAP_SCALE,
+    maxFramerate: NO_CAP_FRAMERATE,
+  });
   assert.deepEqual(videoSenderParams('bitrate-capped', 1000), {
     enabled: true,
     maxBitrate: 600, // 60% of what the link measured.
+    scaleResolutionDownBy: NO_CAP_SCALE,
+    maxFramerate: NO_CAP_FRAMERATE,
   });
   assert.deepEqual(videoSenderParams('resolution-lowered', 1000), {
     enabled: true,
     maxBitrate: 600,
     scaleResolutionDownBy: 2,
+    maxFramerate: NO_CAP_FRAMERATE,
   });
   assert.deepEqual(videoSenderParams('frame-rate-lowered', 1000), {
     enabled: true,

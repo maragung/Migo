@@ -390,6 +390,27 @@ export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCo
 }
 
 /**
+ * The values a sender carries when a rung asks for no cap at all.
+ *
+ * A cap cannot be lifted by leaving its member out of the dictionary: WebIDL reads an absent member
+ * as "leave the receiver's value unchanged", which is the same reason passing `undefined` cannot
+ * lift one, so a cap this client once wrote stays written until it is written over. Only
+ * {@link NO_CAP_SCALE} therefore has a neutral the spec defines — 1 is no scaling — while the other
+ * two have no sentinel for "unlimited" and take a number above anything a call can put on the wire.
+ * That is a ceiling the encoder may take rather than a rate it will send at: the bandwidth estimate
+ * still decides what actually leaves the machine, and the number is chosen to sit above it, so the
+ * top rung behaves as the absence of a cap it is meant to be.
+ */
+export const NO_CAP_KBPS = 100_000;
+export const NO_CAP_FRAMERATE = 60;
+export const NO_CAP_SCALE = 1;
+
+/** What a rung asks of one sender: the caps to write when it carries the track, or nothing at all. */
+export type VideoSenderParams =
+  | { enabled: true; maxBitrate: number; scaleResolutionDownBy: number; maxFramerate: number }
+  | { enabled: false };
+
+/**
  * The sender shaping one rung of the ladder asks of this endpoint's own video on one link.
  *
  * `replaceTrack(null)` (the `enabled: false` rung) is per-link by construction — the same local
@@ -397,29 +418,33 @@ export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCo
  * frame-rate caps ride the sender's parameters. The frame-rate rung halves the frame rate
  * (`maxFramerate` 15 for a 30 fps sender) where the SFU core drops every second frame by sequence:
  * a sender cannot stride its own frames, but half the rate is the same sacrifice on the wire.
+ *
+ * Every rung that carries the track names all three caps, the ones it imposes nothing on included:
+ * a member left out is a member the receiver keeps, so a rung that gives a cap back has to write
+ * the neutral value over it rather than omit it. That is why `full` is not an empty object.
  */
-export function videoSenderParams(
-  quality: LinkQuality,
-  measuredKbps: number,
-): {
-  enabled: boolean;
-  maxBitrate?: number;
-  scaleResolutionDownBy?: number;
-  maxFramerate?: number;
-} {
+export function videoSenderParams(quality: LinkQuality, measuredKbps: number): VideoSenderParams {
   switch (quality) {
     case 'full':
-      return { enabled: true };
+      return {
+        enabled: true,
+        maxBitrate: NO_CAP_KBPS,
+        scaleResolutionDownBy: NO_CAP_SCALE,
+        maxFramerate: NO_CAP_FRAMERATE,
+      };
     case 'bitrate-capped':
       return {
         enabled: true,
         maxBitrate: Math.max(60, Math.round((measuredKbps * BITRATE_CAP_PCT) / 100)),
+        scaleResolutionDownBy: NO_CAP_SCALE,
+        maxFramerate: NO_CAP_FRAMERATE,
       };
     case 'resolution-lowered':
       return {
         enabled: true,
         maxBitrate: Math.max(60, Math.round((measuredKbps * BITRATE_CAP_PCT) / 100)),
         scaleResolutionDownBy: 2,
+        maxFramerate: NO_CAP_FRAMERATE,
       };
     case 'frame-rate-lowered':
       return {
@@ -459,6 +484,36 @@ export function videoTrackToSend(
 }
 
 /**
+ * The bitrate a low-bandwidth call sends its audio at, bits per second.
+ *
+ * Opus at 16 kbps is narrowband speech: intelligible, and about a fifth of what a comfortable
+ * full-band call uses. The mode exists for a link that cannot carry the call the user would rather
+ * have, so the number is chosen to keep the call alive rather than to sound good.
+ */
+export const LOW_BANDWIDTH_AUDIO_BPS = 16_000;
+
+/**
+ * Caps one audio sender's bitrate for a low-bandwidth call, or lifts the cap when the mode is off.
+ *
+ * Audio is never a rung of the ladder — the bottom of the ladder is "video off, audio alive" — so
+ * the mode reaches a voice call through this instead, which is what section 180's low audio bitrate
+ * mode asks for. The cap is written and cleared on the same parameter the video caps use, so a call
+ * whose mode is turned off returns to whatever the encoder would have chosen on its own.
+ */
+export function shapeAudioSender(sender: RTCRtpSender, lowBandwidth: boolean): void {
+  const current = sender.getParameters();
+  const encoding = { ...(current.encodings[0] ?? {}) };
+  // Both directions are written, and the lifted one is a number rather than an omission: a member
+  // left out is a member the sender keeps, so `delete` would leave a call in narrowband for the rest
+  // of its life. See {@link NO_CAP_KBPS} for why the value is what it is.
+  encoding.maxBitrate = lowBandwidth ? LOW_BANDWIDTH_AUDIO_BPS : NO_CAP_KBPS * 1000;
+  current.encodings = [encoding];
+  void sender.setParameters(current).catch(() => {
+    // A sender that cannot be shaped keeps sending at its own rate; the next tick tries again.
+  });
+}
+
+/**
  * Shapes one video sender to a rung, and answers whether the sender now carries the track.
  *
  * The one place a rung becomes something a peer connection does, shared by both planes that run the
@@ -472,6 +527,11 @@ export function videoTrackToSend(
  * Turning a track off is `replaceTrack(null)` rather than `track.enabled = false` for the reason
  * the group plane gives: the same camera keeps flowing to every link the ladder has not grounded,
  * and the ones it has grounded pay nothing for a stream they are not being sent.
+ *
+ * Every cap is written on every pass, and a rung that names none writes the neutral value rather
+ * than omitting the member: WebIDL reads an absent member as "leave the receiver's value alone", so
+ * omission is exactly what would keep the sacrifice a climbing call has already left behind — the
+ * bitrate, the resolution, the frame rate — while the screen showed a tier the sender was not on.
  */
 export function shapeVideoSender(
   sender: RTCRtpSender,
@@ -493,16 +553,10 @@ export function shapeVideoSender(
     carrying = true;
   }
   const current = sender.getParameters();
-  const encoding = current.encodings[0] ?? {};
-  if (params.maxBitrate !== undefined) {
-    encoding.maxBitrate = params.maxBitrate * 1000;
-  }
-  if (params.scaleResolutionDownBy !== undefined) {
-    encoding.scaleResolutionDownBy = params.scaleResolutionDownBy;
-  }
-  if (params.maxFramerate !== undefined) {
-    encoding.maxFramerate = params.maxFramerate;
-  }
+  const encoding = { ...(current.encodings[0] ?? {}) };
+  encoding.maxBitrate = params.maxBitrate * 1000;
+  encoding.scaleResolutionDownBy = params.scaleResolutionDownBy;
+  encoding.maxFramerate = params.maxFramerate;
   current.encodings = [encoding];
   void sender.setParameters(current).catch(() => {
     // A sender that cannot be shaped keeps sending; the next tick retries the rung it is on.

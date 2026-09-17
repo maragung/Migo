@@ -106,7 +106,13 @@ import {
   SdpDisposition,
 } from './call-signal.js';
 import type { SdpDescription } from './call-signal.js';
-import { QUALITY_POLL_MS, advanceMeasurement, degradedAt, qualityReport } from './call-quality.js';
+import {
+  QUALITY_POLL_MS,
+  advanceMeasurement,
+  cappedQuality,
+  degradedAt,
+  qualityReport,
+} from './call-quality.js';
 import {
   callAudioConstraints,
   callVideoConstraints,
@@ -116,7 +122,12 @@ import {
   switchCameraId,
 } from './call-devices.js';
 import type { CallDevice } from './call-devices.js';
-import { readLinkCounters, shapeVideoSender, videoTrackToSend } from './group-media.js';
+import {
+  readLinkCounters,
+  shapeAudioSender,
+  shapeVideoSender,
+  videoTrackToSend,
+} from './group-media.js';
 import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
 import { useMigo } from './use-migo.js';
 
@@ -232,6 +243,21 @@ export interface CallManagerValue {
    */
   quality: LinkQuality | null;
   /**
+   * The tier the user pinned the call to, or null while the ladder is on its own. A ceiling and
+   * never a floor: a pinned call still descends when its link demands, because the alternative is
+   * video sent into a congested path under a screen claiming a tier the call is not on.
+   */
+  qualityCeiling: LinkQuality | null;
+  /** Whether the low-bandwidth mode is on. Section 180 asks for it on voice and video calls alike. */
+  lowBandwidth: boolean;
+  /** Pins the call to a tier, or returns it to automatic with null. Takes effect on the spot. */
+  setQualityCeiling: (ceiling: LinkQuality | null) => void;
+  /**
+   * Turns the low-bandwidth mode on or off. On a video call it caps the ladder; on a voice call,
+   * where there is no video to give up, it caps the audio bitrate instead.
+   */
+  setLowBandwidth: (on: boolean) => void;
+  /**
    * Whether this device is sharing its screen right now. Section 180 requires the sharer to keep
    * seeing that it is sharing for as long as it lasts — a forgotten share is the commonest data
    * leak there is — so this is state the screen reads, not a note the manager keeps to itself.
@@ -316,6 +342,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [cameraOn, setCameraOn] = useState(false);
   const [degraded, setDegraded] = useState(false);
   const [quality, setQuality] = useState<LinkQuality | null>(null);
+  const [qualityCeiling, setQualityCeilingState] = useState<LinkQuality | null>(null);
+  const [lowBandwidth, setLowBandwidthState] = useState(false);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [outputs, setOutputs] = useState<CallDevice[]>([]);
@@ -416,10 +444,25 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
    * what it used to carry.
    */
   const videoAttachedRef = useRef(false);
+  /**
+   * This call's audio sender, which the low-bandwidth mode caps and lifts.
+   *
+   * Kept for the same reason as the video sender: the ladder never touches audio, so the one thing
+   * the mode does on a voice call — where the ladder has nothing to give up — is reach it here.
+   */
+  const audioSenderRef = useRef<RTCRtpSender | null>(null);
   /** The polling timer, armed when a call connects and cleared with everything else. */
   const qualityTimerRef = useRef<number | null>(null);
   /** The rung the link is on, and when it last moved — the recovery ramp is measured from the move. */
   const qualityRef = useRef<LinkQuality>('full');
+  /**
+   * The tier the user pinned the call to, or null for automatic. A ceiling and not a floor: the
+   * ladder still descends below it when the link demands, and the value here is the user's wish
+   * rather than anything the link agreed to.
+   */
+  const qualityCeilingRef = useRef<LinkQuality | null>(null);
+  /** Whether the low-bandwidth mode is on, mirrored into a ref for the poll that reads it. */
+  const lowBandwidthRef = useRef(false);
   const qualityChangedAtRef = useRef(0);
   /** The previous reading, which the next one is subtracted from; null until the first sample. */
   const qualityCountersRef = useRef<RawLinkCounters | null>(null);
@@ -705,6 +748,36 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, [wantedVideoTrack]);
 
   /**
+   * Puts a rung into effect: the tier the screen shows, the Degraded state, and the shaping of this
+   * endpoint's own video.
+   *
+   * Everything that can move the rung goes through here — the ladder, and the two controls that cap
+   * it — so a ceiling is applied to what the call does and shows rather than to the ladder itself,
+   * and a control changed mid-call cannot act on a rung the ladder has already left. The measurement
+   * is passed in rather than read back, because the caller is the one holding a fresh one; a control
+   * that changes between samples re-applies the last numbers the ladder produced.
+   */
+  const applyRung = useCallback(
+    (rung: LinkQuality, measuredKbps: number): void => {
+      const effective = cappedQuality(rung, qualityCeilingRef.current, lowBandwidthRef.current);
+      const isVideo = activeRef.current?.mediaKind === CallMediaKind.Video;
+      setQuality(effective);
+      setDegraded(degradedAt(effective, isVideo));
+      const sender = videoSenderRef.current;
+      if (sender !== null) {
+        videoAttachedRef.current = shapeVideoSender(
+          sender,
+          wantedVideoTrack(),
+          effective,
+          measuredKbps,
+          videoAttachedRef.current,
+        );
+      }
+    },
+    [wantedVideoTrack],
+  );
+
+  /**
    * Samples the call's link once: one reading, one rung, and — when the rung moves — one shaping of
    * this endpoint's own video and one report to the server.
    *
@@ -742,26 +815,58 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     if (!step.changed) {
       return;
     }
+    // The ladder's own memory stays uncapped: it describes what the link can carry, and a user's
+    // ceiling is a wish layered on top of that. Keeping the two apart is what lets a lifted ceiling
+    // return the call to the rung its link is really on, rather than making it climb back through
+    // rungs nobody asked for.
     qualityRef.current = step.quality;
     qualityChangedAtRef.current = now;
-    setQuality(step.quality);
-    setDegraded(degradedAt(step.quality, call.mediaKind === CallMediaKind.Video));
-    const sender = videoSenderRef.current;
-    if (sender !== null) {
-      videoAttachedRef.current = shapeVideoSender(
-        sender,
-        wantedVideoTrack(),
-        step.quality,
-        step.stats.sentKbps,
-        videoAttachedRef.current,
-      );
-    }
+    applyRung(step.quality, step.stats.sentKbps);
     clientRef.current?.calls
       .reportStats(call.callId, qualityReport(step.stats, counters))
       .catch(() => {
         // CALL_STATS is Droppable: a lost report costs nothing, and the next move reports again.
       });
-  }, [wantedVideoTrack]);
+    // Only the rung is applied here; the shaping that reads the wanted camera moved into applyRung,
+    // which is where that dependency now lives.
+  }, [applyRung]);
+
+  /**
+   * Pins the call to a tier, or returns it to automatic when given null.
+   *
+   * Takes effect at once rather than at the next sample: a user who has just asked for a smaller
+   * call is waiting for the call to become smaller, and the numbers the ladder last measured are the
+   * ones the new ceiling is applied to. The rung is not recomputed — the link has not changed, only
+   * what the user is willing to spend on it.
+   */
+  const setQualityCeiling = useCallback(
+    (ceiling: LinkQuality | null): void => {
+      qualityCeilingRef.current = ceiling;
+      setQualityCeilingState(ceiling);
+      applyRung(qualityRef.current, lastMeasureRef.current?.stats.sentKbps ?? 0);
+    },
+    [applyRung],
+  );
+
+  /**
+   * Turns the low-bandwidth mode on or off, on a call of either kind.
+   *
+   * A video call gives up the ladder's top rungs and a voice call gives up audio bitrate, because a
+   * voice call has no video for the ladder to act on — that is the whole of what the mode can mean
+   * there, and a mode that did nothing on the call the user is actually on would be a lie.
+   */
+  const setLowBandwidth = useCallback(
+    (on: boolean): void => {
+      lowBandwidthRef.current = on;
+      setLowBandwidthState(on);
+      const audio = audioSenderRef.current;
+      if (audio !== null) {
+        shapeAudioSender(audio, on);
+      }
+      applyRung(qualityRef.current, lastMeasureRef.current?.stats.sentKbps ?? 0);
+    },
+    [applyRung],
+  );
 
   /** Arms the quality loop for a call that just connected. Idempotent, so a re-connect is harmless. */
   const startQualityLoop = useCallback((): void => {
@@ -795,21 +900,32 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, []);
 
   /**
-   * Remembers this call's video sender, so the ladder can shape it once the call connects.
+   * Remembers this call's senders, so the ladder can shape the video one once the call connects and
+   * the low-bandwidth mode can cap the audio one.
    *
-   * The sender is found here and nowhere else, because here is the only moment it is findable: a
-   * sender that has been grounded by the bottom rung reports no track, so a later search for "the
+   * The video sender is found here and nowhere else, because here is the only moment it is findable:
+   * a sender that has been grounded by the bottom rung reports no track, so a later search for "the
    * video sender" would come back empty on exactly the call that needs shaping most. A voice call
-   * has no video track and so adopts nothing, which is the honest state — the ladder still runs and
-   * the indicator still reports, there is simply no camera for it to act on.
+   * has no video track and so adopts no video sender, which is the honest state — the ladder still
+   * runs and the indicator still reports, there is simply no camera for it to act on.
+   *
+   * The audio sender is adopted for both kinds of call: every call has one, and it is the only
+   * thing a low-bandwidth voice call can give up.
    */
-  const adoptVideoSender = useCallback((pc: RTCPeerConnection, stream: MediaStream): void => {
+  const adoptSenders = useCallback((pc: RTCPeerConnection, stream: MediaStream): void => {
     const sender =
       stream.getVideoTracks().length > 0
         ? (pc.getSenders().find((candidate) => candidate.track?.kind === 'video') ?? null)
         : null;
     videoSenderRef.current = sender;
     videoAttachedRef.current = sender !== null;
+    const audio = pc.getSenders().find((candidate) => candidate.track?.kind === 'audio') ?? null;
+    audioSenderRef.current = audio;
+    // A mode that is already on applies to the sender the moment it exists: the call may have been
+    // set to low bandwidth while this connection was still being built.
+    if (audio !== null && lowBandwidthRef.current) {
+      shapeAudioSender(audio, true);
+    }
     // A camera that was acquired for this call starts on: the track getUserMedia returned is live,
     // and a call that opened on a black self-view would look broken rather than private.
     cameraOnRef.current = sender !== null;
@@ -981,6 +1097,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     // was just stopped; keeping either would have the next call's ladder shape a dead object.
     videoSenderRef.current = null;
     videoAttachedRef.current = false;
+    audioSenderRef.current = null;
+    // The two quality controls are per call as well. A ceiling pinned for one call is not a standing
+    // preference — the next call starts on the best rung its link can carry and re-measures from
+    // there — and a low-bandwidth mode carried over would silently cap a call nobody asked to cap.
+    qualityCeilingRef.current = null;
+    lowBandwidthRef.current = false;
+    setQualityCeilingState(null);
+    setLowBandwidthState(false);
   }, [clearRingTimeout, endScreenCapture, stopQualityLoop]);
 
   /**
@@ -1350,7 +1474,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         for (const track of stream.getTracks()) {
           pc.addTrack(track, stream);
         }
-        adoptVideoSender(pc, stream);
+        adoptSenders(pc, stream);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         // The invite's offer is outstanding until the answer names the device that took it: the
@@ -1414,7 +1538,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     [
       adoptCallKey,
       adoptLocalStream,
-      adoptVideoSender,
+      adoptSenders,
       armRingTimeout,
       callInProgress,
       createPeer,
@@ -1473,7 +1597,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       for (const track of stream.getTracks()) {
         pc.addTrack(track, stream);
       }
-      adoptVideoSender(pc, stream);
+      adoptSenders(pc, stream);
       const offer = decodeSdpDescription(
         openCallSignal(incoming.sealedOffer, callKey, incoming.callId),
       );
@@ -1513,7 +1637,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     answerCall,
     acquireAnswerMedia,
     adoptLocalStream,
-    adoptVideoSender,
+    adoptSenders,
     callInProgress,
     createPeer,
     drainHeldIce,
@@ -1902,6 +2026,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     cameraOn,
     degraded,
     quality,
+    qualityCeiling,
+    lowBandwidth,
     sharingScreen,
     screenStream,
     outputs,
@@ -1921,6 +2047,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     toggleCamera,
     switchCamera,
     setOutputDevice,
+    setQualityCeiling,
+    setLowBandwidth,
     toggleScreenShare,
     dismissCall,
   };

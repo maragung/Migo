@@ -51,7 +51,7 @@ import {
   formatCallDuration,
   mediaKindLabel,
 } from '@/lib/migo/call-signal.js';
-import { qualityTierLabel } from '@/lib/migo/call-quality.js';
+import { QUALITY_CEILINGS, qualityTierLabel } from '@/lib/migo/call-quality.js';
 import type { LinkQuality } from '@/lib/migo/group-media.js';
 import { useCall } from '@/lib/migo/call-manager.js';
 import { MISSED_CALL_MESSAGE } from '@/lib/migo/call-manager.js';
@@ -110,6 +110,15 @@ export interface CallScreenProps {
   cameras: CallDevice[];
   /** The audio output in use, or null for the platform's default. */
   outputId: string | null;
+  /**
+   * The tier the user pinned the call to, or null while the ladder is automatic. Section 180 asks
+   * for manual selection alongside the automatic one, and manual is a ceiling: the call can still
+   * descend when its link demands it, so this is what the user is willing to spend rather than a
+   * promise about what the call will get.
+   */
+  qualityCeiling: LinkQuality | null;
+  /** Whether the low-bandwidth mode is on, which section 180 asks for on voice and video alike. */
+  lowBandwidth: boolean;
   /** The clock the duration reads, passed in so the pure half has no timer of its own. */
   nowMs: number;
   /** When the tracked call ended, for the ended screen's total duration. */
@@ -127,6 +136,8 @@ export interface CallScreenProps {
   onSwitchCamera: () => void;
   onToggleScreenShare: () => void;
   onSelectOutput: (deviceId: string | null) => void;
+  onSelectQuality: (ceiling: LinkQuality | null) => void;
+  onToggleLowBandwidth: (on: boolean) => void;
   onDismiss: () => void;
 }
 
@@ -149,6 +160,8 @@ export function CallScreen({
   outputs,
   cameras,
   outputId,
+  qualityCeiling,
+  lowBandwidth,
   nowMs,
   endedAt,
   localStream,
@@ -162,6 +175,8 @@ export function CallScreen({
   onSwitchCamera,
   onToggleScreenShare,
   onSelectOutput,
+  onSelectQuality,
+  onToggleLowBandwidth,
   onDismiss,
 }: CallScreenProps): ReactNode {
   // The output is applied to the media element rather than carried on the stream: the sink belongs
@@ -387,6 +402,42 @@ export function CallScreen({
               </select>
             ) : null}
             {isVideo ? (
+              // Only a video call gets the tier menu: a ceiling on a voice call would cap a ladder
+              // that has no video to act on, and the only thing it could change is the word on the
+              // screen — a control whose whole effect is to make the indicator less true.
+              //
+              // The list is the ladder minus its bottom rung. A user who wants no video has the
+              // camera button, which says so plainly; a ceiling of "video off" would instead put the
+              // call into Degraded, a state section 180 defines as video paused because quality
+              // dropped, and a sacrifice the user chose is not a drop.
+              <select
+                className="call-action quality"
+                value={qualityCeiling ?? ''}
+                aria-label="Call quality"
+                onChange={(event) =>
+                  onSelectQuality(
+                    event.target.value === '' ? null : (event.target.value as LinkQuality),
+                  )
+                }
+              >
+                <option value="">Automatic</option>
+                {QUALITY_CEILINGS.map((ceiling) => (
+                  <option key={ceiling} value={ceiling}>
+                    {qualityTierLabel(ceiling)}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <button
+              type="button"
+              className={`call-action low-bandwidth${lowBandwidth ? ' on' : ''}`}
+              aria-label={lowBandwidth ? 'Leave low bandwidth mode' : 'Use low bandwidth mode'}
+              aria-pressed={lowBandwidth}
+              onClick={() => onToggleLowBandwidth(!lowBandwidth)}
+            >
+              {lowBandwidth ? '🐢' : '🐇'}
+            </button>
+            {isVideo ? (
               // Only a video call gets the control, because only a video call has a video m-line for
               // a share to ride: section 180 makes screen sharing a video-call capability, and a
               // button that could not do anything is worse than no button.
@@ -469,6 +520,8 @@ export function CallOverlay(): ReactNode {
     outputs,
     cameras,
     outputId,
+    qualityCeiling,
+    lowBandwidth,
     localStream,
     remoteStream,
     endedAt,
@@ -481,6 +534,8 @@ export function CallOverlay(): ReactNode {
     toggleCamera,
     switchCamera,
     setOutputDevice,
+    setQualityCeiling,
+    setLowBandwidth,
     toggleScreenShare,
     dismissCall,
   } = useCall();
@@ -525,6 +580,8 @@ export function CallOverlay(): ReactNode {
         outputs={outputs}
         cameras={cameras}
         outputId={outputId}
+        qualityCeiling={qualityCeiling}
+        lowBandwidth={lowBandwidth}
         nowMs={nowMs}
         endedAt={endedAt}
         localStream={localStream}
@@ -538,6 +595,8 @@ export function CallOverlay(): ReactNode {
         onSwitchCamera={() => void switchCamera()}
         onToggleScreenShare={() => void toggleScreenShare()}
         onSelectOutput={setOutputDevice}
+        onSelectQuality={setQualityCeiling}
+        onToggleLowBandwidth={setLowBandwidth}
         onDismiss={dismissCall}
       />
     );

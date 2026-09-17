@@ -45,12 +45,25 @@
  * for both kinds of call, while the *Degraded* state — which section 180 defines as connected with
  * video paused — is only reachable on a video call, because on a voice call there is no video to
  * pause and claiming the state would be describing a sacrifice nobody made.
+ *
+ * # Manual selection is a ceiling
+ *
+ * Section 180 asks for manual and automatic quality selection. Automatic is the ladder; manual is
+ * {@link cappedQuality}, and it is modelled as a ceiling and never as a floor, because no control
+ * can make a link carry more than it can — a client that pretended otherwise would send video into
+ * a congested path while the screen claimed a tier the call was not on. So a pinned tier only ever
+ * holds the ladder down, and the ladder is still free to descend below it: a call the user pinned
+ * to Good on a link that collapses still gives up video, and the indicator says so. The pinned tier
+ * is applied to what the call *does and shows* rather than to the ladder's own memory, so lifting
+ * the ceiling returns the call to the rung its link is actually on rather than making it climb back
+ * one step at a time through rungs nobody asked for.
  */
 
 import type { CallStats } from '@migo/sdk';
 
 import {
   DEFAULT_ADAPTIVE_THRESHOLDS,
+  QUALITY_LADDER,
   RAMP_INTERVAL_MS,
   advanceQuality,
   linkStatsBetween,
@@ -93,6 +106,56 @@ export function qualityTierLabel(quality: LinkQuality): string {
  */
 export function degradedAt(quality: LinkQuality, isVideo: boolean): boolean {
   return isVideo && quality === 'video-off';
+}
+
+/**
+ * The rungs a user may pin a call to, top first.
+ *
+ * The bottom rung is deliberately not among them. A user who wants no video has the camera button,
+ * which says so plainly; a ceiling of "video off" would instead put the call into *Degraded*, a
+ * state section 180 defines as video paused because the quality dropped — and a sacrifice the user
+ * chose is not a drop, so offering it here would make the screen say something untrue about why the
+ * camera is off.
+ */
+export const QUALITY_CEILINGS: readonly LinkQuality[] = QUALITY_LADDER.slice(0, -1);
+
+/**
+ * Where the low-bandwidth mode pins a call: the lowest rung that still carries video.
+ *
+ * The mode is for a link the user knows is expensive or thin, and it asks for the smallest call that
+ * is still the call they started. Audio is capped as well, by the audio sender's own cap, because on a
+ * voice call the ladder has nothing to give up and the mode would otherwise mean nothing at all.
+ */
+export const LOW_BANDWIDTH_CEILING: LinkQuality = 'frame-rate-lowered';
+
+/**
+ * The rung a call is actually on, once the two controls that cap it have had their say.
+ *
+ * A ceiling, never a floor: the ladder may still descend below whatever the user pinned, because no
+ * control can make a link carry more than it can, and a client that pretended otherwise would send
+ * video into a congested path while the screen claimed a tier the call was not on. `ceiling` is the
+ * manual choice and null means automatic; `lowBandwidth` is the mode, and it is applied as a second
+ * ceiling rather than as its own state, so turning it off restores exactly the rung that was there
+ * before it.
+ */
+export function cappedQuality(
+  quality: LinkQuality,
+  ceiling: LinkQuality | null,
+  lowBandwidth: boolean,
+): LinkQuality {
+  let capped = quality;
+  if (ceiling !== null) {
+    capped = lowerOf(capped, ceiling);
+  }
+  if (lowBandwidth) {
+    capped = lowerOf(capped, LOW_BANDWIDTH_CEILING);
+  }
+  return capped;
+}
+
+/** The rung that gives up more of the two. The ladder's order is what decides, not a second table. */
+function lowerOf(a: LinkQuality, b: LinkQuality): LinkQuality {
+  return QUALITY_LADDER.indexOf(a) >= QUALITY_LADDER.indexOf(b) ? a : b;
 }
 
 /** One step of the ladder, as a measurement produced it. */
