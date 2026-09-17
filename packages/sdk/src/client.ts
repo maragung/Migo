@@ -123,6 +123,7 @@ import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
 import { SocialDomain } from './domains/social.js';
 import { EconomyDomain } from './domains/economy.js';
+import { BotsDomain } from './domains/bots.js';
 import { GamesDomain } from './domains/games.js';
 import { ModerationDomain } from './domains/moderation.js';
 import type { DeviceAddress, DeviceDirectory, GapFiller } from './domains/messaging.js';
@@ -241,6 +242,7 @@ interface Connected {
   economy: EconomyDomain;
   games: GamesDomain;
   moderation: ModerationDomain;
+  bots: BotsDomain;
 }
 
 /**
@@ -511,6 +513,16 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
   /** File reports about a user, message, room, or bot, and hear when one is ruled on. */
   get moderation(): ModerationDomain {
     return this.#requireConnected().moderation;
+  }
+
+  /**
+   * Register a bot, manage the ones this account owns, and talk to one.
+   *
+   * Separate from everything else here in one respect worth knowing before reaching for it: this
+   * is the only place in the SDK that returns a credential, and it does so exactly once.
+   */
+  get bots(): BotsDomain {
+    return this.#requireConnected().bots;
   }
 
   // --- bringing the client online ---
@@ -1673,6 +1685,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
       economy: new EconomyDomain(rpc, this.#options.onEventError),
       games: new GamesDomain(rpc, this.#options.onEventError),
       moderation: new ModerationDomain(rpc, this.#options.onEventError),
+      bots: new BotsDomain(rpc, this.#options.onEventError),
     };
     this.#ctx = ctx;
 

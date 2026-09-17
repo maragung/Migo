@@ -1352,6 +1352,10 @@ impl Dispatcher for AppDispatcher {
             // --- bots ---
             Opcode::BotCommand => bots::handle_command(context, frame, &self.bots).await,
             Opcode::BotRegister => bots::handle_register(context, frame, &self.bots).await,
+            Opcode::BotList => bots::handle_list(context, frame, &self.bots).await,
+            Opcode::BotRotate => bots::handle_rotate(context, frame, &self.bots).await,
+            Opcode::BotPause => bots::handle_pause(context, frame, &self.bots).await,
+            Opcode::BotScopes => bots::handle_scopes(context, frame, &self.bots).await,
 
             // --- moderation ---
             Opcode::ReportCreate => {

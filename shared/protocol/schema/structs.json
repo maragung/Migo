@@ -1795,14 +1795,16 @@
     },
     {
       "name": "BotView",
+      "doc": "A bot as its owner sees it. The optional fields are tagged rather than positional because they were added after the first build wrote this struct, and a reader that predates them must still decode the fixed part.",
       "fields": [
         {
           "name": "bot_id",
           "type": "id"
         },
         {
-          "name": "username",
-          "type": "string"
+          "name": "name",
+          "type": "string",
+          "doc": "The bot's display name, which is what its row stores and what a client shows. Named name rather than username because it is not the backing account's handle"
         },
         {
           "name": "token",
@@ -1810,6 +1812,63 @@
           "optional": true,
           "id": 1,
           "doc": "Present only on register/rotate; never logged"
+        },
+        {
+          "name": "paused",
+          "type": "bool",
+          "optional": true,
+          "id": 2,
+          "doc": "Whether the bot is paused. Absent means a build that predates pausing, not an unpaused bot"
+        },
+        {
+          "name": "scopes",
+          "type": "list<string>",
+          "optional": true,
+          "id": 3,
+          "doc": "The permission slugs the bot holds, from the closed set in section 41. Absent means a build that predates scope reads, not a bot holding none"
+        }
+      ]
+    },
+    {
+      "name": "BotListReq",
+      "doc": "Empty request; the owner is the authenticated account, which the session already names.",
+      "fields": []
+    },
+    {
+      "name": "BotListResponse",
+      "doc": "Every bot one account owns.",
+      "fields": [
+        {
+          "name": "bots",
+          "type": "list<BotView>"
+        }
+      ]
+    },
+    {
+      "name": "BotPause",
+      "doc": "Sets whether a bot is paused. The flag is carried rather than implied by the opcode so one opcode resumes as well as pauses.",
+      "fields": [
+        {
+          "name": "bot_id",
+          "type": "id"
+        },
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "BotScopes",
+      "doc": "Replaces a bot's permissions outright. A replacement rather than a delta, so two owners editing the same bot cannot interleave into a set neither of them asked for.",
+      "fields": [
+        {
+          "name": "bot_id",
+          "type": "id"
+        },
+        {
+          "name": "scopes",
+          "type": "list<string>"
         }
       ]
     },

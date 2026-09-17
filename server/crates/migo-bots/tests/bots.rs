@@ -498,8 +498,44 @@ async fn rotating_a_token_returns_a_new_distinct_secret() {
         .expect("the owner can rotate their bot's token");
     assert_ne!(
         registered.token.expose(),
-        rotated.expose(),
+        rotated.token.expose(),
         "a rotation that returned the same token would not be a rotation"
+    );
+}
+
+/// The view a rotation hands back is the bot it rotated, not a fresh default.
+///
+/// This is the reason the method returns a pair rather than the bare secret: the store's write
+/// already returned the row, so the view costs a field projection and nothing else — but a
+/// projection is exactly where a wrong row, a wrong column, or a view built from the caller
+/// instead of from the row would go unnoticed, because a rotation test that checked only the
+/// secret would still pass. So the scopes and the name are set to values a default would not
+/// have, and the assertion is that they survive the call.
+#[tokio::test]
+async fn rotating_a_token_hands_back_the_bot_it_rotated() {
+    let harness = Harness::new();
+    let registered = harness
+        .register_with(
+            &owner(OWNER),
+            "weatherbot",
+            Scopes::SEND_MESSAGES.with(Scopes::READ_MEMBERS),
+        )
+        .await;
+
+    let rotated = harness
+        .service
+        .rotate_token(&owner(OWNER), registered.bot.bot_id)
+        .await
+        .expect("the owner can rotate their bot's token");
+
+    assert_eq!(rotated.bot.bot_id, registered.bot.bot_id);
+    assert_eq!(rotated.bot.name, registered.bot.name);
+    assert_eq!(rotated.bot.scopes, registered.bot.scopes);
+    assert_eq!(rotated.bot.disabled, registered.bot.disabled);
+    assert!(
+        rotated.bot.scopes.contains(Scopes::READ_MEMBERS),
+        "the view is the row, not a default: a projection that dropped the scope column \
+         would answer every rotation with a bot holding nothing"
     );
 }
 
@@ -530,6 +566,7 @@ async fn only_the_newest_token_authenticates_after_two_rotations() {
         .rotate_token(&owner(OWNER), registered.bot.bot_id)
         .await
         .expect("first rotation succeeds")
+        .token
         .expose()
         .to_string();
     let third = harness
@@ -537,6 +574,7 @@ async fn only_the_newest_token_authenticates_after_two_rotations() {
         .rotate_token(&owner(OWNER), registered.bot.bot_id)
         .await
         .expect("second rotation succeeds")
+        .token
         .expose()
         .to_string();
     // Three distinct credentials have existed; only the last is live.

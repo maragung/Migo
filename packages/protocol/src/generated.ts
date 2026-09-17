@@ -3187,37 +3187,148 @@ export function decodeBotRegister(r: Reader): BotRegister {
   return out;
 }
 
+/** A bot as its owner sees it. The optional fields are tagged rather than positional because they were added after the first build wrote this struct, and a reader that predates them must still decode the fixed part. */
 export interface BotView {
   botId: Id;
-  username: string;
+  /** The bot's display name, which is what its row stores and what a client shows. Named name rather than username because it is not the backing account's handle */
+  name: string;
   /** Present only on register/rotate; never logged */
   token?: string;
+  /** Whether the bot is paused. Absent means a build that predates pausing, not an unpaused bot */
+  paused?: boolean;
+  /** The permission slugs the bot holds, from the closed set in section 41. Absent means a build that predates scope reads, not a bot holding none */
+  scopes?: string[];
 }
 
 export function encodeBotView(w: Writer, v: BotView): void {
   w.enter();
   w.id(v.botId);
-  w.str(v.username);
+  w.str(v.name);
   let present = 0;
   if (v.token !== undefined) present++;
+  if (v.paused !== undefined) present++;
+  if (v.scopes !== undefined) present++;
   w.u32(present);
   if (v.token !== undefined) { const value = v.token; w.optional(1, (w) => { w.str(value); }); }
+  if (v.paused !== undefined) { const value = v.paused; w.optional(2, (w) => { w.bool(value); }); }
+  if (v.scopes !== undefined) { const value = v.scopes; w.optional(3, (w) => { { w.listLen(value.length); for (const item of value) { w.str(item); } } }); }
   w.leave();
 }
 
 export function decodeBotView(r: Reader): BotView {
   r.enter();
   const botId = r.id();
-  const username = r.str();
-  const out: BotView = { botId, username } as BotView;
+  const name = r.str();
+  const out: BotView = { botId, name } as BotView;
   const optionalCount = r.u32();
   for (let i = 0; i < optionalCount; i++) {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.token = sub.str(); break;
+      case 2: out.paused = sub.bool(); break;
+      case 3: out.scopes = ((): string[] => { const n = sub.listLen(); const v: string[] = []; for (let i = 0; i < n; i++) v.push(sub.str()); return v; })(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
+  r.leave();
+  return out;
+}
+
+/** Empty request; the owner is the authenticated account, which the session already names. */
+export interface BotListReq {
+}
+
+export function encodeBotListReq(w: Writer, _v: BotListReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotListReq(r: Reader): BotListReq {
+  r.enter();
+  const out: BotListReq = {  } as BotListReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Every bot one account owns. */
+export interface BotListResponse {
+  bots: BotView[];
+}
+
+export function encodeBotListResponse(w: Writer, v: BotListResponse): void {
+  w.enter();
+  { w.listLen(v.bots.length); for (const item of v.bots) { encodeBotView(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotListResponse(r: Reader): BotListResponse {
+  r.enter();
+  const bots = ((): BotView[] => { const n = r.listLen(); const v: BotView[] = []; for (let i = 0; i < n; i++) v.push(decodeBotView(r)); return v; })();
+  const out: BotListResponse = { bots } as BotListResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Sets whether a bot is paused. The flag is carried rather than implied by the opcode so one opcode resumes as well as pauses. */
+export interface BotPause {
+  botId: Id;
+  paused: boolean;
+}
+
+export function encodeBotPause(w: Writer, v: BotPause): void {
+  w.enter();
+  w.id(v.botId);
+  w.bool(v.paused);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotPause(r: Reader): BotPause {
+  r.enter();
+  const botId = r.id();
+  const paused = r.bool();
+  const out: BotPause = { botId, paused } as BotPause;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Replaces a bot's permissions outright. A replacement rather than a delta, so two owners editing the same bot cannot interleave into a set neither of them asked for. */
+export interface BotScopes {
+  botId: Id;
+  scopes: string[];
+}
+
+export function encodeBotScopes(w: Writer, v: BotScopes): void {
+  w.enter();
+  w.id(v.botId);
+  { w.listLen(v.scopes.length); for (const item of v.scopes) { w.str(item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotScopes(r: Reader): BotScopes {
+  r.enter();
+  const botId = r.id();
+  const scopes = ((): string[] => { const n = r.listLen(); const v: string[] = []; for (let i = 0; i < n; i++) v.push(r.str()); return v; })();
+  const out: BotScopes = { botId, scopes } as BotScopes;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
   r.leave();
   return out;
 }
@@ -7706,6 +7817,14 @@ export const OP = {
   BOT_COMMAND: 178,
   BOT_EVENT: 179,
   BOT_REGISTER: 180,
+  /** Lists every bot the caller owns. The owner is the authenticated account, so the request names none. */
+  BOT_LIST: 187,
+  /** Mints a fresh token for a bot and invalidates the old one. The new token rides in the response's token field, once. */
+  BOT_ROTATE: 188,
+  /** Pauses a bot or resumes it. A paused bot refuses to authenticate, so it stops speaking without losing its token or its row. */
+  BOT_PAUSE: 189,
+  /** Replaces a bot's permissions with exactly the set given, which may be empty. Naming a slug no build defines is a validation error rather than a silently dropped bit. */
+  BOT_SCOPES: 190,
   /** Starts a game in a conversation. */
   GAME_START: 183,
   /** Reads a game's state as the caller sees it. */
@@ -7892,6 +8011,10 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'BOTS' },
   179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent', paced: false, suppressOn: [], feature: 'BOTS' },
   180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView', paced: false, suppressOn: [], feature: 'BOTS' },
+  187: { code: 187, name: 'BOT_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotListReq', response: 'BotListResponse', paced: false, suppressOn: [], feature: 'BOTS' },
+  188: { code: 188, name: 'BOT_ROTATE', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotRotate', response: 'BotView', paced: false, suppressOn: [], feature: 'BOTS' },
+  189: { code: 189, name: 'BOT_PAUSE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotPause', response: 'BotView', paced: false, suppressOn: [], feature: 'BOTS' },
+  190: { code: 190, name: 'BOT_SCOPES', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotScopes', response: 'BotView', paced: false, suppressOn: [], feature: 'BOTS' },
   183: { code: 183, name: 'GAME_START', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameStart', response: 'GameViewWire', paced: false, suppressOn: [], feature: 'GAMES' },
   184: { code: 184, name: 'GAME_VIEW', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'GameViewWire', paced: false, suppressOn: [], feature: 'GAMES' },
   185: { code: 185, name: 'GAME_ABANDON', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'GAMES' },

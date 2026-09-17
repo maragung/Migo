@@ -181,6 +181,10 @@ export {
 } from './domains/moderation.js';
 export type { ReportOptions, ReportTarget } from './domains/moderation.js';
 
+// --- the bots domain: the one surface here that hands back a credential, exactly once ---
+export { BotsDomain, BOT_SCOPES, NO_SCOPES } from './domains/bots.js';
+export type { BotScope } from './domains/bots.js';
+
 // --- the chain domain: JSON-RPC to a pinned public EVM network, not to the Migo server ---
 export { ChainClient, ChainError, AVALANCHE_MAINNET, FUJI_TESTNET } from './domains/chain.js';
 export type {
