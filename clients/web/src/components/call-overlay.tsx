@@ -108,8 +108,20 @@ export interface CallScreenProps {
    * one camera has nothing to switch to, and the button would be one that lies about what it did.
    */
   cameras: CallDevice[];
+  /**
+   * The microphones the platform offers. Unlike outputs this list is never empty on a call that is
+   * running — the call is already holding one — so the control is drawn whenever there is more than
+   * one to choose between, and a device with a single microphone gets no menu that could only ever
+   * restate what is already happening.
+   */
+  microphones: CallDevice[];
   /** The audio output in use, or null for the platform's default. */
   outputId: string | null;
+  /**
+   * The microphone in use, or null for the platform's own choice. It is the device the call actually
+   * opened rather than the one that was asked for, so the menu names what the peer is hearing.
+   */
+  inputId: string | null;
   /**
    * The tier the user pinned the call to, or null while the ladder is automatic. Section 180 asks
    * for manual selection alongside the automatic one, and manual is a ceiling: the call can still
@@ -136,6 +148,7 @@ export interface CallScreenProps {
   onSwitchCamera: () => void;
   onToggleScreenShare: () => void;
   onSelectOutput: (deviceId: string | null) => void;
+  onSelectInput: (deviceId: string | null) => void;
   onSelectQuality: (ceiling: LinkQuality | null) => void;
   onToggleLowBandwidth: (on: boolean) => void;
   onDismiss: () => void;
@@ -159,7 +172,9 @@ export function CallScreen({
   screenStream,
   outputs,
   cameras,
+  microphones,
   outputId,
+  inputId,
   qualityCeiling,
   lowBandwidth,
   nowMs,
@@ -175,6 +190,7 @@ export function CallScreen({
   onSwitchCamera,
   onToggleScreenShare,
   onSelectOutput,
+  onSelectInput,
   onSelectQuality,
   onToggleLowBandwidth,
   onDismiss,
@@ -380,6 +396,27 @@ export function CallScreen({
                 🔄
               </button>
             ) : null}
+            {microphones.length > 1 ? (
+              // The input side of the same requirement. Drawn only where the platform reports more
+              // than one, because a menu with a single row cannot change anything — and unlike the
+              // output list this one always contains the device the call is already using, so the
+              // empty option is the platform's own choice rather than the only possibility.
+              <select
+                className="call-action input"
+                value={inputId ?? ''}
+                aria-label="Microphone"
+                onChange={(event) =>
+                  onSelectInput(event.target.value === '' ? null : event.target.value)
+                }
+              >
+                <option value="">System default</option>
+                {microphones.map((microphone) => (
+                  <option key={microphone.id} value={microphone.id}>
+                    {microphone.label}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             {outputs.length > 0 ? (
               // Section 180's speaker, earpiece, Bluetooth, and wired headset, as whatever the
               // platform reported. A select rather than a cycling button, because the list is named
@@ -519,7 +556,9 @@ export function CallOverlay(): ReactNode {
     screenStream,
     outputs,
     cameras,
+    microphones,
     outputId,
+    inputId,
     qualityCeiling,
     lowBandwidth,
     localStream,
@@ -534,6 +573,7 @@ export function CallOverlay(): ReactNode {
     toggleCamera,
     switchCamera,
     setOutputDevice,
+    setInputDevice,
     setQualityCeiling,
     setLowBandwidth,
     toggleScreenShare,
@@ -579,7 +619,9 @@ export function CallOverlay(): ReactNode {
         screenStream={screenStream}
         outputs={outputs}
         cameras={cameras}
+        microphones={microphones}
         outputId={outputId}
+        inputId={inputId}
         qualityCeiling={qualityCeiling}
         lowBandwidth={lowBandwidth}
         nowMs={nowMs}
@@ -595,6 +637,7 @@ export function CallOverlay(): ReactNode {
         onSwitchCamera={() => void switchCamera()}
         onToggleScreenShare={() => void toggleScreenShare()}
         onSelectOutput={setOutputDevice}
+        onSelectInput={(deviceId) => void setInputDevice(deviceId)}
         onSelectQuality={setQualityCeiling}
         onToggleLowBandwidth={setLowBandwidth}
         onDismiss={dismissCall}

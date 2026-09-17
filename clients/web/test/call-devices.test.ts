@@ -19,6 +19,7 @@ import {
   callVideoConstraints,
   cameraDevicesOf,
   canSelectOutput,
+  microphoneDevicesOf,
   outputDevicesOf,
   switchCameraId,
 } from '../src/lib/migo/call-devices.js';
@@ -50,10 +51,14 @@ test('a device list is read by kind, and an unlabelled one is numbered rather th
     { id: 'out-1', label: 'Speaker' },
     { id: 'out-2', label: 'Speaker (2)' },
   ]);
+  // The microphones are the third list and the only one that is never empty on a running call: a
+  // call cannot open a microphone the platform did not report.
+  assert.deepEqual(microphoneDevicesOf(devices), [{ id: 'mic-1', label: 'Internal microphone' }]);
 
   // A platform that reports no output device at all is an empty list, not an invented default:
   // the caller draws no speaker control from it, which is the honest answer.
   assert.deepEqual(outputDevicesOf([info('audioinput', 'mic-1', 'Mic')]), []);
+  assert.deepEqual(microphoneDevicesOf([info('audiooutput', 'out-1', 'Speaker')]), []);
 });
 
 test('the camera switch wraps, and reports nothing when there is nothing to switch to', () => {
@@ -83,6 +88,17 @@ test('a call names its audio processing, and asks for a camera without demanding
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
+  });
+
+  // A chosen microphone keeps all three, because a switch is about which device hears the user and
+  // not about how the audio is processed — and its id is an ideal for the same reason the camera's
+  // is: a headset that has been unplugged must not make the acquisition fail on a call that is
+  // already running.
+  assert.deepEqual(callAudioConstraints('mic-2'), {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    deviceId: { ideal: 'mic-2' },
   });
 
   // No camera chosen is the platform's own choice; a chosen one is an ideal rather than exact,

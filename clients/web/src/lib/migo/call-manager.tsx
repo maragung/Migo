@@ -118,6 +118,7 @@ import {
   callVideoConstraints,
   cameraDevicesOf,
   canSelectOutput,
+  microphoneDevicesOf,
   outputDevicesOf,
   switchCameraId,
 } from './call-devices.js';
@@ -280,8 +281,21 @@ export interface CallManagerValue {
    * the fact the camera-switch control is drawn from rather than its own idea of a phone.
    */
   cameras: CallDevice[];
+  /**
+   * The microphones the platform offers, which every call has at least one of — this client cannot
+   * open a microphone the platform did not report. The list is what makes the input a choice rather
+   * than an accident of which device the browser happened to pick, and it is read after the call has
+   * granted capture permission, which is when the labels stop being blank.
+   */
+  microphones: CallDevice[];
   /** The audio output in use, or null for the platform's default. */
   outputId: string | null;
+  /**
+   * The microphone in use, or null for the platform's own choice. Read back from the track the call
+   * actually opened rather than from what was asked for, so the menu names the microphone the peer
+   * is hearing.
+   */
+  inputId: string | null;
   /** This side's microphone/camera stream, for the small self-view. */
   localStream: MediaStream | null;
   /** The peer's stream once their tracks arrive, for the main view. */
@@ -322,6 +336,12 @@ export interface CallManagerValue {
    */
   setOutputDevice: (deviceId: string | null) => void;
   /**
+   * Moves the call's microphone to one of {@link microphones}, or back to the platform's choice when
+   * given null. Takes effect on the connected media rather than on the next call, and a switch that
+   * cannot be made leaves the call on the microphone it already had.
+   */
+  setInputDevice: (deviceId: string | null) => Promise<void>;
+  /**
    * Starts or stops a screen share on a connected video call. Silently does nothing on a voice
    * call: section 180 makes screen sharing a video-call capability, and a voice call has no video
    * m-line for a share to ride.
@@ -348,7 +368,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [outputs, setOutputs] = useState<CallDevice[]>([]);
   const [cameras, setCameras] = useState<CallDevice[]>([]);
+  const [microphones, setMicrophones] = useState<CallDevice[]>([]);
   const [outputId, setOutputId] = useState<string | null>(null);
+  const [inputId, setInputId] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
@@ -438,6 +460,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
    * whatever the render it closed over happened to hold.
    */
   const camerasRef = useRef<CallDevice[]>([]);
+  /**
+   * The microphone the user asked for, held as a wish for the same reason as the camera: the
+   * platform substitutes when the ideal device is gone, so the settings are read back afterwards.
+   *
+   * Null is the platform's own choice, which is where a call that never chose one starts and where a
+   * call returns if the chosen microphone is unplugged between acquisition attempts.
+   */
+  const microphoneIdRef = useRef<string | null>(null);
   /**
    * Whether that sender currently carries the camera. Held here rather than read back from the
    * sender, because `replaceTrack(null)` is exactly the state that makes a sender unable to report
@@ -663,10 +693,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       camerasRef.current = list;
       setCameras(list);
       setOutputs(canSelectOutput() ? outputDevicesOf(devices) : []);
+      setMicrophones(microphoneDevicesOf(devices));
     } catch {
       camerasRef.current = [];
       setCameras([]);
       setOutputs([]);
+      setMicrophones([]);
     }
   }, []);
 
@@ -746,6 +778,62 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       );
     }
   }, [wantedVideoTrack]);
+
+  /**
+   * Moves the call's microphone to another one the platform reports.
+   *
+   * The track is replaced rather than the stream re-acquired, exactly as {@link switchCamera} does
+   * it: a second `getUserMedia` for the audio half interrupts the microphone the user is speaking
+   * into even when it settles on the same device, and the video half has no business being re-opened
+   * at all. The new track is acquired first and only then handed over, so a microphone that cannot
+   * be opened — busy in another application, or unplugged between the menu opening and the press —
+   * leaves the call on the one it already had rather than on none.
+   *
+   * The acquisition runs under the call's own audio constraints, because a switch is about which
+   * device hears the user and not about how the audio is processed, and the new track follows the
+   * call's mute state rather than its own default: a muted call must not be unmuted by changing
+   * which microphone is muted. The low-bandwidth cap is deliberately not re-applied — it lives on
+   * the sender's parameters, which replacing a track does not touch.
+   */
+  const setInputDevice = useCallback(async (deviceId: string | null): Promise<void> => {
+    const sender = audioSenderRef.current;
+    if (sender === null) {
+      // No call, or a connection whose sender was never adopted. The control is drawn only on a
+      // connected call, so this is a stale screen doing nothing.
+      return;
+    }
+    let acquired: MediaStream;
+    try {
+      acquired = await navigator.mediaDevices.getUserMedia({
+        audio: callAudioConstraints(deviceId),
+      });
+    } catch {
+      // The microphone could not be opened. The call keeps the one it has, which is the honest
+      // outcome and the same one the camera switch lands on.
+      return;
+    }
+    const track = acquired.getAudioTracks()[0];
+    if (track === undefined) {
+      return;
+    }
+    track.enabled = !mutedRef.current;
+    const stream = localStreamRef.current;
+    const previous = stream?.getAudioTracks()[0] ?? null;
+    // The sender takes the new track before the old one is stopped: stopping first would open a
+    // stretch with nothing attached, which the peer hears as a break in the audio for no reason.
+    await sender.replaceTrack(track).catch(() => {});
+    if (stream !== null && previous !== null) {
+      stream.removeTrack(previous);
+      stream.addTrack(track);
+      setLocalStream(stream);
+    }
+    previous?.stop();
+    // The microphone the platform actually opened, which is not necessarily the one asked for: the
+    // constraint is an ideal, so the wish is corrected to the fact before the menu reads it.
+    const id = track.getSettings().deviceId ?? deviceId;
+    microphoneIdRef.current = id;
+    setInputId(id);
+  }, []);
 
   /**
    * Puts a rung into effect: the tier the screen shows, the Degraded state, and the shaping of this
@@ -1082,9 +1170,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     // not a standing preference, and carrying it into the next call would open a camera nobody
     // asked for and route audio to a headset that may have been unplugged since.
     cameraIdRef.current = null;
+    // The microphone is the third of those wishes, and the one it would be worst to carry: a
+    // headset chosen for one call is exactly the device the user has since put in a drawer.
+    microphoneIdRef.current = null;
+    setInputId(null);
     setOutputId(null);
     setCameras([]);
     setOutputs([]);
+    setMicrophones([]);
     camerasRef.current = [];
     setDegraded(false);
     setQuality(null);
@@ -1411,6 +1504,15 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       const track = stream.getVideoTracks()[0];
       if (track !== undefined) {
         cameraIdRef.current = track.getSettings().deviceId ?? null;
+      }
+      // The microphone is read back for the same reason and one more: the menu has to open on the
+      // microphone the call is actually using, and without this a call that never chose one would
+      // show "System default" while a particular device was live behind it.
+      const audio = stream.getAudioTracks()[0];
+      if (audio !== undefined) {
+        const id = audio.getSettings().deviceId ?? null;
+        microphoneIdRef.current = id;
+        setInputId(id);
       }
       void refreshDevices();
     },
@@ -2032,7 +2134,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     screenStream,
     outputs,
     cameras,
+    microphones,
     outputId,
+    inputId,
     localStream,
     remoteStream,
     endedAt,
@@ -2047,6 +2151,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     toggleCamera,
     switchCamera,
     setOutputDevice,
+    setInputDevice,
     setQualityCeiling,
     setLowBandwidth,
     toggleScreenShare,

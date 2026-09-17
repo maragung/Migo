@@ -33,13 +33,25 @@ export interface CallDevice {
   label: string;
 }
 
-/** The audio processing section 180 requires, named rather than left to a browser default. */
-export function callAudioConstraints(): MediaTrackConstraints {
-  return {
+/**
+ * The audio processing section 180 requires, named rather than left to a browser default.
+ *
+ * A chosen microphone is an ideal and not an exact device id, for the same reason the camera's is
+ * (see {@link callVideoConstraints}): a headset that has been unplugged, or an id that rotated since
+ * the user picked it, would otherwise make the acquisition fail outright — and on a call that is
+ * already running, a failed acquisition means the microphone the user is speaking into keeps being
+ * the one they just asked to leave.
+ */
+export function callAudioConstraints(deviceId: string | null = null): MediaTrackConstraints {
+  const constraints: MediaTrackConstraints = {
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
   };
+  if (deviceId !== null) {
+    constraints.deviceId = { ideal: deviceId };
+  }
+  return constraints;
 }
 
 /**
@@ -72,6 +84,22 @@ export function cameraDevicesOf(devices: readonly MediaDeviceInfo[]): CallDevice
   return named(
     devices.filter((device) => device.kind === 'videoinput'),
     'Camera',
+  );
+}
+
+/**
+ * The microphones the platform offers, in list order.
+ *
+ * Unlike outputs, this list is what every call already reads: a call cannot open a microphone
+ * without the platform's own, so the menu's job is only to let the user move between them. The
+ * labels are blank until a call has granted capture permission, which on a running call they have
+ * been — an unlabelled entry here is a device the platform declined to name rather than one it
+ * cannot open.
+ */
+export function microphoneDevicesOf(devices: readonly MediaDeviceInfo[]): CallDevice[] {
+  return named(
+    devices.filter((device) => device.kind === 'audioinput'),
+    'Microphone',
   );
 }
 
