@@ -107,6 +107,15 @@ import {
 } from './call-signal.js';
 import type { SdpDescription } from './call-signal.js';
 import { QUALITY_POLL_MS, advanceMeasurement, degradedAt, qualityReport } from './call-quality.js';
+import {
+  callAudioConstraints,
+  callVideoConstraints,
+  cameraDevicesOf,
+  canSelectOutput,
+  outputDevicesOf,
+  switchCameraId,
+} from './call-devices.js';
+import type { CallDevice } from './call-devices.js';
 import { readLinkCounters, shapeVideoSender, videoTrackToSend } from './group-media.js';
 import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
 import { useMigo } from './use-migo.js';
@@ -234,6 +243,19 @@ export interface CallManagerValue {
    * happening.
    */
   screenStream: MediaStream | null;
+  /**
+   * The audio outputs the platform offers, empty on a browser with no output selection. Section 180
+   * names speaker, earpiece, Bluetooth, and wired headset, and this is whatever the platform
+   * actually reports — a list the application never invents and never pads.
+   */
+  outputs: CallDevice[];
+  /**
+   * The cameras the platform offers. Fewer than two means there is nothing to switch to, which is
+   * the fact the camera-switch control is drawn from rather than its own idea of a phone.
+   */
+  cameras: CallDevice[];
+  /** The audio output in use, or null for the platform's default. */
+  outputId: string | null;
   /** This side's microphone/camera stream, for the small self-view. */
   localStream: MediaStream | null;
   /** The peer's stream once their tracks arrive, for the main view. */
@@ -262,6 +284,18 @@ export interface CallManagerValue {
   /** Turns this side's camera on or off. Does nothing on a call with no camera to turn. */
   toggleCamera: () => void;
   /**
+   * Switches to the platform's next camera. Does nothing when there is only one, which is the fact
+   * the control is drawn from: a device with a single camera has nothing to switch to, and a button
+   * that did nothing would be worse than no button.
+   */
+  switchCamera: () => Promise<void>;
+  /**
+   * Routes the call's audio to one of {@link outputs}, or to the platform's default when given
+   * null. Takes effect on the connected media, not on the next call: section 180 asks for movement
+   * between outputs while the call runs.
+   */
+  setOutputDevice: (deviceId: string | null) => void;
+  /**
    * Starts or stops a screen share on a connected video call. Silently does nothing on a voice
    * call: section 180 makes screen sharing a video-call capability, and a voice call has no video
    * m-line for a share to ride.
@@ -284,6 +318,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [quality, setQuality] = useState<LinkQuality | null>(null);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [outputs, setOutputs] = useState<CallDevice[]>([]);
+  const [cameras, setCameras] = useState<CallDevice[]>([]);
+  const [outputId, setOutputId] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
@@ -359,6 +396,20 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
    * the user's desktop with nothing in the interface saying so.
    */
   const screenStreamRef = useRef<MediaStream | null>(null);
+  /**
+   * The camera the call is acquired from, or null for the platform's own choice.
+   *
+   * Held as a wish rather than read back from the track: `getUserMedia` is free to substitute when
+   * the ideal device is gone, and the track does not say which one it settled on. `deviceId` from
+   * the settings is read back after acquisition to keep this honest.
+   */
+  const cameraIdRef = useRef<string | null>(null);
+  /**
+   * The camera list as last read, mirrored into a ref because {@link switchCamera} is asked for the
+   * next one at the moment the button is pressed, and a handler that read React state would read
+   * whatever the render it closed over happened to hold.
+   */
+  const camerasRef = useRef<CallDevice[]>([]);
   /**
    * Whether that sender currently carries the camera. Held here rather than read back from the
    * sender, because `replaceTrack(null)` is exactly the state that makes a sender unable to report
@@ -540,6 +591,109 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     if (sender !== null) {
       // Shaped now rather than at the next poll, so the button does what it says on the press: the
       // same function the ladder uses, so the camera cannot come back on a link the ladder grounded.
+      videoAttachedRef.current = shapeVideoSender(
+        sender,
+        wantedVideoTrack(),
+        qualityRef.current,
+        lastMeasureRef.current?.stats.sentKbps ?? 0,
+        videoAttachedRef.current,
+      );
+    }
+  }, [wantedVideoTrack]);
+
+  /**
+   * Re-reads the platform's device lists and folds them into state.
+   *
+   * The lists are read after the call has media, never before: a device's `label` is empty until a
+   * capture permission is granted, so a menu built from an ungranted list is a menu of blanks. What
+   * the platform reports is the whole answer — a deployment with one camera offers no switch, and a
+   * browser with no output selection offers no speaker control (see {@link canSelectOutput}) — which
+   * is why an empty list is kept rather than filled in.
+   *
+   * A failure here is not a failed call: a browser that refuses to enumerate leaves both lists empty
+   * and the call exactly as it was, without the two controls that need them.
+   */
+  const refreshDevices = useCallback(async (): Promise<void> => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const list = cameraDevicesOf(devices);
+      camerasRef.current = list;
+      setCameras(list);
+      setOutputs(canSelectOutput() ? outputDevicesOf(devices) : []);
+    } catch {
+      camerasRef.current = [];
+      setCameras([]);
+      setOutputs([]);
+    }
+  }, []);
+
+  /**
+   * Sets the audio output the call plays through, for this call and the ones after it.
+   *
+   * Section 180 asks for speaker, earpiece, Bluetooth, and wired headset with movement between them
+   * while the call runs, and this is the whole of that on the web: the choice is state the overlay
+   * applies to the media element, so it takes effect on the next frame rather than on the next call.
+   * Null means the platform's default, which is what a browser that has just lost the chosen headset
+   * falls back to.
+   */
+  const setOutputDevice = useCallback((deviceId: string | null): void => {
+    setOutputId(deviceId);
+  }, []);
+
+  /**
+   * Switches the call's camera to the platform's next one.
+   *
+   * The track is replaced rather than the stream re-acquired: the microphone must not blink, and
+   * re-running `getUserMedia` for the audio half would interrupt it on every switch. The new track
+   * is acquired first and only then handed over, so a switch that fails — the other camera is busy
+   * in another application — leaves the call on the camera it already had rather than on none.
+   *
+   * The replacement goes through the same ladder shaping as everything else, so a camera switched
+   * on a link the ladder has grounded is acquired and held, not sent.
+   */
+  const switchCamera = useCallback(async (): Promise<void> => {
+    const call = activeRef.current;
+    const stream = localStreamRef.current;
+    const nextId = switchCameraId(camerasRef.current, cameraIdRef.current);
+    if (
+      call === null ||
+      call.mediaKind !== CallMediaKind.Video ||
+      stream === null ||
+      nextId === null
+    ) {
+      // No call, a voice call, or a device with nothing to switch to. The control is drawn only
+      // where the list had two entries and the call has a video m-line, so this is a stale screen
+      // doing nothing — and on a voice call it also refuses to open a camera the call never asked
+      // for and has no sender to carry.
+      return;
+    }
+    let acquired: MediaStream;
+    try {
+      acquired = await navigator.mediaDevices.getUserMedia({ video: callVideoConstraints(nextId) });
+    } catch {
+      // The camera could not be opened — taken by another application, or unplugged since the list
+      // was read. The call keeps the camera it has, which is the honest outcome.
+      return;
+    }
+    const track = acquired.getVideoTracks()[0];
+    if (track === undefined) {
+      return;
+    }
+    const previous = stream.getVideoTracks()[0] ?? null;
+    if (previous !== null) {
+      stream.removeTrack(previous);
+      previous.stop();
+    }
+    stream.addTrack(track);
+    // The camera the platform actually opened, which is not necessarily the one asked for: the
+    // constraint is an ideal, so the wish is corrected to the fact before the next switch reads it.
+    cameraIdRef.current = track.getSettings().deviceId ?? nextId;
+    // A camera acquired after the user turned video off stays off: the wish is about video, not
+    // about which device provides it.
+    track.enabled = cameraOnRef.current;
+    setLocalStream(stream);
+    const sender = videoSenderRef.current;
+    if (sender !== null) {
       videoAttachedRef.current = shapeVideoSender(
         sender,
         wantedVideoTrack(),
@@ -808,6 +962,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     // Both media wishes belong to the call that just ended; the next call adopts its own camera.
     cameraOnRef.current = false;
     setCameraOn(false);
+    // The chosen camera and output belong to the call too: a device the user picked for one call is
+    // not a standing preference, and carrying it into the next call would open a camera nobody
+    // asked for and route audio to a headset that may have been unplugged since.
+    cameraIdRef.current = null;
+    setOutputId(null);
+    setCameras([]);
+    setOutputs([]);
+    camerasRef.current = [];
     setDegraded(false);
     setQuality(null);
     // The capture is stopped here rather than handed back to a sender: the sender belongs to a
@@ -1078,11 +1240,18 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     [finishCall, handleIceCandidate, markConnected, restartIce, setActive],
   );
 
-  /** Acquires the mic (and camera, for a video call) the call needs. */
+  /**
+   * Acquires the mic (and camera, for a video call) the call needs.
+   *
+   * The constraints are this client's own rather than the browser's defaults (see
+   * {@link callAudioConstraints}): section 180 names echo cancellation, noise suppression, and
+   * automatic gain control, and naming them makes the call's audio processing a decision that can
+   * be read here instead of whatever the current browser release happened to choose.
+   */
   const acquireMedia = async (mediaKind: CallMediaKind): Promise<MediaStream> =>
     navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: mediaKind === CallMediaKind.Video,
+      audio: callAudioConstraints(),
+      video: mediaKind === CallMediaKind.Video ? callVideoConstraints(cameraIdRef.current) : false,
     });
 
   // The answer acquires through the fallback below; placement does not — a user who
@@ -1101,6 +1270,27 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     async (mediaKind: CallMediaKind): Promise<MediaStream> =>
       answerMediaWithFallback(mediaKind, acquireMedia),
     [],
+  );
+
+  /**
+   * Adopts the media a call just acquired, and reads back what the platform actually granted.
+   *
+   * Both flows go through here because the same two facts need recording on each: which camera the
+   * browser opened (the constraint is an ideal, so the wish must be corrected to the fact before the
+   * first switch reads it) and what devices now exist — a list read only after capture is the first
+   * one whose labels are not blank.
+   */
+  const adoptLocalStream = useCallback(
+    (stream: MediaStream): void => {
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      const track = stream.getVideoTracks()[0];
+      if (track !== undefined) {
+        cameraIdRef.current = track.getSettings().deviceId ?? null;
+      }
+      void refreshDevices();
+    },
+    [refreshDevices],
   );
 
   // --- the flows the UI calls ---
@@ -1154,8 +1344,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         });
         adoptCallKey(callId, callKey);
         const stream = await acquireMedia(mediaKind);
-        localStreamRef.current = stream;
-        setLocalStream(stream);
+        adoptLocalStream(stream);
 
         const pc = createPeer(await iceServersForCall(current, callId));
         for (const track of stream.getTracks()) {
@@ -1224,6 +1413,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     },
     [
       adoptCallKey,
+      adoptLocalStream,
       adoptVideoSender,
       armRingTimeout,
       callInProgress,
@@ -1277,8 +1467,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         throw new Error('the call key has not arrived');
       }
       const stream = await acquireAnswerMedia(mediaKind);
-      localStreamRef.current = stream;
-      setLocalStream(stream);
+      adoptLocalStream(stream);
 
       const pc = createPeer(await iceServersForCall(current, incoming.callId));
       for (const track of stream.getTracks()) {
@@ -1323,6 +1512,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, [
     answerCall,
     acquireAnswerMedia,
+    adoptLocalStream,
     adoptVideoSender,
     callInProgress,
     createPeer,
@@ -1673,6 +1863,27 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     return () => window.removeEventListener('beforeunload', onPageUnload);
   }, []);
 
+  /**
+   * Keeps the device lists current while a call is up. A headset plugged in mid-call, or a camera
+   * another application releases, is a device the platform reports through `devicechange` — and
+   * section 180's movement between outputs is exactly the case where the list has to move under the
+   * menu without the call being restarted to see it.
+   */
+  useEffect(() => {
+    if (activeCall === null || activeCall.state === CallState.Ended) {
+      return;
+    }
+    const devices = navigator.mediaDevices;
+    if (devices === undefined || typeof devices.addEventListener !== 'function') {
+      return;
+    }
+    const onDeviceChange = (): void => {
+      void refreshDevices();
+    };
+    devices.addEventListener('devicechange', onDeviceChange);
+    return () => devices.removeEventListener('devicechange', onDeviceChange);
+  }, [activeCall, refreshDevices]);
+
   // Unmounting the shell must not leave a microphone on.
   useEffect(
     () => (): void => {
@@ -1693,6 +1904,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     quality,
     sharingScreen,
     screenStream,
+    outputs,
+    cameras,
+    outputId,
     localStream,
     remoteStream,
     endedAt,
@@ -1705,6 +1919,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     endCall,
     toggleMute,
     toggleCamera,
+    switchCamera,
+    setOutputDevice,
     toggleScreenShare,
     dismissCall,
   };

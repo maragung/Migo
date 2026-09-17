@@ -34,11 +34,14 @@
  * echo in the overlay is a bug every call UI ships once.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, Id } from '@migo/sdk';
+
+import { applyOutputDevice } from '@/lib/migo/call-devices.js';
+import type { CallDevice } from '@/lib/migo/call-devices.js';
 
 import {
   callMediaKindOf,
@@ -95,6 +98,18 @@ export interface CallScreenProps {
    * a self-view of the user's own face during a screen share says the opposite of what is going on.
    */
   screenStream: MediaStream | null;
+  /**
+   * The audio outputs the platform offers. Section 180 names speaker, earpiece, Bluetooth, and
+   * wired headset; this is that list as reported, and an empty one draws no speaker control.
+   */
+  outputs: CallDevice[];
+  /**
+   * The cameras the platform offers. Fewer than two draws no camera-switch control — a device with
+   * one camera has nothing to switch to, and the button would be one that lies about what it did.
+   */
+  cameras: CallDevice[];
+  /** The audio output in use, or null for the platform's default. */
+  outputId: string | null;
   /** The clock the duration reads, passed in so the pure half has no timer of its own. */
   nowMs: number;
   /** When the tracked call ended, for the ended screen's total duration. */
@@ -109,7 +124,9 @@ export interface CallScreenProps {
   onEnd: (reason: CallEndReason) => void;
   onToggleMute: () => void;
   onToggleCamera: () => void;
+  onSwitchCamera: () => void;
   onToggleScreenShare: () => void;
+  onSelectOutput: (deviceId: string | null) => void;
   onDismiss: () => void;
 }
 
@@ -129,6 +146,9 @@ export function CallScreen({
   quality,
   sharingScreen,
   screenStream,
+  outputs,
+  cameras,
+  outputId,
   nowMs,
   endedAt,
   localStream,
@@ -139,9 +159,26 @@ export function CallScreen({
   onEnd,
   onToggleMute,
   onToggleCamera,
+  onSwitchCamera,
   onToggleScreenShare,
+  onSelectOutput,
   onDismiss,
 }: CallScreenProps): ReactNode {
+  // The output is applied to the media element rather than carried on the stream: the sink belongs
+  // to the element and has to be re-applied whenever the chosen device moves. The ref is a callback
+  // rather than an object because of that — React re-runs it on every change of identity, which is
+  // exactly the "this element's output just moved" case. A rejection is a device that disappeared
+  // between the menu opening and the press, and the call keeps playing where it was.
+  const remoteRef = useCallback(
+    (element: HTMLVideoElement | null): void => {
+      if (element === null) {
+        return;
+      }
+      element.srcObject = remoteStream;
+      void applyOutputDevice(element, outputId).catch(() => {});
+    },
+    [remoteStream, outputId],
+  );
   if (incoming !== null) {
     const kind = mediaKindLabel(callMediaKindOf(incoming.mediaKind));
     return (
@@ -200,11 +237,7 @@ export function CallScreen({
             autoPlay
             playsInline
             aria-label={`${peerName}\u2019s video`}
-            ref={(element: HTMLVideoElement | null): void => {
-              if (element !== null) {
-                element.srcObject = remoteStream;
-              }
-            }}
+            ref={remoteRef}
           />
           <video
             className="call-video local"
@@ -319,6 +352,40 @@ export function CallScreen({
                 {cameraOn ? '📷' : '🚫'}
               </button>
             ) : null}
+            {isVideo && cameras.length > 1 ? (
+              // Only drawn where the platform reported a second camera: section 180 asks for the
+              // front/back switch on the devices that have one, and a control that did nothing on a
+              // laptop with a single webcam would be worse than none.
+              <button
+                type="button"
+                className="call-action switch-camera"
+                aria-label="Switch camera"
+                onClick={onSwitchCamera}
+              >
+                🔄
+              </button>
+            ) : null}
+            {outputs.length > 0 ? (
+              // Section 180's speaker, earpiece, Bluetooth, and wired headset, as whatever the
+              // platform reported. A select rather than a cycling button, because the list is named
+              // and the user is choosing between names; the empty option is the system default,
+              // which is where a browser that just lost the chosen headset lands.
+              <select
+                className="call-action output"
+                value={outputId ?? ''}
+                aria-label="Audio output"
+                onChange={(event) =>
+                  onSelectOutput(event.target.value === '' ? null : event.target.value)
+                }
+              >
+                <option value="">System default</option>
+                {outputs.map((output) => (
+                  <option key={output.id} value={output.id}>
+                    {output.label}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             {isVideo ? (
               // Only a video call gets the control, because only a video call has a video m-line for
               // a share to ride: section 180 makes screen sharing a video-call capability, and a
@@ -399,6 +466,9 @@ export function CallOverlay(): ReactNode {
     quality,
     sharingScreen,
     screenStream,
+    outputs,
+    cameras,
+    outputId,
     localStream,
     remoteStream,
     endedAt,
@@ -409,6 +479,8 @@ export function CallOverlay(): ReactNode {
     endCall,
     toggleMute,
     toggleCamera,
+    switchCamera,
+    setOutputDevice,
     toggleScreenShare,
     dismissCall,
   } = useCall();
@@ -450,6 +522,9 @@ export function CallOverlay(): ReactNode {
         quality={quality}
         sharingScreen={sharingScreen}
         screenStream={screenStream}
+        outputs={outputs}
+        cameras={cameras}
+        outputId={outputId}
         nowMs={nowMs}
         endedAt={endedAt}
         localStream={localStream}
@@ -460,7 +535,9 @@ export function CallOverlay(): ReactNode {
         onEnd={(reason) => void endCall(reason)}
         onToggleMute={toggleMute}
         onToggleCamera={toggleCamera}
+        onSwitchCamera={() => void switchCamera()}
         onToggleScreenShare={() => void toggleScreenShare()}
+        onSelectOutput={setOutputDevice}
         onDismiss={dismissCall}
       />
     );
