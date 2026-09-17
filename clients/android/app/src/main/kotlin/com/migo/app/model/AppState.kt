@@ -9,6 +9,7 @@ import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
+import com.migo.core.protocol.BotView
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
@@ -155,6 +156,7 @@ sealed interface AppState {
         val securityCheckup: SecurityCheckupState = SecurityCheckupState(),
         val admins: AdminsState = AdminsState(),
         val games: GamesState = GamesState(),
+        val bots: BotsState = BotsState(),
         val settings: SettingsPanelState = SettingsPanelState(),
         /**
          * The presence the live stream has reported for other accounts, by account id. Seeded by
@@ -174,11 +176,11 @@ sealed interface AppState {
      * which is how a phone wears a second pane.
      */
     enum class Section {
-        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS, SETTINGS;
+        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS, BOTS, SETTINGS;
 
         /** True for the panels the me sheet opens, which cover the strip rather than join it. */
         val isPanel: Boolean
-            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES || this == SETTINGS
+            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES || this == BOTS || this == SETTINGS
     }
 }
 
@@ -593,6 +595,48 @@ data class GamesState(
     /** Why the last read could not answer. */
     val failure: String? = null,
 )
+
+/**
+ * The Bots panel's read and the one-shot state around it.
+ *
+ * The list is the account's own — the wire names no owner because the session is the owner — so
+ * every row here is a bot this account runs, and the null-before-first-read rule keeps "not checked
+ * yet" distinct from "this account runs none".
+ */
+data class BotsState(
+    /** Every bot the account owns; null until the first read lands. */
+    val bots: List<BotView>? = null,
+    /** True while the list is being read. */
+    val loading: Boolean = false,
+    /** Why the last read or the last action could not answer. */
+    val failure: String? = null,
+    /**
+     * The token in hand, and which bot it belongs to.
+     *
+     * Register and rotate are the only two calls anywhere in this client that hand back a secret,
+     * and the node stores a tag rather than the token — so the value exists once, and this is the
+     * only place it is ever held.
+     */
+    val reveal: BotReveal? = null,
+    /** The bot whose rotation is one tap from happening, so the button can ask before it acts. */
+    val confirming: Id? = null,
+    /** The bot whose permission picker is open. */
+    val editing: Id? = null,
+    /** What the node said about a bot on its own, newest first, capped by the model. */
+    val events: List<BotEventNote> = emptyList(),
+)
+
+/** A token that exists once: what was minted, for which bot, and whether it replaced one. */
+data class BotReveal(
+    val botId: Id,
+    val name: String,
+    val token: String,
+    /** True when this came from a rotation, so the card can say what just happened. */
+    val rotated: Boolean,
+)
+
+/** One line the node pushed about a bot its owner runs — a webhook that failed, say. */
+data class BotEventNote(val botId: Id, val event: String)
 
 /**
  * The Settings panel's own facts: the storage the caches hold, and the one-shot sentence an action

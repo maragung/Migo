@@ -3,6 +3,7 @@ package com.migo.core
 import com.migo.core.account.DeviceCredential
 import com.migo.core.account.IdentityKey
 import com.migo.core.crypto.PrekeyBundle
+import com.migo.core.domain.BotsDomain
 import com.migo.core.domain.CallKeyStore
 import com.migo.core.domain.CallsDomain
 import com.migo.core.domain.ConversationsDomain
@@ -53,6 +54,7 @@ import com.migo.core.net.TcpGateway
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.BandwidthMode
+import com.migo.core.protocol.BotEvent
 import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallInviteEvent
 import com.migo.core.protocol.CallSdp
@@ -398,6 +400,7 @@ class MigoClient private constructor(
         ListenerSet<NotificationEvent>(Op.NOTIFICATION_EVENT, options.onEventError)
     private val gameListeners = ListenerSet<GameEvent>(Op.GAME_EVENT, options.onEventError)
     private val economyListeners = ListenerSet<EconomyEvent>(Op.ECONOMY_EVENT, options.onEventError)
+    private val botListeners = ListenerSet<BotEvent>(Op.BOT_EVENT, options.onEventError)
     private val incomingCallListeners =
         ListenerSet<CallInviteEvent>(Op.CALL_INVITE_EVENT, options.onEventError)
     private val callStateListeners = ListenerSet<CallStateEvent>(Op.CALL_STATE_EVENT, options.onEventError)
@@ -511,6 +514,14 @@ class MigoClient private constructor(
     /** File reports about a user, message, room, or bot, and hear when one is ruled on. */
     val moderation: ModerationDomain get() = requireConnected().moderation
 
+    /**
+     * Register a bot, manage the ones this account owns, and talk to one.
+     *
+     * Separate from everything else here in one respect worth knowing before reaching for it: this is
+     * the only place in this client that returns a credential, and it does so exactly once.
+     */
+    val bots: BotsDomain get() = requireConnected().bots
+
     /** The media object plane of the live session: uploads and their URLs. */
     val media: MediaDomain get() = requireConnected().media
 
@@ -591,6 +602,16 @@ class MigoClient private constructor(
      * resulting balance is never in the event and always one `economy.getBalance()` away.
      */
     fun onEconomy(listener: Listener<EconomyEvent>): Subscription = economyListeners.add(listener)
+
+    /**
+     * Registers a handler for what the node says about the caller's own bots, across reconnects.
+     *
+     * The other direction from [BotsDomain.command]: this carries what the node tells an owner
+     * about a bot they run -- a webhook that failed to deliver, say -- rather than what the owner
+     * told the bot. Subscribed once per app rather than once per session, so a reconnect does not
+     * lose the handler.
+     */
+    fun onBotEvent(listener: Listener<BotEvent>): Subscription = botListeners.add(listener)
 
     /** Registers a handler for inbound call invites: another account is calling this one. */
     fun onIncomingCall(listener: Listener<CallInviteEvent>): Subscription = incomingCallListeners.add(listener)
@@ -1652,6 +1673,7 @@ class MigoClient private constructor(
             social = SocialDomain(rpc, options.onEventError),
             economy = EconomyDomain(rpc, options.onEventError),
             moderation = ModerationDomain(rpc, options.onEventError),
+            bots = BotsDomain(rpc, options.onEventError),
             media = MediaDomain(rpc, rest),
             calls = CallsDomain(rpc, deviceId, options.onEventError),
             groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
@@ -1689,6 +1711,7 @@ class MigoClient private constructor(
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
         session.economy.onEvent { economyListeners.deliver(it) }
+        session.bots.onBotEvent { botListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }
         session.conversations.onMember { conversationMemberListeners.deliver(it) }
         session.conversations.onVote { conversationVoteListeners.deliver(it) }
@@ -1966,6 +1989,7 @@ private class Session(
     val social: SocialDomain,
     val economy: EconomyDomain,
     val moderation: ModerationDomain,
+    val bots: BotsDomain,
     val media: MediaDomain,
     val calls: CallsDomain,
     val groupCalls: GroupCallsDomain,
@@ -1982,6 +2006,7 @@ private class Session(
         games.start()
         economy.start()
         moderation.start()
+        bots.start()
         social.start()
         calls.start()
         groupCalls.start()
@@ -1999,6 +2024,7 @@ private class Session(
         games.stop()
         economy.stop()
         moderation.stop()
+        bots.stop()
         social.stop()
         calls.stop()
         groupCalls.stop()

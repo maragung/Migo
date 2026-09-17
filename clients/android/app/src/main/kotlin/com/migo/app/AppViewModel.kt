@@ -37,6 +37,8 @@ import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
 import com.migo.app.model.Attachment
 import com.migo.app.model.AttachmentKind
+import com.migo.app.model.BotEventNote
+import com.migo.app.model.BotReveal
 import com.migo.app.model.ChainNetworkChoice
 import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
@@ -112,6 +114,8 @@ import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.ConversationVoteEvent
+import com.migo.core.protocol.BotEvent
+import com.migo.core.protocol.BotView
 import com.migo.core.protocol.EconomyEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.InboxItem
@@ -2637,6 +2641,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             AppState.Section.ADMINS -> if (signedInState?.admins?.owner == false) loadAdmins()
             AppState.Section.GAMES -> if (signedInState?.games?.catalogue == null) loadGameCatalogue()
+            AppState.Section.BOTS -> if (signedInState?.bots?.bots == null) loadBots()
             // Settings holds no remote reads of its own — the storage sizes it shows are measured
             // on entry, and the preferences it lists are already live — so entering the section
             // asks the session for nothing.
@@ -3133,6 +3138,192 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun economyEvent(event: EconomyEvent) {
         if ((_state.value as? AppState.SignedIn)?.section != AppState.Section.WALLET) return
         loadWallet()
+    }
+
+    // --- bots ---
+
+    /**
+     * The Bots panel's read: every bot this account owns.
+     *
+     * The wire names no owner -- the session is the owner -- so there is no id to get wrong here and
+     * no way to ask about somebody else's bots. The node answers oldest first and keeps that order
+     * stable across calls, so this list is rendered as it arrives rather than sorted here.
+     */
+    fun loadBots() {
+        val live = session ?: return
+        signedIn { it.copy(bots = it.bots.copy(loading = true, failure = null)) }
+        viewModelScope.launch {
+            try {
+                val listed = live.client.bots.list()
+                signedIn { it.copy(bots = it.bots.copy(loading = false, bots = listed)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(bots = it.bots.copy(loading = false, failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Registers a bot and opens the reveal for the token the node returns.
+     *
+     * Register and rotate are the only two calls in this client that hand back a secret, and this is
+     * the moment the first of them lands: the token goes straight into the reveal state, which is
+     * the only place it is ever held, and is never folded into the list -- a management screen that
+     * carried a live credential in every row would be a screen one screenshot away from a leak.
+     */
+    fun registerBot(username: String, displayName: String) {
+        val live = session ?: return
+        val handle = username.trim()
+        val name = displayName.trim()
+        if (handle.isEmpty() || name.isEmpty()) return
+        signedIn { it.copy(bots = it.bots.copy(loading = true, failure = null)) }
+        viewModelScope.launch {
+            try {
+                val created = live.client.bots.register(handle, name)
+                signedIn {
+                    val held = it.bots.bots.orEmpty()
+                    it.copy(
+                        bots = it.bots.copy(
+                            loading = false,
+                            bots = held + created,
+                            reveal = created.token?.let { token ->
+                                BotReveal(created.botId, created.name, token, rotated = false)
+                            },
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(bots = it.bots.copy(loading = false, failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Mints a fresh token for a bot, invalidating the old one, and opens the reveal for it.
+     *
+     * Immediate, with no grace period: the previous token stops authenticating the moment the node
+     * answers, which is why the button that reaches this asks first ([confirmBotRotate]) rather than
+     * acting on one tap.
+     */
+    fun rotateBot(botId: Id) {
+        val live = session ?: return
+        signedIn { it.copy(bots = it.bots.copy(confirming = null, failure = null)) }
+        viewModelScope.launch {
+            try {
+                val rotated = live.client.bots.rotate(botId)
+                replaceBot(rotated)
+                val token = rotated.token
+                if (token != null) {
+                    signedIn {
+                        it.copy(
+                            bots = it.bots.copy(
+                                reveal = BotReveal(rotated.botId, rotated.name, token, rotated = true),
+                            ),
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(bots = it.bots.copy(failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Pauses a bot or resumes it, and folds the answer back into the list.
+     *
+     * The flag is carried on the wire rather than implied by the call, so this is one control that
+     * reflects the state the node reported and a repeat is a no-op rather than an error -- which is
+     * what makes a retry after a lost reply safe.
+     */
+    fun setBotPaused(botId: Id, paused: Boolean) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                replaceBot(live.client.bots.setPaused(botId, paused))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(bots = it.bots.copy(failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Replaces a bot's permissions with exactly the set given.
+     *
+     * A replacement and not a delta: the picker holds a whole set and saves a whole set, so two
+     * screens editing the same bot cannot interleave into a union neither owner chose. An empty list
+     * is a complete request -- it takes every permission away -- rather than an omitted field.
+     */
+    fun setBotScopes(botId: Id, scopes: List<String>) {
+        val live = session ?: return
+        signedIn { it.copy(bots = it.bots.copy(editing = null)) }
+        viewModelScope.launch {
+            try {
+                replaceBot(live.client.bots.setScopes(botId, scopes))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(bots = it.bots.copy(failure = readable(failure))) }
+            }
+        }
+    }
+
+    /** Opens or closes a bot's permission picker. One at a time, so two editors cannot be saved. */
+    fun toggleBotEditor(botId: Id) {
+        signedIn {
+            it.copy(
+                bots = it.bots.copy(
+                    editing = if (it.bots.editing == botId) null else botId,
+                    confirming = null,
+                ),
+            )
+        }
+    }
+
+    /** Arms or disarms the rotation confirmation for a bot. */
+    fun confirmBotRotate(botId: Id?) {
+        signedIn { it.copy(bots = it.bots.copy(confirming = botId, editing = null)) }
+    }
+
+    /** Puts the revealed token away. The value is gone from this client the moment it is called. */
+    fun dismissBotReveal() {
+        signedIn { it.copy(bots = it.bots.copy(reveal = null)) }
+    }
+
+    /**
+     * What the node says about a bot on its own: a delivery that failed, a webhook that refused.
+     *
+     * The event names the bot and says what happened, and nothing here re-reads the list for it: the
+     * event is not a state change, and a management screen that fetched on every notice would spend
+     * a round trip to redraw the row it already has. The last few are kept for the panel to show.
+     */
+    private fun botEvent(event: BotEvent) {
+        signedIn {
+            it.copy(
+                bots = it.bots.copy(
+                    events = (listOf(BotEventNote(event.botId, event.event)) + it.bots.events)
+                        .take(BOT_EVENT_CAP),
+                ),
+            )
+        }
+    }
+
+    /** Folds one bot's fresh view into the held list, leaving every other row untouched. */
+    private fun replaceBot(view: BotView) {
+        signedIn {
+            val held = it.bots.bots ?: return@signedIn it
+            it.copy(
+                bots = it.bots.copy(
+                    bots = held.map { row -> if (row.botId == view.botId) view else row },
+                ),
+            )
+        }
     }
 
     fun loadSpace() {
@@ -4933,6 +5124,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // The game stream: a published event becomes a line in the open thread and a fresh view of
         // the game it moved. Added with the rest so a reconnect re-bridges it with them.
         subscriptions.add(opened.client.onGameEvent { gameEvent(it) })
+        // The bot stream: what the node tells an owner about a bot they run -- a delivery that
+        // failed, a webhook that refused. Added with the rest so a reconnect re-bridges it with
+        // them; the panel holds the last few rather than a log, and nothing here re-reads the list,
+        // because a notice is not a state change.
+        subscriptions.add(opened.client.onBotEvent { botEvent(it) })
         // The wallet's live tick: an economy event on our own user topic means this account spent
         // from somewhere -- this phone, the web, another device -- and the wallet screen re-reads
         // rather than trusting a number it holds, exactly as its own refresh button does. Added
@@ -6635,5 +6831,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
          * bound while it is left open; fifty is enough to scroll back through a recent flurry.
          */
         const val NOTICE_CAP = 50
+
+        /**
+         * How many bot notices the Bots panel keeps. These are the node's own asides about a bot --
+         * a webhook that failed, a delivery that did not land -- and the panel shows them as a short
+         * recent list rather than a log, so a handful is the whole of what it is for.
+         */
+        const val BOT_EVENT_CAP = 5
     }
 }

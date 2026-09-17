@@ -27,6 +27,7 @@ import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.ErrorBanner
+import com.migo.app.ui.BotsScreen
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
 import com.migo.app.ui.MobileHome
@@ -300,6 +301,19 @@ internal fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifi
         AppState.Section.GAMES -> GamesScreen(
             state = state,
             onRefresh = model::loadGameCatalogue,
+            modifier = modifier,
+        )
+
+        AppState.Section.BOTS -> BotsScreen(
+            state = state,
+            onRegister = model::registerBot,
+            onPause = model::setBotPaused,
+            onRotate = model::rotateBot,
+            onConfirmRotate = model::confirmBotRotate,
+            onToggleEditor = model::toggleBotEditor,
+            onSaveScopes = model::setBotScopes,
+            onDismissReveal = model::dismissBotReveal,
+            onRefresh = model::loadBots,
             modifier = modifier,
         )
 
