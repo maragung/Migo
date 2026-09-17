@@ -534,6 +534,64 @@ mod tests {
     }
 
     #[test]
+    fn content_is_addressed_by_its_conversation_and_its_sending_device() {
+        // Why scheme 3 keeps version 1 and binds neither of the two values section 11 names for it:
+        // they are already what selects the key. A receiver looks the chain up by (conversation,
+        // sending device) — here, in the TypeScript SDK, and in the Kotlin client — so an envelope
+        // relabelled into another conversation, or as another device of the same account, is
+        // decrypted against a chain that cannot have produced it and the tag refuses. Binding them
+        // into the associated data as well would restate the addressing rather than add to it.
+        let mut laptop = GroupStore::new(device_identity());
+        let mut phone = GroupStore::new(device_identity());
+        let mut receiver = GroupStore::new(device_identity());
+        let conversation = fresh_id();
+        let elsewhere = fresh_id();
+        let laptop_device = fresh_id();
+        let phone_device = fresh_id();
+
+        // Both of the account's devices distribute in the same conversation, which is the arrangement
+        // that makes the second assertion mean something: the receiver really does hold two chains,
+        // so a refusal is the key being wrong rather than the key being absent.
+        let laptop_chain = laptop.distribution(conversation);
+        let phone_chain = phone.distribution(conversation);
+        receiver.accept(conversation, laptop_device, &laptop_chain);
+        receiver.accept(conversation, phone_device, &phone_chain);
+        // And the very same chain bytes under a second conversation: the same key, the same chain
+        // id, a different conversation. That is what makes the third assertion below about the
+        // associated data rather than about a missing key or a mismatched chain.
+        receiver.accept(elsewhere, laptop_device, &laptop_chain);
+
+        let sealed = laptop
+            .seal(conversation, b"from the laptop")
+            .expect("seals");
+
+        // Its own conversation and its own device: the one arrangement that opens.
+        assert_eq!(
+            receiver
+                .open(conversation, laptop_device, &sealed.envelope)
+                .expect("opens under its own chain"),
+            b"from the laptop"
+        );
+
+        // Another device of the same account: a different chain, so the tag refuses.
+        assert!(
+            receiver
+                .open(conversation, phone_device, &sealed.envelope)
+                .is_err(),
+            "content relabelled as another device of the same account must not open"
+        );
+
+        // Another conversation: the same key and the same chain id, so the only thing that differs is
+        // the associated data — which is what the refusal has to be for this to say anything.
+        assert!(
+            receiver
+                .open(elsewhere, laptop_device, &sealed.envelope)
+                .is_err(),
+            "content relabelled into another conversation must not open"
+        );
+    }
+
+    #[test]
     fn a_truncated_envelope_is_refused_not_panicked() {
         assert!(decode_envelope(&[]).is_none());
         assert!(decode_envelope(&[SENDER_KEY_ENVELOPE_VERSION]).is_none());
