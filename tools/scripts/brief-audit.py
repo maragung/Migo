@@ -937,9 +937,21 @@ def selftest() -> int:
             ("a docs subdirectory cites a nonexistent section",
              add_dangling_brief_ref,
              'references resolve'),
+            # Anchored on the definition of the four words rather than on a
+            # protocol section's own STATUS line, which is what it used to be.
+            # That anchor was section 180's, and when section 180 was honestly
+            # demoted from SPEC to SEBAGIAN -- work landed, and the line had to
+            # say so -- this case failed on a missing anchor instead of on the
+            # defect it exists for. The failure was visible rather than silent,
+            # which is the design, but the case had retired itself for the one
+            # reason that will keep happening: sections stop being SPEC. The
+            # definition in section 0 is the line a vocabulary check should
+            # mutate anyway, since it is the sentence that makes a fifth word
+            # undefined in the first place, and it is in the frozen part of the
+            # document.
             ("a section invents a fifth status word",
-             edit("migo.md", "STATUS: SPEC. Protokol signaling ada di section 165",
-                  "STATUS: BUILD. Protokol signaling ada di section 165"),
+             edit("migo.md", "STATUS: SPEC\nBaru dispesifikasikan di dokumen ini.",
+                  "STATUS: BUILD\nBaru dispesifikasikan di dokumen ini."),
              "four status words"),
         ]
 

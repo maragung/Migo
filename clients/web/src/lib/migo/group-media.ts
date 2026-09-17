@@ -270,6 +270,14 @@ export interface RawLinkCounters {
   jitterMs: number;
   /** An outgoing-bandwidth estimate, when the browser reports one; `null` when it does not. */
   availableKbps: number | null;
+  /**
+   * Whether the nominated pair is a relay pair — the media is going through TURN rather than
+   * straight between the two devices. Not a rung and not a score term: section 180 asks for it as a
+   * *product* number, the share of calls that fell back, because that share is what says where the
+   * next relay belongs. `undefined` when the connection reports no nominated pair yet, which is not
+   * the same fact as `false`.
+   */
+  relay?: boolean;
 }
 
 /**
@@ -312,13 +320,15 @@ export function linkStatsBetween(prev: RawLinkCounters, next: RawLinkCounters): 
  * Reads one raw sample of a real peer connection's counters, or `null` when the connection reports
  * nothing usable yet. Kept separate from {@link linkStatsBetween} because reading is the browser's
  * half and the delta is the model's — only the model's half is pure enough to pin without a
- * connection.
+ * connection. The relay fact rides along because it is free here and impossible anywhere else: only
+ * this reading sees the nominated pair and the two candidates it names.
  */
 export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCounters | null> {
   const stats = await pc.getStats();
   let rttMs = 0;
   let jitterMs = 0;
   let availableKbps: number | null = null;
+  let relay: boolean | undefined;
   const totals = {
     packetsLost: 0,
     packetsReceived: 0,
@@ -326,6 +336,22 @@ export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCo
     framesDropped: 0,
     bytesSent: 0,
   };
+  // Candidates are named by id from the nominated pair, so they have to be read before it is:
+  // `getStats()` yields in no promised order, and a single pass that met the pair first would find
+  // no candidate to look up. Collected first, interpreted after.
+  const candidateTypes = new Map<string, string>();
+  for (const report of stats.values()) {
+    // Written as a shape rather than as a DOM type on purpose: this TypeScript's `lib.dom` has
+    // `RTCIceCandidatePairStats` and no `RTCIceCandidateStats`, so naming the candidate type here
+    // would be an unresolved name that quietly widens the whole expression to `any` — which lints
+    // as unsafe access everywhere it is used and type-checks as nothing at all.
+    const typed = report as { id?: string; type?: string; candidateType?: string };
+    if (typed.type === 'local-candidate' || typed.type === 'remote-candidate') {
+      if (typeof typed.id === 'string') {
+        candidateTypes.set(typed.id, typed.candidateType ?? '');
+      }
+    }
+  }
   let sawAnything = false;
   for (const report of stats.values()) {
     const typed = report as Partial<RTCInboundRtpStreamStats> &
@@ -348,12 +374,19 @@ export async function readLinkCounters(pc: RTCPeerConnection): Promise<RawLinkCo
       if (typeof estimate === 'number' && estimate > 0) {
         availableKbps = Math.round(estimate / 1000);
       }
+      // Either end being a relay candidate means the media rides TURN: a relay pair is one whose
+      // local *or* remote candidate was reflexive-from-a-relay, and both ends read it the same way.
+      const local = candidateTypes.get(typed.localCandidateId ?? '');
+      const remote = candidateTypes.get(typed.remoteCandidateId ?? '');
+      if (local !== undefined || remote !== undefined) {
+        relay = local === 'relay' || remote === 'relay';
+      }
     }
   }
   if (!sawAnything) {
     return null;
   }
-  return { at: Date.now(), ...totals, rttMs, jitterMs, availableKbps };
+  return { at: Date.now(), ...totals, rttMs, jitterMs, availableKbps, relay };
 }
 
 /**
@@ -402,6 +435,58 @@ export function videoSenderParams(
       return unreachable;
     }
   }
+}
+
+/**
+ * Shapes one video sender to a rung, and answers whether the sender now carries the track.
+ *
+ * The one place a rung becomes something a peer connection does, shared by both planes that run the
+ * ladder — the group plane's per-link senders and the 1:1 plane's single sender — so a rung cannot
+ * mean one thing in a group call and another in a two-party one. The caller owns the `attached`
+ * flag because only it knows whether it ever attached a track; this function keeps it honest.
+ *
+ * `track` is the camera the caller *wants* attached, which is not always the camera it has: a
+ * caller whose camera is off passes `null` and the sender is left without a track whatever the rung
+ * says, because the rung decides how much video to send and the user decides whether to send any.
+ * Turning a track off is `replaceTrack(null)` rather than `track.enabled = false` for the reason
+ * the group plane gives: the same camera keeps flowing to every link the ladder has not grounded,
+ * and the ones it has grounded pay nothing for a stream they are not being sent.
+ */
+export function shapeVideoSender(
+  sender: RTCRtpSender,
+  track: MediaStreamTrack | null,
+  quality: LinkQuality,
+  measuredKbps: number,
+  attached: boolean,
+): boolean {
+  const params = videoSenderParams(quality, measuredKbps);
+  if (!params.enabled || track === null) {
+    if (attached) {
+      void sender.replaceTrack(null).catch(() => {});
+    }
+    return false;
+  }
+  let carrying = attached;
+  if (!carrying) {
+    void sender.replaceTrack(track).catch(() => {});
+    carrying = true;
+  }
+  const current = sender.getParameters();
+  const encoding = current.encodings[0] ?? {};
+  if (params.maxBitrate !== undefined) {
+    encoding.maxBitrate = params.maxBitrate * 1000;
+  }
+  if (params.scaleResolutionDownBy !== undefined) {
+    encoding.scaleResolutionDownBy = params.scaleResolutionDownBy;
+  }
+  if (params.maxFramerate !== undefined) {
+    encoding.maxFramerate = params.maxFramerate;
+  }
+  current.encodings = [encoding];
+  void sender.setParameters(current).catch(() => {
+    // A sender that cannot be shaped keeps sending; the next tick retries the rung it is on.
+  });
+  return carrying;
 }
 
 // --- the ICE servers of a group call ----------------------------------------------------------
@@ -1007,42 +1092,22 @@ export class GroupMediaPlane {
   /**
    * Shapes this endpoint's video sender on one link to the link's rung. The video-off rung removes
    * the track from *this* sender only — the same camera keeps flowing to every link the ladder has
-   * not grounded — and the caps ride the sender's parameters.
+   * not grounded — and the caps ride the sender's parameters. The work itself is
+   * {@link shapeVideoSender}, which the 1:1 plane runs too, so a rung cannot come to mean one thing
+   * here and another there.
    */
   #shapeVideo(link: PeerLink): void {
     const sender = link.videoSender;
     if (sender === null || this.#localVideoTrack === null) {
       return;
     }
-    const params = videoSenderParams(link.quality, link.sentKbps);
-    if (!params.enabled) {
-      if (link.sendingVideo) {
-        link.sendingVideo = false;
-        void sender.replaceTrack(null).catch(() => {});
-      }
-      return;
-    }
-    if (!link.sendingVideo && this.#cameraOn) {
-      link.sendingVideo = true;
-      void sender.replaceTrack(this.#localVideoTrack).catch(() => {});
-    }
-    if (link.sendingVideo) {
-      const current = sender.getParameters();
-      const encoding = current.encodings[0] ?? {};
-      if (params.maxBitrate !== undefined) {
-        encoding.maxBitrate = params.maxBitrate * 1000;
-      }
-      if (params.scaleResolutionDownBy !== undefined) {
-        encoding.scaleResolutionDownBy = params.scaleResolutionDownBy;
-      }
-      if (params.maxFramerate !== undefined) {
-        encoding.maxFramerate = params.maxFramerate;
-      }
-      current.encodings = [encoding];
-      void sender.setParameters(current).catch(() => {
-        // A sender that cannot be shaped keeps sending; the next tick retries the rung it is on.
-      });
-    }
+    link.sendingVideo = shapeVideoSender(
+      sender,
+      this.#cameraOn ? this.#localVideoTrack : null,
+      link.quality,
+      link.sentKbps,
+      link.sendingVideo,
+    );
   }
 
   /** Closes one link's connection and disarms its timer. */

@@ -123,6 +123,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     peerId: 'ada',
     muted: false,
     degraded: false,
+    quality: null,
     nowMs: NOW,
     endedAt: null,
     localStream: null,
@@ -369,6 +370,50 @@ test('a degraded call states that video paused while the call continues', () => 
   assert.ok(markup.includes('Poor connection'), 'the degraded line is missing');
   assert.ok(markup.includes('0:30'), 'a degraded call is still connected, still counting');
   assert.ok(markup.includes('aria-label="End call"'));
+});
+
+test('the quality indicator shows the measured tier, and nothing before there is one', () => {
+  const connected = activeCall({ state: CallState.Connected, startedAt: NOW - 30_000 });
+  // Null is not a good rung: a screen that opens on "Excellent" has reported something it never
+  // checked, which is the one thing an indicator exists not to do.
+  const unmeasured = screen({ call: connected });
+  assert.ok(!unmeasured.includes('call-quality'), 'no measurement, no indicator');
+  assert.ok(!unmeasured.includes('Excellent'), 'an unmeasured call must not claim the best tier');
+  for (const [quality, word] of [
+    ['full', 'Excellent'],
+    ['bitrate-capped', 'Good'],
+    ['resolution-lowered', 'Average'],
+    ['frame-rate-lowered', 'Poor'],
+    ['video-off', 'Very poor'],
+  ] as const) {
+    const markup = screen({ call: connected, quality });
+    assert.ok(markup.includes(`call-quality ${quality}`), `the ${quality} rung is not marked`);
+    assert.ok(markup.includes(word), `the ${quality} rung must read as ${word}`);
+  }
+  // A voice call is measured too: a lossy line is a fact about the call with no camera in it.
+  const voice = screen({
+    call: activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio }),
+    quality: 'frame-rate-lowered',
+  });
+  assert.ok(voice.includes('Poor'), 'a voice call reports its link the same way');
+});
+
+test('a measured rung is not shown while the call is still ringing or already ended', () => {
+  // The tier describes a live link, so it belongs to the states a link exists in and not to the
+  // ones either side of them.
+  assert.ok(
+    !screen({ call: activeCall({ state: CallState.Ringing }), quality: 'full' }).includes(
+      'call-quality',
+    ),
+    'a ringing call has no link to report on',
+  );
+  assert.ok(
+    !screen({
+      call: activeCall({ state: CallState.Ended, endReason: CallEndReason.ByCaller }),
+      quality: 'full',
+    }).includes('call-quality'),
+    'an ended call has no link to report on',
+  );
 });
 
 test('an ended call states its reason, its duration if it had one, and offers a way back', () => {

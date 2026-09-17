@@ -100,6 +100,9 @@ import {
   ringTimeoutMs,
   sealCallSignal,
 } from './call-signal.js';
+import { QUALITY_POLL_MS, advanceMeasurement, degradedAt, qualityReport } from './call-quality.js';
+import { readLinkCounters, shapeVideoSender } from './group-media.js';
+import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
 import { useMigo } from './use-migo.js';
 
 /** How long gathered ICE candidates linger before one relay carries them (section 165: batch, briefly). */
@@ -195,11 +198,18 @@ export interface CallManagerValue {
   /** Whether this side's microphone is muted. */
   muted: boolean;
   /**
-   * Whether a connected call's quality has fallen far enough to pause video. Always false in this
-   * build — the statistics feed that would flip it is future work — but the state it drives is the
-   * sixth screen state section 180 requires, so the plumbing is here for it to land in.
+   * Whether a connected call's quality has fallen far enough to pause video. False until a
+   * measurement says otherwise, and false for every voice call however bad the link gets: the
+   * bottom rung means this endpoint stopped sending a camera, and a voice call never was.
    */
   degraded: boolean;
+  /**
+   * The rung section 180's quality indicator shows, or `null` before the first measurement — a
+   * call whose link has been sampled once. Null is not the same as a good rung: a screen that said
+   * "Excellent" before measuring anything would be guessing, which is the one thing an indicator
+   * exists not to do.
+   */
+  quality: LinkQuality | null;
   /** This side's microphone/camera stream, for the small self-view. */
   localStream: MediaStream | null;
   /** The peer's stream once their tracks arrive, for the main view. */
@@ -238,6 +248,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [incomingCall, setIncomingCall] = useState<CallInviteEvent | null>(null);
   const [muted, setMuted] = useState(false);
   const [degraded, setDegraded] = useState(false);
+  const [quality, setQuality] = useState<LinkQuality | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
@@ -283,6 +294,26 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const endSentRef = useRef(false);
   /** When this side began setting the call up, for the one-time setupMs report. */
   const setupStartRef = useRef<number | null>(null);
+
+  // --- the quality plane's own state: one link, sampled every QUALITY_POLL_MS ---
+
+  /** This call's video sender, held from the moment its track was attached. */
+  const videoSenderRef = useRef<RTCRtpSender | null>(null);
+  /**
+   * Whether that sender currently carries the camera. Held here rather than read back from the
+   * sender, because `replaceTrack(null)` is exactly the state that makes a sender unable to report
+   * what it used to carry.
+   */
+  const videoAttachedRef = useRef(false);
+  /** The polling timer, armed when a call connects and cleared with everything else. */
+  const qualityTimerRef = useRef<number | null>(null);
+  /** The rung the link is on, and when it last moved — the recovery ramp is measured from the move. */
+  const qualityRef = useRef<LinkQuality>('full');
+  const qualityChangedAtRef = useRef(0);
+  /** The previous reading, which the next one is subtracted from; null until the first sample. */
+  const qualityCountersRef = useRef<RawLinkCounters | null>(null);
+  /** The most recent measurement, so a call that ends reports numbers rather than only a setup time. */
+  const lastMeasureRef = useRef<{ stats: LinkStats; counters: RawLinkCounters } | null>(null);
   /**
    * The sealing key of each call this session has seen, keyed by call id. Written by the caller
    * (which minted it) and by the message listener (which adopts the caller's key event); read by
@@ -405,8 +436,117 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     }
   }, []);
 
+  /**
+   * Samples the call's link once: one reading, one rung, and — when the rung moves — one shaping of
+   * this endpoint's own video and one report to the server.
+   *
+   * Only a move is acted on and reported. A steady link produces a reading every two seconds and
+   * nothing else, which is what keeps CALL_STATS a Droppable frame an occasional call sends rather
+   * than a stream of them down a link that is already the thing under suspicion. The final numbers
+   * are not lost to that rule: the last measurement is kept and reported when the call ends.
+   */
+  const pollQuality = useCallback(async (): Promise<void> => {
+    const pc = pcRef.current;
+    const call = activeRef.current;
+    if (pc === null || call === null) {
+      return;
+    }
+    const counters = await readLinkCounters(pc).catch(() => null);
+    if (counters === null) {
+      // A connection that reports nothing usable yet is not a link in trouble; it is a link with
+      // no opinion, and guessing a rung from it would degrade a call on no evidence at all.
+      return;
+    }
+    const previous = qualityCountersRef.current;
+    qualityCountersRef.current = counters;
+    const now = Date.now();
+    const step = advanceMeasurement(
+      qualityRef.current,
+      previous,
+      counters,
+      qualityChangedAtRef.current,
+      now,
+    );
+    if (step === null) {
+      return;
+    }
+    lastMeasureRef.current = { stats: step.stats, counters };
+    if (!step.changed) {
+      return;
+    }
+    qualityRef.current = step.quality;
+    qualityChangedAtRef.current = now;
+    setQuality(step.quality);
+    setDegraded(degradedAt(step.quality, call.mediaKind === CallMediaKind.Video));
+    const sender = videoSenderRef.current;
+    if (sender !== null) {
+      videoAttachedRef.current = shapeVideoSender(
+        sender,
+        localStreamRef.current?.getVideoTracks()[0] ?? null,
+        step.quality,
+        step.stats.sentKbps,
+        videoAttachedRef.current,
+      );
+    }
+    clientRef.current?.calls
+      .reportStats(call.callId, qualityReport(step.stats, counters))
+      .catch(() => {
+        // CALL_STATS is Droppable: a lost report costs nothing, and the next move reports again.
+      });
+  }, []);
+
+  /** Arms the quality loop for a call that just connected. Idempotent, so a re-connect is harmless. */
+  const startQualityLoop = useCallback((): void => {
+    qualityCountersRef.current = null;
+    qualityRef.current = 'full';
+    qualityChangedAtRef.current = Date.now();
+    // A connect that follows a reconnect replaces the link the last rung was measured on, so the
+    // screen stops claiming a tier — and a paused camera — until the new link has been sampled. A
+    // rung that describes a connection that no longer exists is worse than no rung at all.
+    lastMeasureRef.current = null;
+    setQuality(null);
+    setDegraded(false);
+    if (qualityTimerRef.current !== null) {
+      return;
+    }
+    qualityTimerRef.current = window.setInterval(() => {
+      void pollQuality();
+    }, QUALITY_POLL_MS);
+  }, [pollQuality]);
+
+  /** Disarms the quality loop and forgets what it measured. */
+  const stopQualityLoop = useCallback((): void => {
+    if (qualityTimerRef.current !== null) {
+      window.clearInterval(qualityTimerRef.current);
+      qualityTimerRef.current = null;
+    }
+    qualityCountersRef.current = null;
+    lastMeasureRef.current = null;
+    qualityRef.current = 'full';
+    qualityChangedAtRef.current = 0;
+  }, []);
+
+  /**
+   * Remembers this call's video sender, so the ladder can shape it once the call connects.
+   *
+   * The sender is found here and nowhere else, because here is the only moment it is findable: a
+   * sender that has been grounded by the bottom rung reports no track, so a later search for "the
+   * video sender" would come back empty on exactly the call that needs shaping most. A voice call
+   * has no video track and so adopts nothing, which is the honest state — the ladder still runs and
+   * the indicator still reports, there is simply no camera for it to act on.
+   */
+  const adoptVideoSender = useCallback((pc: RTCPeerConnection, stream: MediaStream): void => {
+    const sender =
+      stream.getVideoTracks().length > 0
+        ? (pc.getSenders().find((candidate) => candidate.track?.kind === 'video') ?? null)
+        : null;
+    videoSenderRef.current = sender;
+    videoAttachedRef.current = sender !== null;
+  }, []);
+
   /** Stops every resource a call held: timers, candidates, the peer connection, the local media. */
   const teardownMedia = useCallback((): void => {
+    stopQualityLoop();
     clearRingTimeout();
     if (iceTimerRef.current !== null) {
       clearTimeout(iceTimerRef.current);
@@ -439,7 +579,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     mutedRef.current = false;
     setMuted(false);
     setDegraded(false);
-  }, [clearRingTimeout]);
+    setQuality(null);
+    // The sender belonged to the connection that was just closed, and the flag to the track that
+    // was just stopped; keeping either would have the next call's ladder shape a dead object.
+    videoSenderRef.current = null;
+    videoAttachedRef.current = false;
+  }, [clearRingTimeout, stopQualityLoop]);
 
   /**
    * Ends the tracked call locally with a reason, keeping `startedAt` for the duration line.
@@ -459,6 +604,17 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         endSentRef.current = true;
         const callId = call.callId;
         clientRef.current?.calls.end(callId, CallEndReason.Network).catch(() => {});
+      }
+      // The last measurement goes out here rather than only on a rung change, so a call that ran
+      // the whole way on a good link still contributes its RTT, loss and jitter to the numbers
+      // section 180 makes capacity decisions from. Reported before teardown forgets it.
+      const last = lastMeasureRef.current;
+      if (last !== null) {
+        clientRef.current?.calls
+          .reportStats(call.callId, qualityReport(last.stats, last.counters))
+          .catch(() => {
+            // Droppable, and the call is ending anyway: a lost final report costs nothing.
+          });
       }
       teardownMedia();
       forgetCallKey(call.callId);
@@ -516,7 +672,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // CALL_STATS is Droppable: a lost report costs nothing.
       });
     }
-  }, [setActive]);
+    startQualityLoop();
+  }, [setActive, startQualityLoop]);
 
   // --- ICE, both directions ---
 
@@ -703,6 +860,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         for (const track of stream.getTracks()) {
           pc.addTrack(track, stream);
         }
+        adoptVideoSender(pc, stream);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         const result = await current.calls.invite(
@@ -761,6 +919,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     },
     [
       adoptCallKey,
+      adoptVideoSender,
       armRingTimeout,
       callInProgress,
       createPeer,
@@ -820,6 +979,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       for (const track of stream.getTracks()) {
         pc.addTrack(track, stream);
       }
+      adoptVideoSender(pc, stream);
       const offer = decodeSdpDescription(
         openCallSignal(incoming.sealedOffer, callKey, incoming.callId),
       );
@@ -858,6 +1018,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, [
     answerCall,
     acquireAnswerMedia,
+    adoptVideoSender,
     callInProgress,
     createPeer,
     drainHeldIce,
@@ -1178,6 +1339,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     incomingCall,
     muted,
     degraded,
+    quality,
     localStream,
     remoteStream,
     endedAt,

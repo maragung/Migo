@@ -18,6 +18,15 @@
  * the reason — a declined call, a failed call, and a network death are different facts, and
  * calling them all "Call ended" throws away the one thing the user needs before calling back.
  *
+ * # The quality indicator
+ *
+ * Section 180 asks for a network-quality indicator on both kinds of call, and it is the tier the
+ * manager measured rather than a word this component invents — see {@link ./call-quality.ts}. A
+ * voice call shows it too: a lossy link is a fact about the call whether or not a camera is on it,
+ * and a user who cannot tell a bad line from a silent peer hangs up on a call that was working.
+ * Before the first measurement there is no indicator at all, because a screen that opens on
+ * "Excellent" has reported something it never checked.
+ *
  * # Media never touches markup it did not come from
  *
  * The video elements attach only the streams the manager owns; nothing about the call — SDP,
@@ -39,6 +48,8 @@ import {
   formatCallDuration,
   mediaKindLabel,
 } from '@/lib/migo/call-signal.js';
+import { qualityTierLabel } from '@/lib/migo/call-quality.js';
+import type { LinkQuality } from '@/lib/migo/group-media.js';
 import { useCall } from '@/lib/migo/call-manager.js';
 import { MISSED_CALL_MESSAGE } from '@/lib/migo/call-manager.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
@@ -60,8 +71,14 @@ export interface CallScreenProps {
   peerAvatarUrl?: string;
   /** Whether this side's microphone is muted. */
   muted: boolean;
-  /** Whether a connected call's quality has paused video (always false in this build). */
+  /** Whether a connected call's quality has paused video (never true for a voice call). */
   degraded: boolean;
+  /**
+   * The rung the call's link is on, or null before the first measurement. Null shows no indicator
+   * at all rather than a good one: a screen that says "Excellent" before measuring anything is
+   * guessing, and an indicator that guesses is worse than no indicator.
+   */
+  quality: LinkQuality | null;
   /** The clock the duration reads, passed in so the pure half has no timer of its own. */
   nowMs: number;
   /** When the tracked call ended, for the ended screen's total duration. */
@@ -90,6 +107,7 @@ export function CallScreen({
   peerAvatarUrl,
   muted,
   degraded,
+  quality,
   nowMs,
   endedAt,
   localStream,
@@ -202,6 +220,15 @@ export function CallScreen({
         {display === 'ended' && durationMs !== null ? (
           <div className="call-timer">{formatCallDuration(durationMs)}</div>
         ) : null}
+        {quality !== null &&
+        (display === 'connected' || display === 'degraded' || display === 'reconnecting') ? (
+          // The network indicator: the same word for a voice call and a video call, because a
+          // lossy link is a fact about the call whether or not a camera is on it. Polite, so a
+          // rung that moves is announced without interrupting the state the screen is reading.
+          <div className={`call-quality ${quality}`} aria-live="polite">
+            {qualityTierLabel(quality)}
+          </div>
+        ) : null}
       </div>
 
       <div className="call-actions">
@@ -308,6 +335,7 @@ export function CallOverlay(): ReactNode {
     incomingCall,
     muted,
     degraded,
+    quality,
     localStream,
     remoteStream,
     endedAt,
@@ -353,6 +381,7 @@ export function CallOverlay(): ReactNode {
         peerAvatarUrl={profile?.avatarUrl}
         muted={muted}
         degraded={degraded}
+        quality={quality}
         nowMs={nowMs}
         endedAt={endedAt}
         localStream={localStream}

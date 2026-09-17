@@ -3357,6 +3357,16 @@ main {
   font-variant-numeric: tabular-nums;
   color: var(--text);
 }
+/* The network indicator. The two worst rungs are the ones a user acts on — hang up, move closer to
+   the router — so they are the two that stop being quiet text and take a colour. */
+.call-quality {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.call-quality.frame-rate-lowered,
+.call-quality.video-off {
+  color: var(--warning);
+}
 
 /* The video stage fills the overlay; the identity and actions ride above it. */
 .call-video-stage {
