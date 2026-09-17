@@ -301,8 +301,16 @@ class RatchetTest {
         )
 
         // And the binding is per message rather than per session: the context the first chain used
-        // must not open a message the next chain sealed.
+        // must not open a message the next chain sealed. The second pair has to exchange one message
+        // first, for the same reason the first pair above does — the responder cannot send until it
+        // has received, because until then it holds no peer ratchet key to step against.
         val (carol, dave) = pair()
+        val opening = carol.encrypt("tiga".toByteArray(), first)
+        assertArrayEquals(
+            "the second pair's opening message opens",
+            "tiga".toByteArray(),
+            dave.decrypt(opening.header, opening.ciphertext, first),
+        )
         val d0 = dave.encryptNext("empat".toByteArray(), second)
         throwsCryptoError(
             { carol.decrypt(d0.header, d0.ciphertext, first) },

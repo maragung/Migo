@@ -387,8 +387,9 @@ class CryptoVectorsTest {
         val conversation = idFromBytes(ByteArray(16) { 0xc0.toByte() })
         val message = idFromBytes(ByteArray(16) { 0xe0.toByte() })
 
-        val v1: List<Pair<String, Id?>> = listOf("without a message id" to null, "with one" to message)
-        for ((label, messageId) in v1) {
+        val shapes: List<Pair<String, Id?>> =
+            listOf("without a message id" to null, "with one" to message)
+        for ((label, messageId) in shapes) {
             val context = Aad.context(EnvelopeVersion.V1, 1, sender, conversation, messageId)
             assertTrue(
                 "a v1 context must be empty $label, got ${context.size} bytes",

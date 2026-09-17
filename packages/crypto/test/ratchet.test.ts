@@ -278,8 +278,15 @@ test('a context survives the dh ratchet', () => {
   );
 
   // And the binding is per message rather than per session: the context the first chain used must
-  // not open a message the next chain sealed.
+  // not open a message the next chain sealed. The second pair has to exchange one message first, for
+  // the same reason the first pair above does — the responder cannot send until it has received,
+  // because until then it holds no peer ratchet key to step against.
   const other = pair();
+  const opening = other.alice.encrypt(encoder.encode('tiga'), first);
+  assert.deepEqual(
+    other.bob.decrypt(opening.header, opening.ciphertext, first),
+    encoder.encode('tiga'),
+  );
   const sealed = other.bob.encryptNext(encoder.encode('empat'), second);
   assert.throws(
     () => other.alice.decrypt(sealed.header, sealed.ciphertext, first),
