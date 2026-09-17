@@ -129,6 +129,9 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     quality: null,
     sharingScreen: false,
     screenStream: null,
+    outputs: [],
+    cameras: [],
+    outputId: null,
     nowMs: NOW,
     endedAt: null,
     localStream: null,
@@ -139,7 +142,9 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onEnd: () => {},
     onToggleMute: () => {},
     onToggleCamera: () => {},
+    onSwitchCamera: () => {},
     onToggleScreenShare: () => {},
+    onSelectOutput: () => {},
     onDismiss: () => {},
     ...overrides,
   };
@@ -475,6 +480,43 @@ test('the camera control belongs to a video call, and says which way it will go'
   assert.ok(!ringing.includes('Turn camera'), 'the controls belong to a connected call');
 });
 
+test('the camera switch appears only where the platform reported a second camera', () => {
+  const call = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 5_000,
+  });
+  const one = [{ id: 'cam-1', label: 'Front camera' }];
+  const two = [...one, { id: 'cam-2', label: 'Back camera' }];
+
+  // Section 180 asks for a front/back switch; a device with one camera has nothing to switch to,
+  // and a button that did nothing would be a control that lies about what it did.
+  assert.ok(!screen({ call, cameras: one }).includes('Switch camera'));
+  assert.ok(screen({ call, cameras: two }).includes('aria-label="Switch camera"'));
+  // A voice call has no camera to move between, however many the device has.
+  const voice = activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio });
+  assert.ok(!screen({ call: voice, cameras: two }).includes('Switch camera'));
+});
+
+test('the audio output list is the platform’s, drawn only when there is one to offer', () => {
+  const voice = activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio });
+  // A browser with no output selection reports nothing, and the control is drawn from that empty
+  // list rather than from this client's idea of what a phone has.
+  assert.ok(!screen({ call: voice }).includes('Audio output'));
+
+  const outputs = [
+    { id: 'speaker', label: 'Speaker' },
+    { id: 'headset', label: 'Wired headset' },
+  ];
+  const withOutputs = screen({ call: voice, outputs, outputId: 'headset' });
+  // The names are the platform's own — section 180's speaker, earpiece, Bluetooth, and wired
+  // headset are whatever `enumerateDevices` reported, never a set this client invented.
+  assert.ok(withOutputs.includes('Audio output'));
+  assert.ok(withOutputs.includes('Speaker'));
+  assert.ok(withOutputs.includes('Wired headset'));
+  assert.ok(withOutputs.includes('System default'), 'the default is a choice, not an absence');
+});
+
 test('the self-view says a camera that is off is off, rather than showing a black frame', () => {
   const call = activeCall({
     state: CallState.Connected,
@@ -674,6 +716,8 @@ test('the call manager context starts with no call, no invite, and its actions b
         typeof call.endCall === 'function' &&
         typeof call.toggleMute === 'function' &&
         typeof call.toggleCamera === 'function' &&
+        typeof call.switchCamera === 'function' &&
+        typeof call.setOutputDevice === 'function' &&
         typeof call.toggleScreenShare === 'function' &&
         typeof call.dismissCall === 'function'
           ? 'bound'
