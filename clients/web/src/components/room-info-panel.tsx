@@ -519,7 +519,7 @@ export function RosterList({
 }: {
   entries: RosterEntry[];
   /** Resolved profiles, for names and avatars; an unresolved member keeps a stable fallback. */
-  profiles: ReadonlyMap<Id, { displayName: string; avatarUrl?: string }>;
+  profiles: ReadonlyMap<Id, { displayName: string; avatarUrl?: string; botId?: Id }>;
   /** The viewer, so their own row offers no actions and their rank gates the staff controls. */
   viewerId?: Id | null;
   /** The viewer's room rank as a number; unknown (0) shows no staff controls. */
