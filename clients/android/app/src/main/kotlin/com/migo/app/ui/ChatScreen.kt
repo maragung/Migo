@@ -115,9 +115,11 @@ import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
 import com.migo.core.domain.GroupCallInProgress
 import com.migo.core.domain.ReportSubject
+import com.migo.core.domain.ReportTarget
 import com.migo.core.domain.canFounderAct
 import com.migo.core.domain.canVoteKickGroup
 import com.migo.core.domain.filterChatSearch
+import com.migo.core.domain.personTarget
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
@@ -300,6 +302,14 @@ fun ChatScreen(
      * destination picker's suggestion after the sender's file name.
      */
     onSaveDocument: (Attachment) -> Unit = {},
+    /**
+     * The bot this shell has learned an account speaks as, or null when the wire never named one.
+     *
+     * The two roster sheets need it because a room and a group can each hold a bot, and the roster
+     * is where a member is read: the sheets would otherwise be the one list in this client that
+     * cannot tell an account from the program behind it.
+     */
+    botIdOf: (Id) -> Id? = { null },
     /** The session's resolved media, by media id — what an attachment bubble reads its object from. */
     mediaObjects: Map<Id, MediaObject> = emptyMap(),
     /**
@@ -376,7 +386,7 @@ fun ChatScreen(
      * conversations here are end-to-end encrypted, and a quote of the line being reported is
      * exactly the plaintext the node is not meant to hold.
      */
-    onReport: ((ReportSubject, Id, String) -> Unit)? = null,
+    onReport: ((ReportTarget, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -569,8 +579,7 @@ fun ChatScreen(
                                     onReport = onReport?.takeIf { !item.message.mine }?.let { report ->
                                         {
                                             report(
-                                                ReportSubject.Message,
-                                                item.message.messageId,
+                                                ReportTarget(ReportSubject.Message, item.message.messageId),
                                                 "this message",
                                             )
                                         }
@@ -664,6 +673,7 @@ fun ChatScreen(
                 chat = chat,
                 selfId = selfId,
                 avatarBytes = avatarBytes,
+                botIdOf = botIdOf,
                 onClose = onCloseMembers,
                 onViewProfile = onViewMember,
                 onGift = { userId, name -> giftTarget = GiftTarget(userId, name) },
@@ -682,6 +692,7 @@ fun ChatScreen(
                 selfId = selfId,
                 invitees = groupInvitees,
                 avatarBytes = avatarBytes,
+                botIdOf = botIdOf,
                 onClose = onCloseGroupMembers,
                 onViewProfile = onViewMember,
                 onGift = { userId, name -> giftTarget = GiftTarget(userId, name) },
@@ -751,6 +762,7 @@ fun ChatScreen(
                 chat = chat,
                 selfId = selfId,
                 avatarBytes = avatarBytes,
+                botIdOf = botIdOf,
                 onDismiss = { giftPicking = false },
                 onPick = { userId, name ->
                     giftPicking = false
@@ -806,11 +818,13 @@ fun ChatScreen(
                 // the mute is this reader's own choice, the report is a grievance the node keeps,
                 // so a person who has muted somebody can still be the one who reports them.
                 // Never for one's own card: the node refuses a report about the reporter.
+                // Through personTarget, so a card showing a bot files about the bot: the badge
+                // above the button and the id the button sends come from the same field, which is
+                // the only thing that stops the two from disagreeing in silence.
                 onReport = onReport?.takeIf { view.userId != selfId }?.let { report ->
                     {
                         report(
-                            ReportSubject.User,
-                            view.userId,
+                            personTarget(view.userId, view.profile?.botId),
                             view.profile?.displayName?.takeIf { it.isNotBlank() } ?: view.name,
                         )
                     }
@@ -2485,6 +2499,7 @@ private fun GroupMembersSheet(
     selfId: Id,
     invitees: List<GroupInviteCandidate>,
     avatarBytes: Map<Id, ByteArray>,
+    botIdOf: (Id) -> Id?,
     onClose: () -> Unit,
     onViewProfile: (Id, String) -> Unit,
     onGift: (Id, String) -> Unit,
@@ -2604,6 +2619,7 @@ private fun GroupMembersSheet(
                                 GroupInviteRow(
                                     name = person.name,
                                     avatarBytes = avatarBytes[person.userId],
+                                    bot = botIdOf(person.userId) != null,
                                     busy = person.userId in chat.acting,
                                     picked = person.userId.value in invitePicked,
                                     onToggle = {
@@ -2628,6 +2644,7 @@ private fun GroupMembersSheet(
                                 GroupMemberRow(
                                     member = member,
                                     avatarBytes = avatarBytes[member.userId],
+                                    bot = botIdOf(member.userId) != null,
                                     isSelf = member.userId == selfId,
                                     myRole = myRole,
                                     tally = chat.votes[member.userId],
@@ -2661,6 +2678,7 @@ private fun GroupMembersSheet(
 private fun GroupInviteRow(
     name: String,
     avatarBytes: ByteArray?,
+    bot: Boolean,
     busy: Boolean,
     picked: Boolean,
     onToggle: () -> Unit,
@@ -2674,14 +2692,22 @@ private fun GroupInviteRow(
     ) {
         Avatar(name = name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = name,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Row(
             modifier = Modifier.weight(1f),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (bot) {
+                Spacer(modifier = Modifier.width(4.dp))
+                BotBadge(compact = true)
+            }
+        }
         if (busy) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
         }
@@ -2707,6 +2733,7 @@ private fun GroupInviteRow(
 private fun GroupMemberRow(
     member: GroupMember,
     avatarBytes: ByteArray?,
+    bot: Boolean,
     isSelf: Boolean,
     myRole: ConversationRole,
     tally: VoteTally?,
@@ -2741,17 +2768,25 @@ private fun GroupMemberRow(
         Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = if (isSelf) member.name + " (you)" else member.name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = if (member.departed) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (isSelf) member.name + " (you)" else member.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (member.departed) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // A departed member keeps the name it left with, and a bot that left is still the
+                // bot that was here: the mark is a fact about the account, not about its seat.
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             Text(
                 text = sub,
                 style = MaterialTheme.typography.labelSmall,
@@ -2852,6 +2887,7 @@ private fun MembersSheet(
     chat: ChatState,
     selfId: Id,
     avatarBytes: Map<Id, ByteArray>,
+    botIdOf: (Id) -> Id?,
     onClose: () -> Unit,
     onViewProfile: (Id, String) -> Unit,
     onGift: (Id, String) -> Unit,
@@ -2904,6 +2940,7 @@ private fun MembersSheet(
                             MemberRow(
                                 member = member,
                                 avatarBytes = avatarBytes[member.userId],
+                                bot = botIdOf(member.userId) != null,
                                 isSelf = member.userId == selfId,
                                 myRole = myRole,
                                 tally = chat.votes[member.userId],
@@ -2928,6 +2965,7 @@ private fun MembersSheet(
                             items(mutedOnly, key = { "muted-" + it.value }) { id ->
                                 MutedRow(
                                     name = rosterNames[id] ?: id.value.take(8),
+                                    bot = botIdOf(id) != null,
                                     avatarBytes = avatarBytes[id],
                                     acting = id in chat.acting,
                                     onUnmute = { onMuteForMe(id, false) },
@@ -2955,6 +2993,7 @@ private fun MembersSheet(
 private fun MemberRow(
     member: RosterMember,
     avatarBytes: ByteArray?,
+    bot: Boolean,
     isSelf: Boolean,
     myRole: RoomRole,
     tally: VoteTally?,
@@ -2980,13 +3019,22 @@ private fun MemberRow(
         Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = if (isSelf) member.name + " (you)" else member.name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (isSelf) member.name + " (you)" else member.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // A room can hold a bot, and the roster is where a member is read: without the mark
+                // here the only surface that could name a bot in a room is the card behind a menu
+                // nobody has opened yet.
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             Text(
                 text = roleLabel(member.role),
                 style = MaterialTheme.typography.labelSmall,
@@ -3060,21 +3108,35 @@ private fun MemberRow(
 
 /** One account this device has muted who is not in the room, with the control to lift it. */
 @Composable
-private fun MutedRow(name: String, avatarBytes: ByteArray?, acting: Boolean, onUnmute: () -> Unit) {
+private fun MutedRow(
+    name: String,
+    bot: Boolean,
+    avatarBytes: ByteArray?,
+    acting: Boolean,
+    onUnmute: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Avatar(name = name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = name,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Row(
             modifier = Modifier.weight(1f),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (bot) {
+                Spacer(modifier = Modifier.width(4.dp))
+                BotBadge(compact = true)
+            }
+        }
         TextButton(onClick = onUnmute, enabled = !acting) {
             Text("Unmute")
         }
@@ -3302,6 +3364,14 @@ private fun MemberProfileSheet(
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 ListRowName(text = profile.displayName.ifBlank { view.name })
+                                // The one surface that says the whole word. A card is where a
+                                // person stops to read who they are looking at, so the mark here
+                                // is the pill and not the glyph -- and it is the same field the
+                                // card's Report button reads its subject from below.
+                                if (profile.botId != null) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    BotBadge()
+                                }
                                 if (profile.verified == true) {
                                     Spacer(modifier = Modifier.width(6.dp))
                                     // The verified mark, the same glyph the web card carries.
@@ -3502,6 +3572,7 @@ private fun GiftRecipientSheet(
     chat: ChatState,
     selfId: Id,
     avatarBytes: Map<Id, ByteArray>,
+    botIdOf: (Id) -> Id?,
     onDismiss: () -> Unit,
     onPick: (userId: Id, name: String) -> Unit,
 ) {
@@ -3534,7 +3605,16 @@ private fun GiftRecipientSheet(
                         ) {
                             Avatar(name = name, bytes = avatarBytes[userId], size = 44.dp)
                             Spacer(modifier = Modifier.width(12.dp))
-                            ListRowName(text = name)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ListRowName(text = name)
+                                // A gift can be aimed at a bot, and this picker is the only list of
+                                // recipients in the client: the mark says which rows are programs
+                                // before the spend is agreed, not after.
+                                if (botIdOf(userId) != null) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    BotBadge(compact = true)
+                                }
+                            }
                         }
                     }
                 }

@@ -52,6 +52,7 @@ import com.migo.app.AppViewModel
 import com.migo.app.model.AppState
 import com.migo.core.ConnectionState
 import com.migo.core.domain.ReportSubject
+import com.migo.core.domain.ReportTarget
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RoomSummary
 
@@ -107,6 +108,7 @@ fun MobileHome(
                     onStartDirect = model::startDirectWith,
                     onRefresh = model::loadFriends,
                     nameOf = model::nameOf,
+                    botIdOf = model::botIdOf,
                     onOpenIntent = { intentUser = it },
                     onOpenGroup = model::openGroupSheet,
                     onCloseGroup = model::closeGroupSheet,
@@ -188,7 +190,10 @@ fun MobileHome(
             val who = intentUser
             intentUser = null
             if (who != null) {
-                model.openReport(ReportSubject.User, who.userId, who.name)
+                // Through the person door rather than straight at the user kind: the sheet knows
+                // which bot the account speaks as, and a bot report has to carry bot.bot_id rather
+                // than the account id the sheet was opened with.
+                model.openReportAboutPerson(who.userId, who.botId, who.name)
             }
         },
     )
@@ -221,7 +226,7 @@ fun MobileHome(
             val room = intentRoom
             intentRoom = null
             if (room != null) {
-                model.openReport(ReportSubject.Room, room.roomId, "“${room.name}”")
+                model.openReport(ReportTarget(ReportSubject.Room, room.roomId), "“${room.name}”")
             }
         },
     )

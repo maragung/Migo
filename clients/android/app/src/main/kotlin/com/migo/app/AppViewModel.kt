@@ -86,7 +86,6 @@ import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.REPORT_NOTE_MAX_LEN
 import com.migo.core.domain.ReportReason
-import com.migo.core.domain.ReportSubject
 import com.migo.core.domain.ReportTarget
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
@@ -94,6 +93,8 @@ import com.migo.core.domain.TypingTimeouts
 import com.migo.core.domain.chatLogFilename
 import com.migo.core.domain.formatAllChatsLog
 import com.migo.core.domain.formatChatLog
+import com.migo.core.domain.openingReason
+import com.migo.core.domain.personTarget
 import com.migo.core.domain.snapshotEvictions
 import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaChallenge
@@ -469,6 +470,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * Nothing in it is secret: these are the names the profile endpoint hands to anyone who asks.
      */
     private val names = ConcurrentHashMap<Id, String>()
+
+    /**
+     * The bot each account speaks as, by account id, for the accounts the wire has named one for.
+     *
+     * Filled from the same profile reads that fill [names], because it comes off the same struct:
+     * `UserProfile.bot_id` is present exactly when the account is a bot, so this map holds only the
+     * positive and an absent key is the absence of a claim rather than a claim that the account is a
+     * person. A deactivated bot keeps its entry, because its account is still there and still a bot.
+     *
+     * It exists because a bot can only be reported by its own id: the mark a row draws and the id a
+     * report carries have to come from one place, or a row could show a bot and file about the
+     * account behind it -- the one mistake on this path that nothing on the wire would reveal.
+     */
+    private val bots = ConcurrentHashMap<Id, Id>()
 
     /**
      * The decrypted transcript of every conversation this session has shown a message from, by
@@ -991,6 +1006,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // this device any less signed out.
             }
             names.clear()
+            // The bot ids go with the names, and for the same reason: a different account signing
+            // in over the same window must not inherit the last one's marks, and a row marked a bot
+            // by a stale entry is a row offering a report about a bot that account never was.
+            bots.clear()
             // The transcripts are this session's decrypted surface; a different account signing in
             // over the same window must not inherit them (nor the next session of this one — the
             // ratchets that re-decrypt them are gone, and a stale row is a lie about what the
@@ -1314,8 +1333,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (peer != null && peer != live.client.accountId) {
                     try {
                         live.client.profile.fetchOne(peer)?.let { profile ->
-                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
-                            rememberAvatar(profile)
+                            rememberPerson(profile)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -2161,6 +2179,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Records everything one fetched profile tells this shell about an account: its name, the bot it
+     * speaks as, and its avatar.
+     *
+     * One function because the three are three fields of one struct and every caller wants all
+     * three -- the name for the rows, the bot id for the mark and for the report that follows it,
+     * the avatar for the picture. Kept together so a surface that learns a name cannot come away
+     * without the bot id that the same read carried, which is the state a row would show a bot in
+     * while being unable to report it as one.
+     *
+     * The bot id is written and erased rather than only written: a profile that names no bot is the
+     * wire saying this account is not one, and a stale entry left behind would mark an account the
+     * node has stopped calling a bot. Its absence is not a claim of humanity -- see [bots].
+     */
+    private fun rememberPerson(profile: UserProfile) {
+        names[profile.userId] = profile.displayName.ifBlank { profile.username }
+        val botId = profile.botId
+        if (botId != null) {
+            bots[profile.userId] = botId
+        } else {
+            bots -= profile.userId
+        }
+        rememberAvatar(profile)
+    }
+
+    /**
      * Records the avatar a fetched profile names, and starts its download when it is new.
      *
      * Called everywhere a profile arrives (the name cache's fetches, the roster reads, the profile
@@ -2802,8 +2845,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (unknown.isNotEmpty()) {
                     try {
                         for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
-                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
-                            rememberAvatar(profile)
+                            rememberPerson(profile)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -3358,8 +3400,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (unknown.isNotEmpty()) {
                     try {
                         for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
-                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
-                            rememberAvatar(profile)
+                            rememberPerson(profile)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -5902,8 +5943,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (wanted.isEmpty()) return
         try {
             for (profile in live.client.profile.fetch(wanted.toList().take(PROFILE_BATCH))) {
-                names[profile.userId] = profile.displayName.ifBlank { profile.username }
-                rememberAvatar(profile)
+                rememberPerson(profile)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -5953,6 +5993,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The display name this shell has learned for an account, or null when it never heard one. */
     fun nameOf(userId: Id): String? = names[userId]
+
+    /**
+     * The bot this shell has learned an account speaks as, or null when the wire never named one.
+     *
+     * Handed to the lists beside [nameOf] because a row that can name a person is the row that has
+     * to say when that person is not one: the two arrive from the same read, and a surface given
+     * only the first would draw a bot as an ordinary account.
+     */
+    fun botIdOf(userId: Id): Id? = bots[userId]
 
     /**
      * Opens the member profile sheet for one account, as a member row's View profile asks.
@@ -6026,19 +6075,40 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Opens the report sheet over [subjectId], named [label] in the sheet's own heading.
+     * Opens the report sheet over [target], named [label] in the sheet's own heading.
      *
      * One entry point for every surface that offers a report — a message's menu, an account's card,
      * a room's menu — because filing is one act with one shape on the wire: a kind, an id, a reason,
-     * and the reporter's note. What differs between the surfaces is only [label], and the surface
-     * that opened the sheet is the one that knew what the person was looking at.
+     * and the reporter's note. What differs between the surfaces is the target and the [label], and
+     * the surface that opened the sheet is the one that knew what the person was looking at.
+     *
+     * The reason the sheet opens with is [openingReason]'s answer and not this function's: a bot
+     * subject opens on the bot abuse code, every other subject opens on nothing at all. Keeping the
+     * decision there is what stops a door from seeding a reason of its own — a door that picked a
+     * reason for the reporter would be answering a question the sheet exists to ask.
      *
      * Nothing is read here. Unlike the member profile's sheet, which fetches the account it is about,
      * this one has nothing to fetch: the report is a pointer the reporter supplies, and the node
      * answers nothing about a subject a client is not entitled to read back.
      */
-    fun openReport(subject: ReportSubject, subjectId: Id, label: String) {
-        _reportSheet.value = ReportSheetView(subject = subject, subjectId = subjectId, label = label)
+    fun openReport(target: ReportTarget, label: String) {
+        _reportSheet.value = ReportSheetView(
+            subject = target.kind,
+            subjectId = target.id,
+            label = label,
+            reason = openingReason(target),
+        )
+    }
+
+    /**
+     * Opens the report sheet over one person, given the account and the bot it may speak as.
+     *
+     * The one door the person-reporting surfaces use, so none of them has to know that a bot is
+     * reported by a different id than the account it signs in as. [personTarget] makes that choice;
+     * this is where it is applied.
+     */
+    fun openReportAboutPerson(accountId: Id, botId: Id?, label: String) {
+        openReport(personTarget(accountId, botId), label)
     }
 
     /** Closes the report sheet; the picks go with it, so a reopen starts from an empty form. */

@@ -17,6 +17,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -42,6 +43,10 @@ import org.junit.Test
  *   3. **The refusal that must happen locally.** The note ceiling is checked before anything is sent,
  *      because a refusal that arrives after the reporter typed the whole thing has already cost them
  *      the typing on a call the registry prices.
+ *   4. **Which id a report about a person carries.** An account that speaks as a bot is reported by
+ *      `bot.bot_id` and not by the account id, and the two are different ids, so a client that picked
+ *      the wrong one would file a bot complaint naming something that is not a bot -- accepted by the
+ *      node, readable by a moderator, and wrong in a way no reply would reveal.
  *
  * The domain is driven over a fake [RealtimeTransport], the seam the domains are built on -- the same
  * arrangement `GroupCallTest` uses, and the reason any of this is testable without a node.
@@ -178,6 +183,36 @@ class ModerationTest {
             ReportReason.BotAbuse.wire,
             request.reason,
         )
+    }
+
+    // --- which id a report about a person carries ---
+
+    @Test
+    fun `an account that speaks as a bot is reported as the bot, not as the account`() {
+        // The whole reason this rule exists in one place. A surface holding both ids can pick the
+        // wrong one silently: the report is filed, the node accepts it, the moderator reads a bot
+        // complaint naming an id that is not a bot, and nothing on the wire looks wrong.
+        val target = personTarget(ADA, BOT)
+        assertEquals(ReportSubject.Bot, target.kind)
+        assertEquals("the bot's own handle, never the account the bot signs in as", BOT, target.id)
+        assertTrue("the two ids are different things in this fixture", target.id != ADA)
+
+        // The same call with no bot named is an ordinary account report, which is what a null on
+        // the wire means: the absence of a claim, not a claim of humanity.
+        val person = personTarget(ADA, null)
+        assertEquals(ReportSubject.User, person.kind)
+        assertEquals(ADA, person.id)
+    }
+
+    @Test
+    fun `a bot subject opens on the bot reason and every other subject opens on none`() {
+        // Null is the sheet's ordinary opening state -- Send stays dark until a reason is picked --
+        // and a bot is the one exception, because the marking already answered the question the
+        // menu would otherwise ask.
+        assertEquals(ReportReason.BotAbuse, openingReason(personTarget(ADA, BOT)))
+        assertNull(openingReason(personTarget(ADA, null)))
+        assertNull(openingReason(ReportTarget(ReportSubject.Room, ROOM)))
+        assertNull(openingReason(ReportTarget(ReportSubject.Message, MESSAGE)))
     }
 
     // --- the refusals that must not cost a frame ---

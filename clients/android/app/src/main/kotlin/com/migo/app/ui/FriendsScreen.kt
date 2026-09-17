@@ -70,6 +70,15 @@ fun FriendsScreen(
     onRefresh: () -> Unit,
     /** The display name this shell has learned for an account, or null when it never heard one. */
     nameOf: (com.migo.core.wire.Id) -> String? = { null },
+    /**
+     * The bot this shell has learned an account speaks as, or null when the wire never named one.
+     *
+     * Beside [nameOf] because it comes from the same read and answers the same kind of question
+     * about the same row: the graph itself carries only an id and a kind, so a friend's name and a
+     * friend's bot are both things this view has to be told. A null is the wire not having said,
+     * which is not the same as the wire having said no.
+     */
+    botIdOf: (com.migo.core.wire.Id) -> com.migo.core.wire.Id? = { null },
     /** What tapping a friend opens: the friend intent sheet. */
     onOpenIntent: (UserTarget) -> Unit = {},
     /** Opens the new-group sheet over the Friends view. */
@@ -217,6 +226,7 @@ fun FriendsScreen(
                         RequestRow(
                             userId = entry.userId,
                             note = "wants to be friends",
+                            bot = botIdOf(entry.userId) != null,
                             busy = state.friends.busy.contains(entry.userId),
                             onAccept = { onRespond(entry.userId, true) },
                             onDecline = { onRespond(entry.userId, false) },
@@ -230,6 +240,7 @@ fun FriendsScreen(
                             note = "request sent",
                             action = "Message",
                             onAction = { onStartDirect(entry.userId) },
+                            bot = botIdOf(entry.userId) != null,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
@@ -251,7 +262,20 @@ fun FriendsScreen(
                             line = direct?.preview ?: "Tap to chat",
                             unread = direct?.unread ?: 0L,
                             presence = state.presence[entry.userId],
-                            onClick = { onOpenIntent(UserTarget(userId = entry.userId, name = name, friend = true)) },
+                            bot = botIdOf(entry.userId) != null,
+                            // The intent sheet is told which bot the account speaks as, because the
+                            // sheet is one of the doors that reports a person: a sheet handed only
+                            // a name and an account id would file about the account behind the bot.
+                            onClick = {
+                                onOpenIntent(
+                                    UserTarget(
+                                        userId = entry.userId,
+                                        name = name,
+                                        friend = true,
+                                        botId = botIdOf(entry.userId),
+                                    ),
+                                )
+                            },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
@@ -267,6 +291,7 @@ fun FriendsScreen(
                     items(blocked, key = { "blk-" + it.userId.value }) { entry ->
                         BlockedRow(
                             name = nameOf(entry.userId) ?: shortId(entry.userId),
+                            bot = botIdOf(entry.userId) != null,
                             busy = state.friends.busy.contains(entry.userId),
                             onUnblock = { onUnblock(entry.userId) },
                         )
@@ -315,6 +340,7 @@ fun FriendsScreen(
                 title = state.friends.groupTitle,
                 busy = state.friends.groupBusy,
                 nameOf = nameOf,
+                botIdOf = botIdOf,
                 onClose = onCloseGroup,
                 onTitle = onGroupTitle,
                 onToggle = onToggleGroupPick,
@@ -339,6 +365,7 @@ private fun FriendRow(
     line: String,
     unread: Long,
     presence: com.migo.core.protocol.PresenceState?,
+    bot: Boolean,
     onClick: () -> Unit,
 ) {
     Row(
@@ -352,7 +379,13 @@ private fun FriendRow(
         ListRowAvatar(name = name, online = presence != PresenceState.Offline, avatarBytes = avatarBytes)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            ListRowName(text = name)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListRowName(text = name)
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             ListRowLine(text = line)
         }
         if (unread > 0) {
@@ -368,6 +401,7 @@ private fun FriendRow(
 private fun RequestRow(
     userId: com.migo.core.wire.Id,
     note: String,
+    bot: Boolean,
     busy: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
@@ -382,7 +416,13 @@ private fun RequestRow(
         ListRowAvatar(name = userId.value)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            ListRowName(text = shortId(userId))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListRowName(text = shortId(userId))
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             ListRowLine(text = note)
         }
         TextButton(onClick = onDecline, enabled = !busy) { Text("Decline") }
@@ -401,6 +441,7 @@ private fun RequestRow(
 @Composable
 private fun BlockedRow(
     name: String,
+    bot: Boolean,
     busy: Boolean,
     onUnblock: () -> Unit,
 ) {
@@ -414,7 +455,13 @@ private fun BlockedRow(
         ListRowAvatar(name = name)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            ListRowName(text = name)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListRowName(text = name)
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             ListRowLine(text = "Blocked — they cannot reach you")
         }
         TextButton(onClick = onUnblock, enabled = !busy) { Text("Unblock") }
@@ -464,7 +511,16 @@ private fun SuggestionRow(
         ListRowAvatar(name = person.displayName)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            ListRowName(text = person.displayName)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListRowName(text = person.displayName)
+                // The wire's own field, not a second fetch: the suggestion came with the bot id
+                // attached, which is what makes this row the one place a stranger can be told
+                // apart from a stranger's program before either is added.
+                if (person.botId != null) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             ListRowLine(
                 text = "@" + person.username +
                     (if (person.mutualFriends > 0) " · ${person.mutualFriends} mutual" else ""),
@@ -496,6 +552,7 @@ private fun NewGroupSheet(
     title: String,
     busy: Boolean,
     nameOf: (com.migo.core.wire.Id) -> String?,
+    botIdOf: (com.migo.core.wire.Id) -> com.migo.core.wire.Id?,
     onClose: () -> Unit,
     onTitle: (String) -> Unit,
     onToggle: (com.migo.core.wire.Id) -> Unit,
@@ -561,13 +618,23 @@ private fun NewGroupSheet(
                                 Monogram(name = name, size = 32.dp)
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = name,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = name,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        // A group can hold a bot, and the picker is where the
+                                        // decision to put one in is made: the mark belongs on the
+                                        // row being picked rather than on the member list the person
+                                        // only sees afterwards.
+                                        if (botIdOf(entry.userId) != null) {
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            BotBadge(compact = true)
+                                        }
+                                    }
                                     // The first pick is called out because it carries a meaning
                                     // the rest do not: that person becomes the second founder.
                                     Text(

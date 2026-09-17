@@ -915,6 +915,10 @@ data class ReportSheetView(
      * not the web client's default: the web dialog preselects the first reason, and a mobile sheet
      * where Send is live before anything was read invites a report filed under a reason the reporter
      * never chose.
+     *
+     * The one subject that opens with a reason is a bot, where [openingReason] answers with the bot
+     * abuse code and the sheet draws it as a picked row -- see that function for why an answer the
+     * marking already gave is not the same thing as a default nobody read.
      */
     val reason: ReportReason? = null,
     /** The reporter's own words, exactly as typed. Empty is absent, never an empty note on the wire. */

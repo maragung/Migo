@@ -243,6 +243,9 @@ internal fun ChatPane(
         },
         mediaObjects = mediaObjects,
         avatarBytes = avatarBytes,
+        // The two roster sheets' mark, from the shell: the same map the friends list reads, so a
+        // bot is the same bot in every list it appears in.
+        botIdOf = model::botIdOf,
         // The voice-note player's two receiver-side facts: which notes this account has heard,
         // and the rate the next note plays at. Both are local — no mark and no rate ever rides
         // the wire — so both are handed straight from the model's own state.

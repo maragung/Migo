@@ -36,6 +36,8 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -288,6 +290,52 @@ fun ListRowLine(text: String, modifier: Modifier = Modifier) {
     )
 }
 
+/**
+ * The mark that says an account is a bot.
+ *
+ * A bot is an account, so it appears in every list a person appears in, and until it is marked the
+ * only thing telling the two apart is what the account chooses to say about itself -- which is
+ * exactly the thing a malicious bot would lie about. Every surface that names a person draws this
+ * when the wire named a bot behind the account, and draws nothing at all when it did not: a mark
+ * that is always there is a mark nobody reads.
+ *
+ * It says "Bot" rather than only wearing the glyph, because a robot emoji beside a name is a
+ * decoration until somebody has been told what it means, and this is the one place the client gets
+ * to say it. The two forms differ only in width -- [compact] is the glyph alone, for the dense rows
+ * where a pill would push the name it belongs to off the line -- and the sentence travels in both,
+ * as the screen reader's description, because a small mark is read by exactly the people who cannot
+ * see how small it is.
+ *
+ * It says what a bot *is* and not what it did: a mark that accused would be a mark the account
+ * could be reported for wearing, and the honest fact here is the one the wire stated.
+ */
+@Composable
+fun BotBadge(modifier: Modifier = Modifier, compact: Boolean = false) {
+    val said = "This is a bot, not a person: a program its owner runs. " +
+        "Report it as a bot if it misbehaves."
+    if (compact) {
+        Text(
+            text = "🤖",
+            fontSize = MigoType.meta,
+            modifier = modifier.semantics { contentDescription = said },
+        )
+    } else {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = rowInk().second,
+            shape = RoundedCornerShape(MigoRadius.pill),
+            modifier = modifier.semantics { contentDescription = said },
+        ) {
+            Text(
+                text = "🤖 Bot",
+                fontSize = MigoType.micro,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
 /** The row's unread pill: red, fully rounded, the one number the reader is hunting for. */
 @Composable
 fun UnreadPill(count: Long, modifier: Modifier = Modifier) {
@@ -392,7 +440,14 @@ fun RoomSummaryRow(room: RoomSummary, joined: Boolean = false, onJoin: () -> Uni
     }
 }
 
-/** One person row in a digest: name, handle, an optional note, and the offered action. */
+/**
+ * One person row in a digest: name, handle, an optional note, and the offered action.
+ *
+ * [bot] draws the bot mark beside the name. It is a plain flag rather than the id the mark would
+ * carry, because this row never reports anybody: the surfaces that do hold the id and go through
+ * `personTarget` themselves, and a row given an id it had no use for would be a second copy of the
+ * rule that decides which id a report carries.
+ */
 @Composable
 fun PersonSummaryRow(
     name: String,
@@ -400,6 +455,7 @@ fun PersonSummaryRow(
     note: String?,
     action: String,
     onAction: () -> Unit,
+    bot: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -411,7 +467,13 @@ fun PersonSummaryRow(
         ListRowAvatar(name = name)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            ListRowName(text = name)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListRowName(text = name)
+                if (bot) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    BotBadge(compact = true)
+                }
+            }
             ListRowLine(text = "@" + handle + (note?.let { " · $it" } ?: ""))
         }
         TextButton(onClick = onAction) { Text(action) }
