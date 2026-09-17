@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.migo.app.model.ReportSheetView
 import com.migo.core.domain.REPORT_NOTE_MAX_LEN
 import com.migo.core.domain.ReportReason
+import com.migo.core.domain.ReportSubject
 
 /**
  * One reason a person can point at, as the sheet offers it: the code that travels and the two
@@ -57,6 +58,11 @@ data class ReportReasonOption(
  * exist for them rather than through a generic report menu, and offering them here would promise a
  * response path this sheet does not own.
  *
+ * That last one has one exception, and it is not a hole in the rule but the case the rule was
+ * written around: a report about a bot *is* the channel that exists for bot abuse, and the surface
+ * that opens this sheet over a bot has already said so by marking the account. [reportReasons] is
+ * what adds it back for exactly that subject — see [BOT_REPORT_REASON].
+ *
  * [ReportReason.Other] is last and is the only catch-all: a menu that put it first would collect
  * every report that was not read to the bottom.
  */
@@ -83,6 +89,37 @@ val REPORT_REASONS: List<ReportReasonOption> = listOf(
     ReportReasonOption(ReportReason.Impersonation, "Impersonation", "Pretending to be somebody else."),
     ReportReasonOption(ReportReason.Other, "Something else", "None of the above."),
 )
+
+/**
+ * The bot abuse code as a menu row, offered only where the subject is a bot.
+ *
+ * It is drawn rather than merely preselected because this sheet's own rule is that a live Send sits
+ * under a row the reporter can see: a menu that opened with a reason picked and no row showing it
+ * would be a form whose Send button is the only thing that knows what it is about to file. It comes
+ * first, above the generic list, because the surface that opened the sheet has already answered the
+ * question the generic list would otherwise be asking -- and it stays the reporter's to change,
+ * since the menu is where the decision is made and the marking only decided where the reading
+ * starts.
+ */
+val BOT_REPORT_REASON: ReportReasonOption = ReportReasonOption(
+    ReportReason.BotAbuse,
+    "Bot misbehaving",
+    "A bot that is broken, spammy, or abusive — a bad integration, not a bad person.",
+)
+
+/**
+ * The reason menu for a subject, in the order it is read.
+ *
+ * The generic nine for everything, and the bot row ahead of them for a bot. A function rather than a
+ * second list, because the two menus differ by one row and a copy of the nine would be a copy that
+ * could drift from the list it duplicates.
+ */
+fun reportReasons(subject: ReportSubject): List<ReportReasonOption> =
+    if (subject == ReportSubject.Bot) {
+        listOf(BOT_REPORT_REASON) + REPORT_REASONS
+    } else {
+        REPORT_REASONS
+    }
 
 /**
  * The report sheet: one question, one optional note, one priced act.
@@ -134,6 +171,21 @@ fun ReportSheet(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
         )
 
+        // What a bot subject means, said once above the menu. Not a warning and not a second
+        // question: the marking already answered the question this sheet would otherwise have to
+        // ask, and what is left to say is the one thing the mark cannot -- that the report names
+        // the bot and not the account behind it, which is what lets a moderator tell a broken
+        // integration from an abusive person before deciding anything.
+        if (view.subject == ReportSubject.Bot) {
+            Text(
+                text = "This account speaks as a bot: a program its owner runs. This report is " +
+                    "filed about the bot itself, not about whoever runs it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
+        }
+
         // The menu scrolls inside a bounded height: nine rows with their hints are taller than the
         // sheet on a short screen, and the note and the Send under them must stay reachable without
         // the person having to dismiss and reopen.
@@ -143,7 +195,7 @@ fun ReportSheet(
                 .heightIn(max = 264.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            for (option in REPORT_REASONS) {
+            for (option in reportReasons(view.subject)) {
                 ReasonRow(
                     option = option,
                     picked = view.reason == option.reason,

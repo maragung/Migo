@@ -45,11 +45,18 @@ private fun presenceWord(presence: PresenceState): String = when (presence) {
     PresenceState.Unknown -> "offline"
 }
 
-/** The person a user-intent sheet was opened for: who they are, and whether they are a friend. */
+/**
+ * The person a user-intent sheet was opened for: who they are, and whether they are a friend.
+ *
+ * [botId] rides along because this sheet is one of the doors that reports a person, and a door that
+ * reported by the account id would file about the account behind a bot rather than about the bot.
+ * Null is the wire never having named one, which is what every ordinary account carries.
+ */
 data class UserTarget(
     val userId: Id,
     val name: String,
     val friend: Boolean,
+    val botId: Id? = null,
 )
 
 /**
@@ -254,7 +261,16 @@ fun UserIntentSheet(
             )
             Spacer(modifier = Modifier.width(10.dp))
             Column {
-                ListRowName(text = target.name)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ListRowName(text = target.name)
+                    // The mark rides on the sheet's own heading, because this is the surface a
+                    // person reaches a friend through: the row that opened it may have been a
+                    // short id, and a bot named here is a bot the report below is about.
+                    if (target.botId != null) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        BotBadge(compact = true)
+                    }
+                }
                 ListRowLine(
                     text = if (target.friend) {
                         "Friend" + (presence?.let { " · ${presenceWord(it)}" } ?: "")

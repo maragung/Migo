@@ -153,6 +153,43 @@ data class ReportTarget(
 )
 
 /**
+ * What a report about *a person* points at, given the account and the bot it may speak as.
+ *
+ * An account that speaks as a bot is reported as the bot and not as the account behind it, because
+ * `bot.bot_id` is a different id from the account id and is the one the node's own bot actions act
+ * on: a report filed under the account id would reach a moderator as a report about a bot that names
+ * something which is not one, and nothing on the wire would look wrong while it did. `botId` is the
+ * `UserProfile.bot_id` the wire carries, and it is null for every ordinary account -- a null here is
+ * the absence of a claim and not a claim that the account is human, so an account the node never
+ * named a bot for is reported as a user.
+ *
+ * This is the one place in this client where the choice is made, and every surface that reports a
+ * person goes through it for that reason: a row that decided for itself would be a second copy of a
+ * rule that has to agree with the first, on the one id in this whole path where being wrong is
+ * silent.
+ */
+fun personTarget(accountId: Id, botId: Id?): ReportTarget =
+    if (botId != null) {
+        ReportTarget(ReportSubject.Bot, botId)
+    } else {
+        ReportTarget(ReportSubject.User, accountId)
+    }
+
+/**
+ * The reason a report about [target] opens on, or null where the reporter has to pick one.
+ *
+ * Null is the ordinary answer and the sheet's own rule: Send stays dark until a reason is picked,
+ * because a menu read with a thumb already moving is not a menu that was read. A bot subject is the
+ * one exception, and it is not a default so much as an answer the marking already gave -- the account
+ * is a bot, that is what bot abuse means, and a reporter asked to judge "bot abuse" over an account
+ * this client has just marked as a bot has been asked a question the mark answered. The sheet offers
+ * the code as a picked row where the generic menu does not list it, so the live Send still sits under
+ * a row the reporter can see, and every other reason stays available beside it.
+ */
+fun openingReason(target: ReportTarget): ReportReason? =
+    if (target.kind == ReportSubject.Bot) ReportReason.BotAbuse else null
+
+/**
  * Files reports, and receives the node's word when one is ruled on.
  *
  * One instance per client. [report] works on its own; [onModerationEvent] only fires once [start] has

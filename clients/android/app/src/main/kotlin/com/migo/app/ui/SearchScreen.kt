@@ -124,6 +124,10 @@ fun SearchScreen(
                             note = if (person.mutualFriends > 0) "${person.mutualFriends} mutual" else null,
                             action = "Message",
                             onAction = { onStartDirect(person.accountId) },
+                            // The search's own answer carries the bot id, so the one surface where a
+                            // person meets an account they have never heard of says what it is
+                            // before either door below it is taken.
+                            bot = person.botId != null,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
