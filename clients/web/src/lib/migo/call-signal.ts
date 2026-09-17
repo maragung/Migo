@@ -209,6 +209,52 @@ export function decodeSdpDescription(bytes: Uint8Array): SdpDescription {
 }
 
 /**
+ * What an arriving SDP relay asks of this side, decided from the description and one local fact.
+ *
+ * The frame does not say: the server delivers a mid-call renegotiation to its target as
+ * `CALL_SDP`, the very opcode an invite's answer arrives on, so the frame's name is the sender's
+ * business and never the receiver's. What distinguishes them is the type *inside* the sealed blob —
+ * the peer's own declaration, sealed under the call's key and therefore as trustworthy as the peer
+ * — read together with whether this side has an offer outstanding.
+ *
+ * Neither half suffices alone. The type alone would let a redelivered offer be answered twice,
+ * since `CALL_SDP` is Critical and at-least-once delivery is what that class promises. The flag
+ * alone would read a redelivered answer as a fresh offer, and applying a second remote description
+ * the connection is not waiting for is a state error rather than a renegotiation.
+ *
+ * So the wrong pairings are {@link SdpDisposition.Ignore}, not errors: the first exchange of each
+ * kind already said what the call needed, and a duplicate that acted would undo it.
+ */
+export enum SdpDisposition {
+  /** An answer to an offer this side has out: apply it. */
+  Answer = 'answer',
+  /** The peer's offer, with none of ours outstanding: apply it and answer. */
+  Renegotiation = 'renegotiation',
+  /** A duplicate, a late arrival, or an offer from the side that is itself offering: do nothing. */
+  Ignore = 'ignore',
+}
+
+/**
+ * Decides what an arriving SDP relay means for this side. Pure: the caller passes whether it has an
+ * offer outstanding, so the rule is pinned by a test without a peer connection in sight.
+ */
+export function sdpDisposition(description: SdpDescription, offerPending: boolean): SdpDisposition {
+  if (description.type === 'answer') {
+    // A second answer is a redelivery, or the answer to a restart that media came back without.
+    return offerPending ? SdpDisposition.Answer : SdpDisposition.Ignore;
+  }
+  if (description.type === 'offer') {
+    // An offer from the side that is itself offering is glare this build does not create: only the
+    // caller renegotiates, and it holds its own offer while it waits. The offer already out is the
+    // one the call is proceeding on, so the arriving one is ignored rather than rolled back.
+    return offerPending ? SdpDisposition.Ignore : SdpDisposition.Renegotiation;
+  }
+  // pranswer and rollback are states this build never puts on the wire, so a relay carrying one is
+  // not part of a call it is running.
+  return SdpDisposition.Ignore;
+}
+
+/**
  * The bytes of an ICE batch: a JSON array of candidate inits, one relay per gathering run —
  * one frame per candidate is exactly the signaling storm the wire's batch field exists to avoid.
  */

@@ -25,7 +25,8 @@
  * projection can be rebuilt rather than only maintained: every other fact here arrives as an event,
  * and a client that was offline when the call started has no event to have missed. It also never
  * opens or seals anything: the bytes handed
- * to {@link invite}, {@link answer}, {@link sendSdp}, and {@link sendIce} are already sealed by the
+ * to {@link invite}, {@link answer}, {@link sendSdp}, {@link renegotiate}, and {@link sendIce} are
+ * already sealed by the
  * caller, and the bytes handed back through {@link onIncomingCall} and the relay listeners are
  * passed through verbatim. The end-to-end media encryption is a separate, future layer; until it
  * lands the application seals with placeholder material, and this domain cannot tell the
@@ -42,6 +43,7 @@ import {
   encodeCallCancel,
   encodeCallEnd,
   encodeCallSdp,
+  encodeCallRenegotiate,
   encodeCallIce,
   encodeCallStats,
   encodeCallTurnFetch,
@@ -240,9 +242,11 @@ export class CallsDomain {
   /**
    * Registers a handler for SDP relays addressed to this device. Returns its unsubscribe.
    *
-   * For a caller this is how the answer arrives; for a callee, a renegotiated offer (a future
-   * flow). The blob is sealed for this device — the handler receives it verbatim and opening it is
-   * the application's crypto, never the server's.
+   * For a caller this is how the answer arrives; for either side, it is also how a mid-call
+   * renegotiation arrives — the server delivers a `CALL_RENEGOTIATE` to its target as this same
+   * `CALL_SDP`, so a receiver tells the two apart by whether it has an offer outstanding, never by
+   * the frame it arrived on. The blob is sealed for this device — the handler receives it verbatim
+   * and opening it is the application's crypto, never the server's.
    */
   onSdp(handler: Listener<CallSdp>): () => void {
     return this.#sdpListeners.add(handler);
@@ -351,6 +355,30 @@ export class CallsDomain {
   async sendSdp(callId: Id, toDevice: Id, sealedSdp: Uint8Array): Promise<void> {
     const request = { callId, fromDevice: this.#deviceId, toDevice, sealedSdp };
     await this.#rpc.call(OP.CALL_SDP, encodeCallSdp, decodeAcknowledged, request);
+  }
+
+  /**
+   * Relays a sealed renegotiation offer to one device of the peer, for an ICE restart mid-call.
+   *
+   * The frame is `CALL_RENEGOTIATE`, and the server delivers it to its target as `CALL_SDP` — a
+   * renegotiation is the same frame under another name, which is why the peer receives it through
+   * {@link onSdp} and why nothing about the sealing changes: the blob is an offer like the invite's,
+   * sealed under the call's own key, and the server relays bytes it cannot read.
+   *
+   * Why a separate verb rather than {@link sendSdp}: the two say different things to the server. A
+   * `CALL_SDP` is part of a call *starting* — the answer to an invite — while a renegotiation is a
+   * call already connected asking to rebuild its transport. The server treats the second as
+   * renegotiation traffic, and a client that sent a restart as a plain SDP would be describing a
+   * connected call as one still being negotiated.
+   *
+   * A restart is bidirectional the moment either side offers it, so one offerer suffices: two
+   * offerers at once would be glare, and the loser's offer would have to be rolled back. This
+   * domain does not choose the offerer — that is the application's call, and it is the side that
+   * detected the blip.
+   */
+  async renegotiate(callId: Id, toDevice: Id, sealedSdp: Uint8Array): Promise<void> {
+    const request = { callId, fromDevice: this.#deviceId, toDevice, sealedSdp };
+    await this.#rpc.call(OP.CALL_RENEGOTIATE, encodeCallRenegotiate, decodeAcknowledged, request);
   }
 
   /**

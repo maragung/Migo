@@ -20,12 +20,15 @@
  *
  * # The reconnect window
  *
- * A transport blip must not end a call (section 180): the peer connection going `disconnected`
- * shows *Reconnecting* and starts a window; media coming back cancels it; the window expiring ends
+ * A transport blip must not end a call (section 180): the peer connection going `disconnected` —
+ * or `failed`, which is ICE's verdict on the current candidate pairs rather than on the call —
+ * shows *Reconnecting* and starts a window; media coming back cancels it, the window expiring ends
  * the call with `Network` — and, since the server and the peer still think the call is live, fires
- * a best-effort `CALL_END` so the other side is spared the whole window. This build does not yet
- * attempt the ICE restart inside the window — that is `CALL_RENEGOTIATE`'s job and a future task —
- * so the window is a grace period, not a recovery attempt.
+ * a best-effort `CALL_END` so the other side is spared the whole window. Inside the window the
+ * caller offers an ICE restart through `CALL_RENEGOTIATE` (see {@link restartIce}), which is what
+ * makes the window a recovery attempt rather than only a grace period: a blip that moved the two
+ * devices' addresses leaves every old candidate pair dead, and only a fresh set can bring the media
+ * back.
  *
  * # The ring's lifecycle
  *
@@ -98,8 +101,11 @@ import {
   inviteEndReason,
   openCallSignal,
   ringTimeoutMs,
+  sdpDisposition,
   sealCallSignal,
+  SdpDisposition,
 } from './call-signal.js';
+import type { SdpDescription } from './call-signal.js';
 import { QUALITY_POLL_MS, advanceMeasurement, degradedAt, qualityReport } from './call-quality.js';
 import { readLinkCounters, shapeVideoSender, videoTrackToSend } from './group-media.js';
 import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
@@ -308,6 +314,18 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   /** Candidates the peer relayed before this side's remote description was set, applied after it is. */
   const heldIceRef = useRef<RTCIceCandidateInit[]>([]);
   const remoteDescriptionSetRef = useRef(false);
+  /**
+   * Whether an offer of *this* side's is outstanding — the invite's own offer, or a restart's — and
+   * whose answer has not come back.
+   *
+   * This is the only thing that tells the two kinds of arriving SDP apart, and it has to be a fact
+   * about this side rather than about the frame: the server delivers a renegotiation to its target
+   * as `CALL_SDP`, the same opcode an invite's answer arrives on, so a receiver that read the
+   * frame's name would read every incoming renegotiation as the answer to an offer it never made.
+   * Whichever side holds an outstanding offer reads the next SDP as its answer; the other side reads
+   * it as an offer to answer.
+   */
+  const localOfferPendingRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
   /** The caller's local mirror of the invite's expiry, while its call still rings unanswered. */
   const ringTimerRef = useRef<number | null>(null);
@@ -765,6 +783,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     iceBatchRef.current = [];
     heldIceRef.current = [];
     remoteDescriptionSetRef.current = false;
+    // An offer belongs to the call it was made on: the next call's answer must not be read as this
+    // one's, and a restart left flagged here would keep the next call from ever offering its own.
+    localOfferPendingRef.current = false;
     peerDeviceRef.current = null;
     setupStartRef.current = null;
     endSentRef.current = false;
@@ -945,6 +966,62 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   // --- the peer connection ---
 
   /**
+   * Attempts an ICE restart: a fresh offer on the call's existing peer connection, sealed and
+   * relayed as `CALL_RENEGOTIATE`.
+   *
+   * Section 180 asks for this inside the reconnect window, and it is what makes the window a
+   * recovery attempt rather than only a grace period: a blip that moved the two devices' addresses —
+   * a phone that changed networks, a NAT that rebound its mapping — leaves every old candidate pair
+   * dead for good, so waiting cannot bring the call back and only a fresh set of candidates can. The
+   * media itself needs no renegotiation: the m-lines are the ones already agreed, and the restart
+   * changes the transport under them.
+   *
+   * Only the caller offers. An ICE restart is bidirectional the moment either side does it, so one
+   * offerer is enough; two would be glare, and the rollback that resolves glare is a state this
+   * build has no reason to enter. The caller is also the side that holds a target device id for the
+   * whole call, where the callee's is the invite's.
+   *
+   * One attempt per outstanding offer, tracked by {@link localOfferPendingRef}: a second offer
+   * before the first is answered would be glare with this side's own restart. A later blip can try
+   * again, because the flag clears when the answer arrives or when this attempt fails to leave.
+   */
+  const restartIce = useCallback((): void => {
+    const call = activeRef.current;
+    const pc = pcRef.current;
+    const target = peerDeviceRef.current;
+    const key = call === null ? undefined : callKeysRef.current.get(call.callId);
+    if (call === null || pc === null || target === null || key === undefined || !call.isCaller) {
+      return;
+    }
+    if (localOfferPendingRef.current) {
+      return;
+    }
+    localOfferPendingRef.current = true;
+    void (async (): Promise<void> => {
+      try {
+        // `iceRestart` is the whole point: a plain offer would re-send the same candidates the dead
+        // path was built from, which is a renegotiation that cannot help.
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        await clientRef.current?.calls.renegotiate(
+          call.callId,
+          target,
+          sealCallSignal(
+            encodeSdpDescription({ type: 'offer', sdp: offer.sdp ?? '' }),
+            key,
+            call.callId,
+          ),
+        );
+      } catch {
+        // The attempt did not leave this device — a connection that closed under it, a signaling
+        // write that failed. That is a failed restart, not a failed call: the window is still open,
+        // so the offer flag is cleared and a later blip inside it may try again.
+        localOfferPendingRef.current = false;
+      }
+    })();
+  }, []);
+
+  /**
    * Builds this call's peer connection over the given ICE servers: TURN relays the server
    * configured for the call, plus the public STUN fallback (see {@link iceServersForCall}).
    */
@@ -968,10 +1045,21 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
             clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
           }
+          // Media is back, so whatever offer was outstanding is moot: an answer that arrives after
+          // this would be applied to a connection that no longer needs it, and the flag would keep
+          // the next restart from being attempted.
+          localOfferPendingRef.current = false;
           markConnected();
-        } else if (pc.connectionState === 'disconnected') {
+        } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
           // Section 180: a blip is not an end. Show Reconnecting and open the window; media back
-          // cancels it, the deadline ends the call as a network failure.
+          // cancels it, the deadline ends the call as a network failure — and inside the window the
+          // caller offers a restart, which is the part that can actually bring the media back.
+          //
+          // `failed` gets the same treatment rather than an immediate end, because a restart is
+          // exactly the remedy the specification names for it: `failed` is ICE's verdict on the
+          // *current* candidate pairs, and a fresh set is the one thing that can still help. Ending
+          // the call on the verdict, without offering the restart, would hang up on a call the
+          // section says is recoverable.
           if (call.state !== CallState.Reconnecting) {
             setActive({ ...call, state: CallState.Reconnecting });
           }
@@ -981,14 +1069,13 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
               finishCall(CallEndReason.Network);
             }, RECONNECT_WINDOW_MS);
           }
-        } else if (pc.connectionState === 'failed') {
-          finishCall(CallEndReason.Network);
+          restartIce();
         }
       };
       pcRef.current = pc;
       return pc;
     },
-    [finishCall, handleIceCandidate, markConnected, setActive],
+    [finishCall, handleIceCandidate, markConnected, restartIce, setActive],
   );
 
   /** Acquires the mic (and camera, for a video call) the call needs. */
@@ -1077,6 +1164,10 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         adoptVideoSender(pc, stream);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        // The invite's offer is outstanding until the answer names the device that took it: the
+        // first SDP to arrive for this call is that answer, and this flag is how the handler below
+        // knows to read it as one.
+        localOfferPendingRef.current = true;
         const result = await current.calls.invite(
           conversationId,
           calleeId,
@@ -1391,7 +1482,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     [clearRingTimeout, finishCall, forgetCallKey, markConnected, setActive, setIncoming],
   );
 
-  /** An SDP relay: for a caller this is the answer naming the device everything now addresses. */
+  /**
+   * An SDP relay, read for what this side is waiting for.
+   *
+   * The frame does not name what it is: the server delivers a mid-call renegotiation to its target
+   * as `CALL_SDP`, the same opcode an invite's answer arrives on (see the SDK's
+   * {@link CallsDomain.onSdp}). {@link sdpDisposition} is the whole rule, kept pure so a test can
+   * pin it; what is left here is the doing — apply the answer, or answer the peer's offer.
+   */
   const handleSdp = useCallback(
     (sdp: CallSdp): void => {
       const call = activeRef.current;
@@ -1399,39 +1497,77 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       if (call === null || sdp.callId !== call.callId || pc === null) {
         return;
       }
-      if (!call.isCaller || remoteDescriptionSetRef.current) {
-        // A renegotiated offer mid-call is CALL_RENEGOTIATE's flow, not this build's.
+      const callKey = callKeysRef.current.get(call.callId);
+      if (callKey === undefined) {
+        // No key, nothing openable — the key message that preceded the invite was lost. For the
+        // caller that is fatal: the answer is the one frame the call cannot proceed without, and
+        // pretending otherwise would leave it ringing a call it can never connect. Any other SDP
+        // is dropped, the same rule an unopenable ICE batch gets.
+        if (localOfferPendingRef.current) {
+          finishCall(CallEndReason.Failed);
+        }
         return;
       }
-      let description: { type: 'offer' | 'answer' | 'pranswer' | 'rollback'; sdp: string };
+      let description: SdpDescription;
       try {
-        const callKey = callKeysRef.current.get(call.callId);
-        if (callKey === undefined) {
-          // No key, no answer: the key message the caller sent before the invite was lost, and
-          // an answer we cannot open is worse than a call that fails loudly.
-          throw new Error('the call key is missing');
-        }
         description = decodeSdpDescription(openCallSignal(sdp.sealedSdp, callKey, sdp.callId));
       } catch {
-        finishCall(CallEndReason.Failed);
+        // Unopenable or malformed bytes are not this side's answer: one bad frame ends nothing
+        // while the connection's own signaling carries the call.
         return;
       }
-      pc.setRemoteDescription(description)
-        .then(() => {
+      const disposition = sdpDisposition(description, localOfferPendingRef.current);
+      if (disposition === SdpDisposition.Ignore) {
+        return;
+      }
+
+      if (disposition === SdpDisposition.Answer) {
+        localOfferPendingRef.current = false;
+        pc.setRemoteDescription(description)
+          .then(() => {
+            remoteDescriptionSetRef.current = true;
+            peerDeviceRef.current = sdp.fromDevice;
+            flushIce();
+            drainHeldIce();
+            if (call.state === CallState.Ringing) {
+              // The answer landed, so the invite's expiry has no call left to end: the ring's
+              // local mirror retires with the state it was arming against.
+              clearRingTimeout();
+              setActive({ ...call, state: CallState.Connecting });
+            }
+          })
+          .catch(() => {
+            finishCall(CallEndReason.Failed);
+          });
+        return;
+      }
+
+      // The peer's renegotiation: an ICE restart, whose fresh candidates arrive as ICE relays
+      // around this frame. The media needs nothing new — the m-lines are the ones already agreed —
+      // so the offer is applied and answered, sealed and sent back the way it came.
+      const fromDevice = sdp.fromDevice;
+      void (async (): Promise<void> => {
+        try {
+          await pc.setRemoteDescription(description);
           remoteDescriptionSetRef.current = true;
-          peerDeviceRef.current = sdp.fromDevice;
-          flushIce();
-          drainHeldIce();
-          if (call.state === CallState.Ringing) {
-            // The answer landed, so the invite's expiry has no call left to end: the ring's
-            // local mirror retires with the state it was arming against.
-            clearRingTimeout();
-            setActive({ ...call, state: CallState.Connecting });
-          }
-        })
-        .catch(() => {
-          finishCall(CallEndReason.Failed);
-        });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await clientRef.current?.calls.sendSdp(
+            call.callId,
+            fromDevice,
+            sealCallSignal(
+              encodeSdpDescription({ type: 'answer', sdp: answer.sdp ?? '' }),
+              callKey,
+              call.callId,
+            ),
+          );
+        } catch {
+          // The restart could not be answered. The call is left as it was rather than ended here:
+          // the transport is down on this side, the peer's own window is running, and the reconnect
+          // deadline is what decides — ending it from here would hang up on the very attempt the
+          // section asks for.
+        }
+      })();
     },
     [clearRingTimeout, finishCall, flushIce, drainHeldIce, setActive],
   );
