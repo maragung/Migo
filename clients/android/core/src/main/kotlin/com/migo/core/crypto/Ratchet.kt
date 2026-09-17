@@ -110,6 +110,15 @@ private class StashedKey(val key: ByteArray, val nonce: ByteArray)
  * frame, and the conversation is broken from then on rather than merely delayed.
  *
  * This mirrors `server/crates/migo-crypto/src/ratchet.rs` step for step, including that rule.
+ *
+ * # The context is a parameter, not a field
+ *
+ * Every sealing and opening call takes the context the envelope binds, and [Aad.assemble] joins it to
+ * the v1 associated data. It is passed per call rather than held on the session because the session
+ * is one device pair and the context is one envelope: the same session carries messages for whichever
+ * conversation the caller is sealing for, and a context stored at X3DH time would be a context
+ * captured before the conversation existed. An empty context reproduces the version-1 associated data
+ * byte for byte, which is what every call site passes until the version byte moves.
  */
 class RatchetSession private constructor(
     private var rootKey: ByteArray,
@@ -273,8 +282,12 @@ class RatchetSession private constructor(
      *
      * The ciphertext has no nonce prefix: the nonce is derived from the message key, which the
      * receiver reconstructs from the header, so it is never transmitted and cannot be tampered with.
+     *
+     * [context] is [Aad.context]'s output for this envelope, empty for version 1. It is authenticated
+     * but not transmitted: the receiver rebuilds it from the metadata it was handed, so what the tag
+     * proves is that the sender bound the same values the receiver did.
      */
-    fun encrypt(plaintext: ByteArray): RatchetMessage {
+    fun encrypt(plaintext: ByteArray, context: ByteArray): RatchetMessage {
         val pair = sendingPair ?: throw CryptoError.noSession()
         val chain = sendingChain ?: throw CryptoError.noSession()
 
@@ -282,7 +295,7 @@ class RatchetSession private constructor(
         val header = RatchetHeader.of(pair.public(), previousSendingCount, sentCount)
         sentCount += 1
 
-        val aad = concatBytes(associatedData, header.toBytes())
+        val aad = Aad.assemble(associatedData, header.toBytes(), context)
         val sealed = Aead.sealWithNonce(messageKey.key, messageKey.nonce, aad, plaintext)
         messageKey.key.destroy()
         messageKey.nonce.fill(0)
@@ -296,9 +309,14 @@ class RatchetSession private constructor(
      * Advances the ratchet only when decryption succeeds. A forged message that claimed a new ratchet
      * key would otherwise destroy the session's ability to decrypt genuine ones — a denial of service
      * from anyone who can inject a frame.
+     *
+     * [context] must be the same value the sender passed to [encrypt] for this envelope, which is what
+     * makes a frame relocated to another conversation fail to open rather than open in the wrong
+     * place. A wrong context is indistinguishable from a wrong key here, which is the point: both are
+     * a failed tag, and the caller has no metadata left to check afterwards.
      */
-    fun decrypt(header: RatchetHeader, ciphertext: ByteArray): ByteArray {
-        val aad = concatBytes(associatedData, header.toBytes())
+    fun decrypt(header: RatchetHeader, ciphertext: ByteArray, context: ByteArray): ByteArray {
+        val aad = Aad.assemble(associatedData, header.toBytes(), context)
         val headerKey = header.ratchetKey
 
         // A late message whose key was already derived and set aside. Removed before the open, not
@@ -474,10 +492,14 @@ class RatchetSession private constructor(
         sendingPair = pair
     }
 
-    /** Encrypts, turning the DH ratchet first if the last operation was a receive. */
-    fun encryptNext(plaintext: ByteArray): RatchetMessage {
+    /**
+     * Encrypts, turning the DH ratchet first if the last operation was a receive.
+     *
+     * [context] is the same per-envelope value [encrypt] takes.
+     */
+    fun encryptNext(plaintext: ByteArray, context: ByteArray): RatchetMessage {
         prepareSend()
-        return encrypt(plaintext)
+        return encrypt(plaintext, context)
     }
 
     /** Stores a skipped key, evicting the oldest once the bound is reached. */
