@@ -39,6 +39,7 @@ const CONVERSATION = idOf(1);
 const ELSEWHERE = idOf(2);
 const ALICE_USER = idOf(10);
 const ALICE_DEVICE = idOf(11);
+const ALICE_OTHER_DEVICE = idOf(12);
 const BOB_USER = idOf(20);
 const BOB_DEVICE = idOf(21);
 
@@ -159,4 +160,48 @@ test('the sender-key envelope keeps its own version', () => {
   const sealed = group.sealContent(CONVERSATION, encodeContent(text('broadcast')));
   assert.equal(sealed.scheme, 3);
   assert.equal(sealed.envelope[0], 1, 'the sender-key envelope is still version 1');
+});
+
+test('content is addressed by its conversation and its sending device', () => {
+  // The other half of the version-byte decision, and the reason scheme 3 keeps version 1: the two
+  // values section 11 would bind here are already what selects the key. A receiver looks the chain up
+  // by (conversation, sender device) — in this class, in the Kotlin client, and in the desktop one —
+  // so a content envelope relabelled into another conversation, or as another device of the same
+  // account, is decrypted against a chain that cannot have produced it and the tag refuses. Binding
+  // them into the associated data as well would restate the addressing rather than add to it.
+  const laptop = new GroupCrypto(newStore());
+  const phone = new GroupCrypto(newStore());
+  const bob = new GroupCrypto(newStore());
+
+  // Both of the account's devices distribute in the same conversation, which is the arrangement that
+  // makes the second assertion below mean something: the receiver really does hold two chains, so a
+  // refusal is the key being wrong rather than the key being absent.
+  const laptopChain = laptop.distributionFor(CONVERSATION);
+  bob.acceptDistribution(CONVERSATION, ALICE_DEVICE, laptopChain);
+  bob.acceptDistribution(CONVERSATION, ALICE_OTHER_DEVICE, phone.distributionFor(CONVERSATION));
+  // And the very same chain bytes under a second conversation: the same key, the same chain id, a
+  // different conversation. That is what makes the third assertion below about the associated data
+  // rather than about a missing key or a mismatched chain.
+  bob.acceptDistribution(ELSEWHERE, ALICE_DEVICE, laptopChain);
+
+  const fromLaptop = laptop.sealContent(CONVERSATION, encodeContent(text('from the laptop')));
+
+  // Its own conversation and its own device: the one arrangement that opens.
+  assert.deepEqual(
+    decodeContent(bob.open(CONVERSATION, ALICE_DEVICE, fromLaptop.envelope)),
+    text('from the laptop'),
+  );
+
+  // Another device of the same account: a different chain, so the tag refuses.
+  assert.throws(
+    () => bob.open(CONVERSATION, ALICE_OTHER_DEVICE, fromLaptop.envelope),
+    'content relabelled as another device of the same account must not open',
+  );
+
+  // Another conversation: the same key and the same chain id, so the only thing that differs is the
+  // associated data — which is what the refusal has to be for this to say anything.
+  assert.throws(
+    () => bob.open(ELSEWHERE, ALICE_DEVICE, fromLaptop.envelope),
+    'content relabelled into another conversation must not open',
+  );
 });

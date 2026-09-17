@@ -148,10 +148,56 @@ class EnvelopeContextTest {
         assertEquals("content still travels under scheme 3", 3, sealed.scheme)
         assertEquals("the sender-key envelope is still version 1", 1, sealed.envelope[0].toInt())
     }
+
+    @Test
+    fun `content is addressed by its conversation and its sending device`() {
+        // The other half of the version-byte decision, and the reason scheme 3 keeps version 1: the
+        // two values section 11 would bind here are already what selects the key. A receiver looks
+        // the chain up by conversation and sending device, so an envelope relabelled into another
+        // conversation, or as another device of the same account, is decrypted against a chain that
+        // cannot have produced it and the tag refuses. Binding them into the associated data as well
+        // would restate the addressing rather than add to it.
+        val laptop = GroupCrypto(KeyStore.create())
+        val phone = GroupCrypto(KeyStore.create())
+        val bob = GroupCrypto(KeyStore.create())
+
+        // Both of the account's devices distribute in the same conversation, which is the
+        // arrangement that makes the second assertion below mean something: the receiver really does
+        // hold two chains, so a refusal is the key being wrong rather than the key being absent.
+        val laptopChain = laptop.distributionFor(CONVERSATION)
+        bob.acceptDistribution(CONVERSATION, ME_DEVICE, laptopChain)
+        bob.acceptDistribution(CONVERSATION, ME_OTHER_DEVICE, phone.distributionFor(CONVERSATION))
+        // And the very same chain bytes under a second conversation: the same key, the same chain
+        // id, a different conversation. That is what makes the third assertion below about the
+        // associated data rather than about a missing key or a mismatched chain.
+        bob.acceptDistribution(ELSEWHERE, ME_DEVICE, laptopChain)
+
+        // Distributed before sealing, the order the messaging domain uses: the distribution captures
+        // the chain at message 0, so the receiver opens the message sealed at that same position.
+        val sealed = laptop.sealContent(CONVERSATION, CHAIN)
+
+        // Its own conversation and its own device: the one arrangement that opens.
+        assertArrayEquals(
+            CHAIN,
+            bob.open(CONVERSATION, ME_DEVICE, sealed.envelope),
+        )
+
+        // Another device of the same account: a different chain, so the tag refuses.
+        assertThrows(CryptoError::class.java) {
+            bob.open(CONVERSATION, ME_OTHER_DEVICE, sealed.envelope)
+        }
+
+        // Another conversation: the same key and the same chain id, so the only thing that differs
+        // is the associated data, which is what the refusal has to be for this to say anything.
+        assertThrows(CryptoError::class.java) {
+            bob.open(ELSEWHERE, ME_DEVICE, sealed.envelope)
+        }
+    }
 }
 
 private val ME: Id = parseId("0123456789ABCDEFGHJKMNPQRV")
 private val ME_DEVICE: Id = parseId("0123456789ABCDEFGHJKMNPQRW")
+private val ME_OTHER_DEVICE: Id = parseId("0123456789ABCDEFGHJKMNPQRX")
 private val ADA: Id = parseId("0123456789ABCDEFGHJKMNPQRY")
 private val ADA_LAPTOP: Id = parseId("0123456789ABCDEFGHJKMNPQRZ")
 private val CONVERSATION: Id = parseId("0123456789ABCDEFGHJKMNPQ25")
