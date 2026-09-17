@@ -132,6 +132,8 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     outputs: [],
     cameras: [],
     outputId: null,
+    qualityCeiling: null,
+    lowBandwidth: false,
     nowMs: NOW,
     endedAt: null,
     localStream: null,
@@ -145,6 +147,8 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onSwitchCamera: () => {},
     onToggleScreenShare: () => {},
     onSelectOutput: () => {},
+    onSelectQuality: () => {},
+    onToggleLowBandwidth: () => {},
     onDismiss: () => {},
     ...overrides,
   };
@@ -517,6 +521,48 @@ test('the audio output list is the platform’s, drawn only when there is one to
   assert.ok(withOutputs.includes('System default'), 'the default is a choice, not an absence');
 });
 
+test('the tier menu is the ladder without its bottom rung, and a voice call has none', () => {
+  // The fixture's default kind is a voice call, so the video case has to name itself — which is
+  // also what makes the second half of this test the same fixture with the other kind.
+  const video = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 30_000,
+  });
+  const markup = screen({ call: video });
+  // Section 180 asks for manual selection beside the automatic one, so the menu opens on Automatic
+  // and then offers the tiers in the ladder's own words.
+  assert.ok(markup.includes('Call quality'));
+  assert.ok(markup.includes('Automatic'), 'the automatic rung is the default choice');
+  for (const word of ['Excellent', 'Good', 'Average', 'Poor']) {
+    assert.ok(markup.includes(word), `the ${word} ceiling must be offered`);
+  }
+  // The bottom rung is not offered: a user who wants no video has the camera button, and a ceiling
+  // of "video off" would show them a Degraded call they had chosen rather than one they had lost.
+  assert.ok(!markup.includes('Very poor'), 'the bottom rung is the camera button\u2019s job');
+
+  // A voice call gets no tier menu: a ceiling there would cap a ladder with no video to act on, and
+  // the only thing it could change is the word on the screen.
+  const voice = activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio });
+  assert.ok(!screen({ call: voice }).includes('Call quality'));
+});
+
+test('the low bandwidth mode offers itself on both kinds of call and shows when it is on', () => {
+  for (const mediaKind of [CallMediaKind.Audio, CallMediaKind.Video]) {
+    const call = activeCall({ state: CallState.Connected, mediaKind, startedAt: NOW - 30_000 });
+    // Section 180 lists the mode on the voice call and the video call both, because a voice call
+    // has audio bitrate to give up where a video call has rungs of the ladder.
+    const off = screen({ call });
+    assert.ok(off.includes('Use low bandwidth mode'), 'the mode is offered');
+    assert.ok(off.includes('aria-pressed="false"'), 'and says it is off');
+
+    // A mode nobody can see is a mode nobody turns off, so the pressed state is on the control.
+    const on = screen({ call, lowBandwidth: true });
+    assert.ok(on.includes('Leave low bandwidth mode'));
+    assert.ok(on.includes('aria-pressed="true"'));
+  }
+});
+
 test('the self-view says a camera that is off is off, rather than showing a black frame', () => {
   const call = activeCall({
     state: CallState.Connected,
@@ -718,6 +764,8 @@ test('the call manager context starts with no call, no invite, and its actions b
         typeof call.toggleCamera === 'function' &&
         typeof call.switchCamera === 'function' &&
         typeof call.setOutputDevice === 'function' &&
+        typeof call.setQualityCeiling === 'function' &&
+        typeof call.setLowBandwidth === 'function' &&
         typeof call.toggleScreenShare === 'function' &&
         typeof call.dismissCall === 'function'
           ? 'bound'

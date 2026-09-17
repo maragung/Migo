@@ -19,15 +19,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  LOW_BANDWIDTH_CEILING,
+  QUALITY_CEILINGS,
   QUALITY_POLL_MS,
   advanceMeasurement,
+  cappedQuality,
   degradedAt,
   qualityReport,
   qualityTierLabel,
 } from '../src/lib/migo/call-quality.js';
 import {
+  LOW_BANDWIDTH_AUDIO_BPS,
+  NO_CAP_FRAMERATE,
+  NO_CAP_KBPS,
+  NO_CAP_SCALE,
   QUALITY_LADDER,
   RAMP_INTERVAL_MS,
+  shapeAudioSender,
   shapeVideoSender,
   videoSenderParams,
 } from '../src/lib/migo/group-media.js';
@@ -348,7 +356,7 @@ test('a rung’s caps ride the sender’s parameters, and the bottom rung writes
     const encoding = encodingOf(fake);
     assert.equal(
       encoding.maxBitrate,
-      expected.maxBitrate === undefined ? undefined : expected.maxBitrate * 1000,
+      expected.maxBitrate * 1000,
       `${rung} bitrate, in the bits per second the sender's parameters take`,
     );
     assert.equal(encoding.scaleResolutionDownBy, expected.scaleResolutionDownBy, `${rung} scale`);
@@ -373,4 +381,113 @@ test('a bitrate cap is a share of what the link is measured to be sending', () =
   const idle = fakeSender();
   shapeVideoSender(idle.sender, CAMERA, 'bitrate-capped', 10, true);
   assert.ok((encodingOf(idle).maxBitrate ?? 0) > 0);
+});
+
+test('a rung climbed back to gives back every cap the rungs below wrote', () => {
+  // A cap cannot be lifted by leaving its member out of the parameters — the sender keeps whatever
+  // a member it is not told about already held — so the top rung writes the neutral values over
+  // them. Without that, a call that recovers, or a user who lifts the ceiling they pinned, would go
+  // on sending the small video the screen no longer claims.
+  const fake = fakeSender();
+  shapeVideoSender(fake.sender, CAMERA, 'frame-rate-lowered', 1_000, true);
+  const capped = encodingOf(fake);
+  assert.equal(capped.scaleResolutionDownBy, 2);
+  assert.equal(capped.maxFramerate, 15);
+  assert.ok((capped.maxBitrate ?? 0) > 0);
+
+  shapeVideoSender(fake.sender, CAMERA, 'full', 1_000, true);
+  const lifted = encodingOf(fake);
+  assert.equal(lifted.scaleResolutionDownBy, NO_CAP_SCALE, 'the scale is given back as no scaling');
+  assert.equal(lifted.maxFramerate, NO_CAP_FRAMERATE);
+  assert.equal(lifted.maxBitrate, NO_CAP_KBPS * 1000, 'and the bitrate as the ceiling above it');
+  assert.ok(
+    (lifted.maxBitrate ?? 0) > (capped.maxBitrate ?? 0),
+    'the ceiling it replaced is the larger of the two',
+  );
+
+  // And the middle of the ladder is not the top of it: climbing one rung gives back that rung's
+  // sacrifice and keeps the rest, which is the difference between a ladder and a switch.
+  const half = fakeSender();
+  shapeVideoSender(half.sender, CAMERA, 'resolution-lowered', 1_000, true);
+  shapeVideoSender(half.sender, CAMERA, 'bitrate-capped', 1_000, true);
+  const middle = encodingOf(half);
+  assert.equal(middle.scaleResolutionDownBy, NO_CAP_SCALE, 'the resolution is given back');
+  assert.ok(
+    (middle.maxBitrate ?? 0) < NO_CAP_KBPS * 1000,
+    'the bitrate cap it still sits under is not',
+  );
+});
+
+test('the low-bandwidth mode caps the audio a voice call has instead of video to give up', () => {
+  // Audio is never a rung of the ladder — the bottom of it is "video off, audio alive" — so on a
+  // voice call, where the ladder has nothing to act on, this cap is the whole of the mode.
+  const fake = fakeSender();
+  shapeAudioSender(fake.sender, true);
+  assert.equal(encodingOf(fake).maxBitrate, LOW_BANDWIDTH_AUDIO_BPS);
+
+  // Turning the mode off lifts the cap rather than leaving the call narrowband for the rest of its
+  // life, and it lifts it by writing the ceiling over it: a member left out would be a cap the
+  // sender keeps, which is the whole reason this is a number and not a deletion.
+  shapeAudioSender(fake.sender, false);
+  assert.equal(encodingOf(fake).maxBitrate, NO_CAP_KBPS * 1000);
+});
+
+test('a manual tier is a ceiling the link can still descend below', () => {
+  // Section 180 asks for manual selection beside the automatic one, and manual is a ceiling and not
+  // a floor: no control can make a link carry more than it can, so a call pinned to Good on a link
+  // that collapses still gives up video — and the indicator says so, because the tier a user reads
+  // is the tier the call is actually on.
+  const pinned = 'bitrate-capped';
+  assert.equal(
+    cappedQuality('full', pinned, false),
+    pinned,
+    'the ceiling holds a healthy link down',
+  );
+  assert.equal(
+    cappedQuality('resolution-lowered', pinned, false),
+    'resolution-lowered',
+    'and a link below it is left where it is',
+  );
+  assert.equal(cappedQuality('video-off', pinned, false), 'video-off');
+  assert.equal(cappedQuality('full', null, false), 'full', 'automatic is no ceiling at all');
+
+  // Pinning the top rung is not the same as automatic only in what it says: both leave the call at
+  // the top, which is why the menu offers every rung the ladder has and lets the user mean it.
+  assert.equal(cappedQuality('full', 'full', false), 'full');
+
+  // The bottom rung is deliberately not offered: it would put a video call into Degraded, a state
+  // whose whole meaning is that quality dropped until video was paused, and a sacrifice the user
+  // chose is not a drop. A user who wants no video has the camera button.
+  assert.deepEqual(QUALITY_CEILINGS, [
+    'full',
+    'bitrate-capped',
+    'resolution-lowered',
+    'frame-rate-lowered',
+  ]);
+  const lowestOffered = QUALITY_CEILINGS.at(-1);
+  assert.ok(lowestOffered !== undefined, 'the menu offers something');
+  assert.equal(degradedAt(cappedQuality('full', lowestOffered, false), true), false);
+});
+
+test('the low-bandwidth mode is a second ceiling, so turning it off gives back what it took', () => {
+  // Two controls write to one rung, and neither overwrites the other: the mode is applied as its own
+  // ceiling rather than as a rung of its own, so a call the user pinned to Poor and then put in low
+  // bandwidth mode is on whichever of the two is lower, and leaving the mode restores the pin.
+  assert.equal(cappedQuality('full', null, true), LOW_BANDWIDTH_CEILING);
+  assert.equal(cappedQuality('full', 'frame-rate-lowered', true), 'frame-rate-lowered');
+  assert.equal(
+    cappedQuality('video-off', 'full', true),
+    'video-off',
+    'and the worse of the link and the controls always wins',
+  );
+  assert.equal(cappedQuality('full', 'bitrate-capped', true), LOW_BANDWIDTH_CEILING);
+  assert.equal(
+    cappedQuality('full', 'bitrate-capped', false),
+    'bitrate-capped',
+    'the pin survives',
+  );
+
+  // The mode keeps video: turning it off entirely would be the camera button's job, and a mode that
+  // did it would show the user a Degraded call they had asked for.
+  assert.equal(degradedAt(LOW_BANDWIDTH_CEILING, true), false);
 });
