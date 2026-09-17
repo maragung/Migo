@@ -25,7 +25,8 @@ export type WinKind =
   | 'admins'
   | 'moderation'
   | 'store'
-  | 'games';
+  | 'games'
+  | 'bots';
 
 /** One open window on the desk (or, on a phone, one tab in the strip). */
 export interface WinState {
@@ -59,6 +60,7 @@ export const KIND_LABEL: Readonly<Record<WinKind, string>> = {
   moderation: 'Moderation',
   store: 'Store',
   games: 'Games',
+  bots: 'Bots',
 };
 
 /** The icon each kind's tab carries. */
@@ -78,6 +80,7 @@ export const KIND_ICON: Readonly<Record<WinKind, IconName>> = {
   moderation: 'eye',
   store: 'gift',
   games: 'game',
+  bots: 'bot',
 };
 
 /** The desk's window sizes: the default side window, and the two the design names. */

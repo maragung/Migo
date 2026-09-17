@@ -955,6 +955,180 @@ main {
   font-size: var(--fs-meta);
 }
 
+/* --- the Bots window: the accounts you run, and the one credential that is shown once --- */
+
+.bots-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+
+/* The one-time token card. It is the loudest thing in the window on purpose: a token that was
+   not saved is a bot that has to be rotated again, and rotation breaks whatever is running. */
+.bots-reveal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.bots-reveal-title {
+  margin: 0;
+  font-weight: 700;
+  font-size: var(--fs-body);
+}
+.bots-reveal-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+.bots-token {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-alt);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-body-sm);
+  word-break: break-all;
+  user-select: all;
+}
+.bots-reveal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bots-register {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.bots-register-title {
+  margin: 0;
+  font-weight: 700;
+  font-size: var(--fs-body);
+}
+.bots-register-fields {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.bots-register-fields .field-label {
+  flex: 1 1 160px;
+}
+
+/* What the node said about a bot on its own — a webhook that failed, say — oldest dropped. */
+.bots-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bots-event {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+}
+
+.bots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.bot-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bot-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.bot-card-name {
+  font-weight: 700;
+  font-size: var(--fs-body);
+}
+/* The state chip carries the state as a word, not only as a colour: a paused bot has to read as
+   paused to somebody who cannot tell the two shades apart. */
+.bot-chip {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.bot-chip-off {
+  border-color: var(--warning);
+  background: transparent;
+  color: var(--text-dim);
+}
+.bot-card-scopes {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+.bot-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bot-scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+.bot-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.bot-scope-label {
+  display: block;
+  font-size: var(--fs-body);
+}
+.bot-scope-hint {
+  display: block;
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+}
+
 /* --- section panels (home, rooms, space, friends, alerts, search, wallet, profile, settings) --- */
 
 /* A panel is its own scroll container: the shell never scrolls, the section does. */

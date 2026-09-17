@@ -820,6 +820,12 @@ export function MobileHome({
           onClick={() => fromSheet(() => onOpenWindow('games'))}
         />
         <SheetAction
+          icon="bot"
+          label="Bots"
+          sub="Accounts you run"
+          onClick={() => fromSheet(() => onOpenWindow('bots'))}
+        />
+        <SheetAction
           icon="search"
           label="Search"
           onClick={() => fromSheet(() => onOpenWindow('search'))}
