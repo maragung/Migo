@@ -18,6 +18,9 @@
  *   3. **A relay sealed for another device is not delivered.** The server fans an invite out to
  *      every device of the callee account, and a `CALL_SDP`/`CALL_ICE` addressed to a sibling
  *      device is expected fan-out noise a handler must never see — it cannot open the blob.
+ *   4. **A renegotiation rides `CALL_RENEGOTIATE`, not `CALL_SDP`.** Same sealed blob either way,
+ *      so a wrong opcode would still decode, deliver, and connect — the server would simply have
+ *      been told the wrong thing about a call that is already up.
  */
 
 import assert from 'node:assert/strict';
@@ -41,6 +44,7 @@ import {
   decodeCallIce,
   decodeCallId,
   decodeCallInvite,
+  decodeCallRenegotiate,
   decodeCallSdp,
   decodeCallStats,
   decodeCallTurnFetch,
@@ -215,6 +219,23 @@ test('calls: sendSdp and sendIce relay from this device to the named one', async
   assert.equal(ice.fromDevice, DEVICE);
   assert.equal(ice.toDevice, PEER_DEVICE);
   assert.deepEqual(ice.sealedCandidates, SEALED, 'the whole batch rides as one blob');
+});
+
+test('calls: renegotiate rides its own opcode, with the same sealed blob as a relay', async () => {
+  const { transport, calls } = rig(
+    new Map([[OP.CALL_RENEGOTIATE, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
+  await calls.renegotiate(CALL, PEER_DEVICE, SEALED);
+
+  // The opcode is the whole difference from sendSdp: the server reads these two frames
+  // differently, and a restart sent as a plain SDP would describe a connected call as one still
+  // being negotiated. The body is the same shape, which is why the peer receives it as CALL_SDP.
+  assert.equal(sentAt(transport, 0).opcode, OP.CALL_RENEGOTIATE);
+  const frame = decodeBody(decodeCallRenegotiate, sentAt(transport, 0).body);
+  assert.equal(frame.callId, CALL);
+  assert.equal(frame.fromDevice, DEVICE, 'a renegotiation must name the device it came from');
+  assert.equal(frame.toDevice, PEER_DEVICE);
+  assert.deepEqual(frame.sealedSdp, SEALED, 'the offer is sealed here, exactly as a relay is');
 });
 
 test('calls: getTurnServers asks for the call and hands back the relay list', async () => {

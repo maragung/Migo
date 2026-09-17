@@ -72,6 +72,8 @@ import {
   openCallSignal,
   ringTimeoutMs,
   sealCallSignal,
+  sdpDisposition,
+  SdpDisposition,
 } from '../src/lib/migo/call-signal.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
 import type { TurnServer } from '@migo/sdk';
@@ -259,6 +261,27 @@ test('SDP descriptions and ICE batches round-trip through their codecs and refus
     () => decodeIceBatch(new TextEncoder().encode('{"not":"a batch"}')),
     CallSignalFormatError,
   );
+});
+
+test('an arriving SDP is read as an answer or a renegotiation, never as both', () => {
+  const offer = { type: 'offer' as const, sdp: 'v=0' };
+  const answer = { type: 'answer' as const, sdp: 'v=0' };
+
+  // The two cases the call actually runs on: the side that offered is answered, and the side that
+  // did not is offered a restart to answer.
+  assert.equal(sdpDisposition(answer, true), SdpDisposition.Answer);
+  assert.equal(sdpDisposition(offer, false), SdpDisposition.Renegotiation);
+
+  // CALL_SDP is Critical, so a redelivery is a frame the transport is entitled to hand over twice.
+  // A second answer applied to a connection that is no longer waiting for one is a state error, and
+  // a second offer answered twice is a renegotiation nobody asked for — both are ignored.
+  assert.equal(sdpDisposition(answer, false), SdpDisposition.Ignore);
+  assert.equal(sdpDisposition(offer, true), SdpDisposition.Ignore);
+
+  // pranswer and rollback are states this build never puts on the wire; a relay carrying one is
+  // not part of a call it is running.
+  assert.equal(sdpDisposition({ type: 'pranswer', sdp: 'v=0' }, false), SdpDisposition.Ignore);
+  assert.equal(sdpDisposition({ type: 'rollback', sdp: '' }, true), SdpDisposition.Ignore);
 });
 
 // --- the words and numbers ---
