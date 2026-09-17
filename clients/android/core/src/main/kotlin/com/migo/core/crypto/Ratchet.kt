@@ -101,9 +101,15 @@ private class StashedKey(val key: ByteArray, val nonce: ByteArray)
  * had already used a key the other had not; in Rust the type is simply not `Clone`, and here the
  * private mutable state and the absence of a copy path serve the same purpose.
  *
- * This mirrors `server/crates/migo-crypto/src/ratchet.rs` step for step — including where the chain
- * key is advanced in place versus on a local copy, which is the difference between a forged frame
- * that is merely rejected and one that corrupts the session.
+ * Nothing is committed until the tag verifies. Every field of [RatchetHeader] is public, so a frame
+ * that fails to authenticate is free to send, and that makes the *order* of operations on the
+ * receive path a security property in its own right: deriving along a chain must happen on a copy,
+ * and the session's own state must move only once the message is proven. Advancing a stored chain
+ * first would leave it moved while the counter that indexes it stayed put, so the genuine message
+ * at that number would derive its key from the wrong position and never open again — one forged
+ * frame, and the conversation is broken from then on rather than merely delayed.
+ *
+ * This mirrors `server/crates/migo-crypto/src/ratchet.rs` step for step, including that rule.
  */
 class RatchetSession private constructor(
     private var rootKey: ByteArray,
@@ -333,10 +339,22 @@ class RatchetSession private constructor(
         }
         val gap = header.messageNumber - receivedCount
         if (gap > MAX_CHAIN_GAP) throw CryptoError.chainGapTooLarge()
-        val chain = receivingChain ?: throw CryptoError.noSession()
+        val stored = receivingChain ?: throw CryptoError.noSession()
 
-        // Derive and stash the keys for anything skipped, then the key we want. This advances the
-        // tracked receiving chain in place, exactly as the Rust version's `as_mut()` does.
+        // Advance a *copy* of the chain, never the stored one.
+        //
+        // `advanceRatchetChain` mutates its argument in place, and `openWithNonce` below can throw.
+        // Advancing the stored chain first would leave it moved while `receivedCount` still pointed
+        // at the old position, so every later genuine message at that number would be derived from
+        // the wrong step of the chain — permanently undecryptable. What makes that reachable is
+        // that the frame needs no secret to trigger it: the ratchet public key travels in the
+        // header, so an attacker replays the current one with a message number at or past
+        // `receivedCount` and any ciphertext at all, and the corruption is done before the tag is
+        // even consulted. A server relaying this conversation can therefore break it for both ends
+        // at will.
+        val chain = stored.copyOf()
+
+        // Derive and stash the keys for anything skipped, then the key we want.
         val pending = ArrayList<Pair<Long, RatchetMessageKey>>()
         var offset = 0L
         while (offset < gap) {
@@ -351,8 +369,12 @@ class RatchetSession private constructor(
             target.nonce.fill(0)
         }
 
-        // Only now, once the message is proven genuine, mutate session state.
+        // Only now, once the message is proven genuine, mutate session state. The chain this frame
+        // advanced past is zeroed rather than left for the collector, because a live chain key
+        // derives every key after it.
         for ((number, key) in pending) stashSkipped(headerKey, number, key)
+        stored.fill(0)
+        receivingChain = chain
         receivedCount = header.messageNumber + 1
         return plaintext
     }
@@ -372,18 +394,21 @@ class RatchetSession private constructor(
         val pair = sendingPair ?: throw CryptoError.noSession()
 
         // Finish the previous chain, so messages still in flight from it can be decrypted when they
-        // arrive. This advances the *old* receiving chain in place; the new chain below is local
-        // until it is proven, so a forged frame cannot corrupt what we already track.
+        // arrive. This advances a *copy*: the target message below can throw, and the advanced form
+        // of this chain is never stored anyway — only the keys it yields are, and only once the
+        // target is proven — so mutating the stored chain here would corrupt it on a forged frame
+        // and buy nothing.
         val leftovers = ArrayList<Triple<ByteArray, Long, RatchetMessageKey>>()
         val oldChain = receivingChain
         val previousKey = receivingKey
         if (oldChain != null && previousKey != null) {
+            val chain = oldChain.copyOf()
             val remaining = saturatingSubU32(header.previousChainLength, receivedCount)
             if (remaining > MAX_CHAIN_GAP) throw CryptoError.chainGapTooLarge()
             var offset = 0L
             while (offset < remaining) {
                 leftovers.add(
-                    Triple(previousKey, receivedCount + offset, advanceRatchetChain(oldChain)),
+                    Triple(previousKey, receivedCount + offset, advanceRatchetChain(chain)),
                 )
                 offset += 1
             }

@@ -39,6 +39,20 @@
 //!
 //! A stored key is deleted the moment it is used. That is what makes a replayed
 //! frame fail rather than deliver the same message twice.
+//!
+//! # Nothing is committed until the tag verifies
+//!
+//! Every field of the header is public, so a frame that fails to authenticate is
+//! free to send. That makes the *order* of operations on the receive path a
+//! security property in its own right: deriving along a chain must happen on a
+//! copy, and the session's own state must move only once the message is proven.
+//! Advancing a stored chain first would leave it moved while the counter that
+//! indexes it stayed put, so the genuine message at that number would derive its
+//! key from the wrong position and never open again — one forged frame, and the
+//! conversation is broken from then on rather than merely delayed. Both receive
+//! paths follow this rule, and
+//! `a_forged_frame_does_not_advance_the_current_chain` and its neighbour hold
+//! them to it.
 
 use std::collections::HashMap;
 
@@ -348,23 +362,36 @@ impl RatchetSession {
         if gap > MAX_CHAIN_GAP {
             return Err(CryptoError::ChainGapTooLarge);
         }
-        let chain = self
-            .receiving_chain
-            .as_mut()
-            .ok_or(CryptoError::NoSession)?;
+
+        // Advance a *copy* of the chain, never the session's own buffer.
+        //
+        // `advance_chain` mutates in place, and `open_with_nonce` below can fail. Advancing the
+        // stored chain first would leave it moved while `received_count` still pointed at the old
+        // position, so every later genuine message at that number would be derived from the wrong
+        // step of the chain — permanently undecryptable. What makes that reachable is that the
+        // frame needs no secret to trigger it: the ratchet public key travels in the header, so an
+        // attacker replays the current one with a message number at or past `received_count` and
+        // any ciphertext at all, and the corruption is done before the tag is even consulted. A
+        // server that relays this conversation can therefore break it for both ends at will.
+        let mut chain = self.receiving_chain.ok_or(CryptoError::NoSession)?;
 
         // Derive and stash the keys for anything skipped, then the key we want.
         let mut pending = Vec::with_capacity(gap as usize);
         for offset in 0..gap {
-            let key = advance_chain(chain);
+            let key = advance_chain(&mut chain);
             pending.push((self.received_count + offset, key));
         }
-        let target = advance_chain(chain);
+        let target = advance_chain(&mut chain);
         let plaintext = aead::open_with_nonce(&target.key, &target.nonce, aad, ciphertext)?;
 
-        // Only now, once the message is proven genuine, mutate session state.
+        // Only now, once the message is proven genuine, mutate session state. The chain this frame
+        // advanced past is zeroed rather than dropped, because a live chain key derives every key
+        // after it.
         for (number, key) in pending {
             self.stash_skipped(header.ratchet_key, number, key);
+        }
+        if let Some(mut advanced_past) = self.receiving_chain.replace(chain) {
+            advanced_past.zeroize();
         }
         self.received_count = header.message_number + 1;
         Ok(plaintext)
@@ -386,10 +413,14 @@ impl RatchetSession {
 
         // Finish the previous chain, so messages still in flight from it can be
         // decrypted when they arrive.
+        //
+        // Advanced on a copy, for the same reason as the current chain: the frame
+        // below can fail, and the advanced form of this chain is never stored
+        // anyway — only the keys it yields are, and only once the frame is proven.
+        // Mutating the session's buffer here would corrupt it on a forged frame
+        // and buy nothing.
         let mut leftovers = Vec::new();
-        if let (Some(chain), Some(previous_key)) =
-            (self.receiving_chain.as_mut(), self.receiving_key)
-        {
+        if let (Some(mut chain), Some(previous_key)) = (self.receiving_chain, self.receiving_key) {
             let remaining = header
                 .previous_chain_length
                 .saturating_sub(self.received_count);
@@ -400,7 +431,7 @@ impl RatchetSession {
                 leftovers.push((
                     previous_key,
                     self.received_count + offset,
-                    advance_chain(chain),
+                    advance_chain(&mut chain),
                 ));
             }
         }
@@ -994,6 +1025,111 @@ mod tests {
             .encrypt_next(b"two", &mut p.random, &second)
             .expect("encrypts");
         assert_eq!(p.alice.decrypt(&h, &c, &second).expect("decrypts"), b"two");
+    }
+
+    #[test]
+    fn a_forged_frame_does_not_advance_the_current_chain() {
+        // The ratchet public key travels in the header, so the frames below need
+        // no secret at all: the key the attacker read off the wire, a message
+        // number at or past what Bob expects, and any ciphertext. What they must
+        // not do is leave Bob's chain advanced while his `received_count` still
+        // points at the old step — the genuine message at that number would then
+        // derive its key from the wrong place and never open again. Two shapes,
+        // because the two advance paths fail differently: no gap at all, and a
+        // gap wide enough to populate the skipped-key list.
+        let mut p = pair(21);
+        let (header, ciphertext) = p.alice.encrypt(b"satu", &[]).expect("encrypts");
+        assert_eq!(
+            p.bob.decrypt(&header, &ciphertext, &[]).expect("decrypts"),
+            b"satu"
+        );
+
+        for gap in [0u32, 3] {
+            let forged = RatchetHeader {
+                ratchet_key: header.ratchet_key,
+                previous_chain_length: 0,
+                message_number: header.message_number + 1 + gap,
+            };
+            assert!(
+                p.bob.decrypt(&forged, &ciphertext, &[]).is_err(),
+                "a replay of the current key with gap {gap} must not open"
+            );
+        }
+
+        let (header, ciphertext) = p.alice.encrypt(b"dua", &[]).expect("encrypts");
+        assert_eq!(
+            p.bob
+                .decrypt(&header, &ciphertext, &[])
+                .expect("the genuine message still opens after two forged frames"),
+            b"dua"
+        );
+    }
+
+    #[test]
+    fn a_forged_frame_does_not_advance_the_previous_chain() {
+        // The same corruption one chain over. A frame claiming a ratchet key Bob
+        // is not tracking sends him down the DH-ratchet path, where he finishes
+        // the chain he is leaving so messages still in flight from it stay
+        // readable — and that finishing is what must not happen until the frame
+        // is proven. The attacker supplies a well-formed key of their own, so the
+        // rejection comes from the tag rather than from a malformed point.
+        let mut p = pair(22);
+        let (h, c) = p.alice.encrypt(b"a0", &[]).expect("encrypts");
+        assert_eq!(p.bob.decrypt(&h, &c, &[]).expect("decrypts"), b"a0");
+
+        // Two more Alice sends that Bob never receives: in flight on the chain he
+        // is about to leave behind.
+        let (held_0, held_0_ct) = p.alice.encrypt(b"a1", &[]).expect("encrypts");
+        let (held_1, held_1_ct) = p.alice.encrypt(b"a2", &[]).expect("encrypts");
+
+        // Bob replies, so Alice turns the DH ratchet and her next send opens a new
+        // chain whose `previous_chain_length` names all three she has sent.
+        let (h, c) = p
+            .bob
+            .encrypt_next(b"b0", &mut p.random, &[])
+            .expect("encrypts");
+        assert_eq!(p.alice.decrypt(&h, &c, &[]).expect("decrypts"), b"b0");
+        let (new_chain, new_ct) = p
+            .alice
+            .encrypt_next(b"a3", &mut p.random, &[])
+            .expect("encrypts");
+        assert_eq!(
+            new_chain.previous_chain_length, 3,
+            "three sent on the old chain"
+        );
+
+        let attacker_key = KeyPair::generate(&mut p.random).public();
+        let forged = RatchetHeader {
+            ratchet_key: attacker_key,
+            previous_chain_length: 3,
+            message_number: 0,
+        };
+        assert!(
+            p.bob.decrypt(&forged, &new_ct, &[]).is_err(),
+            "a frame on an unknown chain must not open"
+        );
+
+        assert_eq!(
+            p.bob
+                .decrypt(&held_0, &held_0_ct, &[])
+                .expect("the in-flight message still opens after a forged frame"),
+            b"a1"
+        );
+        assert_eq!(
+            p.bob
+                .decrypt(&held_1, &held_1_ct, &[])
+                .expect("and the one after it"),
+            b"a2"
+        );
+
+        // The genuine new-chain message still opens too, so the forged frame cost
+        // the session nothing in either direction.
+        assert_eq!(
+            p.bob
+                .decrypt(&new_chain, &new_ct, &[])
+                .expect("the new chain still opens"),
+            b"a3"
+        );
     }
 
     #[test]
