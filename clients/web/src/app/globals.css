@@ -3368,6 +3368,33 @@ main {
   color: var(--warning);
 }
 
+/*
+ * The sharer's own screen-share indicator. Deliberately not dim text: section 180 makes it a
+ * requirement rather than a courtesy, because a share nobody remembers is the commonest leak there
+ * is. It carries a colour, a border and a dot of its own so it reads as a state of the call rather
+ * than as another line of status, and it is never a toast — it stays up for the whole share.
+ */
+.call-sharing {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft-strong);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+.call-sharing::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 /* The video stage fills the overlay; the identity and actions ride above it. */
 .call-video-stage {
   position: absolute;
@@ -3432,6 +3459,16 @@ main {
 }
 .call-action.mute.muted {
   color: var(--text-dim);
+}
+/* The same disc as mute, and the same dimming when the share is off and the button is only an
+   offer; while a share runs it takes the accent the indicator takes, so the two read as one fact. */
+.call-action.share {
+  background: var(--accent-soft-strong);
+  border-color: var(--accent-border);
+  color: var(--text-dim);
+}
+.call-action.share.sharing {
+  color: var(--accent);
 }
 
 /*

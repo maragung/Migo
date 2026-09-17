@@ -101,7 +101,7 @@ import {
   sealCallSignal,
 } from './call-signal.js';
 import { QUALITY_POLL_MS, advanceMeasurement, degradedAt, qualityReport } from './call-quality.js';
-import { readLinkCounters, shapeVideoSender } from './group-media.js';
+import { readLinkCounters, shapeVideoSender, videoTrackToSend } from './group-media.js';
 import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
 import { useMigo } from './use-migo.js';
 
@@ -210,6 +210,18 @@ export interface CallManagerValue {
    * exists not to do.
    */
   quality: LinkQuality | null;
+  /**
+   * Whether this device is sharing its screen right now. Section 180 requires the sharer to keep
+   * seeing that it is sharing for as long as it lasts — a forgotten share is the commonest data
+   * leak there is — so this is state the screen reads, not a note the manager keeps to itself.
+   */
+  sharingScreen: boolean;
+  /**
+   * The captured screen while a share runs, for the self-view. The camera is still the camera, and
+   * a self-view showing the user's face through a screen share says the opposite of what is
+   * happening.
+   */
+  screenStream: MediaStream | null;
   /** This side's microphone/camera stream, for the small self-view. */
   localStream: MediaStream | null;
   /** The peer's stream once their tracks arrive, for the main view. */
@@ -235,6 +247,12 @@ export interface CallManagerValue {
   endCall: (reason: CallEndReason) => Promise<void>;
   /** Mutes or unmutes this side's microphone. */
   toggleMute: () => void;
+  /**
+   * Starts or stops a screen share on a connected video call. Silently does nothing on a voice
+   * call: section 180 makes screen sharing a video-call capability, and a voice call has no video
+   * m-line for a share to ride.
+   */
+  toggleScreenShare: () => Promise<void>;
   /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
   dismissCall: () => void;
 }
@@ -249,6 +267,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const [muted, setMuted] = useState(false);
   const [degraded, setDegraded] = useState(false);
   const [quality, setQuality] = useState<LinkQuality | null>(null);
+  const [sharingScreen, setSharingScreen] = useState(false);
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
@@ -299,6 +319,13 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
 
   /** This call's video sender, held from the moment its track was attached. */
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
+  /**
+   * The screen this endpoint is sharing, if it is. Separate from the camera stream rather than
+   * mixed into it: the camera has to survive a share (it is what comes back when one stops) and the
+   * capture has to be stoppable on its own, because a screen share left running is a live window on
+   * the user's desktop with nothing in the interface saying so.
+   */
+  const screenStreamRef = useRef<MediaStream | null>(null);
   /**
    * Whether that sender currently carries the camera. Held here rather than read back from the
    * sender, because `replaceTrack(null)` is exactly the state that makes a sender unable to report
@@ -437,6 +464,22 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   }, []);
 
   /**
+   * The video track this endpoint wants on the wire: the shared screen while a share runs, the
+   * camera otherwise.
+   *
+   * One accessor for one question, because two callers ask it — the quality plane shaping a rung and
+   * the screen-share toggle swapping what the sender carries — and two answers to "which track"
+   * would be a bug waiting for the poll that lands while a share is starting. The answer itself is
+   * {@link videoTrackToSend}'s, so a share and the ladder cannot disagree about which track is the
+   * one being sent.
+   */
+  const wantedVideoTrack = useCallback(
+    (): MediaStreamTrack | null =>
+      videoTrackToSend(screenStreamRef.current, localStreamRef.current),
+    [],
+  );
+
+  /**
    * Samples the call's link once: one reading, one rung, and — when the rung moves — one shaping of
    * this endpoint's own video and one report to the server.
    *
@@ -482,7 +525,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     if (sender !== null) {
       videoAttachedRef.current = shapeVideoSender(
         sender,
-        localStreamRef.current?.getVideoTracks()[0] ?? null,
+        wantedVideoTrack(),
         step.quality,
         step.stats.sentKbps,
         videoAttachedRef.current,
@@ -493,7 +536,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       .catch(() => {
         // CALL_STATS is Droppable: a lost report costs nothing, and the next move reports again.
       });
-  }, []);
+  }, [wantedVideoTrack]);
 
   /** Arms the quality loop for a call that just connected. Idempotent, so a re-connect is harmless. */
   const startQualityLoop = useCallback((): void => {
@@ -544,6 +587,110 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     videoAttachedRef.current = sender !== null;
   }, []);
 
+  /**
+   * Ends the screen capture and forgets it. The sender is left alone, because the callers that have
+   * one to hand back do it themselves and the one that does not is tearing the connection down.
+   */
+  const endScreenCapture = useCallback((): void => {
+    const stream = screenStreamRef.current;
+    screenStreamRef.current = null;
+    if (stream === null) {
+      return;
+    }
+    for (const track of stream.getTracks()) {
+      // The handler is detached before the stop, so the browser's own "Stop sharing" path and this
+      // one cannot re-enter each other: `stop()` fires `onended`, and a second stop would be a
+      // second state update for a share that is already over.
+      track.onended = null;
+      track.stop();
+    }
+    setScreenStream(null);
+  }, []);
+
+  /**
+   * Stops a screen share: the capture ends, the indicator goes out, and the camera takes the sender
+   * back if the rung still has video in it.
+   *
+   * Three callers and identical in all of them — the toggle, the browser's own "Stop sharing"
+   * control, and the teardown that ends the call — because a share that outlives the call it
+   * belonged to is a capture still running with nothing on screen saying so.
+   */
+  const stopScreenShare = useCallback((): void => {
+    if (screenStreamRef.current === null) {
+      return;
+    }
+    endScreenCapture();
+    setSharingScreen(false);
+    const sender = videoSenderRef.current;
+    const camera = localStreamRef.current?.getVideoTracks()[0] ?? null;
+    // Handing the sender back is the rung's call, exactly as taking it was: at the bottom rung this
+    // endpoint sends no video, and a share *ending* must not be the thing that puts a camera on a
+    // link the ladder grounded. The next poll shapes it either way.
+    if (sender !== null && qualityRef.current !== 'video-off') {
+      void sender.replaceTrack(camera).catch(() => {});
+      videoAttachedRef.current = camera !== null;
+    }
+  }, [endScreenCapture]);
+
+  /**
+   * Starts a screen share on a connected video call, or stops the one running.
+   *
+   * The browser's own picker is the whole of the three scopes section 180 asks for — screen,
+   * window, tab — because the source cannot be forced: a menu this client drew would promise a
+   * choice the browser is free to ignore. Nothing here renegotiates, and nothing here seals: a
+   * video call already has a video m-line, so a share is a `replaceTrack` over media that is
+   * already negotiated and already encrypted end to end, which is what section 180 means by the
+   * share following the call's encryption model.
+   */
+  const toggleScreenShare = useCallback(async (): Promise<void> => {
+    if (screenStreamRef.current !== null) {
+      stopScreenShare();
+      return;
+    }
+    const call = activeRef.current;
+    if (
+      call === null ||
+      call.mediaKind !== CallMediaKind.Video ||
+      call.state !== CallState.Connected
+    ) {
+      return;
+    }
+    let captured: MediaStream;
+    try {
+      captured = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    } catch {
+      // The picker was dismissed or refused, which is a choice rather than a failure: the call is
+      // untouched and a message would name an error the user just decided to make.
+      return;
+    }
+    const track = captured.getVideoTracks()[0] ?? null;
+    // The picker holds the tab for as long as the user takes to choose, and the call can end under
+    // it. A capture that outlives its call is the one leak this feature must not ship, so it is
+    // stopped here rather than kept for a call that no longer exists.
+    if (track === null || activeRef.current === null || screenStreamRef.current !== null) {
+      for (const held of captured.getTracks()) {
+        held.stop();
+      }
+      return;
+    }
+    screenStreamRef.current = captured;
+    setScreenStream(captured);
+    setSharingScreen(true);
+    // The browser's own "Stop sharing" button ends the track rather than telling the page, so this
+    // is the only way the interface learns the share is over — without it the indicator would keep
+    // claiming a share while nothing was being sent.
+    track.onended = (): void => {
+      stopScreenShare();
+    };
+    const sender = videoSenderRef.current;
+    // At the bottom rung the ladder has grounded this link and the screen stays captured but
+    // unsent; the poll that climbs attaches it, because the track it wants is read from here.
+    if (sender !== null && qualityRef.current !== 'video-off') {
+      await sender.replaceTrack(track).catch(() => {});
+      videoAttachedRef.current = true;
+    }
+  }, [stopScreenShare]);
+
   /** Stops every resource a call held: timers, candidates, the peer connection, the local media. */
   const teardownMedia = useCallback((): void => {
     stopQualityLoop();
@@ -580,11 +727,16 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     setMuted(false);
     setDegraded(false);
     setQuality(null);
+    // The capture is stopped here rather than handed back to a sender: the sender belongs to a
+    // connection that is being closed, so the hand-back would be work for a dead object, while the
+    // capture is a live window on the user's desktop that ends only when something stops it.
+    endScreenCapture();
+    setSharingScreen(false);
     // The sender belonged to the connection that was just closed, and the flag to the track that
     // was just stopped; keeping either would have the next call's ladder shape a dead object.
     videoSenderRef.current = null;
     videoAttachedRef.current = false;
-  }, [clearRingTimeout, stopQualityLoop]);
+  }, [clearRingTimeout, endScreenCapture, stopQualityLoop]);
 
   /**
    * Ends the tracked call locally with a reason, keeping `startedAt` for the duration line.
@@ -1340,6 +1492,8 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     muted,
     degraded,
     quality,
+    sharingScreen,
+    screenStream,
     localStream,
     remoteStream,
     endedAt,
@@ -1351,6 +1505,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     cancelCall,
     endCall,
     toggleMute,
+    toggleScreenShare,
     dismissCall,
   };
 

@@ -79,6 +79,17 @@ export interface CallScreenProps {
    * guessing, and an indicator that guesses is worse than no indicator.
    */
   quality: LinkQuality | null;
+  /**
+   * Whether this side is sharing its screen. Section 180 makes the indicator a requirement rather
+   * than a nicety: a share nobody remembers is the commonest data leak in practice, so the sharer
+   * keeps reading that it is sharing for as long as it lasts.
+   */
+  sharingScreen: boolean;
+  /**
+   * The captured screen while a share runs. The self-view shows this rather than the camera, since
+   * a self-view of the user's own face during a screen share says the opposite of what is going on.
+   */
+  screenStream: MediaStream | null;
   /** The clock the duration reads, passed in so the pure half has no timer of its own. */
   nowMs: number;
   /** When the tracked call ended, for the ended screen's total duration. */
@@ -92,6 +103,7 @@ export interface CallScreenProps {
   onCancel: () => void;
   onEnd: (reason: CallEndReason) => void;
   onToggleMute: () => void;
+  onToggleScreenShare: () => void;
   onDismiss: () => void;
 }
 
@@ -108,6 +120,8 @@ export function CallScreen({
   muted,
   degraded,
   quality,
+  sharingScreen,
+  screenStream,
   nowMs,
   endedAt,
   localStream,
@@ -117,6 +131,7 @@ export function CallScreen({
   onCancel,
   onEnd,
   onToggleMute,
+  onToggleScreenShare,
   onDismiss,
 }: CallScreenProps): ReactNode {
   if (incoming !== null) {
@@ -188,10 +203,10 @@ export function CallScreen({
             autoPlay
             playsInline
             muted
-            aria-label="Your video"
+            aria-label={sharingScreen ? 'The screen you are sharing' : 'Your video'}
             ref={(element: HTMLVideoElement | null): void => {
               if (element !== null) {
-                element.srcObject = localStream;
+                element.srcObject = screenStream ?? localStream;
               }
             }}
           />
@@ -227,6 +242,15 @@ export function CallScreen({
           // rung that moves is announced without interrupting the state the screen is reading.
           <div className={`call-quality ${quality}`} aria-live="polite">
             {qualityTierLabel(quality)}
+          </div>
+        ) : null}
+        {sharingScreen ? (
+          // The sharer's own reminder, and the reason it is not a toast: section 180 asks for an
+          // indicator visible *for as long as sharing runs*, so it stays for the whole share,
+          // survives to the Degraded state, and never fades — a share nobody remembers is the
+          // commonest data leak in practice.
+          <div className="call-sharing" role="status">
+            You are sharing your screen
           </div>
         ) : null}
       </div>
@@ -272,6 +296,19 @@ export function CallScreen({
             >
               {muted ? '🔇' : '🎙️'}
             </button>
+            {isVideo ? (
+              // Only a video call gets the control, because only a video call has a video m-line for
+              // a share to ride: section 180 makes screen sharing a video-call capability, and a
+              // button that could not do anything is worse than no button.
+              <button
+                type="button"
+                className={`call-action share${sharingScreen ? ' sharing' : ''}`}
+                aria-label={sharingScreen ? 'Stop sharing your screen' : 'Share your screen'}
+                onClick={onToggleScreenShare}
+              >
+                🖥️
+              </button>
+            ) : null}
             <button
               type="button"
               className="call-action hang-up"
@@ -336,6 +373,8 @@ export function CallOverlay(): ReactNode {
     muted,
     degraded,
     quality,
+    sharingScreen,
+    screenStream,
     localStream,
     remoteStream,
     endedAt,
@@ -345,6 +384,7 @@ export function CallOverlay(): ReactNode {
     cancelCall,
     endCall,
     toggleMute,
+    toggleScreenShare,
     dismissCall,
   } = useCall();
 
@@ -382,6 +422,8 @@ export function CallOverlay(): ReactNode {
         muted={muted}
         degraded={degraded}
         quality={quality}
+        sharingScreen={sharingScreen}
+        screenStream={screenStream}
         nowMs={nowMs}
         endedAt={endedAt}
         localStream={localStream}
@@ -391,6 +433,7 @@ export function CallOverlay(): ReactNode {
         onCancel={() => void cancelCall()}
         onEnd={(reason) => void endCall(reason)}
         onToggleMute={toggleMute}
+        onToggleScreenShare={() => void toggleScreenShare()}
         onDismiss={dismissCall}
       />
     );
