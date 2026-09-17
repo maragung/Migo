@@ -546,6 +546,47 @@ pub fn divider(ui: &mut Ui, theme: Theme) {
         .rect_filled(rect, CornerRadius::ZERO, colors.border);
 }
 
+/// The mark that says an account is a bot.
+///
+/// Section 49's last open sentence on this client was that a bot could be reported and never seen —
+/// a bot holds an ordinary account row and an ordinary profile, so every listing here drew one as a
+/// person. The wire now names the bot behind such an account, and this is the one place that turns
+/// the name into something a reader can see.
+///
+/// # Why it draws nothing at all
+///
+/// A caller with no bot id gets no widget: not an empty pill, not a placeholder. The mark has to be
+/// absent often enough to mean something when it is here, and a mark that were always present — even
+/// as a gap — is a mark nobody reads. So the caller's question is "is this a bot", asked by handing
+/// over the id the wire gave, and [`None`] is a complete answer to it.
+///
+/// # The two forms
+///
+/// The full pill is for the surfaces where someone stops to read who they are looking at; the
+/// compact form drops the word for a dense row, where a pill would cost a line. Both carry the same
+/// sentence on the hover, because the sentence is the part that explains the mark and the person who
+/// needs the explanation is exactly the one who does not already know what the glyph means.
+pub fn bot_badge(
+    ui: &mut Ui,
+    theme: Theme,
+    bot_id: Option<migo_core::Id>,
+    compact: bool,
+) -> Response {
+    let colors = palette(theme);
+    if bot_id.is_none() {
+        return ui.allocate_response(Vec2::ZERO, Sense::hover());
+    }
+    let text = if compact {
+        "\u{1F916}"
+    } else {
+        "\u{1F916} Bot"
+    };
+    pill(ui, text, colors.text_muted, colors.surface).on_hover_text(
+        "This is a bot, not a person: a program its owner runs. Report it as a bot if it \
+         misbehaves.",
+    )
+}
+
 /// Small capsule of text: a state, a count, a label.
 pub fn pill(ui: &mut Ui, text: &str, foreground: Color32, background: Color32) -> Response {
     let font = FontId::proportional(font::TINY);
@@ -828,6 +869,13 @@ pub struct RowContent<'a> {
     pub unread: u32,
     pub selected: bool,
     pub encrypted: bool,
+    /// The bot this conversation's title names, where the title names exactly one account.
+    ///
+    /// A direct chat with a bot draws the mark beside its title for the same reason the thread
+    /// does: the list is where a person decides which conversation to open, and a bot that looked
+    /// like a friend there would be discovered a click later than it should have been. A group or
+    /// a room names nobody in particular, so it carries [`None`] and draws nothing.
+    pub bot: Option<migo_core::Id>,
 }
 
 /// Draws one conversation row and returns its response.
@@ -876,6 +924,7 @@ pub fn conversation_row(ui: &mut Ui, theme: Theme, content: RowContent<'_>) -> R
                 // on one that is not. A badge that appears either way teaches the user to ignore it.
                 ui.label(RichText::new("\u{1F512}").font(FontId::proportional(font::TINY)));
             }
+            bot_badge(ui, theme, content.bot, true);
         });
         if let Some(preview) = content.preview {
             ui.add(

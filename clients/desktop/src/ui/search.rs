@@ -6,12 +6,28 @@
 //! endpoint, and the user who typed three letters has not yet asked a question.
 
 use egui::{Align, FontId, Layout, RichText, Ui};
+use migo_core::Id;
 
 use crate::model::{PersonRow, RoomRow};
 use crate::net::Command;
 use crate::theme::{font, palette, space};
 use crate::ui::chat::ChatState;
 use crate::ui::{widgets, Context};
+
+/// One local hit: a conversation in the list whose title matches the query.
+///
+/// Copied out of the chat state before the rows draw, for the reason the comment at the copy
+/// gives — the click that opens a hit needs the chat state mutably, and the iterator's borrow
+/// would otherwise outlive it.
+struct Hit {
+    conversation_id: Id,
+    title: String,
+    preview: Option<String>,
+    unread: u32,
+    encrypted: bool,
+    /// The bot the hit's title names, where it names exactly one account.
+    bot: Option<Id>,
+}
 
 /// The place's state.
 #[derive(Debug, Default)]
@@ -104,7 +120,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
         .account
         .map(|account| account.account_id)
         .unwrap_or_default();
-    let matches: Vec<(migo_core::Id, String, Option<String>, u32, bool)> = chat
+    let matches: Vec<Hit> = chat
         .conversations
         .iter()
         .filter(|conversation| {
@@ -113,14 +129,16 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
                 .to_lowercase()
                 .contains(&query.to_lowercase())
         })
-        .map(|conversation| {
-            (
-                conversation.conversation_id,
-                conversation.display_title(me, &chat.names),
-                conversation.preview.clone(),
-                conversation.unread,
-                conversation.encrypted,
-            )
+        .map(|conversation| Hit {
+            conversation_id: conversation.conversation_id,
+            title: conversation.display_title(me, &chat.names),
+            preview: conversation.preview.clone(),
+            unread: conversation.unread,
+            encrypted: conversation.encrypted,
+            // Read from the same bots map the thread's own marks come from, through the helper
+            // that keeps the mark and the title in step: a hit can only wear the mark when the
+            // title it wears is the name of that one bot.
+            bot: conversation.display_bot(me, &chat.bots),
         })
         .collect();
 
@@ -143,22 +161,23 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
         .show(ui, |ui| {
             if !matches.is_empty() {
                 widgets::subheader(ui, context.theme, "CHATS");
-                for (conversation_id, title, preview, unread, encrypted) in &matches {
+                for hit in &matches {
                     if widgets::conversation_row(
                         ui,
                         context.theme,
                         widgets::RowContent {
-                            title,
-                            preview: preview.as_deref(),
+                            title: &hit.title,
+                            preview: hit.preview.as_deref(),
                             time: None,
-                            unread: *unread,
+                            unread: hit.unread,
                             selected: false,
-                            encrypted: *encrypted,
+                            encrypted: hit.encrypted,
+                            bot: hit.bot,
                         },
                     )
                     .clicked()
                     {
-                        crate::ui::chat::open(context, chat, *conversation_id);
+                        crate::ui::chat::open(context, chat, hit.conversation_id);
                     }
                 }
                 ui.add_space(space::SM);
@@ -204,12 +223,18 @@ pub(crate) fn person_row(ui: &mut Ui, context: &mut Context<'_>, person: &Person
         widgets::avatar(ui, context.theme, &person.display_name, 32.0);
         ui.add_space(space::SM);
         ui.vertical(|ui| {
-            ui.label(
-                RichText::new(&person.display_name)
-                    .font(FontId::proportional(font::BODY))
-                    .color(colors.text)
-                    .strong(),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&person.display_name)
+                        .font(FontId::proportional(font::BODY))
+                        .color(colors.text)
+                        .strong(),
+                );
+                // The mark, drawn from the search's own answer rather than from any cache: a
+                // discovered account is the case where a reader has least to go on, and the
+                // wire's answer already said whether this one is a bot.
+                widgets::bot_badge(ui, context.theme, person.bot_id, true);
+            });
             let mut handle = format!("@{}", person.username);
             if person.mutual_friends > 0 {
                 handle.push_str(&format!(" · {} mutual", person.mutual_friends));

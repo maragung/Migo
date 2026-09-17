@@ -44,6 +44,15 @@ pub struct ChatState {
     pub messages: HashMap<Id, Vec<Message>>,
     /// Display names for account ids, so a direct conversation can be titled by the other person.
     pub names: HashMap<Id, String>,
+    /// The bot each account speaks as, for the accounts the wire named one for.
+    ///
+    /// Filled by the same profile read that fills [`Self::names`] — the worker sends the two
+    /// together precisely so no surface can learn a name without also learning whether the account
+    /// is a bot — and holds only the positive, so a missing key is the absence of a claim rather
+    /// than a claim that the account is a person. It exists because a bot can only be reported by
+    /// its own id: a row that drew the mark off one field and filed the report off another could
+    /// name the wrong thing without anything looking wrong.
+    pub bots: HashMap<Id, Id>,
     /// Who is currently typing, per conversation.
     pub typing: HashMap<Id, Vec<Id>>,
     /// Group calls this device is seated in, per conversation: the participant count, one seat
@@ -338,6 +347,11 @@ pub struct ReportSheet {
     /// reads, and a report filed under a reason the reporter never picked is worse than no
     /// report at all. The web dialog defaults to the first reason and can therefore be sent
     /// without the list being read once; this one cannot.
+    ///
+    /// A bot subject is the one case that opens with a reason already chosen, and it is not a
+    /// hole in that rule: [`crate::report::opening_reason`] names a code only where the surface
+    /// already knew the answer, and [`crate::report::reasons_for`] draws that code as a row — so
+    /// the choice the sheet opens on is always a row the reporter can see picked.
     pub reason: Option<crate::report::ReportReason>,
     /// The reporter's own words, if they wrote any — the only field in the whole path a human
     /// wrote. Capped at [`crate::report::REPORT_NOTE_MAX_LEN`] by the field itself, so the
@@ -346,12 +360,18 @@ pub struct ReportSheet {
 }
 
 impl ReportSheet {
-    /// A sheet on `target`, opened from `conversation_id`'s window with nothing chosen yet.
+    /// A sheet on `target`, opened from `conversation_id`'s window.
+    ///
+    /// The reason it opens with is [`crate::report::opening_reason`]'s decision, not this
+    /// constructor's: nothing chosen for every subject but a bot, and the bot reason — which
+    /// [`crate::report::reasons_for`] then draws as the first row — where the surface already
+    /// knew the answer.
     pub fn on(conversation_id: Id, target: crate::report::ReportTarget) -> Self {
+        let reason = crate::report::opening_reason(&target);
         Self {
             conversation_id,
             target,
-            reason: None,
+            reason,
             note: String::new(),
         }
     }
@@ -1140,6 +1160,16 @@ fn thread_pane(
                             .cloned()
                             .unwrap_or_else(|| model::short_id(message.sender_id))
                     });
+                    // The bot, where the wire named one for this sender: the label above the
+                    // bubble is the only place a group thread says who is speaking, so a bot
+                    // whose messages carried no mark would read as a person for the whole of a
+                    // long thread. Absent for an outgoing message for the same reason the name
+                    // is: this account is not a bot to itself.
+                    let sender_bot = if group && !message.outgoing {
+                        state.bots.get(&message.sender_id).copied()
+                    } else {
+                        None
+                    };
                     // An avatar on the incoming side only. Outgoing bubbles are already anchored by
                     // their alignment and accent fill; a self-avatar beside them would be decoration.
                     let avatar_seed = if message.outgoing {
@@ -1168,6 +1198,7 @@ fn thread_pane(
                         context,
                         message,
                         sender.as_deref(),
+                        sender_bot,
                         avatar_seed,
                         read,
                         &mut state.media,
@@ -1723,6 +1754,16 @@ fn group_roster_panel(
                                         .font(egui::FontId::proportional(font::SMALL))
                                         .color(colors.text),
                                 );
+                                // A bot is marked here for the same reason it is marked on the
+                                // friends pane's own rows: this picker offers to seat somebody
+                                // in a group, and who is being seated is worth knowing before
+                                // the invite rather than after it.
+                                widgets::bot_badge(
+                                    ui,
+                                    context.theme,
+                                    friends.bots.get(friend).copied(),
+                                    true,
+                                );
                                 if ui
                                     .add(
                                         egui::Button::new("Add")
@@ -1880,6 +1921,16 @@ fn group_roster_panel(
                                     colors.text
                                 }),
                         );
+                        // The bot mark, where the wire named one for this member — the same
+                        // map that decides which id this row's Report would carry, so the row
+                        // that tells a reader they are looking at a bot is the row that files
+                        // about that bot.
+                        widgets::bot_badge(
+                            &mut inner,
+                            context.theme,
+                            state.bots.get(&member.account_id).copied(),
+                            true,
+                        );
                         if member.role == ConversationRole::Founder {
                             widgets::pill(&mut inner, "founder", colors.text_muted, colors.surface);
                         }
@@ -2031,6 +2082,10 @@ fn group_roster_panel(
     // The report sheet opens on the name this panel's row already drew: the sheet's whole
     // sentence is built from it, so a person the roster has no name for falls back to the
     // short id every other nameless row here uses rather than to a blank.
+    //
+    // Which id the report carries is `person_target`'s decision and not this panel's: an account
+    // that speaks as a bot is reported as the bot, and the bot id comes from the same map the
+    // row's mark was drawn from, so the two cannot disagree.
     if let Some(user_id) = report_ask {
         let label = state
             .names
@@ -2039,7 +2094,7 @@ fn group_roster_panel(
             .unwrap_or_else(|| model::short_id(user_id));
         state.reporting = Some(ReportSheet::on(
             conversation_id,
-            crate::report::ReportTarget::user(user_id, label),
+            crate::report::person_target(user_id, state.bots.get(&user_id).copied(), label),
         ));
     }
     // The profile view opens with its card ask and its standing asks together: the card is
@@ -2315,6 +2370,15 @@ fn room_roster_panel(
                                 .font(egui::FontId::proportional(font::SMALL))
                                 .color(colors.text),
                         );
+                        // The bot mark, on the group panel's own rule: drawn from the same map
+                        // the row's Report reads, and drawn not at all when the wire named no
+                        // bot for this member.
+                        widgets::bot_badge(
+                            &mut inner,
+                            context.theme,
+                            state.bots.get(&member.account_id).copied(),
+                            true,
+                        );
                         widgets::pill(
                             &mut inner,
                             room_role_label(member.role),
@@ -2488,7 +2552,7 @@ fn room_roster_panel(
             .unwrap_or_else(|| model::short_id(user_id));
         state.reporting = Some(ReportSheet::on(
             conversation_id,
-            crate::report::ReportTarget::user(user_id, label),
+            crate::report::person_target(user_id, state.bots.get(&user_id).copied(), label),
         ));
     }
     // The profile view opens with its card ask and its standing asks together — the same
@@ -2729,6 +2793,15 @@ fn gift_picker(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                                 .font(egui::FontId::proportional(font::SMALL))
                                 .color(colors.text),
                         );
+                        // The mark on the recipient picker too: a gift is a charge, and a
+                        // charge aimed at a bot is a charge the sender would rather have known
+                        // about before the press rather than after it.
+                        widgets::bot_badge(
+                            &mut inner,
+                            context.theme,
+                            state.bots.get(member).copied(),
+                            true,
+                        );
                         if response.clicked() {
                             chosen = Some(*member);
                         }
@@ -2855,17 +2928,38 @@ fn report_window(
             );
             ui.add_space(space::SM);
 
+            // What the subject is, where the wire said something the sheet's own sentence does
+            // not. A bot is the one case: the header names it, and this says what "it" means —
+            // the report is about the program, not about whoever runs it, which is the
+            // distinction the bot reason code exists to draw and the one a reporter is least
+            // likely to guess.
+            if target.kind == crate::report::ReportSubject::Bot {
+                ui.label(
+                    RichText::new(
+                        "This account speaks as a bot: a program its owner runs. This report is \
+                         filed about the bot itself, not about whoever runs it.",
+                    )
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text),
+                );
+                ui.add_space(space::SM);
+            }
+
             // The reasons a person can judge for themselves, one row each with the line that
             // says what the code means in practice. The scroll is a ceiling rather than a
             // page-turn: the list is short enough to read whole on a desktop window, and a
             // sheet that clipped its last option would be hiding exactly the escape hatch a
             // reporter whose reason is not listed is looking for.
+            //
+            // Which rows those are is `reasons_for`'s decision and not this loop's: a bot subject
+            // is offered the bot row in front of the same nine, and this draws whatever came back
+            // rather than knowing which subject it is drawing for.
             egui::ScrollArea::vertical()
                 .id_salt("report-reasons")
                 .max_height(260.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for option in &crate::report::REPORT_REASONS {
+                    for option in crate::report::reasons_for(target.kind) {
                         // A radio in all but name: `selectable_value` writes the choice and
                         // draws the selection state itself, so there is one place that decides
                         // what "chosen" looks like rather than one per row.
@@ -2981,9 +3075,13 @@ fn member_profile_window(
     let card = &view.card;
     let progression = view.progression;
     // Deferred: the friend acts the social line offers, applied after the window's borrows
-    // close. Each act is a command plus the re-read that makes the next line honest.
+    // close. Each act is a command plus the re-read that makes the next line honest. The report
+    // door rides the same patience: a card is a surface a person arrives at to find out who they
+    // are dealing with, and a bot card that named a bot and offered no way to do anything about
+    // it would be a mark with no consequence.
     let mut friend_request = false;
     let mut friend_respond: Option<bool> = None;
+    let mut report_card = false;
     let mut open = true;
     egui::Window::new("Profile")
         .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -3017,6 +3115,10 @@ fn member_profile_window(
                             .font(egui::FontId::proportional(font::SUBTITLE))
                             .color(colors.text),
                         );
+                        // The bot mark, where the wire named one, before the verified mark: a
+                        // reader has to know what they are looking at before they weigh who
+                        // vouches for it. A card that named no bot draws nothing here at all.
+                        widgets::bot_badge(ui, context.theme, card.bot_id, false);
                         // The verified mark: the server's own word, not a judgement this
                         // client makes, so it draws as the plain ✔ the web card draws and
                         // says whose word it is on the hover.
@@ -3202,7 +3304,32 @@ fn member_profile_window(
                     _ => {}
                 }
             }
+
+            // The report door, on the same rule the header's and the roster's follow: a card
+            // names an account, and a card that names a bot is the surface a person is most
+            // likely to be looking at when they decide to report one. It is drawn on every card
+            // rather than only on a bot's, because which id the report carries is
+            // `person_target`'s decision and not this door's — and a door that appeared only for
+            // bots would be this card making a claim about who is worth reporting.
+            ui.add_space(space::SM);
+            if quiet_action(ui, "Report", colors.text_muted).clicked() {
+                report_card = true;
+            }
         });
+    // The report door files through the same `person_target` every other person door uses, so a
+    // bot card files a bot report and a person card files an account report without this window
+    // knowing which it drew.
+    if report_card {
+        let label = if card.display_name.is_empty() {
+            card.username.clone()
+        } else {
+            card.display_name.clone()
+        };
+        state.reporting = Some(ReportSheet::on(
+            conversation_id,
+            crate::report::person_target(card.account_id, card.bot_id, label),
+        ));
+    }
     // The friend acts, applied now that the window's clone is spent: each issues its command
     // and re-reads the edge, so the line next says what the wire says — never what the
     // button's click wished for.
@@ -3516,7 +3643,7 @@ fn thread_header(
         {
             state.reporting = Some(ReportSheet::on(
                 conversation_id,
-                crate::report::ReportTarget::user(peer, title),
+                crate::report::person_target(peer, state.bots.get(&peer).copied(), title),
             ));
         }
     }
@@ -3609,6 +3736,10 @@ fn day_separator(ui: &mut Ui, context: &Context<'_>, day: &str) {
 /// touching it does. The media and reactions state is passed in mutable: the row that draws
 /// an unfetched image is the row that asks for it, and the row that can be reacted to is the
 /// row that carries the picker.
+///
+/// The sender's bot, where the wire named one, is drawn beside the label above the bubble —
+/// the label being the only place a group thread says who is speaking, so a bot whose messages
+/// carried no mark would read as a person for the whole of a long thread.
 // Every fact the row draws is a fact it needs, and in immediate mode they arrive as
 // parameters, not as a struct the caller would build only to hand it here.
 #[allow(clippy::too_many_arguments)]
@@ -3617,6 +3748,7 @@ fn message_row(
     context: &mut Context<'_>,
     message: &Message,
     sender: Option<&str>,
+    sender_bot: Option<Id>,
     avatar_seed: Option<&str>,
     read: bool,
     media: &mut MediaState,
@@ -3655,6 +3787,7 @@ fn message_row(
                     .text_style(crate::theme::named(crate::theme::text_style::CAPTION))
                     .color(colors.text_muted),
             );
+            widgets::bot_badge(ui, context.theme, sender_bot, true);
         });
     }
     ui.horizontal(|ui| {
