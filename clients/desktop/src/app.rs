@@ -29,6 +29,7 @@ use crate::settings::{self, ServerMode, Settings};
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
+use crate::ui::bots::BotsState;
 use crate::ui::chat::{
     ChatState, ImageBlob, NotePreview, RecordingView, RoomNotice, MAX_ROOM_NOTICES,
 };
@@ -75,6 +76,8 @@ pub struct App {
     space: SpaceState,
     alerts: AlertsState,
     games: GamesState,
+    /// The bots this account runs, and the one-time token a register or a rotation just minted.
+    bots: BotsState,
     search: SearchState,
     wallet: WalletState,
     /// The call overlay's subject: the one call this device is in, as the worker last projected
@@ -183,6 +186,7 @@ impl App {
             space: SpaceState::default(),
             alerts: AlertsState::default(),
             games: GamesState::default(),
+            bots: BotsState::default(),
             search: SearchState::default(),
             wallet: WalletState::default(),
             call: None,
@@ -1091,6 +1095,27 @@ impl App {
                         at: migo_core::Timestamp::now(),
                     });
                 }
+                Event::Bots(rows) => {
+                    // The whole list at once, which is what makes the pane's "not read yet"
+                    // state — a `None` — different from a server that answered with nothing.
+                    self.bots.file_list(rows);
+                }
+                Event::BotChanged { view, token } => {
+                    self.bots.file_changed(view, token);
+                }
+                Event::BotNotice { bot_id, event } => {
+                    // A notice and not a fact about the row: the pane appends the line and
+                    // re-reads nothing, the contract the game push above keeps for the same
+                    // reason — the event is a cue, and the row is the server's to state.
+                    self.bots.file_notice(bot_id, event);
+                }
+                Event::BotFailed { reason } => {
+                    // The pane is handed its controls back as well as the reason: a management
+                    // call that was refused is an answer, and an ask that never hears one leaves
+                    // the form and the row's levers disabled for the rest of the session. The
+                    // generic toast has already said the same words to the person.
+                    self.bots.fail(reason);
+                }
                 Event::Balance {
                     coins,
                     points,
@@ -1725,6 +1750,15 @@ impl App {
                                                     menu = Some(Place::Games);
                                                     ui.close();
                                                 }
+                                                // The accounts this person runs. An entry of
+                                                // its own rather than a Settings row, because
+                                                // registering a bot and minting its token is a
+                                                // thing a developer opens a window to do, not a
+                                                // preference.
+                                                if ui.button("Bots").clicked() {
+                                                    menu = Some(Place::Bots);
+                                                    ui.close();
+                                                }
                                                 // Settings keeps its own entry now that "My
                                                 // Profile" opens the profile window: server,
                                                 // theme, devices, and the way out.
@@ -2108,6 +2142,7 @@ impl App {
             Place::Profile => crate::ui::profile::show(ui, &mut context, &mut self.profile_panel),
             Place::Admins => crate::ui::admins::show(ui, &mut context, &mut self.admins_panel),
             Place::Games => crate::ui::games::show(ui, &context, &mut self.games),
+            Place::Bots => crate::ui::bots::show(ui, &mut context, &mut self.bots),
             Place::Settings => {
                 crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
             }
@@ -2142,6 +2177,15 @@ impl App {
                 }
             }
             Place::Games => {}
+            // The bot list is the server's, and the other devices of this account change it
+            // too, so it re-reads on entry — the friends graph's own rule, and this fires once
+            // per window opening because `open_side` only reports a window it just minted.
+            //
+            // Nothing here marks the pane as busy. A read this pane cannot correlate has no
+            // failure of its own — a refusal toasts and never comes back — so a flag set here
+            // would be a spinner nothing could clear, and the pane's own "not loaded yet" line
+            // with its load button already says the honest thing while the answer is out.
+            Place::Bots => self.commands.push(Command::BotList),
             // The saved-log list is a fact about the disk, not the frame: read on entry so the
             // storage group's numbers are current, and after any action that touches the
             // directory (see `apply_chat_log_action`).

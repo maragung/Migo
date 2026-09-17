@@ -487,6 +487,30 @@ pub enum Command {
     /// Revoke one global admin by the id the list reported. Owner-only, confirmed by the UI
     /// before it is sent, because a revocation takes moderation away from a person.
     RevokeAdmin { account_id: Id },
+    /// Read the bots this account runs. The request is empty because the session already names
+    /// the owner, so there is no id here to get wrong and no way to ask after somebody else's
+    /// bot — the wire answers a management call for another account's bot with NOT_FOUND rather
+    /// than a refusal, so that a bot id's existence cannot be probed at all.
+    BotList,
+    /// Register a bot: a handle to sign in with and a display name people read beside its
+    /// messages. The answer carries the token, which is one of the two times in this whole
+    /// client that a credential arrives — see [`Event::BotChanged`].
+    BotRegister {
+        username: String,
+        display_name: String,
+    },
+    /// Mint a fresh token for one bot, invalidating the old one with no grace period. This is
+    /// the recovery path after a token leaks or is lost, and the answer is the only time the new
+    /// token exists: the node stores a keyed tag and cannot print it again.
+    BotRotate { bot_id: Id },
+    /// Stop a bot or start it again. The flag rides the request rather than being implied by
+    /// which call it is, so pausing an already-paused bot is a repeatable no-op rather than an
+    /// error, which is what makes a retry after a lost reply safe.
+    BotPause { bot_id: Id, paused: bool },
+    /// Replace a bot's permissions with exactly this set — a replacement rather than a delta,
+    /// so two screens editing one bot cannot interleave into a union neither owner chose. An
+    /// empty list is a complete request that takes every permission away, not an omitted field.
+    BotScopes { bot_id: Id, scopes: Vec<String> },
     /// Read the account's registered wallet addresses over REST.
     Wallets,
     /// Seal the account root into a `.migo` recovery container at `path`.
@@ -1065,6 +1089,37 @@ pub enum Event {
         /// The board version every event of one move shares, for a consumer that orders by it.
         state_version: u64,
     },
+    /// The bots this account runs, as one answer.
+    ///
+    /// The whole list at once rather than a delta, because every management call answers with
+    /// the bot it changed and the pane folds that one row back in — so this event is the list's
+    /// own read and the re-read after anything the pane could not fold itself.
+    Bots(Vec<migo_protocol::BotView>),
+    /// One bot's own row, as the call that changed it answered.
+    ///
+    /// `token` is present exactly twice in a bot's life — the register that made it and a
+    /// rotation — and is the only credential this client ever hands the UI. It rides here
+    /// rather than in [`Event::Bots`] because the list never carries it: a token that appeared
+    /// on every read would be a token the node could reprint, and it cannot. A reply that
+    /// arrives without one is an ordinary change, and the difference is drawn, not guessed:
+    /// the pane keeps one reveal card and never infers a token from a rotation it did not see.
+    BotChanged {
+        view: migo_protocol::BotView,
+        token: Option<String>,
+    },
+    /// A bot told the node something on its own: a delivery that failed, a webhook that refused.
+    ///
+    /// A notice and not a fact about the row — nothing here says the bot changed, so the pane
+    /// appends the line and re-reads nothing, the same contract [`Event::GamePushed`] has.
+    BotNotice { bot_id: Id, event: String },
+    /// A management call was refused, in the node's own words.
+    ///
+    /// Separate from the toast every refusal also raises, because a toast tells the person and
+    /// this tells the pane: the four calls that change something leave their controls disabled
+    /// while an ask is out, and a pane that never hears about the refusal would hold them
+    /// disabled for the rest of the session. Nothing about the row is carried — a refusal
+    /// changed nothing, and the pane's own list is still the truth.
+    BotFailed { reason: String },
     /// The caller's wallet moved on the server: a spend made from any session of the account.
     ///
     /// The economy twin of [`Event::AlertPushed`]: a cue to re-read, never a fact. The wire's
@@ -2281,6 +2336,14 @@ struct Worker {
     /// is the one exact key — a second room's panel may be asking at the same time, and unlike
     /// the group roster's map the answer must not be handed to every asker at once.
     room_roster_asks: HashMap<u32, Id>,
+    /// The four bot-management asks that change something, keyed by the correlation each carried.
+    ///
+    /// A set rather than a map because nothing here needs the bot back: the reply names the row it
+    /// changed, and the one thing this is for is the case where no reply comes. A refusal arrives
+    /// as an error frame carrying no opcode, so the correlation is the only exact key — and
+    /// without it the pane that made the ask would hold its button disabled forever, because the
+    /// generic toast tells the person what happened and nothing tells the pane.
+    bot_asks: HashSet<u32>,
     /// The room sanction awaiting its acknowledgement: the correlation its ask carried, and
     /// the room, because the bare ack names neither. Keyed by the correlation so a refusal —
     /// which arrives as an error frame, with no opcode to say whose ask it refuses — can retire
@@ -2365,6 +2428,7 @@ impl Worker {
             voice_listened,
             group_rosters: HashMap::new(),
             room_roster_asks: HashMap::new(),
+            bot_asks: HashSet::new(),
             pending_room_sanction: None,
             pending_report: None,
             people_asks: HashMap::new(),
@@ -2712,6 +2776,14 @@ impl Worker {
             Command::RevokeAdmin { account_id } => {
                 self.revoke_admin(account_id).await;
             }
+            Command::BotList => self.request_bots().await,
+            Command::BotRegister {
+                username,
+                display_name,
+            } => self.register_bot(username, display_name).await,
+            Command::BotRotate { bot_id } => self.rotate_bot(bot_id).await,
+            Command::BotPause { bot_id, paused } => self.set_bot_paused(bot_id, paused).await,
+            Command::BotScopes { bot_id, scopes } => self.set_bot_scopes(bot_id, scopes).await,
             Command::Wallets => self.fetch_wallets().await,
             Command::ExportContainer { path, credential } => {
                 self.export_container(path, credential).await;
@@ -3205,6 +3277,7 @@ impl Worker {
         // file a people answer to the pane that asked, nor a roster page to the panel awaiting
         // it — the panes re-ask when their draw needs the fact again.
         self.room_roster_asks.clear();
+        self.bot_asks.clear();
         self.people_asks.clear();
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
@@ -3416,6 +3489,7 @@ impl Worker {
                 // new correlations cannot be answered by the dropped session's replies, so the
                 // panes' asks die with it and re-ask on their own next draw.
                 self.room_roster_asks.clear();
+                self.bot_asks.clear();
                 self.people_asks.clear();
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
@@ -8094,6 +8168,98 @@ impl Worker {
         });
     }
 
+    /// A bot event was pushed: what one of this account's bots reported about itself.
+    fn on_bot_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::BotEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::BotNotice {
+            bot_id: event.bot_id,
+            event: event.event,
+        });
+    }
+
+    /// The bot list came back.
+    fn on_bots(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::BotListResponse>(frame) else {
+            return;
+        };
+        self.sink.send(Event::Bots(response.bots));
+    }
+
+    /// One management call's answer: the row it changed, and the token when it minted one.
+    ///
+    /// The token is read off the row rather than added by the asker, because the node is the
+    /// only thing that knows whether the call produced one — register and rotate do, and a
+    /// build that predates the tagged field produces none, which is a case the pane draws
+    /// rather than a case this arm invents an empty token for.
+    fn on_bot_changed(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(view) = gateway::decode::<migo_protocol::BotView>(frame) else {
+            return;
+        };
+        // The ask is retired here as well as at a refusal, so the set tracks asks outstanding
+        // rather than every ask this session ever made.
+        self.bot_asks.remove(&frame.header.correlation);
+        let token = view.token.clone();
+        self.sink.send(Event::BotChanged { view, token });
+    }
+
+    /// Asks for this account's bots.
+    async fn request_bots(&mut self) {
+        self.request(Opcode::BotList, &migo_protocol::BotListReq {})
+            .await;
+    }
+
+    /// Registers a bot and asks for the list again on success.
+    ///
+    /// The reply is folded in by the pane and the list is *not* re-read: the call answers with
+    /// the row it made, so a second read would be a round trip spent to learn what is already in
+    /// hand, and one that could race the very answer it was meant to confirm.
+    async fn register_bot(&mut self, username: String, display_name: String) {
+        let message = migo_protocol::BotRegister {
+            username,
+            display_name,
+        };
+        self.ask_bot(Opcode::BotRegister, &message).await;
+    }
+
+    /// Mints a fresh token for one bot. See [`Command::BotRotate`].
+    async fn rotate_bot(&mut self, bot_id: Id) {
+        self.ask_bot(Opcode::BotRotate, &migo_protocol::BotRotate { bot_id })
+            .await;
+    }
+
+    /// Stops or starts one bot. See [`Command::BotPause`].
+    async fn set_bot_paused(&mut self, bot_id: Id, paused: bool) {
+        self.ask_bot(
+            Opcode::BotPause,
+            &migo_protocol::BotPause { bot_id, paused },
+        )
+        .await;
+    }
+
+    /// Replaces one bot's permissions with the set given. See [`Command::BotScopes`].
+    async fn set_bot_scopes(&mut self, bot_id: Id, scopes: Vec<String>) {
+        self.ask_bot(
+            Opcode::BotScopes,
+            &migo_protocol::BotScopes { bot_id, scopes },
+        )
+        .await;
+    }
+
+    /// Sends one of the four management calls and remembers its correlation until it answers.
+    ///
+    /// The four that change something go through here rather than [`Worker::request`], which
+    /// remembers nothing: a pane whose button is disabled until the answer arrives needs to hear
+    /// about the answer that never comes, and a refusal carries no opcode — only the correlation
+    /// it was sent with. The list read keeps the plain path, because it changes nothing and its
+    /// pane has a button that can be pressed again.
+    async fn ask_bot<T: migo_protocol::Encode>(&mut self, opcode: Opcode, value: &T) {
+        if let Some(correlation) = self.send_and_remember(opcode, value).await {
+            self.bot_asks.insert(correlation);
+        }
+    }
+
     /// An economy event was pushed: the cue to re-read the wallet. See [`Event::EconomyPushed`].
     fn on_economy_pushed(&mut self, frame: &migo_protocol::Frame) {
         let Ok(_event) = gateway::decode::<migo_protocol::EconomyEvent>(frame) else {
@@ -8473,6 +8639,14 @@ impl Worker {
             {
                 self.pending_report = None;
             }
+            if self.bot_asks.remove(&frame.header.correlation) {
+                // A management call was refused. The pane is told as well as the person: its
+                // controls disable while an ask is out, and the toast below says what happened
+                // without saying which pane was waiting or re-enabling anything.
+                self.sink.send(Event::BotFailed {
+                    reason: error.to_string(),
+                });
+            }
             self.sink.toast(error.to_string(), ToastKind::Error);
             return;
         }
@@ -8587,6 +8761,17 @@ impl Worker {
             // fan-out — its reply is the opening view — and included in every other event's, so
             // this arm hears the games the account's other sessions and the other members play.
             Opcode::GameEvent => self.on_game_event(&frame),
+            // A bot's own report about itself, pushed to the owner's sessions. BOT_REGISTER is
+            // not here: it is the one bots opcode that authenticates as a Bot and is sent by the
+            // bot's own connection, not by this pane. The four management replies share one arm
+            // because they share one answer — the row they changed — and the two that mint a
+            // token are told apart by whether the reply carries one, never by which opcode it
+            // was, since a node that predates the token is a case the row itself already draws.
+            Opcode::BotList => self.on_bots(&frame),
+            Opcode::BotRotate | Opcode::BotPause | Opcode::BotScopes | Opcode::BotRegister => {
+                self.on_bot_changed(&frame)
+            }
+            Opcode::BotEvent => self.on_bot_event(&frame),
             // The caller's own wallet moved: a spend from any session of the account, pushed on
             // the user topic every session holds from its handshake. A cue to re-read, the same
             // contract as the notification push above.
