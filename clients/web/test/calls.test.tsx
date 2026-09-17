@@ -131,7 +131,9 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     screenStream: null,
     outputs: [],
     cameras: [],
+    microphones: [],
     outputId: null,
+    inputId: null,
     qualityCeiling: null,
     lowBandwidth: false,
     nowMs: NOW,
@@ -147,6 +149,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onSwitchCamera: () => {},
     onToggleScreenShare: () => {},
     onSelectOutput: () => {},
+    onSelectInput: () => {},
     onSelectQuality: () => {},
     onToggleLowBandwidth: () => {},
     onDismiss: () => {},
@@ -521,6 +524,36 @@ test('the audio output list is the platform’s, drawn only when there is one to
   assert.ok(withOutputs.includes('System default'), 'the default is a choice, not an absence');
 });
 
+test('the microphone menu appears only where there is a choice, and names what is in use', () => {
+  const voice = activeCall({ state: CallState.Connected, startedAt: NOW - 30_000 });
+  // A device with one microphone gets no menu: there is nothing to move to, and section 180 asks
+  // for a choice rather than for a control. This is the state every call starts in, since the list
+  // is empty until a call has read the devices back.
+  assert.ok(!screen({ call: voice }).includes('Microphone'));
+
+  const microphones = [
+    { id: 'builtin', label: 'Internal microphone' },
+    { id: 'headset', label: 'Headset microphone' },
+  ];
+  const menu = screen({ call: voice, microphones, inputId: 'headset' });
+  assert.ok(menu.includes('Microphone'));
+  assert.ok(menu.includes('Internal microphone'));
+  assert.ok(menu.includes('Headset microphone'));
+  assert.ok(menu.includes('System default'), 'the platform’s own choice is offered too');
+  // The menu names the microphone the call actually opened rather than the one that was asked for,
+  // so a substituted device is not reported as the one the user picked.
+  assert.ok(menu.includes('value="headset"'));
+
+  // Unlike the output menu this one is not a video-call control: every call is holding one of these
+  // microphones, so the choice is drawn on a voice call and a video call alike.
+  const video = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 30_000,
+  });
+  assert.ok(screen({ call: video, microphones, inputId: 'builtin' }).includes('Microphone'));
+});
+
 test('the tier menu is the ladder without its bottom rung, and a voice call has none', () => {
   // The fixture's default kind is a voice call, so the video case has to name itself — which is
   // also what makes the second half of this test the same fixture with the other kind.
@@ -764,6 +797,8 @@ test('the call manager context starts with no call, no invite, and its actions b
         typeof call.toggleCamera === 'function' &&
         typeof call.switchCamera === 'function' &&
         typeof call.setOutputDevice === 'function' &&
+        typeof call.setInputDevice === 'function' &&
+        Array.isArray(call.microphones) &&
         typeof call.setQualityCeiling === 'function' &&
         typeof call.setLowBandwidth === 'function' &&
         typeof call.toggleScreenShare === 'function' &&
