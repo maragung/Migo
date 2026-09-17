@@ -3736,6 +3736,10 @@ fn day_separator(ui: &mut Ui, context: &Context<'_>, day: &str) {
 /// touching it does. The media and reactions state is passed in mutable: the row that draws
 /// an unfetched image is the row that asks for it, and the row that can be reacted to is the
 /// row that carries the picker.
+///
+/// The sender's bot, where the wire named one, is drawn beside the label above the bubble —
+/// the label being the only place a group thread says who is speaking, so a bot whose messages
+/// carried no mark would read as a person for the whole of a long thread.
 // Every fact the row draws is a fact it needs, and in immediate mode they arrive as
 // parameters, not as a struct the caller would build only to hand it here.
 #[allow(clippy::too_many_arguments)]
@@ -3744,8 +3748,6 @@ fn message_row(
     context: &mut Context<'_>,
     message: &Message,
     sender: Option<&str>,
-    /// The bot the sender speaks as, where the wire named one — drawn beside the label above
-    /// the bubble, which is the only place a group thread says who is speaking.
     sender_bot: Option<Id>,
     avatar_seed: Option<&str>,
     read: bool,

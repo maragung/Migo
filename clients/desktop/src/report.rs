@@ -206,7 +206,12 @@ pub struct ReportReasonOption {
 ///
 /// The words are the web client's and the Android sheet's, deliberately identical, because the
 /// reason a reporter picks has to mean the same thing on every device they might pick it from.
-pub const REPORT_REASONS: [ReportReasonOption; 9] = [
+///
+/// A `static` rather than a `const`, and for one reason: [`reasons_for`] hands out references
+/// into this list, and a reference into a `const` is a reference into a temporary the compiler
+/// may or may not promote — a `static` is one value at one address for the life of the program,
+/// so the borrow is `'static` by construction rather than by the promotion rules.
+pub static REPORT_REASONS: [ReportReasonOption; 9] = [
     ReportReasonOption {
         reason: ReportReason::Spam,
         label: "Spam",
