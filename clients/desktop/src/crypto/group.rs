@@ -63,8 +63,16 @@ use migo_crypto::{
 
 use super::CryptoError;
 
-/// The only envelope version this build writes, and the only one it reads.
-const ENVELOPE_VERSION: u8 = 1;
+/// The version of the group (sender-key) envelope, which did not move with the pairwise one.
+///
+/// The two schemes reach their section 11 binding differently: the pairwise layer appends a context
+/// to its associated data, and it is that context which made its version byte move to 2, while this
+/// layer hands the conversation context to the sender-key AEAD outright. One version constant shared
+/// between the two would have made the pairwise flip relabel every group message as carrying a
+/// context it does not carry, so this stays 1 until a binding on *this* path moves it — the sending
+/// device and the message id, which section 11 describes as still to come. Mirrors
+/// `SENDER_KEY_ENVELOPE_VERSION` in the TypeScript SDK and the Kotlin client.
+const SENDER_KEY_ENVELOPE_VERSION: u8 = 1;
 
 /// The chain key and the identity public key are the two fixed-width blocks in a distribution.
 const CHAIN_KEY_LEN: usize = 32;
@@ -306,7 +314,7 @@ fn random_chain_id() -> u32 {
 /// Assembles the section 11 group envelope from a sealed message.
 fn encode_envelope(epoch: u32, message: &SenderKeyMessage) -> Vec<u8> {
     let mut out = Vec::with_capacity(3 + 16 + SIGNATURE_LEN + message.ciphertext.len());
-    out.push(ENVELOPE_VERSION);
+    out.push(SENDER_KEY_ENVELOPE_VERSION);
     out.push(super::envelope::SCHEME_SENDER_KEY);
     varint(u64::from(message.header.chain_id), &mut out);
     varint(u64::from(epoch), &mut out);
@@ -321,7 +329,7 @@ fn encode_envelope(epoch: u32, message: &SenderKeyMessage) -> Vec<u8> {
 /// bookkeeping is what decides whether a message is current, not the sender's epoch label.
 fn decode_envelope(bytes: &[u8]) -> Option<SenderKeyMessage> {
     let mut cursor = Cursor::new(bytes);
-    if cursor.u8()? != ENVELOPE_VERSION {
+    if cursor.u8()? != SENDER_KEY_ENVELOPE_VERSION {
         return None;
     }
     if cursor.u8()? != super::envelope::SCHEME_SENDER_KEY {
@@ -514,16 +522,26 @@ mod tests {
         let parsed = decode_envelope(&sealed.envelope).expect("parses");
         assert_eq!(parsed.header.chain_id, sealed.chain_id);
         assert_eq!(parsed.ciphertext.len(), b"round trip".len() + 16);
+        // The pairwise layer's flip to version 2 did not move this byte: the group layout reaches
+        // its binding through the conversation context the sender-key AEAD is handed, not through a
+        // context appended to the associated data, so labelling these bytes version 2 would claim a
+        // context they do not carry.
+        assert_eq!(sealed.envelope[0], SENDER_KEY_ENVELOPE_VERSION);
+        assert_eq!(
+            sealed.envelope[1],
+            super::super::envelope::SCHEME_SENDER_KEY
+        );
     }
 
     #[test]
     fn a_truncated_envelope_is_refused_not_panicked() {
         assert!(decode_envelope(&[]).is_none());
-        assert!(decode_envelope(&[ENVELOPE_VERSION]).is_none());
-        assert!(
-            decode_envelope(&[ENVELOPE_VERSION, super::super::envelope::SCHEME_SENDER_KEY])
-                .is_none()
-        );
+        assert!(decode_envelope(&[SENDER_KEY_ENVELOPE_VERSION]).is_none());
+        assert!(decode_envelope(&[
+            SENDER_KEY_ENVELOPE_VERSION,
+            super::super::envelope::SCHEME_SENDER_KEY,
+        ])
+        .is_none());
     }
 
     #[test]

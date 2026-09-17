@@ -102,6 +102,15 @@ impl EnvelopeVersion {
     /// Every version a reader must accept, oldest first.
     pub const ACCEPTED: [Self; 2] = [Self::V1, Self::V2];
 
+    /// The version a build that writes envelopes writes.
+    ///
+    /// A name for the choice rather than a second constant beside it: two
+    /// constants that must agree is one constant too many, and a writer's
+    /// default reads this one. A reader must not use it — a reader's job is
+    /// [`Self::ACCEPTED`], because stored history was written by whatever build
+    /// was current then and cannot be re-encoded.
+    pub const WRITTEN: Self = Self::V2;
+
     /// The version byte as it travels.
     #[must_use]
     pub const fn wire(self) -> u8 {

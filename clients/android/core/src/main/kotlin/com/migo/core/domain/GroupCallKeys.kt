@@ -370,7 +370,8 @@ class GroupCallKeysDomain(
         store.beginJoinAsk(roster.callId, roster.conversationId, holder.deviceId)
         try {
             val ask = Content.ControlEvent(CALL_KEY_ASK_EVENT, idToBytes(accountId)).encode()
-            val sealed = sessionCrypto.seal(roster.conversationId, holder.userId, holder.deviceId, ask)
+            val sealed =
+                sessionCrypto.seal(roster.conversationId, deviceId, holder.userId, holder.deviceId, ask)
             val request = CallRenegotiate(
                 callId = roster.callId,
                 fromDevice = deviceId,

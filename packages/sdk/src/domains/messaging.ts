@@ -481,11 +481,7 @@ export class MessagingDomain {
    * and reported rather than thrown.
    */
   async redistributeSenderKey(conversationId: Id, epoch?: number): Promise<void> {
-    if (this.#deviceId === undefined) {
-      // The frame must honestly name the distributing device; the receiver's ratchet is keyed by
-      // it, so a nil stamp would make every distribution we send unopenable.
-      throw new SdkError('messaging: redistributeSenderKey requires the device id');
-    }
+    const deviceId = this.#requireDeviceId('redistributeSenderKey');
     if (epoch === undefined) {
       this.#groupCrypto.rotate(conversationId);
     } else {
@@ -493,13 +489,14 @@ export class MessagingDomain {
     }
     await this.#distributeChain(
       conversationId,
+      deviceId,
       OP.GROUP_KEY_DISTRIBUTE,
       (sealed, device) => {
         // Section 163's redistribution frame: addressed to the one device the copy is sealed
         // for, because the receiving side keys its ratchet lookup by our device id.
         const request: GroupKeyDistribution = {
           conversationId,
-          fromDevice: this.#deviceId as Id,
+          fromDevice: deviceId,
           toAccount: device.userId,
           toDevice: device.deviceId,
           sealedDistribution: sealed.envelope,
@@ -516,6 +513,22 @@ export class MessagingDomain {
   }
 
   /**
+   * This client's device id, or a refusal naming the operation that needed it.
+   *
+   * Needed on every seal, not just on the frames that carry it in the clear: a sender-key
+   * distribution is bound to the device that sent it, so a nil stamp would make every distribution
+   * we send unopenable at the far end — the receiver rebuilds the context from the device id it
+   * reads off the frame, and the two would not agree. Refusing here rather than sealing under a
+   * placeholder is the difference between a loud failure and a silent one.
+   */
+  #requireDeviceId(operation: string): Id {
+    if (this.#deviceId === undefined) {
+      throw new SdkError(`messaging: ${operation} requires the device id`);
+    }
+    return this.#deviceId;
+  }
+
+  /**
    * Forgets crypto state for a conversation, or for one device within it.
    *
    * Use it when leaving a conversation, or when a peer's identity key changes and the sessions built
@@ -529,7 +542,8 @@ export class MessagingDomain {
 
   /** Sends the current sender key to every recipient device that does not already hold it. */
   async #distribute(conversationId: Id): Promise<void> {
-    await this.#distributeChain(conversationId, OP.MESSAGE_SEND, (sealed, _device) => {
+    const deviceId = this.#requireDeviceId('distribute');
+    await this.#distributeChain(conversationId, deviceId, OP.MESSAGE_SEND, (sealed, _device) => {
       const send: MessageSend = {
         messageId: newId(),
         conversationId,
@@ -551,6 +565,7 @@ export class MessagingDomain {
    */
   async #distributeChain(
     conversationId: Id,
+    senderDeviceId: Id,
     opcode: number,
     sendOne: (sealed: SealedEnvelope, device: DeviceAddress) => Promise<unknown>,
     tolerate = false,
@@ -568,6 +583,7 @@ export class MessagingDomain {
         };
         const sealed = await this.#sessionCrypto.seal(
           conversationId,
+          senderDeviceId,
           device.userId,
           device.deviceId,
           encodeContent(control),

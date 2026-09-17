@@ -5,7 +5,7 @@
 //! the web client and on Android, and vice versa. It mirrors `packages/sdk/src/session-crypto.ts`.
 //!
 //! ```text
-//! u8      envelope_version           always ENVELOPE_VERSION
+//! u8      envelope_version           the version this build writes; 1 and 2 are both read
 //! u8      scheme                     decides which fields follow
 //! varint  sender_key_id              0 for 1:1; the field exists for the group layout
 //! -- X3DH preamble, present only for SCHEME_DOUBLE_RATCHET_PREKEY --
@@ -32,16 +32,24 @@
 //! `SCHEME_DOUBLE_RATCHET_PREKEY` changes which fields are *present*, not just how one is
 //! interpreted. That is what a scheme is for; a boolean flag whose value silently adds a hundred
 //! bytes to the layout is how parsers end up disagreeing about where the ciphertext starts.
+//!
+//! # The version byte is read, not assumed
+//!
+//! Version 2 is version 1 with section 11's context appended to the associated data, and the change
+//! is additive in exactly one direction: a version-2 envelope's tag covers `associated_data ||
+//! header || context`, and a version-1 envelope is the same bytes with an empty tail, so a reader
+//! that knows the context opens everything written before the flip. What it is *not* is backwards
+//! compatible the other way, which is why the version had to wait for all four implementations to
+//! land together, and why the parsed version travels on [`Envelope`] rather than being read as a
+//! constant wherever the associated data is built: a reader has to reproduce the *sender's* bytes.
 
 use bytes::BufMut;
+use migo_crypto::aad;
 use migo_crypto::identity::{IDENTITY_PUBLIC_LEN, PUBLIC_KEY_LEN};
-use migo_crypto::{IdentityPublic, RatchetHeader};
+use migo_crypto::{EnvelopeVersion, IdentityPublic, RatchetHeader};
 use migo_wire::varint;
 
 use super::CryptoError;
-
-/// The only envelope version this build writes, and the only one it reads.
-pub const ENVELOPE_VERSION: u8 = 1;
 
 /// An established 1:1 Double Ratchet message — no X3DH preamble.
 pub const SCHEME_DOUBLE_RATCHET: u8 = 1;
@@ -66,6 +74,13 @@ pub struct Preamble {
 /// A parsed or about-to-be-written envelope.
 #[derive(Debug, Clone)]
 pub struct Envelope {
+    /// The version the bytes declare, which is what decides the associated data the tag covers.
+    ///
+    /// It defaults to the version this build writes and is set by the parser to the byte it read,
+    /// because the two are not always the same: a message written before the flip is version 1 and
+    /// binds no context, and a reader that rebuilt the context anyway would refuse every message in
+    /// stored history.
+    pub version: EnvelopeVersion,
     /// Which of the `SCHEME_*` constants this is.
     pub scheme: u8,
     /// `0` for 1:1. Named in the layout because the group layout needs it in the same position.
@@ -83,6 +98,7 @@ impl Envelope {
     #[must_use]
     pub fn established(header: RatchetHeader, ciphertext: Vec<u8>) -> Self {
         Self {
+            version: EnvelopeVersion::WRITTEN,
             scheme: SCHEME_DOUBLE_RATCHET,
             sender_key_id: 0,
             preamble: None,
@@ -95,6 +111,7 @@ impl Envelope {
     #[must_use]
     pub fn initial(preamble: Preamble, header: RatchetHeader, ciphertext: Vec<u8>) -> Self {
         Self {
+            version: EnvelopeVersion::WRITTEN,
             scheme: SCHEME_DOUBLE_RATCHET_PREKEY,
             sender_key_id: 0,
             preamble: Some(preamble),
@@ -124,7 +141,7 @@ impl Envelope {
                 + RatchetHeader::ENCODED_LEN
                 + self.ciphertext.len(),
         );
-        out.put_u8(ENVELOPE_VERSION);
+        out.put_u8(self.version.wire());
         out.put_u8(self.scheme);
         varint::encode_u64(u64::from(self.sender_key_id), &mut out);
 
@@ -156,10 +173,11 @@ impl Envelope {
     pub fn decode(bytes: &[u8]) -> Result<Self, CryptoError> {
         let mut cursor = Cursor::new(bytes);
 
-        let version = cursor.u8()?;
-        if version != ENVELOPE_VERSION {
-            return Err(CryptoError::Envelope("unsupported envelope version"));
-        }
+        // The accepted set is `migo-crypto`'s, not a second list kept here: a version this parser
+        // agreed to read but the ratchet refuses to build a context for would be a version that
+        // decodes and then cannot be opened.
+        let version = EnvelopeVersion::from_wire(cursor.u8()?)
+            .ok_or(CryptoError::Envelope("unsupported envelope version"))?;
         let scheme = cursor.u8()?;
         let sender_key_id = cursor.varint_u32()?;
 
@@ -204,6 +222,7 @@ impl Envelope {
         }
 
         Ok(Self {
+            version,
             scheme,
             sender_key_id,
             preamble,
@@ -309,28 +328,35 @@ mod tests {
     }
 
     #[test]
-    fn a_future_envelope_version_is_refused_clearly_and_deterministically() {
-        // Brief section 176: a change to the envelope format needs a new `envelope_version`, and
-        // a client must keep reading the old one because stored history cannot be re-encoded.
-        // Until that future version exists, refusing it — rather than guessing at its layout —
-        // is what keeps this parser honest, and this test simulates it by bumping the version
-        // byte on the test side only: `ENVELOPE_VERSION` itself never moves here. Every value
-        // the byte can hold is swept, so nothing above or below the current version is accepted
-        // silently, and every refusal is the same named reason rather than a panic.
+    fn a_version_no_build_writes_is_refused_clearly_and_deterministically() {
+        // Brief section 176: a change to the envelope format needs a new `envelope_version`, and a
+        // client must keep reading the old one because stored history cannot be re-encoded — which
+        // is exactly what the version-2 flip did to this parser, and why the accepted set is
+        // `migo-crypto`'s rather than a single current value. Every value the byte can hold is
+        // swept, so the two the protocol defines are the only ones accepted, and every refusal is
+        // the same named reason rather than a panic.
+        //
+        // What this test does *not* claim is that the accepted versions are interchangeable: the
+        // version selects the associated data, and a version-1 label on a version-2 envelope is
+        // refused by the AEAD rather than by the parser. `session.rs` pins that half, where the
+        // ratchet is.
         let bytes = established().encode().expect("encodes");
-        for version in 0u8..=255 {
+        for byte in 0u8..=255 {
             let mut candidate = bytes.clone();
-            candidate[0] = version;
+            candidate[0] = byte;
             match Envelope::decode(&candidate) {
-                Ok(_) => assert_eq!(
-                    version, ENVELOPE_VERSION,
-                    "no version but the current one may decode"
+                Ok(parsed) => assert!(
+                    EnvelopeVersion::ACCEPTED.contains(&parsed.version),
+                    "version {byte} decoded but is not one a reader must accept"
                 ),
                 Err(error) => {
-                    assert_ne!(version, ENVELOPE_VERSION);
+                    assert!(
+                        EnvelopeVersion::from_wire(byte).is_none(),
+                        "version {byte} is one this build reads and was refused anyway"
+                    );
                     assert!(
                         matches!(error, CryptoError::Envelope("unsupported envelope version")),
-                        "version {version} was refused as {error:?}"
+                        "version {byte} was refused as {error:?}"
                     );
                 }
             }

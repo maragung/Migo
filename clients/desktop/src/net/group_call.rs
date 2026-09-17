@@ -840,9 +840,16 @@ impl Worker {
                 return;
             };
             let bundle = signed.bundles.get(&to_device).cloned();
-            signed
-                .sessions
-                .seal(conversation_id, to_device, bundle.as_ref(), &payload)
+            // The ask is bound to this device as its sender, like every other pairwise seal: the
+            // holder rebuilds the context from the frame's sender field and the two must agree.
+            let my_device = signed.account.device_id;
+            signed.sessions.seal(
+                conversation_id,
+                my_device,
+                to_device,
+                bundle.as_ref(),
+                &payload,
+            )
         };
         let Ok(envelope) = envelope else {
             // No session and no bundle: the fetch is the only way forward, and the ask waits
@@ -1326,6 +1333,7 @@ mod tests {
         let envelope = alice
             .seal(
                 conversation,
+                alice_device,
                 bob_device,
                 Some(&published_bundle(bob.keys())),
                 b"the ask",

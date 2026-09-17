@@ -22,22 +22,35 @@
 //! binding is the anti-unknown-key-share protection: the server cannot swap the sender's identity or
 //! replay a session key into a conversation with a third party without the tag failing.
 //!
-//! Section 11 also lists `conversation_id` and `message_id` among the metadata it would bind. The
-//! ratchet in `migo-crypto` threads a per-message context now — envelope version 2 — but this client
-//! still writes version 1 and passes `NO_CONTEXT`, because binding that context desyncs from any
-//! peer still writing version 1: the two ends must hand the ratchet the same bytes or genuine
-//! messages stop opening. Moving to version 2 is a coordinated change across all four
-//! implementations — the four builds that construct the structure and none of which calls another —
-//! so it is deferred here in the same terms as in the TypeScript SDK rather than done half-way on
-//! one client.
+//! Section 11 also lists `conversation_id` and `message_id` among the metadata the tag binds. The
+//! conversation and the sending device are bound now — envelope version 2, with the context
+//! `migo-crypto`'s `aad` module builds and this store hands the ratchet on both sides. What that
+//! buys is narrower than it sounds, and worth stating exactly, because this layer's traffic is not
+//! what its name suggests: content never travels here. Every message, one-to-one or group, is sealed
+//! once under a sender key, and what travels pairwise is the *distribution* of that key to one
+//! device. Relocating a distribution is the case section 11 calls worse than a denial of service —
+//! a chain installed in a conversation the sender never authorised, under which the recipient then
+//! reads whatever the relocator sends — and binding the conversation id is what stops it. Binding
+//! the sending device is what stops a distribution being replayed as if it came from a different
+//! device of the same account.
+//!
+//! `message_id` is deliberately still unbound. A distribution rides inside the message that carries
+//! it and has no id of its own: [`SessionStore::seal`] produces one envelope per recipient device,
+//! while the message id is minted by whoever builds the frame, so the flags byte stays clear until
+//! there is a binding on this path that genuinely has an id.
+//!
+//! The version travels on the parsed [`Envelope`] rather than being read as a constant here: a
+//! receiver has to reproduce the *sender's* bytes, and for a message written before the flip that
+//! means no context at all.
 
 use std::collections::HashMap;
 
 use migo_account::{DeviceCredential, IdentityKey, MigoRoot};
 use migo_core::{Id, OsRandom, Random};
+use migo_crypto::aad;
 use migo_crypto::identity::{KeyPair, SignedPrekey, PUBLIC_KEY_LEN};
 use migo_crypto::x3dh::{initiate, respond, InitialMessage, PrekeyBundle};
-use migo_crypto::{IdentityPublic, IdentitySecret, RatchetSession};
+use migo_crypto::{EnvelopeVersion, IdentityPublic, IdentitySecret, RatchetSession};
 
 use super::envelope::{Envelope, Preamble};
 use super::CryptoError;
@@ -49,20 +62,21 @@ use super::CryptoError;
 /// returns, and small enough that the published bundle stays a few kilobytes.
 pub const ONE_TIME_PREKEY_COUNT: u32 = 100;
 
-/// The bound context this client seals and opens under: none.
+/// The context an envelope of `version` binds, for the metadata the frame carries.
 ///
-/// Section 11's context — the version, the scheme, the sending device, the conversation, the message
-/// — is a version-2 envelope feature, and this client still writes version 1. An empty context is
-/// exactly the version-1 associated data, so passing it changes nothing on the wire; what it does
-/// is keep the two ends of a session symmetric, because both must hand the ratchet the *same*
-/// context or the frames stop opening.
-///
-/// The context is not merely unset here: it is not yet reachable from this layer. `seal` and `open`
-/// each hold the conversation and the *peer's* device, and the context also names the sending
-/// device and, for a message, a message id — neither of which the session store is told, because
-/// today it does not need them. Wiring them through is the coordinated step, and it moves the
-/// version byte with it.
-const NO_CONTEXT: &[u8] = &[];
+/// One function for both directions, so a writer and a reader of the same version cannot disagree
+/// about the bytes. `aad::context` returns empty bytes for version 1 whatever it is handed, which is
+/// what lets a single call site be correct for both: the version, not the caller, decides whether
+/// there is a context to bind. `message_id` is always `None` here — see the module docs on why this
+/// layer has no id to bind.
+fn context_for(
+    version: EnvelopeVersion,
+    scheme: u8,
+    sender_device: &Id,
+    conversation: &Id,
+) -> Vec<u8> {
+    aad::context(version, scheme, sender_device, conversation, None)
+}
 
 /// This device's own key material.
 ///
@@ -357,9 +371,18 @@ impl SessionStore {
     /// `bundle` is required only for the first message; pass `None` once a session exists. A caller
     /// that has no bundle and no session gets [`CryptoError::NoBundle`] rather than a silent
     /// plaintext send.
+    ///
+    /// `sending_device` is this device's own id — the one the frame this envelope rides in stamps as
+    /// its sender. It is a parameter rather than state on the store for the same reason
+    /// [`SessionStore::open`] takes the sender's from the frame: the id arrives with the grant at
+    /// sign-in and changes with the session, while this store is built from the vault before either
+    /// is known, so a field would freeze whichever id happened to be current when it was
+    /// constructed. Every caller already holds the id it is about to put on the frame, which is also
+    /// the only value that keeps the receiver's rebuilt context in step.
     pub fn seal(
         &mut self,
         conversation: Id,
+        sending_device: Id,
         device: Id,
         bundle: Option<&PrekeyBundle>,
         plaintext: &[u8],
@@ -388,25 +411,56 @@ impl SessionStore {
         }
 
         let entry = self.sessions.get_mut(&key).expect("inserted above");
-        let (header, ciphertext) =
-            entry
-                .session
-                .encrypt_next(plaintext, &mut random, NO_CONTEXT)?;
 
         // The peer has replied, so it has the session; the preamble has done its job and every
-        // further message saves the ~110 bytes it costs.
+        // further message saves the ~110 bytes it costs. Decided before the envelope is built rather
+        // than after, because the scheme it yields is what the context binds: the two must be read
+        // off one value or a message can go out declaring one layout and sealed under another.
         if entry.session.received_count() > 0 {
             entry.outgoing_preamble = None;
         }
+        let preamble = entry.outgoing_preamble.clone();
+        let scheme = if preamble.is_some() {
+            super::envelope::SCHEME_DOUBLE_RATCHET_PREKEY
+        } else {
+            super::envelope::SCHEME_DOUBLE_RATCHET
+        };
 
-        Ok(match &entry.outgoing_preamble {
-            Some(preamble) => Envelope::initial(preamble.clone(), header, ciphertext),
+        // The scheme travels inside the context as well as in the envelope, so a distribution
+        // relabelled from the plain form to the prekey form fails the tag rather than being read
+        // under the wrong layout.
+        let context = context_for(
+            EnvelopeVersion::WRITTEN,
+            scheme,
+            &sending_device,
+            &conversation,
+        );
+        let (header, ciphertext) = entry
+            .session
+            .encrypt_next(plaintext, &mut random, &context)?;
+
+        Ok(match preamble {
+            Some(preamble) => Envelope::initial(preamble, header, ciphertext),
             None => Envelope::established(header, ciphertext),
         })
     }
 
     /// Opens an envelope from one device in one conversation, answering X3DH first if it carries
     /// a preamble.
+    ///
+    /// `device` is the *sender's*, because that is what the context binds and what the session is
+    /// keyed by; this device's own id is not part of opening anything.
+    ///
+    /// # Commit only on success
+    ///
+    /// A first message carries X3DH material, so a receiver with no session for the sender derives
+    /// one rather than refusing outright. That derivation is committed here only after the tag has
+    /// verified, because a distribution goes out to every device in a conversation: a first message
+    /// pairwise-sealed for a *different* device also arrives here, decodes as a well-formed prekey
+    /// envelope, and would — if committed eagerly — plant a bogus session in this slot so the real
+    /// distribution could never open, and spend a one-time prekey doing it. The responder session is
+    /// therefore derived locally, the decrypt attempted, and only then do the session and the
+    /// consumed prekey become state.
     pub fn open(
         &mut self,
         conversation: Id,
@@ -414,13 +468,20 @@ impl SessionStore {
         envelope: &Envelope,
     ) -> Result<Vec<u8>, CryptoError> {
         let key = (conversation, device);
+        let context = context_for(envelope.version, envelope.scheme, &device, &conversation);
+
         if let Some(preamble) = &envelope.preamble {
             let already = self
                 .sessions
                 .get(&key)
                 .is_some_and(|entry| entry.origin.as_ref() == Some(preamble));
             if !already {
-                let (session, secret) = self.answer(preamble)?;
+                let (mut session, secret, one_time_prekey) = self.derive_responder(preamble)?;
+                let plaintext =
+                    session.decrypt(&envelope.header, &envelope.ciphertext, &context)?;
+                if let Some(id) = one_time_prekey {
+                    self.keys.one_time.remove(&id);
+                }
                 self.sessions.insert(
                     key,
                     Entry {
@@ -430,25 +491,30 @@ impl SessionStore {
                         origin: Some(preamble.clone()),
                     },
                 );
+                return Ok(plaintext);
             }
         }
 
         let entry = self.sessions.get_mut(&key).ok_or(CryptoError::NoSession)?;
-        let plaintext =
-            entry
-                .session
-                .decrypt(&envelope.header, &envelope.ciphertext, NO_CONTEXT)?;
+        let plaintext = entry
+            .session
+            .decrypt(&envelope.header, &envelope.ciphertext, &context)?;
         // We have heard from them, so they have the session. Stop paying for the preamble.
         entry.outgoing_preamble = None;
         Ok(plaintext)
     }
 
-    /// Runs X3DH as the responder for one preamble, consuming the one-time prekey it names.
+    /// Runs X3DH as the responder for one preamble, naming the one-time prekey that a *successful*
+    /// open must then consume.
     ///
-    /// The one-time prekey is removed whether or not the session goes on to decrypt anything. That
-    /// is the point of it being one-time: reusing it would give two sessions the same fourth DH
-    /// input, and an attacker who recorded both would only have to break one.
-    fn answer(&mut self, preamble: &Preamble) -> Result<(RatchetSession, [u8; 32]), CryptoError> {
+    /// Consuming is the caller's step, and it happens only once the tag has verified — see
+    /// [`SessionStore::open`]. The key is still one-time in the sense that matters: it is removed
+    /// before the session that used it can be used again, so two sessions never share the fourth DH
+    /// input, and an attacker who recorded both would still only have to break one.
+    fn derive_responder(
+        &self,
+        preamble: &Preamble,
+    ) -> Result<(RatchetSession, [u8; 32], Option<u32>), CryptoError> {
         if preamble.signed_prekey_id != self.keys.signed_prekey_id {
             return Err(CryptoError::UnknownPrekey);
         }
@@ -456,7 +522,7 @@ impl SessionStore {
             Some(id) => Some(
                 self.keys
                     .one_time
-                    .remove(&id)
+                    .get(&id)
                     .ok_or(CryptoError::UnknownPrekey)?,
             ),
             None => None,
@@ -470,7 +536,9 @@ impl SessionStore {
         let seed = respond(
             &self.keys.identity,
             &self.keys.signed_prekey,
-            one_time.as_ref(),
+            // Already a reference: looked up rather than removed, because consuming the prekey is
+            // the caller's step and waits for the tag (see `open`).
+            one_time,
             &initial,
         )?;
         // The responder's first ratchet key is its signed prekey pair, which is what lets the
@@ -479,7 +547,11 @@ impl SessionStore {
         // pair is rebuilt from its seed, which is the same key by construction.
         let pair = KeyPair::from_seed(self.keys.signed_prekey.expose_seed());
         let secret = seed.shared_secret;
-        Ok((RatchetSession::responder(&seed, pair), secret))
+        Ok((
+            RatchetSession::responder(&seed, pair),
+            secret,
+            preamble.one_time_prekey_id,
+        ))
     }
 
     /// How many unused one-time prekeys remain.
@@ -719,13 +791,14 @@ mod tests {
         // And a session Bob initiates lands on the same property: the secret is a function of the
         // handshake's inputs, not of who ran `initiate`.
         let reply = bob
-            .seal(conversation, alice_device, None, b"the answer")
+            .seal(conversation, bob_device, alice_device, None, b"the answer")
             .expect("the established session seals without a bundle");
         assert!(reply.preamble.is_none());
         let other = Id::generate(0, &mut OsRandom);
         let first = bob
             .seal(
                 other,
+                bob_device,
                 alice_device,
                 Some(&published_bundle(alice.keys())),
                 b"bob speaks first here",
@@ -743,5 +816,119 @@ mod tests {
         assert!(alice.pairwise_secret(other, bob_device).is_some());
         let stranger = Id::generate(0, &mut OsRandom);
         assert!(alice.pairwise_secret(other, stranger).is_none());
+    }
+
+    /// A distribution sealed for one conversation must not open in another.
+    ///
+    /// Section 11 states the stake exactly. Content never travels through this layer — every message
+    /// is sealed once under a sender key and what travels pairwise is the *distribution* of that key
+    /// to one device. Relocating a distribution is therefore worse than a denial of service: it
+    /// installs a chain in a conversation the sender never authorised, and the recipient then reads
+    /// whatever the relocator sends under it.
+    ///
+    /// This is the attack version 2 exists to stop, and the case that would have opened on the old
+    /// code: the first message to a device carries X3DH material, and nothing in that derivation
+    /// mentions the conversation — the identities and the prekeys are the same in every conversation
+    /// the two devices share.
+    #[test]
+    fn a_distribution_relocated_to_another_conversation_does_not_open() {
+        let alice_keys = DeviceKeys::additional();
+        let bob_keys = DeviceKeys::additional();
+        let alice_device = Id::generate(0, &mut OsRandom);
+        let bob_device = Id::generate(0, &mut OsRandom);
+        let conversation = Id::generate(0, &mut OsRandom);
+        let elsewhere = Id::generate(0, &mut OsRandom);
+        let mut alice = SessionStore::new(alice_keys);
+        let mut bob = SessionStore::new(bob_keys);
+
+        let bundle = published_bundle(bob.keys());
+        let sealed = alice
+            .seal(
+                conversation,
+                alice_device,
+                bob_device,
+                Some(&bundle),
+                b"the chain we distribute",
+            )
+            .expect("seals against the bundle");
+        let prekeys = bob.one_time_remaining();
+
+        // The attack first, while the prekey is still unspent, so the assertion below is about a
+        // prekey that must survive rather than one the genuine open has already taken.
+        assert!(
+            bob.open(elsewhere, alice_device, &sealed).is_err(),
+            "a distribution for one conversation must not open in another"
+        );
+        assert_eq!(
+            bob.one_time_remaining(),
+            prekeys,
+            "a message that failed to authenticate must not spend the prekey it named"
+        );
+
+        // And the control: in the conversation it was sealed for, the same bytes open.
+        let opened = bob
+            .open(conversation, alice_device, &sealed)
+            .expect("a distribution opens in its own conversation");
+        assert_eq!(opened, b"the chain we distribute");
+        assert_eq!(
+            bob.one_time_remaining(),
+            prekeys - 1,
+            "and once it has genuinely opened, the prekey is spent"
+        );
+    }
+
+    /// The version byte selects the associated data, at the layer that has to build it.
+    ///
+    /// `migo-crypto`'s own tests pin that the ratchet feeds its context to the AEAD, and the vectors
+    /// pin the context's bytes. Neither pins the thing that protects a conversation: that *this*
+    /// store builds the context out of the frame's claimed metadata and hands it to the ratchet on
+    /// both sides. A store that accepted a context parameter and passed an empty one would leave
+    /// every test above green.
+    #[test]
+    fn the_version_byte_selects_the_associated_data_this_store_builds() {
+        let alice_keys = DeviceKeys::additional();
+        let bob_keys = DeviceKeys::additional();
+        let alice_device = Id::generate(0, &mut OsRandom);
+        let bob_device = Id::generate(0, &mut OsRandom);
+        let conversation = Id::generate(0, &mut OsRandom);
+        let mut alice = SessionStore::new(alice_keys);
+        let mut bob = SessionStore::new(bob_keys);
+
+        let bundle = published_bundle(bob.keys());
+        let sealed = alice
+            .seal(
+                conversation,
+                alice_device,
+                bob_device,
+                Some(&bundle),
+                b"the chain we distribute",
+            )
+            .expect("seals against the bundle");
+        assert_eq!(
+            sealed.version,
+            EnvelopeVersion::WRITTEN,
+            "the pairwise layer writes the version this build declares"
+        );
+
+        // Relabelling it version 1 must break it. The ratchet would then seam an empty context where
+        // the sender sealed a real one, so a tag that verifies can only mean the context never
+        // reached the tag — which is precisely the failure this whole step exists to rule out.
+        let mut relabelled =
+            Envelope::decode(&sealed.encode().expect("encodes")).expect("its own encoding decodes");
+        relabelled.version = EnvelopeVersion::V1;
+        let prekeys = bob.one_time_remaining();
+        assert!(
+            bob.open(conversation, alice_device, &relabelled).is_err(),
+            "a message relabelled to version 1 must not open under the version-2 associated data"
+        );
+
+        // The genuine envelope still opens, so the failure above is the relabelling and not a session
+        // the failed attempt damaged: nothing is committed on a message that does not authenticate,
+        // which for a first message means neither the session nor the one-time prekey it named.
+        assert_eq!(bob.one_time_remaining(), prekeys);
+        let opened = bob
+            .open(conversation, alice_device, &sealed)
+            .expect("the genuine envelope opens");
+        assert_eq!(opened, b"the chain we distribute");
     }
 }

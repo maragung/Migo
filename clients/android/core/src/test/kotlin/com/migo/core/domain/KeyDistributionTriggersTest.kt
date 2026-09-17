@@ -412,7 +412,7 @@ class KeyDistributionTriggersTest {
         // so this is unambiguously the legacy shape.
         val legacySecret = ByteArray(CALL_KEY_LEN) { 0x7F }
         val sealed = runBlocking {
-            f.me.sessionCrypto.seal(CONVERSATION, ADA, ADA_LAPTOP, legacySecret)
+            f.me.sessionCrypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, legacySecret)
         }
         val ask = encodeOf {
             CallRenegotiate(

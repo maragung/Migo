@@ -26,7 +26,7 @@
  * are:
  *
  * ```text
- * u8      envelope_version       ENVELOPE_VERSION
+ * u8      envelope_version       SENDER_KEY_ENVELOPE_VERSION
  * u8      scheme                 SCHEME_SENDER_KEY
  * varint  sender_key_id          the chain id (which of the sender's chains this is)
  * varint  group_key_epoch        bumped whenever membership changes, so a removed member's key dies
@@ -57,11 +57,27 @@ import type { IdentitySecret, SenderKeyMessage } from '@migo/crypto';
 import { conversationContext } from './content.js';
 import { EnvelopeReader, EnvelopeWriter } from './envelope-buffer.js';
 import { SdkError } from './errors.js';
-import { ENVELOPE_VERSION, SCHEME_SENDER_KEY } from './session-crypto.js';
+import { SCHEME_SENDER_KEY } from './session-crypto.js';
 import type { SealedEnvelope } from './session-crypto.js';
 
 /** Bytes of a sender-key chain key, mirroring `CHAIN_KEY_LEN` in the crypto crate. */
 const CHAIN_KEY_LEN = 32;
+
+/**
+ * The envelope version this layer writes, which is not the pairwise layer's.
+ *
+ * Both are section 11 envelopes and both carry an `envelope_version` byte, but the byte is a claim
+ * about the *associated data*, and the two schemes reach their binding differently: a pairwise
+ * envelope appends section 11's fixed context, while this one already binds the conversation id as
+ * the AEAD's associated data outright (`conversationContext`). So the version that says "a context
+ * is appended" is not the version this one writes, and sharing one constant would have made the
+ * pairwise flip silently relabel every group message as carrying a context it does not carry —
+ * a version byte that means two things depending on the scheme is worse than two constants.
+ *
+ * The group layout's remaining binding — the sending device and the message id, which a group
+ * message genuinely has — moves this byte on its own, in the step section 11 describes.
+ */
+const SENDER_KEY_ENVELOPE_VERSION = 1;
 
 /**
  * The identity secret this layer signs with.
@@ -335,7 +351,7 @@ function parseDistribution(bytes: Uint8Array): SenderKeyDistribution {
 /** Assembles the section 11 group envelope from a sealed sender-key message. */
 function encodeSenderKeyEnvelope(epoch: number, message: SenderKeyMessage): Uint8Array {
   const writer = new EnvelopeWriter();
-  writer.u8(ENVELOPE_VERSION);
+  writer.u8(SENDER_KEY_ENVELOPE_VERSION);
   writer.u8(SCHEME_SENDER_KEY);
   writer.varint(message.header.chainId);
   writer.varint(epoch);
@@ -355,7 +371,7 @@ interface ParsedSenderKeyEnvelope {
 function decodeSenderKeyEnvelope(bytes: Uint8Array): ParsedSenderKeyEnvelope {
   const reader = new EnvelopeReader(bytes);
   const version = reader.u8();
-  if (version !== ENVELOPE_VERSION) {
+  if (version !== SENDER_KEY_ENVELOPE_VERSION) {
     throw new SdkError(`group-crypto: unsupported envelope version ${version}`);
   }
   const scheme = reader.u8();

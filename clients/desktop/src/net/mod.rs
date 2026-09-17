@@ -6959,17 +6959,19 @@ impl Worker {
             let Ok(control) = control else {
                 continue;
             };
-            let envelope =
-                match signed
-                    .sessions
-                    .seal(conversation_id, *device, bundle.as_ref(), &control)
-                {
-                    Ok(envelope) => envelope,
-                    // A device whose bundle will not start a session is skipped, not fatal: the
-                    // content message still reaches it only if a distribution did, and its next
-                    // send re-offers one.
-                    Err(_) => continue,
-                };
+            let envelope = match signed.sessions.seal(
+                conversation_id,
+                my_device,
+                *device,
+                bundle.as_ref(),
+                &control,
+            ) {
+                Ok(envelope) => envelope,
+                // A device whose bundle will not start a session is skipped, not fatal: the
+                // content message still reaches it only if a distribution did, and its next
+                // send re-offers one.
+                Err(_) => continue,
+            };
             let Ok(bytes) = envelope.encode() else {
                 continue;
             };
@@ -7871,9 +7873,17 @@ impl Worker {
         let Ok(control) = control else {
             return None;
         };
-        let envelope = signed
-            .sessions
-            .seal(conversation_id, device, bundle.as_ref(), &control);
+        // This device's own id, which the envelope binds as its sender: the receiver rebuilds the
+        // context from the frame's sender field, and the two must agree or the distribution is
+        // unopenable there.
+        let my_device = signed.account.device_id;
+        let envelope = signed.sessions.seal(
+            conversation_id,
+            my_device,
+            device,
+            bundle.as_ref(),
+            &control,
+        );
         let Ok(envelope) = envelope else {
             // No session and no bundle for this device: fetch the bundle so the next event's
             // redistribution can reach it. This one is skipped, not fatal — the same
