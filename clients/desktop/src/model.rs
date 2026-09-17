@@ -203,6 +203,34 @@ impl Conversation {
         }
     }
 
+    /// The bot this conversation's title names, where the title names exactly one account.
+    ///
+    /// The companion of [`Self::display_title`], and it reads the same two things that method
+    /// does: a conversation carrying a title of its own — a group, a room — names nobody in
+    /// particular and has no one bot to mark, and one whose title is the peers' names has a bot
+    /// to mark only when there is exactly one peer to name.
+    ///
+    /// Kept beside `display_title` rather than computed at each row for the reason the two must
+    /// agree: a row that marked the bot of the second of three members would put a bot's mark on
+    /// a title that names three people, and a row that marked nobody would leave a direct chat
+    /// with a bot reading as a direct chat with a person.
+    #[must_use]
+    pub fn display_bot(&self, me: Id, bots: &HashMap<Id, Id>) -> Option<Id> {
+        if self.title.as_deref().is_some_and(|title| !title.is_empty()) {
+            return None;
+        }
+        let peers: Vec<Id> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|id| *id != me)
+            .collect();
+        match peers.as_slice() {
+            [only] => bots.get(only).copied(),
+            _ => None,
+        }
+    }
+
     /// Whether this conversation is a group conversation — the kind the roster panel, the
     /// founder controls, and the vote-kick lever belong to. Turned on the server's own kind,
     /// not the member count: a group of two (one member just left) is still a group with a
@@ -747,6 +775,13 @@ pub struct MemberCard {
     pub country: Option<String>,
     /// The language the account speaks, as it declared it.
     pub language: Option<String>,
+    /// The bot this account speaks as, present exactly when it is one.
+    ///
+    /// Carried on the same rule the wire names it: only the positive is ever written, so an absent
+    /// field is the absence of a claim rather than a claim that the account is a person. The mark
+    /// reads it and [`crate::report::person_target`] reports by it, and both read this one field so
+    /// a card cannot draw a bot and file a complaint about somebody else.
+    pub bot_id: Option<Id>,
 }
 
 /// One account found by search or offered as a suggestion.
@@ -756,6 +791,8 @@ pub struct PersonRow {
     pub username: String,
     pub display_name: String,
     pub mutual_friends: u32,
+    /// The bot this account speaks as, on [`MemberCard::bot_id`]'s own rule.
+    pub bot_id: Option<Id>,
 }
 
 /// The account's XP progression, for the wallet's level card and the member view's standing
@@ -1105,6 +1142,62 @@ mod tests {
         let mut direct = group.clone();
         direct.kind = ConversationKind::Direct;
         assert!(!direct.is_group());
+    }
+
+    #[test]
+    fn the_bot_mark_follows_the_title_it_agrees_with() {
+        // The mark and the title are read off the same two facts, so every case here is a
+        // case of `display_title` too, and the point is that they cannot disagree: a row
+        // wearing a bot's mark under a title that names three people would accuse the wrong
+        // one, and a direct chat with a bot wearing none would read as a chat with a person.
+        let me = Id::from_bytes([1; 16]);
+        let peer = Id::from_bytes([2; 16]);
+        let bot = Id::from_bytes([3; 16]);
+        let other = Id::from_bytes([4; 16]);
+        let bots: HashMap<Id, Id> = [(peer, bot)].into_iter().collect();
+
+        let base = Conversation {
+            conversation_id: Id::from_bytes([9; 16]),
+            title: None,
+            members: vec![me, peer],
+            encrypted: true,
+            last_seq: 0,
+            preview: None,
+            updated_at: None,
+            unread: 0,
+            kind: ConversationKind::Direct,
+            room_id: None,
+        };
+
+        // A direct chat with a bot: the title is that bot's name, and the mark is its id.
+        assert_eq!(base.display_bot(me, &bots), Some(bot));
+
+        // The same conversation with the account the wire named no bot for: the title still
+        // names them, and no mark is drawn, because there is nothing to draw.
+        assert_eq!(base.display_bot(me, &HashMap::new()), None);
+
+        // A conversation carrying a title of its own — a group, a room — names nobody in
+        // particular, so it wears no mark even when a member of it is a bot.
+        let mut titled = base.clone();
+        titled.title = Some("Weekend plans".to_owned());
+        assert_eq!(titled.display_bot(me, &bots), None);
+
+        // An empty title is the server sending nothing rather than a group called "", and it
+        // is treated as no title at all — the same rule `display_title` applies.
+        let mut empty = base.clone();
+        empty.title = Some(String::new());
+        assert_eq!(empty.display_bot(me, &bots), Some(bot));
+
+        // More than one peer: the title names them all, and no single one of them can be the
+        // bot the row's mark would claim.
+        let mut several = base.clone();
+        several.members = vec![me, peer, other];
+        assert_eq!(several.display_bot(me, &bots), None);
+
+        // And a conversation whose only peer is this account — a note to self — names nobody.
+        let mut alone = base.clone();
+        alone.members = vec![me];
+        assert_eq!(alone.display_bot(me, &bots), None);
     }
 
     #[test]

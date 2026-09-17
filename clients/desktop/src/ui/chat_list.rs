@@ -46,6 +46,8 @@ struct Row {
     time: Option<String>,
     unread: u32,
     encrypted: bool,
+    /// The bot the row's title names, where it names exactly one account.
+    bot: Option<Id>,
 }
 
 /// Draws the chat list: the box, then every conversation it lets through.
@@ -99,6 +101,10 @@ pub fn show(
             time: conversation.updated_at.map(row_time),
             unread: conversation.unread,
             encrypted: conversation.encrypted,
+            // Read from the same bots map the thread's own marks come from, through the helper
+            // that keeps the mark and the title in step: a row can only wear the mark when the
+            // title it wears is the name of that one bot.
+            bot: conversation.display_bot(me, &chat.bots),
         })
         .collect();
 
@@ -151,6 +157,7 @@ pub fn show(
                         unread: row.unread,
                         selected: selected == Some(row.conversation_id),
                         encrypted: row.encrypted,
+                        bot: row.bot,
                     },
                 )
                 .clicked()

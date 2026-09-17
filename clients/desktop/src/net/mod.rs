@@ -925,8 +925,22 @@ pub enum Event {
         user_id: Id,
         typing: bool,
     },
-    /// Display names for account ids, so the UI can title a direct conversation.
-    Names(HashMap<Id, String>),
+    /// Display names for account ids, so the UI can title a direct conversation — and, beside
+    /// them, the bot each of those accounts speaks as wherever the card named one.
+    ///
+    /// The two maps travel together rather than as two events because they come from one read:
+    /// a profile answer is the only thing on this wire that names an account, and an account
+    /// that is a bot is named a bot by the same answer. Sent apart, a consumer could take the
+    /// names and forget the bots, and the result would be a client that draws a bot as a person
+    /// on the surfaces that happen to read only the first map — with nothing anywhere saying so.
+    ///
+    /// The bots map holds only the positive, so an absent key is the absence of a claim rather
+    /// than a claim that the account is a person. That is what lets a surface draw the mark
+    /// exactly when the wire named one and stay silent otherwise.
+    Names {
+        names: HashMap<Id, String>,
+        bots: HashMap<Id, Id>,
+    },
     /// The social graph moved: friendships and pending requests, reduced to model rows.
     ///
     /// Followed by names and presence for the same ids wherever the server discloses them,
@@ -4075,6 +4089,7 @@ impl Worker {
             custom_status: profile.custom_status.clone(),
             country: profile.country.clone(),
             language: profile.language.clone(),
+            bot_id: profile.bot_id,
         }
     }
 
@@ -8302,6 +8317,7 @@ impl Worker {
                 username: person.username,
                 display_name: person.display_name,
                 mutual_friends: person.mutual_friends,
+                bot_id: person.bot_id,
             })
             .collect();
         match self.people_asks.remove(&frame.header.correlation) {
@@ -9213,6 +9229,7 @@ impl Worker {
         };
         let me = self.signed.as_ref().map(|signed| signed.account.account_id);
         let mut names = HashMap::with_capacity(response.profiles.len());
+        let mut bots = HashMap::new();
         for profile in &response.profiles {
             let name = if profile.display_name.is_empty() {
                 profile.username.clone()
@@ -9253,9 +9270,15 @@ impl Worker {
                     });
                 }
             }
+            // The bot, where the card named one, filed beside the name it rode in with. Only the
+            // positive is written: a card that named no bot says nothing about the account, and
+            // recording "not a bot" would be this client making a claim the wire never made.
+            if let Some(bot_id) = profile.bot_id {
+                bots.insert(profile.user_id, bot_id);
+            }
             names.insert(profile.user_id, name);
         }
-        self.sink.send(Event::Names(names));
+        self.sink.send(Event::Names { names, bots });
         // The ask is spent with the reply, matched or not: a reply that names every subject
         // it was given and still not the asked-for account is the server's own word that the
         // card is not coming, and a later unrelated batch must not answer a question nobody

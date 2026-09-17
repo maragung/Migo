@@ -67,12 +67,11 @@ pub enum ReportSubject {
     Room,
     /// A bot, by `bot.bot_id` rather than by the account it signs in as.
     ///
-    /// Carried because the numbering is the wire's and a client that skipped the kind would
-    /// leave a hole where the node reads one — but nothing here constructs it: this client
-    /// has no bot surface, so there is no bot on any screen for a report to point at. The
-    /// kind exists for the clients that grow one, and the value is pinned by a test either
-    /// way.
-    #[allow(dead_code)]
+    /// The two are different ids and different problems: a bot report names the integration, a
+    /// user report names the person who owns it, and a moderator deciding what to do needs to
+    /// tell them apart before deciding anything. A surface that holds both ids picks between
+    /// them through [`person_target`], which is the only place in this client that makes the
+    /// choice.
     Bot,
 }
 
@@ -107,7 +106,7 @@ pub enum ReportReason {
     Spam,
     /// Volume rather than content: the same thing, very fast.
     ///
-    /// One of the four codes no surface here offers; see the note on [`Self::ChildSafety`].
+    /// One of the three codes no surface here offers; see the note on [`Self::ChildSafety`].
     #[allow(dead_code)]
     Flood,
     /// An attempt to obtain money or credentials by deception.
@@ -124,26 +123,29 @@ pub enum ReportReason {
     Violence,
     /// Self-harm or suicide content.
     ///
-    /// One of the four codes no surface here offers; see the note on [`Self::ChildSafety`].
+    /// One of the three codes no surface here offers; see the note on [`Self::ChildSafety`].
     #[allow(dead_code)]
     SelfHarm,
     /// Somebody pretending to be somebody else.
     Impersonation,
     /// Child sexual abuse material. Kept its own code; see the enum's own note.
     ///
-    /// One of the four codes the sheet deliberately does not list, alongside
-    /// [`Self::SelfHarm`], [`Self::Flood`] and [`Self::BotAbuse`] — three that ask the
-    /// reporter to draw a line the queue's own prioritisation should draw, and one that is a
-    /// judgement about volume rather than about content, which a person reading one message
-    /// cannot make. Nothing in this client constructs them: they are carried so the numbering
-    /// is the wire's, and the values are pinned by a test either way. A client that grows a
-    /// surface knowing which it means — a bot screen, a support form — finds the code here.
+    /// One of the three codes the sheet deliberately does not list, alongside [`Self::SelfHarm`]
+    /// and [`Self::Flood`] — two that ask the reporter to draw a line the queue's own
+    /// prioritisation should draw, and one that is a judgement about volume rather than about
+    /// content, which a person reading one message cannot make. Nothing in this client constructs
+    /// them: they are carried so the numbering is the wire's, and the values are pinned by a test
+    /// either way. A client that grows a surface knowing which it means — a support form, say —
+    /// finds the code here.
     #[allow(dead_code)]
     ChildSafety,
     /// A bot misbehaving: a broken integration rather than an abusive person.
     ///
-    /// One of the four codes no surface here offers; see the note on [`Self::ChildSafety`].
-    #[allow(dead_code)]
+    /// The fourth code that is not a menu item, and the one that is nevertheless reachable: a bot
+    /// is named on the wire, this client marks one wherever it draws one, and the marking already
+    /// answered the question a reason list would otherwise ask. So [`reasons_for`] puts this row
+    /// in front of the nine for a [`ReportSubject::Bot`] and [`opening_reason`] opens the sheet on
+    /// it, while every other subject is offered the nine alone.
     BotAbuse,
     /// None of the above.
     Other,
@@ -191,10 +193,13 @@ pub struct ReportReasonOption {
 /// The reasons offered, in the order the sheet lists them.
 ///
 /// A subset of [`ReportReason`]: the codes a person can actually judge for themselves. The rest —
-/// [`ReportReason::ChildSafety`], [`ReportReason::SelfHarm`], [`ReportReason::BotAbuse`] — are
-/// reachable only through a surface that already knows which it means, and are deliberately not a
-/// menu item, because a reporter asked to choose between "child safety" and "sexual content" in a
-/// list is being asked to draw a legal line the queue's own prioritisation should draw instead.
+/// [`ReportReason::ChildSafety`], [`ReportReason::SelfHarm`] — are reachable only through a
+/// surface that already knows which it means, and are deliberately not a menu item, because a
+/// reporter asked to choose between "child safety" and "sexual content" in a list is being asked
+/// to draw a legal line the queue's own prioritisation should draw instead.
+///
+/// The fourth withheld code, [`ReportReason::BotAbuse`], is the one exception and is not in this
+/// list either: see [`BOT_REPORT_REASON`] and [`reasons_for`] for where it is offered instead.
 ///
 /// [`ReportReason::Other`] is last and is the only catch-all: a menu that put it first would collect
 /// every report from every reporter who reads the list top-down.
@@ -249,6 +254,75 @@ pub const REPORT_REASONS: [ReportReasonOption; 9] = [
     },
 ];
 
+/// The bot-abuse row, which is offered to exactly one subject and to no other.
+///
+/// The words are the web dialog's and the Android sheet's, deliberately identical, because the
+/// reason a reporter picks has to mean the same thing on every device they might pick it from.
+///
+/// It is not in [`REPORT_REASONS`] because the rule that keeps it out of the generic menu is not
+/// "bot abuse is never offered" but "bot abuse is offered exactly where the surface already knows
+/// the subject is a bot" — and a rule stated that way is a rule about the *subject*, which is what
+/// [`reasons_for`] implements. Keeping it in the array and filtering it out per subject would put
+/// the nine and the ten one boolean apart in the same list, where a caller that forgot the filter
+/// would offer it to everybody and nothing would look wrong.
+pub const BOT_REPORT_REASON: ReportReasonOption = ReportReasonOption {
+    reason: ReportReason::BotAbuse,
+    label: "Bot misbehaving",
+    hint: "A bot that is broken, spammy, or abusive — a bad integration, not a bad person.",
+};
+
+/// The reason rows a report about `subject` offers, in the order the sheet draws them.
+///
+/// The nine every subject gets, and one row in front of them for a bot. Nothing is swapped out and
+/// nothing is lost: a reporter who knows a bot is doing something the bot row does not describe can
+/// still pick any of the nine, which is what makes the bot row an opening position rather than a
+/// verdict.
+///
+/// This mirrors the web dialog's `personSubject` and the Android sheet's `reportReasons`, and the
+/// difference between the three clients is worth stating because it is deliberate. The web dialog
+/// can open on a code its menu does not draw — it shows no radio checked while Send stays live —
+/// and this sheet cannot: `None` is what keeps Send dark here, and a Send that is live over a
+/// choice the reporter cannot see is a report filed under a reason nobody picked. So the row the
+/// sheet opens on has to be a row it drew, and for a bot that means this function has to add one.
+pub fn reasons_for(subject: ReportSubject) -> Vec<&'static ReportReasonOption> {
+    let mut rows: Vec<&'static ReportReasonOption> = Vec::with_capacity(REPORT_REASONS.len() + 1);
+    if subject == ReportSubject::Bot {
+        rows.push(&BOT_REPORT_REASON);
+    }
+    rows.extend(REPORT_REASONS.iter());
+    rows
+}
+
+/// The reason a sheet on `target` opens with, or `None` while the reporter is still reading.
+///
+/// `None` is the ordinary answer and the one every subject but a bot gets: the sheet's Send stays
+/// dark until a row is picked, because a list drawn with a row already chosen is a list nobody
+/// reads. A bot is the exception, and only because the marking already answered the question this
+/// list would otherwise ask — the surface knew the account was a bot before the reporter opened
+/// anything, which is exactly the knowledge that makes opening on a code honest rather than a guess.
+pub const fn opening_reason(target: &ReportTarget) -> Option<ReportReason> {
+    if matches!(target.kind, ReportSubject::Bot) {
+        Some(ReportReason::BotAbuse)
+    } else {
+        None
+    }
+}
+
+/// The report an account row points at, given the account and the bot it may speak as.
+///
+/// An account that speaks as a bot is reported as the bot and not as the account behind it, because
+/// `bot.bot_id` is a different id from the account id: a report filed under the account id would
+/// reach a moderator as a report about a bot that names something which is not one, and nothing on
+/// the wire would look wrong while it did. Every person-reporting door in this client goes through
+/// here for that reason — the rule is one branch, and it belongs in one place rather than in each
+/// row that happens to have a bot in it.
+pub fn person_target(account_id: Id, bot_id: Option<Id>, label: impl Into<String>) -> ReportTarget {
+    match bot_id {
+        Some(bot) => ReportTarget::bot(bot, label),
+        None => ReportTarget::user(account_id, label),
+    }
+}
+
 /// What a report points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportTarget {
@@ -298,9 +372,9 @@ impl ReportTarget {
     /// problems with different remedies: a moderator reading the queue needs to tell "this
     /// integration is broken" from "this person is abusive" before deciding anything.
     ///
-    /// Nothing on this client calls it: a bot target belongs to a screen that shows bots, and
-    /// this one has none. It is here so the vocabulary is whole for the client that grows one.
-    #[allow(dead_code)]
+    /// Reached through [`person_target`] rather than called directly by the surfaces that report a
+    /// person: a row holding both ids has to pick one, and a pick made at each row is a pick that
+    /// can be made wrongly at one of them without anything saying so.
     pub fn bot(id: Id, label: impl Into<String>) -> Self {
         Self {
             kind: ReportSubject::Bot,
@@ -353,15 +427,135 @@ mod tests {
     /// The menu is the codes a person can judge for themselves, and the three that are not on it
     /// are absent on purpose — a reporter choosing between "child safety" and "sexual content" in a
     /// list is being asked to make a legal distinction the queue should make instead.
+    ///
+    /// `BotAbuse` is absent from this list too, and that is a different fact about it rather than
+    /// the same one: it is offered, to a bot subject and to nothing else. The two claims are
+    /// asserted separately so neither can quietly become the other.
     #[test]
     fn the_menu_omits_the_three_codes_a_reporter_cannot_judge() {
         let offered: Vec<ReportReason> = REPORT_REASONS.iter().map(|entry| entry.reason).collect();
         assert!(!offered.contains(&ReportReason::ChildSafety));
         assert!(!offered.contains(&ReportReason::SelfHarm));
+        assert!(!offered.contains(&ReportReason::Flood));
         assert!(!offered.contains(&ReportReason::BotAbuse));
         assert_eq!(9, offered.len());
         // The catch-all is last: a list read top-down must not meet "Something else" first.
         assert_eq!(Some(&ReportReason::Other), offered.last());
+        // And "the generic menu" is not "every code": Flood is a fourth code no subject is
+        // offered, which the assertion above would pass just as well if it were missing from the
+        // enum entirely.
+        assert!(!reasons_for(ReportSubject::User)
+            .iter()
+            .any(|row| row.reason == ReportReason::Flood));
+    }
+
+    /// The one thing a bot subject changes about the menu: a row in front, and nothing else.
+    #[test]
+    fn a_bot_subject_is_offered_the_bot_reason_first_and_keeps_every_other_row() {
+        let menu = reasons_for(ReportSubject::Bot);
+        assert_eq!(REPORT_REASONS.len() + 1, menu.len());
+        assert_eq!(ReportReason::BotAbuse, menu[0].reason);
+        // The nine behind it, in order and unaltered: the reporter who knows the bot is doing
+        // something the bot row does not describe can still say so.
+        let tail: Vec<ReportReason> = menu[1..].iter().map(|row| row.reason).collect();
+        let generic: Vec<ReportReason> = REPORT_REASONS.iter().map(|row| row.reason).collect();
+        assert_eq!(generic, tail);
+        // Nothing duplicated, which is what makes building the list by concatenation safe.
+        for (index, row) in menu.iter().enumerate() {
+            assert!(
+                !menu[index + 1..]
+                    .iter()
+                    .any(|later| later.reason == row.reason),
+                "{:?} is offered twice",
+                row.reason
+            );
+        }
+    }
+
+    /// Every other subject gets the generic menu untouched, which is the half a bot-only test
+    /// would not notice breaking.
+    #[test]
+    fn every_other_subject_gets_the_generic_menu_untouched() {
+        for subject in [
+            ReportSubject::User,
+            ReportSubject::Message,
+            ReportSubject::Room,
+        ] {
+            let rows: Vec<ReportReason> =
+                reasons_for(subject).iter().map(|row| row.reason).collect();
+            let generic: Vec<ReportReason> = REPORT_REASONS.iter().map(|row| row.reason).collect();
+            assert_eq!(generic, rows, "{subject:?} is not a bot");
+        }
+    }
+
+    /// The pairing that matters: whatever the sheet opens with has to be a row the reporter can
+    /// see picked. The reason and the rows are decided in two different functions, so they are
+    /// asserted against each other here rather than assumed to agree.
+    #[test]
+    fn the_reason_a_bot_sheet_opens_on_is_the_row_its_menu_shows_first() {
+        let target = person_target(
+            Id::from_bytes([3u8; 16]),
+            Some(Id::from_bytes([4u8; 16])),
+            "Ana",
+        );
+        let opening = opening_reason(&target).expect("a bot subject opens on a reason");
+        assert_eq!(opening, reasons_for(target.kind)[0].reason);
+    }
+
+    /// And the ordinary answer is none: Send stays dark until the reporter picks.
+    #[test]
+    fn every_other_subject_opens_with_nothing_chosen() {
+        let account = Id::from_bytes([3u8; 16]);
+        assert_eq!(None, opening_reason(&person_target(account, None, "Ana")));
+        assert_eq!(
+            None,
+            opening_reason(&ReportTarget::room(account, "the room"))
+        );
+        assert_eq!(None, opening_reason(&ReportTarget::message(account)));
+        // The row the bot sheet opens on is a row the generic menu does *not* hold, which is the
+        // whole reason `reasons_for` has to add it: a sheet opening on a code it never drew would
+        // be a live Send over an unseen choice.
+        assert!(!REPORT_REASONS
+            .iter()
+            .any(|row| row.reason == ReportReason::BotAbuse));
+    }
+
+    /// Which id a report about a person carries, in the one place that decides it.
+    #[test]
+    fn an_account_that_speaks_as_a_bot_is_reported_as_the_bot_not_as_the_account() {
+        let account = Id::from_bytes([3u8; 16]);
+        let bot = Id::from_bytes([4u8; 16]);
+        let target = person_target(account, Some(bot), "Ana");
+        assert_eq!(ReportSubject::Bot, target.kind);
+        assert_eq!(bot, target.id);
+        assert_ne!(account, target.id, "the two ids are different things");
+
+        // No bot named is an ordinary account report — and a null on the wire is the absence of a
+        // claim, not a claim that the account is a person.
+        let person = person_target(account, None, "Ana");
+        assert_eq!(ReportSubject::User, person.kind);
+        assert_eq!(account, person.id);
+    }
+
+    /// The bot-abuse row is offered to a bot and to nothing else, which is the rule `reasons_for`
+    /// states as being about the subject rather than about the code.
+    #[test]
+    fn the_bot_row_is_offered_to_a_bot_and_to_no_other_subject() {
+        for subject in [
+            ReportSubject::User,
+            ReportSubject::Message,
+            ReportSubject::Room,
+        ] {
+            assert!(
+                !reasons_for(subject)
+                    .iter()
+                    .any(|row| row.reason == ReportReason::BotAbuse),
+                "{subject:?} is not a bot and must not be offered bot abuse"
+            );
+        }
+        assert_eq!(ReportReason::BotAbuse, BOT_REPORT_REASON.reason);
+        assert!(!BOT_REPORT_REASON.label.is_empty());
+        assert!(!BOT_REPORT_REASON.hint.is_empty());
     }
 
     /// Every menu entry carries words, because a row with an empty label is a button nobody can

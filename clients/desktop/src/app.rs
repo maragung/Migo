@@ -537,9 +537,14 @@ impl App {
                     // indicator must not outlive the typer).
                     self.chat.note_typing(conversation_id, user_id, typing);
                 }
-                Event::Names(names) => {
-                    merge_names(&mut self.chat.names, names.clone());
-                    self.friends.merge_names(names);
+                Event::Names { names, bots } => {
+                    merge_people(
+                        &mut self.chat.names,
+                        &mut self.chat.bots,
+                        names.clone(),
+                        bots.clone(),
+                    );
+                    self.friends.merge_people(names, bots);
                 }
                 Event::Relationships(entries) => {
                     self.friends.set_relationships(entries.clone());
@@ -2752,18 +2757,27 @@ impl eframe::App for App {
     }
 }
 
-/// Folds new display names into the cache, keeping existing entries.
+/// Folds new display names — and the bots that rode in with them — into the caches, keeping
+/// existing entries.
 ///
-/// A profile response may omit someone the cache already knows, and replacing the map wholesale would
-/// blank a title that was already correct.
-fn merge_names(
-    cache: &mut HashMap<migo_core::Id, String>,
+/// A profile response may omit someone the cache already knows, and replacing the map wholesale
+/// would blank a title that was already correct. The bots map is folded on the same rule and in the
+/// same call, because the two arrive from one read: a caller that could take the names alone is a
+/// caller that could grow a surface drawing a bot as a person, and the whole point of the worker
+/// sending them together is that no such caller should be easy to write.
+fn merge_people(
+    names: &mut HashMap<migo_core::Id, String>,
+    bots: &mut HashMap<migo_core::Id, migo_core::Id>,
     incoming: HashMap<migo_core::Id, String>,
+    incoming_bots: HashMap<migo_core::Id, migo_core::Id>,
 ) {
     for (id, name) in incoming {
         if !name.is_empty() {
-            cache.insert(id, name);
+            names.insert(id, name);
         }
+    }
+    for (id, bot_id) in incoming_bots {
+        bots.insert(id, bot_id);
     }
 }
 

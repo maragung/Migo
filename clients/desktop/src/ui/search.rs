@@ -104,7 +104,14 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
         .account
         .map(|account| account.account_id)
         .unwrap_or_default();
-    let matches: Vec<(migo_core::Id, String, Option<String>, u32, bool)> = chat
+    let matches: Vec<(
+        migo_core::Id,
+        String,
+        Option<String>,
+        u32,
+        bool,
+        Option<migo_core::Id>,
+    )> = chat
         .conversations
         .iter()
         .filter(|conversation| {
@@ -120,6 +127,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
                 conversation.preview.clone(),
                 conversation.unread,
                 conversation.encrypted,
+                conversation.display_bot(me, &chat.bots),
             )
         })
         .collect();
@@ -143,7 +151,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
         .show(ui, |ui| {
             if !matches.is_empty() {
                 widgets::subheader(ui, context.theme, "CHATS");
-                for (conversation_id, title, preview, unread, encrypted) in &matches {
+                for (conversation_id, title, preview, unread, encrypted, bot) in &matches {
                     if widgets::conversation_row(
                         ui,
                         context.theme,
@@ -154,6 +162,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
                             unread: *unread,
                             selected: false,
                             encrypted: *encrypted,
+                            bot: *bot,
                         },
                     )
                     .clicked()
@@ -204,12 +213,18 @@ pub(crate) fn person_row(ui: &mut Ui, context: &mut Context<'_>, person: &Person
         widgets::avatar(ui, context.theme, &person.display_name, 32.0);
         ui.add_space(space::SM);
         ui.vertical(|ui| {
-            ui.label(
-                RichText::new(&person.display_name)
-                    .font(FontId::proportional(font::BODY))
-                    .color(colors.text)
-                    .strong(),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&person.display_name)
+                        .font(FontId::proportional(font::BODY))
+                        .color(colors.text)
+                        .strong(),
+                );
+                // The mark, drawn from the search's own answer rather than from any cache: a
+                // discovered account is the case where a reader has least to go on, and the
+                // wire's answer already said whether this one is a bot.
+                widgets::bot_badge(ui, context.theme, person.bot_id, true);
+            });
             let mut handle = format!("@{}", person.username);
             if person.mutual_friends > 0 {
                 handle.push_str(&format!(" · {} mutual", person.mutual_friends));

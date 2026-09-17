@@ -37,6 +37,14 @@ pub struct FriendsState {
     /// Display names for the accounts in the graph. Filled by the same profile fetches the chat
     /// titles use, merged rather than replaced so a name already learned survives a refresh.
     pub names: HashMap<Id, String>,
+    /// The bot each account speaks as, for the accounts the wire named one for.
+    ///
+    /// The graph wire that fills this pane carries an account id and a kind and nothing else, so
+    /// the bot id cannot ride the edge: it rides the profile read that names the account, the same
+    /// read that fills [`Self::names`], and is merged on the same rule. Absent means the wire
+    /// claimed nothing, which is what keeps every row here silent about accounts it knows nothing
+    /// about.
+    pub bots: HashMap<Id, Id>,
     /// Last-known presence per account.
     pub presence: HashMap<Id, Presence>,
     /// The search field's contents.
@@ -86,15 +94,26 @@ impl FriendsState {
         self.presence.insert(user_id, state);
     }
 
-    /// Merges freshly fetched names, keeping entries that already resolved.
+    /// Merges freshly fetched names — and the bots that rode in with them — keeping entries that
+    /// already resolved.
     ///
     /// The same folding rule the chat's name cache uses: a profile answer that omits someone
     /// the pane already names must not blank the name it was asked to confirm.
-    pub fn merge_names(&mut self, incoming: HashMap<Id, String>) {
+    ///
+    /// The two maps are merged by one call rather than two because they arrive from one read, and
+    /// a caller that could take the names alone is a caller that could grow a pane drawing a bot
+    /// as a person. Note what merging the bots map does *not* do: a later answer that names no bot
+    /// for an account leaves an earlier answer's bot standing rather than erasing it, because an
+    /// absent field on a profile card is the absence of a claim and not a retraction — the same
+    /// reading the wire's own optional field asks for.
+    pub fn merge_people(&mut self, incoming: HashMap<Id, String>, bots: HashMap<Id, Id>) {
         for (id, name) in incoming {
             if !name.is_empty() {
                 self.names.insert(id, name);
             }
+        }
+        for (id, bot_id) in bots {
+            self.bots.insert(id, bot_id);
         }
     }
 
@@ -683,6 +702,14 @@ fn new_group_form(
                             .font(egui::FontId::proportional(font::SMALL))
                             .color(colors.text),
                     );
+                    // Marked before the pick rather than after the group exists: who is being
+                    // seated is the fact the picker exists to let a person weigh.
+                    widgets::bot_badge(
+                        ui,
+                        context.theme,
+                        state.bots.get(&friend.user_id).copied(),
+                        true,
+                    );
                     if ui
                         .add(
                             egui::Button::new("Add")
@@ -842,6 +869,16 @@ fn row(
             RichText::new(widgets::elide(&name, 30))
                 .font(egui::FontId::proportional(font::BODY))
                 .color(colors.text),
+        );
+        // The mark, on every section this row draws for — friends, requests in and out,
+        // blocked, muted — because the graph wire names none of them a bot and the profile read
+        // that named this account is the only thing that knows. A row whose profile never came
+        // back draws nothing, which is the absence of a claim rather than a claim of personhood.
+        widgets::bot_badge(
+            ui,
+            context.theme,
+            state.bots.get(&entry.user_id).copied(),
+            true,
         );
         let presence = state.presence.get(&entry.user_id).copied();
         if let Some(presence) = presence {
