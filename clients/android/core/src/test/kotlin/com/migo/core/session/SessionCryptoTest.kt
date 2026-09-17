@@ -63,7 +63,7 @@ class SessionCryptoTest {
         val f = Fixture()
 
         val envelope = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, FIRST_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, FIRST_MESSAGE)
         }
         val opened = runBlocking {
             f.ada.crypto.open(CONVERSATION, ME, ME_DEVICE, envelope.envelope)
@@ -86,7 +86,7 @@ class SessionCryptoTest {
     fun `the secret survives persistence into a fresh instance`() {
         val f = Fixture()
         val envelope = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, FIRST_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, FIRST_MESSAGE)
         }
         runBlocking { f.ada.crypto.open(CONVERSATION, ME, ME_DEVICE, envelope.envelope) }
         val before = runBlocking { f.ada.crypto.sessionSecret(CONVERSATION, ME_DEVICE) }
@@ -100,7 +100,7 @@ class SessionCryptoTest {
         // And the restored ratchet is not just present but working: the next message the peer
         // seals opens on the hydrated session, so the record round-trips the whole entry.
         val second = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, SECOND_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, SECOND_MESSAGE)
         }
         val reopened = runBlocking { restarted.open(CONVERSATION, ME, ME_DEVICE, second.envelope) }
         assertArrayEquals("the restored session carries traffic", SECOND_MESSAGE, reopened)
@@ -110,7 +110,7 @@ class SessionCryptoTest {
     fun `sessionSecret answers a copy, not the stored bytes`() {
         val f = Fixture()
         val envelope = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, FIRST_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, FIRST_MESSAGE)
         }
         runBlocking { f.ada.crypto.open(CONVERSATION, ME, ME_DEVICE, envelope.envelope) }
 
@@ -143,7 +143,7 @@ class SessionCryptoTest {
     fun `a record written before retention loads with a null secret but still carries traffic`() {
         val f = Fixture()
         val envelope = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, FIRST_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, FIRST_MESSAGE)
         }
         runBlocking { f.ada.crypto.open(CONVERSATION, ME, ME_DEVICE, envelope.envelope) }
 
@@ -157,7 +157,7 @@ class SessionCryptoTest {
 
         // The session itself never stopped working: it just cannot take part in a unified join ask.
         val second = runBlocking {
-            f.me.crypto.seal(CONVERSATION, ADA, ADA_LAPTOP, SECOND_MESSAGE)
+            f.me.crypto.seal(CONVERSATION, ME_DEVICE, ADA, ADA_LAPTOP, SECOND_MESSAGE)
         }
         val reopened = runBlocking { restarted.open(CONVERSATION, ME, ME_DEVICE, second.envelope) }
         assertArrayEquals("the legacy record's session still carries traffic", SECOND_MESSAGE, reopened)

@@ -287,6 +287,7 @@ export class GroupCallKeysDomain {
     void this.#sessionCrypto
       .seal(
         entry.conversationId,
+        this.#deviceId,
         distributor.userId,
         distributor.deviceId,
         encodeContent({

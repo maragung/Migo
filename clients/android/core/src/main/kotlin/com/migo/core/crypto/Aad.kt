@@ -100,6 +100,14 @@ enum class EnvelopeVersion(
         /** Every version a reader must accept, oldest first. */
         val ACCEPTED: List<EnvelopeVersion> = listOf(V1, V2)
 
+        /**
+         * The version this build writes.
+         *
+         * A name for the choice rather than a second constant beside it: two constants that must
+         * agree is one constant too many, and the envelope's own default reads this one.
+         */
+        val WRITTEN: EnvelopeVersion = V2
+
         /** Reads a version byte, or null for a value no build writes. */
         fun fromWire(value: Int): EnvelopeVersion? = ACCEPTED.firstOrNull { it.wire == value }
     }

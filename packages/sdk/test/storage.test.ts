@@ -122,7 +122,13 @@ test('running a full 1:1 session touches no web store', async () => {
   const aliceSession = new SessionCrypto(alice, new StaticBundleSource(bundleFrom(bob)));
   const bobSession = new SessionCrypto(bob, new StaticBundleSource(bundleFrom(alice)));
 
-  const first = await aliceSession.seal(idOf(1), idOf(20), idOf(21), encodeContent(text('hi')));
+  const first = await aliceSession.seal(
+    idOf(1),
+    idOf(11),
+    idOf(20),
+    idOf(21),
+    encodeContent(text('hi')),
+  );
   bobSession.open(idOf(1), idOf(10), idOf(11), first.envelope);
 
   assert.deepEqual(accesses, [], 'the session layer read from or wrote to a web store');

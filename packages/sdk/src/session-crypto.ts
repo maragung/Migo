@@ -14,7 +14,7 @@
  * few bytes on every message and leaks structure through length. The 1:1 layout is:
  *
  * ```text
- * u8      envelope_version           always ENVELOPE_VERSION for now
+ * u8      envelope_version           {@link ENVELOPE_VERSION}; 1 and 2 are both read
  * u8      scheme                     which of SCHEME_* below; decides the fields that follow
  * varint  sender_key_id              0 for 1:1 (the field exists for the group layout)
  * ── X3DH preamble, present only for SCHEME_DOUBLE_RATCHET_PREKEY ──
@@ -42,14 +42,25 @@
  * (via the X3DH `associatedData`, `IK_initiator || IK_responder`) and the ratchet header. The
  * identity binding is the anti-UKS protection section 11 cares about most — the server cannot swap
  * the sender's identity or replay a session key into a conversation with a third party without the
- * tag failing. Section 11 additionally lists `conversation_id` and `message_id` among the metadata
- * it would bind. That binding is envelope version 2, and the code for both halves of it now exists:
- * the ratchet in `@migo/crypto` (mirroring `migo-crypto/src/ratchet.rs` step for step) takes a
- * per-message context, and `@migo/crypto`'s `aad` module builds the same bytes as the Rust `aad`
- * module, both checked against `shared/protocol/vectors/crypto/aad-context.json`. What has not
- * happened is the flip: this layer still writes {@link ENVELOPE_VERSION} 1 and seals under
- * `NO_CONTEXT`, because a writer that moves to version 2 before its peers can read it sends
- * messages they refuse. The step left is coordination, not code.
+ * tag failing. Section 11 additionally lists `conversation_id`, `sender_device` and `message_id`
+ * among the metadata it would bind, and this layer now binds two of the three.
+ *
+ * What that buys is narrower than "the server cannot move a message" and worth stating exactly,
+ * because the layer's traffic is not what it sounds like: content never travels here. Every message,
+ * one-to-one or group, is sealed once under a sender key; what this pairwise layer carries is the
+ * *distribution* of that sender key to one specific device. Relocating a distribution is the case
+ * section 11 calls worse than a denial of service — a chain installed in a conversation the sender
+ * never authorised, under which the recipient will then read whatever the relocator sends. Binding
+ * the conversation id is what stops that, and binding the sending device is what stops a
+ * distribution being replayed as if it came from a different device of the same account.
+ *
+ * `message_id` is deliberately not among the two. A distribution rides *inside* a message that
+ * carries it and has no id of its own; the only id in reach at seal time belongs to the frame, and
+ * the same sealed envelope is not what carries it — {@link seal} produces one envelope per recipient
+ * device, while the message id is minted by whoever builds the frame. Binding the carrier's id would
+ * mean binding a value the receiver, which reads the id off the frame rather than the envelope, has
+ * no way to reconstruct. So the flags byte stays clear until there is a binding on this path that
+ * genuinely has an id, which is the scheme-3 extension section 11 describes as still to come.
  *
  * # The inner plaintext is the caller's
  *
@@ -59,7 +70,9 @@
  */
 
 import type { Id } from '@migo/wire';
+import { idToBytes } from '@migo/wire';
 import {
+  aad,
   initiate,
   respond,
   RatchetSession,
@@ -68,31 +81,74 @@ import {
   IDENTITY_PUBLIC_LEN,
   PUBLIC_KEY_LEN,
 } from '@migo/crypto';
-import type { IdentitySecret, KeyPair, PrekeyBundle, InitialMessage } from '@migo/crypto';
+import type {
+  EnvelopeVersion,
+  IdentitySecret,
+  KeyPair,
+  PrekeyBundle,
+  InitialMessage,
+} from '@migo/crypto';
 
 import { EnvelopeReader, EnvelopeWriter } from './envelope-buffer.js';
 import { SdkError } from './errors.js';
 
-/** The only envelope version this build writes, and the only one it reads. */
-export const ENVELOPE_VERSION = 1;
+/**
+ * The envelope version this layer writes.
+ *
+ * Version 2 is version 1 with section 11's context appended to the associated data, and the change
+ * is additive in exactly one direction: a version-2 envelope is `associatedData || header ||
+ * context`, so a reader that knows the context opens it, and a version-1 envelope is the same bytes
+ * with an empty tail, so a version-2 reader opens every message written before the flip. What it is
+ * *not* is backwards compatible the other way, which is why the version byte had to wait: a build
+ * that predates this reads the byte, finds 2 where it expected 1, and refuses — which is the correct
+ * failure, and still a conversation that stops. The three clients moved together for that reason.
+ *
+ * Section 11's remaining binding is `message_id`, which is not here: see the module docs on why a
+ * distribution has no id of its own to bind.
+ */
+export const ENVELOPE_VERSION = 2;
 
 /**
- * The context a version-1 envelope binds: none.
+ * Reads an envelope version byte, or throws for a value no build writes.
  *
- * Section 11's bound context (`@migo/crypto`'s `aad.context`) is a version-2 feature, and a version-1
- * envelope's associated data is `x3dh_associated_data || ratchet_header` and nothing else. Sealing a
- * version-1 envelope under a context would produce a message no peer can open, so this layer passes
- * nothing until the version byte moves — and it moves only when every client can read version 2,
- * because a writer that moves first is a writer whose messages the readers it is talking to refuse.
+ * The accepted set is `@migo/crypto`'s, not a second list kept here: a version this layer agreed to
+ * read but the crypto layer refuses to build a context for would be a version that decodes and then
+ * cannot be opened. History is the reason the set is more than one entry — a conversation's back
+ * pages are stored as they were written, so they stay version 1 for as long as any device still
+ * holds them, and a reader that accepted only the version it writes could not scroll past the flip.
  *
- * The plumbing exists on both sides already: `RatchetSession.encrypt`/`decrypt` take the context, and
- * `migo-crypto/src/aad.rs` and `@migo/crypto`'s `aad.ts` build the same bytes, pinned by
- * `shared/protocol/vectors/crypto/aad-context.json`. What remains is the coordinated flip.
- *
- * Nothing may write through this array: it is one shared instance, and a context smeared into it
- * would be a context every later message silently carried.
+ * Refusing rather than defaulting, because a default would mean computing an associated data for a
+ * layout the sender did not choose.
  */
-const NO_CONTEXT = new Uint8Array(0);
+function readableVersion(byte: number): EnvelopeVersion {
+  const known = aad.fromWire(byte);
+  if (known === null) {
+    throw new SdkError(`session-crypto: unsupported envelope version ${byte}`);
+  }
+  return known;
+}
+
+/**
+ * The context an envelope of `version` binds, for the metadata the frame claims.
+ *
+ * One function for both directions, so a writer and a reader of the same version cannot disagree
+ * about the bytes. `aad.context` returns empty bytes for version 1 whatever it is handed, which is
+ * what lets a single call site be correct for both: the version, not the caller, decides whether
+ * anything is bound.
+ *
+ * The metadata is what the frame *claims* and nothing else — at open time the sending device and the
+ * conversation arrive from the wire, and none of it is verified until the tag computed over these
+ * very bytes decides. That is the mechanism rather than a shortcut: a value verified first would be
+ * a value the tag was then computed over, which is circular.
+ */
+function contextFor(
+  version: EnvelopeVersion,
+  scheme: number,
+  senderDevice: Id,
+  conversationId: Id,
+): Uint8Array {
+  return aad.context(version, scheme, idToBytes(senderDevice), idToBytes(conversationId), null);
+}
 
 /** An established 1:1 Double Ratchet message — no X3DH preamble. */
 export const SCHEME_DOUBLE_RATCHET = 1;
@@ -216,9 +272,18 @@ export class SessionCrypto {
    * and emits a {@link SCHEME_DOUBLE_RATCHET_PREKEY} envelope carrying the material the peer needs
    * to answer. Messages after that stay in prekey scheme until the peer replies, then switch to the
    * plain {@link SCHEME_DOUBLE_RATCHET} form.
+   *
+   * `senderDeviceId` is *our* device, and it is a parameter rather than something this store is
+   * built with because it is a property of the sealing rather than of the store. The store outlives
+   * any one device — a client builds it once and keeps its ratchets across reconnects, while the id
+   * the server hands out at authenticate time belongs to a session — and this is the same value
+   * {@link open} receives as `senderDeviceId`, read from the other end of the same frame. Naming it
+   * here is what makes the two halves symmetric: a writer binds the device it says it is, and a
+   * reader binds the device the frame claims, and the tag is what decides whether they agree.
    */
   async seal(
     conversationId: Id,
+    senderDeviceId: Id,
     peerUserId: Id,
     peerDeviceId: Id,
     plaintext: Uint8Array,
@@ -239,15 +304,21 @@ export class SessionCrypto {
       this.#sessions.set(key, entry);
     }
 
-    const { header, ciphertext } = entry.session.encryptNext(plaintext, NO_CONTEXT);
+    // The scheme decides the context as much as the envelope: it travels inside the context too, so
+    // a distribution re-labelled from the plain form to the prekey form fails the tag rather than
+    // being read under the wrong layout.
+    const pendingInit = entry.pendingInit;
+    const scheme = pendingInit !== null ? SCHEME_DOUBLE_RATCHET_PREKEY : SCHEME_DOUBLE_RATCHET;
+    const context = contextFor(ENVELOPE_VERSION, scheme, senderDeviceId, conversationId);
+    const { header, ciphertext } = entry.session.encryptNext(plaintext, context);
 
-    if (entry.pendingInit !== null) {
+    if (pendingInit !== null) {
       const envelope = encodeEnvelope(
         SCHEME_DOUBLE_RATCHET_PREKEY,
         0,
         header,
         ciphertext,
-        entry.pendingInit,
+        pendingInit,
       );
       return { scheme: SCHEME_DOUBLE_RATCHET_PREKEY, senderKeyId: 0, envelope };
     }
@@ -292,7 +363,8 @@ export class SessionCrypto {
     if (existing !== undefined) {
       // An established session: the ratchet guarantees it is not mutated if the decrypt fails, so a
       // resent prekey preamble or a foreign broadcast that lands on this slot cannot corrupt it.
-      const plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext, NO_CONTEXT);
+      const context = contextFor(parsed.version, parsed.scheme, senderDeviceId, conversationId);
+      const plaintext = existing.session.decrypt(parsed.header, parsed.ciphertext, context);
       // We have now heard from the peer, so they hold a working session; stop re-sending X3DH.
       existing.pendingInit = null;
       return plaintext;
@@ -308,7 +380,8 @@ export class SessionCrypto {
     // attempt the decrypt. Only a decrypt that passes the AEAD tag proves this message was sealed
     // for us rather than broadcast for another device.
     const derived = this.#deriveResponder(parsed.init);
-    const plaintext = derived.session.decrypt(parsed.header, parsed.ciphertext, NO_CONTEXT);
+    const context = contextFor(parsed.version, parsed.scheme, senderDeviceId, conversationId);
+    const plaintext = derived.session.decrypt(parsed.header, parsed.ciphertext, context);
 
     // Success: this message was ours. Now — and only now — consume the prekey and keep the session.
     if (derived.oneTimePrekeyId !== null) {
@@ -431,8 +504,16 @@ function encodeEnvelope(
   return writer.finish();
 }
 
-/** The parsed shape of an envelope: its scheme, any X3DH material, and the ratchet message. */
+/** The parsed shape of an envelope: its version, its scheme, any X3DH material, and the message. */
 interface ParsedEnvelope {
+  /**
+   * The version the envelope declares, already checked against the versions this build reads.
+   *
+   * The caller needs it rather than just the fact that it parsed: the version decides whether the
+   * tag was computed over a context, and at open time that is the difference between the associated
+   * data to rebuild and an empty tail.
+   */
+  version: EnvelopeVersion;
   scheme: number;
   senderKeyId: number;
   init: InitialMessage | null;
@@ -443,10 +524,7 @@ interface ParsedEnvelope {
 /** Parses a section 11 envelope, rejecting a version or shape this build does not understand. */
 function decodeEnvelope(bytes: Uint8Array): ParsedEnvelope {
   const reader = new EnvelopeReader(bytes);
-  const version = reader.u8();
-  if (version !== ENVELOPE_VERSION) {
-    throw new SdkError(`session-crypto: unsupported envelope version ${version}`);
-  }
+  const version = readableVersion(reader.u8());
   const scheme = reader.u8();
   const senderKeyId = reader.varint();
 
@@ -466,5 +544,5 @@ function decodeEnvelope(bytes: Uint8Array): ParsedEnvelope {
   const ciphertext = reader.rest();
   const header = new RatchetHeader(ratchetKey, previousChainLength, messageNumber);
 
-  return { scheme, senderKeyId, init, header, ciphertext };
+  return { version, scheme, senderKeyId, init, header, ciphertext };
 }

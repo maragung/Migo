@@ -48,7 +48,13 @@ test('a first 1:1 message carries no byte of the sender or recipient private key
   // Alice is the initiator; her session fetches Bob's public bundle and runs X3DH locally.
   const session = new SessionCrypto(alice, new StaticBundleSource(bundleFrom(bob)));
 
-  const sealed = await session.seal(CONV, BOB_USER, BOB_DEVICE, encodeContent(text('hello bob')));
+  const sealed = await session.seal(
+    CONV,
+    ALICE_DEVICE,
+    BOB_USER,
+    BOB_DEVICE,
+    encodeContent(text('hello bob')),
+  );
 
   // The initiator's own secrets and the responder's secrets alike must be absent from the envelope.
   // X3DH mixes both parties' private keys into the shared secret, but only public keys and key ids
@@ -67,12 +73,30 @@ test('a whole ratchet round trip never serialises the derived session or message
   const aliceSession = new SessionCrypto(alice, new StaticBundleSource(bundleFrom(bob)));
   const bobSession = new SessionCrypto(bob, new StaticBundleSource(bundleFrom(alice)));
 
-  const first = await aliceSession.seal(CONV, BOB_USER, BOB_DEVICE, encodeContent(text('one')));
+  const first = await aliceSession.seal(
+    CONV,
+    ALICE_DEVICE,
+    BOB_USER,
+    BOB_DEVICE,
+    encodeContent(text('one')),
+  );
   const opened = bobSession.open(CONV, ALICE_USER, ALICE_DEVICE, first.envelope);
   // Bob replies, which advances the ratchet on both sides and switches Alice out of prekey scheme.
-  const reply = await bobSession.seal(CONV, ALICE_USER, ALICE_DEVICE, encodeContent(text('two')));
+  const reply = await bobSession.seal(
+    CONV,
+    BOB_DEVICE,
+    ALICE_USER,
+    ALICE_DEVICE,
+    encodeContent(text('two')),
+  );
   aliceSession.open(CONV, BOB_USER, BOB_DEVICE, reply.envelope);
-  const third = await aliceSession.seal(CONV, BOB_USER, BOB_DEVICE, encodeContent(text('three')));
+  const third = await aliceSession.seal(
+    CONV,
+    ALICE_DEVICE,
+    BOB_USER,
+    BOB_DEVICE,
+    encodeContent(text('three')),
+  );
 
   // The message decrypted, so the flow was real, not a no-op that trivially leaks nothing.
   assert.equal(new TextDecoder().decode(opened.subarray(1)).includes('one'), true);
@@ -127,7 +151,15 @@ test('a full messaging send transmits only ciphertext frames, never a private se
       return Promise.resolve([{ userId: BOB_USER, deviceId: BOB_DEVICE }]);
     },
   };
-  const messaging = new MessagingDomain(rpc, sessionCrypto, groupCrypto, directory);
+  const messaging = new MessagingDomain(
+    rpc,
+    sessionCrypto,
+    groupCrypto,
+    directory,
+    undefined,
+    undefined,
+    ALICE_DEVICE,
+  );
 
   await messaging.send(CONV, text('the first message to a fresh conversation'));
 

@@ -693,16 +693,19 @@ impl Worker {
             ) else {
                 continue;
             };
-            let envelope =
-                match signed
-                    .sessions
-                    .seal(conversation_id, *device, bundle.as_ref(), &control)
-                {
-                    Ok(envelope) => envelope,
-                    // A device whose bundle will not start a session is skipped, not fatal: its
-                    // next send re-offers one.
-                    Err(_) => continue,
-                };
+            let my_device = signed.account.device_id;
+            let envelope = match signed.sessions.seal(
+                conversation_id,
+                my_device,
+                *device,
+                bundle.as_ref(),
+                &control,
+            ) {
+                Ok(envelope) => envelope,
+                // A device whose bundle will not start a session is skipped, not fatal: its
+                // next send re-offers one.
+                Err(_) => continue,
+            };
             let Ok(bytes) = envelope.encode() else {
                 continue;
             };

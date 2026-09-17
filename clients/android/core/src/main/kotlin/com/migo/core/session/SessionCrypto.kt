@@ -3,6 +3,7 @@ package com.migo.core.session
 import com.migo.core.crypto.Aad
 import com.migo.core.crypto.CryptoError
 import com.migo.core.crypto.Envelope
+import com.migo.core.crypto.EnvelopeVersion
 import com.migo.core.crypto.IdentitySecret
 import com.migo.core.crypto.InitialMessage
 import com.migo.core.crypto.KeyPair
@@ -55,20 +56,26 @@ import kotlinx.coroutines.sync.withLock
  * knowing anything about files or key wrapping; the default does nothing, which keeps the in-memory
  * behaviour of the reference available for tests.
  *
- * # Why every call here passes an empty context
+ * # What the tag binds besides the identities
  *
- * [seal] and [open] hand the ratchet [Aad.NO_CONTEXT], which is the version-1 associated data and
- * nothing more. That is not because this layer lacks the metadata: a context names the sending device,
- * the conversation and the message, and this class is *given* the conversation id and the peer's
- * device id on every call and holds its own device identity in [keys]. It is because the envelope this
- * layer writes still declares version 1, and a version-1 associated data is defined not to depend on
- * that metadata. Binding it here would put this client one version ahead of the peers that have to
- * read it, and the peers would refuse rather than misread -- which is the correct failure, and still a
- * conversation that stops.
+ * [seal] and [open] now hand the ratchet a real context, so a version-2 envelope's tag covers the
+ * conversation and the sending device as well as the two identities. What that buys is narrower than
+ * it sounds, and worth stating exactly, because this layer's traffic is not what its name suggests:
+ * content never travels here. Every message, one-to-one or group, is sealed once under a sender key,
+ * and what travels pairwise is the *distribution* of that key to one device. Relocating a
+ * distribution is the case section 11 calls worse than a denial of service -- a chain installed in a
+ * conversation the sender never authorised, under which the recipient then reads whatever the
+ * relocator sends -- and binding the conversation id is what stops it. Binding the sending device is
+ * what stops a distribution being replayed as if it came from a different device of the same account.
  *
- * So the version byte and the context move together, and neither moves alone. When they do move, the
- * ids this file already holds are what fills the context in, and the change is confined to the two
- * scheme constants [seal] chooses between and the [Aad.context] call beside them.
+ * `message_id` is deliberately not bound. A distribution rides inside the message that carries it and
+ * has no id of its own: [seal] produces one envelope per recipient device, while the message id is
+ * minted by whoever builds the frame, so the flags byte stays clear until there is a binding on this
+ * path that genuinely has an id.
+ *
+ * The version byte decides which associated data is rebuilt, and it is a field of the parsed envelope
+ * rather than a constant read here -- a receiver has to reproduce the *sender's* bytes, and for a
+ * message written before the flip that means no context at all.
  */
 class SessionCrypto(
     private val keys: LocalKeyStore,
@@ -98,9 +105,17 @@ class SessionCrypto(
      * plain [SCHEME_DOUBLE_RATCHET] form -- the standard "keep sending prekey messages until
      * acknowledged" rule, because until we successfully open something from the peer we have no
      * evidence they ever received the first one.
+     *
+     * [senderDeviceId] is this device's own id -- the one the frame this envelope rides in will stamp
+     * as its sender. It is a parameter rather than constructor state for the same reason [open] takes
+     * one: the id arrives with the grant at connect time and changes with the session, while this
+     * object is built once and deliberately survives a reconnect, so a field would freeze whichever id
+     * happened to be current when it was constructed. Every caller already holds the id it is about to
+     * put on the frame, which is also the only value that keeps the receiver's rebuilt context in step.
      */
     suspend fun seal(
         conversationId: Id,
+        senderDeviceId: Id,
         peerUserId: Id,
         peerDeviceId: Id,
         plaintext: ByteArray,
@@ -135,8 +150,13 @@ class SessionCrypto(
             sessions[key] = entry
         }
 
-        val message = entry.session.encryptNext(plaintext, Aad.NO_CONTEXT)
+        // The scheme decides the context as much as the envelope does: it travels inside the context
+        // too, so a distribution relabelled from the plain form to the prekey form fails the tag
+        // rather than being read under the wrong layout.
         val pending = entry.pendingInit
+        val scheme = if (pending != null) SCHEME_DOUBLE_RATCHET_PREKEY else SCHEME_DOUBLE_RATCHET
+        val context = contextFor(EnvelopeVersion.WRITTEN, scheme, senderDeviceId, conversationId)
+        val message = entry.session.encryptNext(plaintext, context)
         val envelope = if (pending != null) {
             Envelope.initial(preambleOf(pending), message.header, message.ciphertext).encode()
         } else {
@@ -149,7 +169,7 @@ class SessionCrypto(
         persistence.save(conversationId, peerDeviceId, entry.session, entry.sharedSecret)
 
         SealedEnvelope(
-            scheme = if (pending != null) SCHEME_DOUBLE_RATCHET_PREKEY else SCHEME_DOUBLE_RATCHET,
+            scheme = scheme,
             senderKeyId = 0L,
             envelope = envelope,
         )
@@ -193,6 +213,7 @@ class SessionCrypto(
         // already refuses a sender-key envelope and an unknown scheme, so there is
         // no scheme check here: adding a second one would be a second place to keep in step.
         val parsed = Envelope.decode(envelope)
+        val context = contextFor(parsed.version, parsed.scheme, senderDeviceId, conversationId)
         val key = sessionKey(conversationId, senderDeviceId)
         val existing = entryOrNull(conversationId, senderDeviceId)
 
@@ -202,7 +223,7 @@ class SessionCrypto(
             val plaintext = existing.session.decrypt(
                 parsed.header,
                 parsed.ciphertext,
-                Aad.NO_CONTEXT,
+                context,
             )
             // We have now heard from the peer, so they hold a working session; stop re-sending X3DH.
             existing.pendingInit = null
@@ -220,7 +241,7 @@ class SessionCrypto(
         val plaintext = derived.session.decrypt(
             parsed.header,
             parsed.ciphertext,
-            Aad.NO_CONTEXT,
+            context,
         )
 
         // Success: this message was ours. Now -- and only now -- consume the prekey and keep the
@@ -343,6 +364,26 @@ class SessionCrypto(
         message.signedPrekeyId,
         message.oneTimePrekeyId,
     )
+
+    /**
+     * The context an envelope of [version] binds, for the metadata the frame claims.
+     *
+     * One function for both directions, so a writer and a reader of the same version cannot disagree
+     * about the bytes. [Aad.context] returns empty bytes for version 1 whatever it is handed, which is
+     * what lets a single call site be right for both: the version, not the caller, decides whether
+     * anything is bound.
+     *
+     * The metadata is what the frame *claims* and nothing else. At open time the sending device and
+     * the conversation arrive from the wire, and none of it is verified until the tag computed over
+     * these very bytes decides -- that is the mechanism rather than a shortcut, since a value verified
+     * first would be a value the tag was then computed over.
+     */
+    private fun contextFor(
+        version: EnvelopeVersion,
+        scheme: Int,
+        senderDevice: Id,
+        conversationId: Id,
+    ): ByteArray = Aad.context(version, scheme, senderDevice, conversationId)
 
     private fun sessionKey(conversationId: Id, deviceId: Id): String =
         "${conversationId.value}|${deviceId.value}"

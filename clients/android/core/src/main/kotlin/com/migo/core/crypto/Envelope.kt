@@ -14,7 +14,7 @@ import com.migo.core.wire.WireError
  * field.
  *
  * ```text
- * u8      envelope_version       always ENVELOPE_VERSION
+ * u8      envelope_version       the EnvelopeVersion this build writes; 1 and 2 are both read
  * u8      scheme                 decides which fields follow
  * varint  sender_key_id          0 for 1:1; the field exists for the group layout
  * -- X3DH preamble, present only for SCHEME_DOUBLE_RATCHET_PREKEY --
@@ -50,9 +50,6 @@ import com.migo.core.wire.WireError
  * [RatchetHeader.toBytes], which is a different byte string from this envelope's varint header.
  * Exposing a "header prefix" here would invite a caller to authenticate the wrong bytes.
  */
-
-/** The only envelope version this build writes, and the only one it reads. */
-const val ENVELOPE_VERSION = 1
 
 /** An established 1:1 Double Ratchet message -- no X3DH preamble. */
 const val SCHEME_DOUBLE_RATCHET = 1
@@ -119,6 +116,18 @@ class Envelope(
     val header: RatchetHeader,
     /** The AEAD output, tag included. */
     val ciphertext: ByteArray,
+    /**
+     * The version these bytes declare, which is what decides the associated data the tag covers.
+     *
+     * A field rather than a constant read at the use site, because a receiver has to rebuild the
+     * *sender's* associated data and the only thing that says which one that is is this byte: a
+     * version-1 envelope carries no context and a version-2 one does, and the difference is not
+     * recoverable from anything else in the frame.
+     *
+     * Defaulted to what this build writes, which is the only correct value for an envelope being
+     * composed; [decode] fills it from the bytes it read.
+     */
+    val version: EnvelopeVersion = EnvelopeVersion.WRITTEN,
 ) {
     init {
         requireU32(senderKeyId, "sender key id")
@@ -144,7 +153,7 @@ class Envelope(
             2 + 5 + IDENTITY_PUBLIC_LEN + PUBLIC_KEY_LEN + 16 +
                 RatchetHeader.ENCODED_LEN + ciphertext.size,
         )
-        out.push(ENVELOPE_VERSION)
+        out.push(version.wire)
         out.push(scheme)
         Varint.encodeU64(senderKeyId, out)
 
@@ -195,8 +204,11 @@ class Envelope(
         fun decode(bytes: ByteArray): Envelope {
             val cursor = Cursor(bytes)
 
-            val version = cursor.u8()
-            if (version != ENVELOPE_VERSION) throw CryptoError.malformedHeader()
+            // The accepted set is [Aad]'s, not a second list kept here: a version this parser agreed
+            // to read but the context builder refuses to build for would be a version that decodes
+            // and then cannot be opened.
+            val version = EnvelopeVersion.fromWire(cursor.u8())
+                ?: throw CryptoError.malformedHeader()
             val scheme = cursor.u8()
             val senderKeyId = cursor.varintU32()
 
@@ -237,6 +249,7 @@ class Envelope(
                 preamble,
                 RatchetHeader.of(ratchetKey, previousChainLength, messageNumber),
                 ciphertext,
+                version,
             )
         }
     }

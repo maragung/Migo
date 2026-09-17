@@ -6,7 +6,6 @@ import com.migo.core.crypto.CryptoError
 import com.migo.core.crypto.CryptoErrorKind
 import com.migo.core.crypto.Csprng
 import com.migo.core.crypto.Cursor
-import com.migo.core.crypto.ENVELOPE_VERSION
 import com.migo.core.crypto.IDENTITY_PUBLIC_LEN
 import com.migo.core.crypto.IdentityPublic
 import com.migo.core.crypto.IdentitySecret
@@ -23,6 +22,21 @@ import com.migo.core.wire.Varint
 import com.migo.core.wire.idToBytes
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+
+/**
+ * The envelope version this layer writes, which is not the pairwise layer's.
+ *
+ * Both are section 11 envelopes and both carry an `envelope_version` byte, but the byte is a claim
+ * about the *associated data*, and the two schemes reach their binding differently: a pairwise
+ * envelope appends section 11's fixed context, while this one binds the conversation id as the AEAD's
+ * associated data outright. Sharing one constant across the two would have made the pairwise flip
+ * silently relabel every group message as carrying a context it does not carry, and a version byte
+ * that means two things depending on the scheme is worse than two constants.
+ *
+ * The group layout's own remaining binding -- the sending device and the message id, which a group
+ * message genuinely has -- moves this byte on its own, in the step section 11 describes.
+ */
+private const val SENDER_KEY_ENVELOPE_VERSION = 1
 
 /**
  * The end-to-end layer for broadcast conversations, which on Migo is every conversation.
@@ -47,7 +61,7 @@ import kotlin.concurrent.withLock
  * must match `packages/sdk/src/group-crypto.ts` byte for byte:
  *
  * ```text
- * u8      envelope_version       ENVELOPE_VERSION
+ * u8      envelope_version       SENDER_KEY_ENVELOPE_VERSION
  * u8      scheme                 SCHEME_SENDER_KEY
  * varint  sender_key_id          the chain id -- which of the sender's chains this is
  * varint  group_key_epoch        bumped when membership changes, so a removed member's key dies
@@ -491,7 +505,7 @@ private fun parseDistribution(bytes: ByteArray): SenderKeyDistribution {
 /** Assembles the section 11 group envelope from a sealed sender-key message. */
 private fun encodeSenderKeyEnvelope(epoch: Long, message: SenderKeyMessage): ByteArray {
     val out = ByteAccumulator(2 + 15 + SIGNATURE_LEN + message.ciphertext.size)
-    out.push(ENVELOPE_VERSION)
+    out.push(SENDER_KEY_ENVELOPE_VERSION)
     out.push(SCHEME_SENDER_KEY)
     Varint.encodeU64(message.header.chainId, out)
     Varint.encodeU64(epoch, out)
@@ -513,7 +527,7 @@ private class ParsedSenderKeyEnvelope(val epoch: Long, val message: SenderKeyMes
  */
 private fun decodeSenderKeyEnvelope(bytes: ByteArray): ParsedSenderKeyEnvelope {
     val cursor = Cursor(bytes)
-    if (cursor.u8() != ENVELOPE_VERSION) throw CryptoError.malformedHeader()
+    if (cursor.u8() != SENDER_KEY_ENVELOPE_VERSION) throw CryptoError.malformedHeader()
     // A 1:1 envelope reaching the group layer lands here, which is the mirror of `Envelope.decode`
     // refusing a sender-key envelope on the 1:1 path. Neither layer guesses at the other's bytes.
     if (cursor.u8() != SCHEME_SENDER_KEY) throw CryptoError.malformedHeader()

@@ -95,6 +95,7 @@ function rig(
   const rpc = new Rpc(transport.asTransport());
   const store = options.store ?? newStore();
   const peer = options.peers?.[0];
+  const ownDevice = idOf(options.deviceId ?? 2);
   const sessionCrypto = new SessionCrypto(store, new StaticBundleSource(bundleFrom(peer ?? store)));
   const groupCrypto = new GroupCrypto(store);
   const directory = new ListDirectory(options.devices ?? []);
@@ -105,7 +106,7 @@ function rig(
     directory,
     options.onEventError,
     undefined,
-    options.deviceId === undefined ? undefined : idOf(options.deviceId),
+    options.deviceId === undefined ? undefined : ownDevice,
   );
   return { transport, messaging, sessionCrypto, groupCrypto, directory };
 }
@@ -297,6 +298,7 @@ test('triggers: an accepted distribution is the baseline a later distribution mu
   staleCrypto.rotateTo(CONVERSATION, 5);
   const sealed = await sender.sessionCrypto.seal(
     CONVERSATION,
+    OWN_DEVICE,
     PEER_B_USER,
     PEER_B_DEVICE,
     encodeContent({

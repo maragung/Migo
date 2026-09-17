@@ -459,7 +459,7 @@ class MessagingDomain(
             val distribution = groupCrypto.distributionFor(conversationId)
             val plaintext = Content.ControlEvent(SENDER_KEY_EVENT, distribution).encode()
             val sealed = try {
-                sessionCrypto.seal(conversationId, device.userId, device.deviceId, plaintext)
+                sessionCrypto.seal(conversationId, deviceId, device.userId, device.deviceId, plaintext)
             } finally {
                 plaintext.fill(0)
                 distribution.fill(0)
@@ -528,7 +528,7 @@ class MessagingDomain(
             // [distribute] keeps for the copy this method owns.
             val distribution = groupCrypto.distributionFor(conversationId)
             val sealed = try {
-                sessionCrypto.seal(conversationId, device.userId, device.deviceId, distribution)
+                sessionCrypto.seal(conversationId, deviceId, device.userId, device.deviceId, distribution)
             } finally {
                 distribution.fill(0)
             }
