@@ -5350,24 +5350,49 @@ impl Decode for BotRegister {
     }
 }
 
+/// A bot as its owner sees it. The optional fields are tagged rather than positional because they were added after the first build wrote this struct, and a reader that predates them must still decode the fixed part.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BotView {
     pub bot_id: Id,
-    pub username: String,
+    /// The bot's display name, which is what its row stores and what a client shows. Named name rather than username because it is not the backing account's handle
+    pub name: String,
     /// Present only on register/rotate; never logged
     pub token: Option<String>,
+    /// Whether the bot is paused. Absent means a build that predates pausing, not an unpaused bot
+    pub paused: Option<bool>,
+    /// The permission slugs the bot holds, from the closed set in section 41. Absent means a build that predates scope reads, not a bot holding none
+    pub scopes: Option<Vec<String>>,
 }
 
 impl Encode for BotView {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
         w.write_id(&self.bot_id);
-        w.write_str(&self.username)?;
-        let present = usize::from(self.token.is_some());
+        w.write_str(&self.name)?;
+        let present = usize::from(self.token.is_some())
+            + usize::from(self.paused.is_some())
+            + usize::from(self.scopes.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.token {
             w.optional(1, |w| {
                 w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.paused {
+            w.optional(2, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.scopes {
+            w.optional(3, |w| {
+                {
+                    w.list_len(v.len())?;
+                    for item in v.iter() {
+                        w.write_str(item)?;
+                    }
+                }
                 Ok(())
             })?;
         }
@@ -5381,15 +5406,180 @@ impl Decode for BotView {
         r.enter()?;
         let mut out = Self::default();
         out.bot_id = r.read_id()?;
-        out.username = r.read_string()?;
+        out.name = r.read_string()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             let (field_id, mut owned) = r.read_optional()?;
             let sub = &mut owned;
             match field_id {
                 1 => out.token = Some(sub.read_string()?),
+                2 => out.paused = Some(sub.read_bool()?),
+                3 => {
+                    out.scopes = Some({
+                        let n = sub.read_list_len()?;
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(sub.read_string()?);
+                        }
+                        v
+                    })
+                }
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Empty request; the owner is the authenticated account, which the session already names.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotListReq {}
+
+impl Encode for BotListReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotListReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Every bot one account owns.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotListResponse {
+    pub bots: Vec<BotView>,
+}
+
+impl Encode for BotListResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.bots.len())?;
+            for item in self.bots.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotListResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bots = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(BotView::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Sets whether a bot is paused. The flag is carried rather than implied by the opcode so one opcode resumes as well as pauses.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotPause {
+    pub bot_id: Id,
+    pub paused: bool,
+}
+
+impl Encode for BotPause {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        w.write_bool(self.paused);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotPause {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        out.paused = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Replaces a bot's permissions outright. A replacement rather than a delta, so two owners editing the same bot cannot interleave into a set neither of them asked for.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotScopes {
+    pub bot_id: Id,
+    pub scopes: Vec<String>,
+}
+
+impl Encode for BotScopes {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        {
+            w.list_len(self.scopes.len())?;
+            for item in self.scopes.iter() {
+                w.write_str(item)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotScopes {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        out.scopes = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_string()?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
         }
         r.leave();
         Ok(out)
@@ -11574,6 +11764,14 @@ pub enum Opcode {
     BotCommand = 178,
     BotEvent = 179,
     BotRegister = 180,
+    /// Lists every bot the caller owns. The owner is the authenticated account, so the request names none.
+    BotList = 187,
+    /// Mints a fresh token for a bot and invalidates the old one. The new token rides in the response's token field, once.
+    BotRotate = 188,
+    /// Pauses a bot or resumes it. A paused bot refuses to authenticate, so it stops speaking without losing its token or its row.
+    BotPause = 189,
+    /// Replaces a bot's permissions with exactly the set given, which may be empty. Naming a slug no build defines is a validation error rather than a silently dropped bit.
+    BotScopes = 190,
     /// Starts a game in a conversation.
     GameStart = 183,
     /// Reads a game's state as the caller sees it.
@@ -11752,6 +11950,10 @@ impl Opcode {
             178 => Self::BotCommand,
             179 => Self::BotEvent,
             180 => Self::BotRegister,
+            187 => Self::BotList,
+            188 => Self::BotRotate,
+            189 => Self::BotPause,
+            190 => Self::BotScopes,
             183 => Self::GameStart,
             184 => Self::GameView,
             185 => Self::GameAbandon,
@@ -11892,6 +12094,10 @@ impl Opcode {
             Self::BotCommand => "BOT_COMMAND",
             Self::BotEvent => "BOT_EVENT",
             Self::BotRegister => "BOT_REGISTER",
+            Self::BotList => "BOT_LIST",
+            Self::BotRotate => "BOT_ROTATE",
+            Self::BotPause => "BOT_PAUSE",
+            Self::BotScopes => "BOT_SCOPES",
             Self::GameStart => "GAME_START",
             Self::GameView => "GAME_VIEW",
             Self::GameAbandon => "GAME_ABANDON",
@@ -12032,6 +12238,10 @@ impl Opcode {
             Self::BotCommand => 2,
             Self::BotEvent => 0,
             Self::BotRegister => 20,
+            Self::BotList => 3,
+            Self::BotRotate => 10,
+            Self::BotPause => 5,
+            Self::BotScopes => 5,
             Self::GameStart => 5,
             Self::GameView => 2,
             Self::GameAbandon => 2,
@@ -12171,6 +12381,10 @@ impl Opcode {
             Self::BotCommand => DeliveryClass::Critical,
             Self::BotEvent => DeliveryClass::Critical,
             Self::BotRegister => DeliveryClass::Critical,
+            Self::BotList => DeliveryClass::Critical,
+            Self::BotRotate => DeliveryClass::Critical,
+            Self::BotPause => DeliveryClass::Critical,
+            Self::BotScopes => DeliveryClass::Critical,
             Self::GameStart => DeliveryClass::Critical,
             Self::GameView => DeliveryClass::Critical,
             Self::GameAbandon => DeliveryClass::Critical,
@@ -12314,6 +12528,10 @@ impl Opcode {
             Self::BotCommand => false,
             Self::BotEvent => false,
             Self::BotRegister => false,
+            Self::BotList => false,
+            Self::BotRotate => false,
+            Self::BotPause => false,
+            Self::BotScopes => false,
             Self::GameStart => false,
             Self::GameView => false,
             Self::GameAbandon => false,
@@ -12461,6 +12679,10 @@ impl Opcode {
             Self::BotCommand => AuthLevel::User,
             Self::BotEvent => AuthLevel::User,
             Self::BotRegister => AuthLevel::Bot,
+            Self::BotList => AuthLevel::User,
+            Self::BotRotate => AuthLevel::User,
+            Self::BotPause => AuthLevel::User,
+            Self::BotScopes => AuthLevel::User,
             Self::GameStart => AuthLevel::User,
             Self::GameView => AuthLevel::User,
             Self::GameAbandon => AuthLevel::User,
@@ -12553,6 +12775,10 @@ impl Opcode {
             Self::BotCommand => Some(features::BOTS),
             Self::BotEvent => Some(features::BOTS),
             Self::BotRegister => Some(features::BOTS),
+            Self::BotList => Some(features::BOTS),
+            Self::BotRotate => Some(features::BOTS),
+            Self::BotPause => Some(features::BOTS),
+            Self::BotScopes => Some(features::BOTS),
             Self::GameStart => Some(features::GAMES),
             Self::GameView => Some(features::GAMES),
             Self::GameAbandon => Some(features::GAMES),
@@ -12687,6 +12913,10 @@ impl Opcode {
             Self::BotCommand => Direction::ClientToServer,
             Self::BotEvent => Direction::ServerToClient,
             Self::BotRegister => Direction::ClientToServer,
+            Self::BotList => Direction::ClientToServer,
+            Self::BotRotate => Direction::ClientToServer,
+            Self::BotPause => Direction::ClientToServer,
+            Self::BotScopes => Direction::ClientToServer,
             Self::GameStart => Direction::ClientToServer,
             Self::GameView => Direction::ClientToServer,
             Self::GameAbandon => Direction::ClientToServer,
@@ -12827,6 +13057,10 @@ impl Opcode {
             Self::BotCommand => false,
             Self::BotEvent => false,
             Self::BotRegister => false,
+            Self::BotList => false,
+            Self::BotRotate => false,
+            Self::BotPause => false,
+            Self::BotScopes => false,
             Self::GameStart => false,
             Self::GameView => false,
             Self::GameAbandon => false,
@@ -12974,6 +13208,10 @@ impl Opcode {
         Self::BotCommand,
         Self::BotEvent,
         Self::BotRegister,
+        Self::BotList,
+        Self::BotRotate,
+        Self::BotPause,
+        Self::BotScopes,
         Self::GameStart,
         Self::GameView,
         Self::GameAbandon,

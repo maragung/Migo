@@ -4349,23 +4349,44 @@ data class BotRegister(
     }
 }
 
+/** A bot as its owner sees it. The optional fields are tagged rather than positional because they were added after the first build wrote this struct, and a reader that predates them must still decode the fixed part. */
 data class BotView(
     val botId: Id,
-    val username: String,
+    /** The bot's display name, which is what its row stores and what a client shows. Named name rather than username because it is not the backing account's handle */
+    val name: String,
     /** Present only on register/rotate; never logged */
     val token: String? = null,
+    /** Whether the bot is paused. Absent means a build that predates pausing, not an unpaused bot */
+    val paused: Boolean? = null,
+    /** The permission slugs the bot holds, from the closed set in section 41. Absent means a build that predates scope reads, not a bot holding none */
+    val scopes: List<String>? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.id(botId)
-        w.str(username)
+        w.str(name)
         var present = 0
         if (token != null) present++
+        if (paused != null) present++
+        if (scopes != null) present++
         w.u32(present)
         if (token != null) {
             val value = token
             w.optional(1) { w ->
                 w.str(value)
+            }
+        }
+        if (paused != null) {
+            val value = paused
+            w.optional(2) { w ->
+                w.bool(value)
+            }
+        }
+        if (scopes != null) {
+            val value = scopes
+            w.optional(3) { w ->
+                w.listLen(value.size)
+                for (item in value) { w.str(item) }
             }
         }
         w.leave()
@@ -4375,18 +4396,127 @@ data class BotView(
         fun decode(r: Reader): BotView {
             r.enter()
             val botId = r.id()
-            val username = r.str()
+            val name = r.str()
             var token: String? = null
+            var paused: Boolean? = null
+            var scopes: List<String>? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> token = sub.str()
+                    2L -> paused = sub.bool()
+                    3L -> scopes = run { val n = sub.listLen(); val acc = ArrayList<String>(n); for (i in 0 until n) acc.add(sub.str()); acc }
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return BotView(botId, username, token)
+            return BotView(botId, name, token, paused, scopes)
+        }
+    }
+}
+
+/** Empty request; the owner is the authenticated account, which the session already names. */
+class BotListReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotListReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotListReq()
+        }
+    }
+}
+
+/** Every bot one account owns. */
+data class BotListResponse(
+    val bots: List<BotView>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(bots.size)
+        for (item in bots) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotListResponse {
+            r.enter()
+            val bots = run { val n = r.listLen(); val acc = ArrayList<BotView>(n); for (i in 0 until n) acc.add(BotView.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotListResponse(bots)
+        }
+    }
+}
+
+/** Sets whether a bot is paused. The flag is carried rather than implied by the opcode so one opcode resumes as well as pauses. */
+data class BotPause(
+    val botId: Id,
+    val paused: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.bool(paused)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotPause {
+            r.enter()
+            val botId = r.id()
+            val paused = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotPause(botId, paused)
+        }
+    }
+}
+
+/** Replaces a bot's permissions outright. A replacement rather than a delta, so two owners editing the same bot cannot interleave into a set neither of them asked for. */
+data class BotScopes(
+    val botId: Id,
+    val scopes: List<String>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.listLen(scopes.size)
+        for (item in scopes) { w.str(item) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotScopes {
+            r.enter()
+            val botId = r.id()
+            val scopes = run { val n = r.listLen(); val acc = ArrayList<String>(n); for (i in 0 until n) acc.add(r.str()); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotScopes(botId, scopes)
         }
     }
 }
@@ -9527,6 +9657,14 @@ object Op {
     const val BOT_COMMAND: Long = 178L
     const val BOT_EVENT: Long = 179L
     const val BOT_REGISTER: Long = 180L
+    /** Lists every bot the caller owns. The owner is the authenticated account, so the request names none. */
+    const val BOT_LIST: Long = 187L
+    /** Mints a fresh token for a bot and invalidates the old one. The new token rides in the response's token field, once. */
+    const val BOT_ROTATE: Long = 188L
+    /** Pauses a bot or resumes it. A paused bot refuses to authenticate, so it stops speaking without losing its token or its row. */
+    const val BOT_PAUSE: Long = 189L
+    /** Replaces a bot's permissions with exactly the set given, which may be empty. Naming a slug no build defines is a validation error rather than a silently dropped bit. */
+    const val BOT_SCOPES: Long = 190L
     /** Starts a game in a conversation. */
     const val GAME_START: Long = 183L
     /** Reads a game's state as the caller sees it. */
@@ -9713,6 +9851,10 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null, false, listOf(), "BOTS"),
     179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null, false, listOf(), "BOTS"),
     180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null, false, listOf(), "BOTS"),
+    187L to OpcodeMeta(187L, "BOT_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotListReq", "BotListResponse", null, false, listOf(), "BOTS"),
+    188L to OpcodeMeta(188L, "BOT_ROTATE", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotRotate", "BotView", null, false, listOf(), "BOTS"),
+    189L to OpcodeMeta(189L, "BOT_PAUSE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotPause", "BotView", null, false, listOf(), "BOTS"),
+    190L to OpcodeMeta(190L, "BOT_SCOPES", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotScopes", "BotView", null, false, listOf(), "BOTS"),
     183L to OpcodeMeta(183L, "GAME_START", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameStart", "GameViewWire", null, false, listOf(), "GAMES"),
     184L to OpcodeMeta(184L, "GAME_VIEW", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "GameViewWire", null, false, listOf(), "GAMES"),
     185L to OpcodeMeta(185L, "GAME_ABANDON", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "Acknowledged", null, false, listOf(), "GAMES"),

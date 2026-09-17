@@ -951,6 +951,54 @@
    "class": "Critical"
   },
   {
+   "name": "BOT_LIST",
+   "code": 187,
+   "direction": "client_to_server",
+   "payload": "BotListReq",
+   "response": "BotListResponse",
+   "auth": "User",
+   "feature": "BOTS",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Lists every bot the caller owns. The owner is the authenticated account, so the request names none."
+  },
+  {
+   "name": "BOT_ROTATE",
+   "code": 188,
+   "direction": "client_to_server",
+   "payload": "BotRotate",
+   "response": "BotView",
+   "auth": "User",
+   "feature": "BOTS",
+   "cost": 10,
+   "class": "Critical",
+   "doc": "Mints a fresh token for a bot and invalidates the old one. The new token rides in the response's token field, once."
+  },
+  {
+   "name": "BOT_PAUSE",
+   "code": 189,
+   "direction": "client_to_server",
+   "payload": "BotPause",
+   "response": "BotView",
+   "auth": "User",
+   "feature": "BOTS",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Pauses a bot or resumes it. A paused bot refuses to authenticate, so it stops speaking without losing its token or its row."
+  },
+  {
+   "name": "BOT_SCOPES",
+   "code": 190,
+   "direction": "client_to_server",
+   "payload": "BotScopes",
+   "response": "BotView",
+   "auth": "User",
+   "feature": "BOTS",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Replaces a bot's permissions with exactly the set given, which may be empty. Naming a slug no build defines is a validation error rather than a silently dropped bit."
+  },
+  {
    "name": "GAME_START",
    "code": 183,
    "direction": "client_to_server",

@@ -94,3 +94,155 @@ async fn register_returns_a_bot_with_an_id() {
     );
     assert_eq!(registered.bot.name, "Weather");
 }
+
+/// Registers a bot the way every management test below needs one: owned by `account`, named,
+/// and holding nothing.
+async fn a_bot(
+    svc: &migo_bots::SharedBots,
+    account: u128,
+    username: &str,
+) -> migo_bots::Registered {
+    svc.register(
+        &owner(account),
+        NewBotSpec {
+            username: username.to_string(),
+            display_name: username.to_string(),
+            scopes: Scopes::NONE,
+            webhook_url: None,
+            locale: None,
+        },
+    )
+    .await
+    .expect("registration succeeds")
+}
+
+/// The method `handle_list` delegates to: the caller's own bots, and only those.
+///
+/// The negative half is the point. A list that answered with every bot in the store would
+/// pass a test that registered one bot and read it back, and would hand every owner the names
+/// of every other owner's integrations — so this registers for two accounts and asserts the
+/// answer is partitioned.
+#[tokio::test]
+async fn list_answers_with_the_callers_own_bots_and_no_others() {
+    let (svc, _store) = harness();
+    let mine = a_bot(&svc, 1, "weather").await;
+    let also_mine = a_bot(&svc, 1, "clock").await;
+    let theirs = a_bot(&svc, 2, "theirs").await;
+
+    let listed = svc.list(&owner(1)).await.expect("the owner can list");
+
+    let ids: Vec<_> = listed.iter().map(|bot| bot.bot_id).collect();
+    assert!(ids.contains(&mine.bot.bot_id));
+    assert!(ids.contains(&also_mine.bot.bot_id));
+    assert!(
+        !ids.contains(&theirs.bot.bot_id),
+        "an owner's list must not name another account's bot"
+    );
+    assert_eq!(ids.len(), 2);
+}
+
+/// The method `handle_rotate` delegates to: the pair it replies with is the bot it rotated.
+///
+/// The handler replies with `rotated.bot` and `rotated.token`, so a rotation that returned a
+/// default view — or the view of some other row — would answer the owner with a bot that is
+/// not the one whose credential they just replaced.
+#[tokio::test]
+async fn rotate_hands_back_the_bot_whose_token_it_replaced() {
+    let (svc, _store) = harness();
+    let registered = a_bot(&svc, 1, "weather").await;
+
+    let rotated = svc
+        .rotate_token(&owner(1), registered.bot.bot_id)
+        .await
+        .expect("the owner can rotate");
+
+    assert_eq!(rotated.bot.bot_id, registered.bot.bot_id);
+    assert_eq!(rotated.bot.name, registered.bot.name);
+    assert_ne!(
+        rotated.token.expose(),
+        registered.token.expose(),
+        "a rotation that returned the same secret would not be a rotation"
+    );
+}
+
+/// The method `handle_pause` delegates to: pausing is visible on the view and on the next
+/// list, and resuming is the same call with the flag the other way.
+#[tokio::test]
+async fn pausing_shows_on_the_view_and_survives_into_the_next_list() {
+    let (svc, _store) = harness();
+    let registered = a_bot(&svc, 1, "weather").await;
+    assert!(!registered.bot.disabled, "a new bot is not paused");
+
+    let paused = svc
+        .set_paused(&owner(1), registered.bot.bot_id, true)
+        .await
+        .expect("the owner can pause");
+    assert!(paused.disabled);
+    assert!(paused.disabled_at.is_some(), "pausing records when");
+
+    let listed = svc.list(&owner(1)).await.expect("the owner can list");
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].disabled,
+        "the pause is a stored row and not a value returned once"
+    );
+
+    let resumed = svc
+        .set_paused(&owner(1), registered.bot.bot_id, false)
+        .await
+        .expect("the owner can resume");
+    assert!(!resumed.disabled);
+    assert!(resumed.disabled_at.is_none());
+}
+
+/// The method `handle_scopes` delegates to: a replacement, and the slug vocabulary the
+/// handler parses the wire's strings through.
+///
+/// `scopes_from_slugs` is private to the dispatch module, so the rule it enforces is pinned
+/// here at the two halves it is built from: every slug a client may send round-trips, and a
+/// slug no build defines is refused rather than folded into the set as nothing. That second
+/// half is the one that matters — a handler that dropped unknown slugs would answer a request
+/// for `moderate` with a bot that silently lacks it, and the owner would find out when the
+/// bot failed to do the thing they granted.
+#[tokio::test]
+async fn scopes_are_replaced_wholesale_and_unknown_slugs_are_refused() {
+    let (svc, _store) = harness();
+    let registered = a_bot(&svc, 1, "weather").await;
+    let bot_id = registered.bot.bot_id;
+
+    // Every slug the wire may carry round-trips, and the set built from them is exactly the
+    // set the view reports back.
+    let wanted = [Scopes::SEND_MESSAGES, Scopes::READ_MEMBERS];
+    let mut requested = Scopes::NONE;
+    for scope in wanted {
+        let slug = scope.slug().expect("a named scope has a slug");
+        let parsed = Scopes::from_slug(slug).expect("a slug this build emits parses back");
+        assert_eq!(parsed, scope);
+        requested = requested.with(parsed);
+    }
+
+    let widened = svc
+        .set_scopes(&owner(1), bot_id, requested)
+        .await
+        .expect("the owner can set scopes");
+    assert!(widened.scopes.contains(Scopes::SEND_MESSAGES));
+    assert!(widened.scopes.contains(Scopes::READ_MEMBERS));
+    assert!(!widened.scopes.contains(Scopes::MODERATE));
+
+    // A replacement, not a union: the second call drops what the first granted.
+    let narrowed = svc
+        .set_scopes(&owner(1), bot_id, Scopes::NONE)
+        .await
+        .expect("the owner can clear scopes");
+    assert!(
+        narrowed.scopes.is_empty(),
+        "setting scopes replaces the set rather than widening it"
+    );
+
+    // The rule the handler refuses on.
+    assert!(
+        Scopes::from_slug("moderate_extra").is_none(),
+        "a slug no build defines must be refused, not folded in as nothing"
+    );
+    assert!(Scopes::from_slug("").is_none());
+}

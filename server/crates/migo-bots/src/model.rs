@@ -222,13 +222,16 @@ pub struct BotView {
     pub disabled: bool,
 }
 
-/// The result of registering a bot: the view, and the token shown exactly once.
+/// The result of the two calls that mint a bot token: the view, and the token shown once.
 ///
 /// The token is a [`Secret`]; it is returned here and never again, because the store keeps
-/// only its keyed tag. An owner who loses it rotates rather than recovers it.
+/// only its keyed tag. An owner who loses it rotates rather than recovers it — which is why
+/// `rotate_token` returns this same pair and not the bare token: both moments produce exactly
+/// these two things, the row that was written and the one credential that will never be
+/// readable again, and a caller that has one of them invariably wants the other.
 #[derive(Clone, Debug)]
 pub struct Registered {
-    /// The bot that was created.
+    /// The bot that was created, or the bot whose token was rotated.
     pub bot: BotView,
     /// Its bearer token, in plain text, for the one and only time it is available.
     pub token: Secret,

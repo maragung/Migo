@@ -334,16 +334,23 @@ where
         })
     }
 
-    async fn rotate_token(&self, owner: &Caller, bot_id: Id) -> Result<Secret> {
+    async fn rotate_token(&self, owner: &Caller, bot_id: Id) -> Result<Registered> {
         self.charge(owner, ROTATE_COST).await?;
         self.owned(owner, bot_id).await?;
         let (token, token_hash) = self.mint_token();
-        self.store
+        // The store hands back the row it just wrote, so the view costs nothing extra: reading
+        // it again would be a second round trip for data already in hand, and the caller would
+        // be charged for both.
+        let updated = self
+            .store
             .set_bot_token_hash(bot_id, token_hash)
             .await?
             .ok_or_else(|| fault::not_found("bot"))?;
         self.meters.token_rotated();
-        Ok(token)
+        Ok(Registered {
+            bot: view_of(&updated),
+            token,
+        })
     }
 
     async fn set_scopes(&self, owner: &Caller, bot_id: Id, scopes: Scopes) -> Result<BotView> {

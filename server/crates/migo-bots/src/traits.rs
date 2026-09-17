@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use migo_core::{Id, Result, Secret};
+use migo_core::{Id, Result};
 
 use crate::model::{BotIdentity, BotView, Caller, NewBotSpec, Registered, Scopes};
 
@@ -76,7 +76,14 @@ pub trait Bots: Send + Sync {
     ///
     /// The path an owner takes after a leak, or a lost token: the previous token stops
     /// authenticating the instant the new tag is written. Only the bot's owner may rotate it.
-    async fn rotate_token(&self, owner: &Caller, bot_id: Id) -> Result<Secret>;
+    ///
+    /// Returns the whole [`Registered`] pair rather than the bare token, because the store's
+    /// write already hands back the updated row and a caller that wants to show the owner what
+    /// it just rotated would otherwise read the same row a second time — and be charged for
+    /// both reads. Rotation changes only the credential, so the view that comes back is the
+    /// one the bot already had; it is returned so a client can prove which bot it rotated
+    /// rather than because rotation moved anything in it.
+    async fn rotate_token(&self, owner: &Caller, bot_id: Id) -> Result<Registered>;
 
     /// Sets a bot's permission scopes to exactly `scopes`, returning the updated view.
     ///
