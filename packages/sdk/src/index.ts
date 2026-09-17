@@ -279,6 +279,7 @@ export {
 export type {
   Acknowledged,
   BadgeWire,
+  BotView,
   CallIce,
   CallInviteEvent,
   CallInviteResult,

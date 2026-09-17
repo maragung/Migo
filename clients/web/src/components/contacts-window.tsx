@@ -57,7 +57,7 @@ const PRESENCE_OPTIONS: ReadonlyArray<PresenceStateValue> = [
 const MENU_ENTRIES: ReadonlyArray<{
   kind: Exclude<WinKind, 'chat'>;
   label: string;
-  icon: 'user' | 'settings' | 'shield' | 'wallet' | 'gift' | 'search' | 'game';
+  icon: 'user' | 'settings' | 'shield' | 'wallet' | 'gift' | 'search' | 'game' | 'bot';
 }> = [
   { kind: 'profile', label: 'My Profile', icon: 'user' },
   { kind: 'settings', label: 'Settings', icon: 'settings' },
@@ -65,6 +65,9 @@ const MENU_ENTRIES: ReadonlyArray<{
   { kind: 'wallet', label: 'My Wallet', icon: 'wallet' },
   { kind: 'search', label: 'Search', icon: 'search' },
   { kind: 'games', label: 'Games', icon: 'game' },
+  // The developer surface, beside Games rather than inside any tab: a bot is an account this
+  // person runs, so it belongs to the menu of things that belong to them.
+  { kind: 'bots', label: 'Bots', icon: 'bot' },
   { kind: 'store', label: 'Store', icon: 'gift' },
 ];
 

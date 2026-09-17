@@ -95,6 +95,7 @@ fun panelTitle(section: AppState.Section): String = when (section) {
     AppState.Section.PROFILE -> "Profile"
     AppState.Section.ADMINS -> "Admins"
     AppState.Section.GAMES -> "Games"
+    AppState.Section.BOTS -> "Bots"
     AppState.Section.SETTINGS -> "Settings"
     else -> "Panel"
 }

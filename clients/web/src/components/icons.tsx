@@ -35,6 +35,7 @@ export type IconName =
   | 'mic'
   | 'gift'
   | 'game'
+  | 'bot'
   | 'star'
   | 'verified'
   | 'back'
@@ -208,6 +209,17 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
   star: (
     <>
       <path d="m12 4 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.7l5.4-.8L12 4Z" />
+    </>
+  ),
+  // A head with an antenna, not a second face: the set already draws a person for `user`, and a
+  // bot has to be distinguishable from one at 16 pixels in a taskbar. The two eyes are strokes
+  // rather than dots because a dot at this size renders as a speck of ink the eye reads as dirt.
+  bot: (
+    <>
+      <rect x="4" y="8" width="16" height="11" rx="3" />
+      <path d="M12 8V5" />
+      <circle cx="12" cy="4" r="1.2" />
+      <path d="M9 12.5v2M15 12.5v2" />
     </>
   ),
   verified: (

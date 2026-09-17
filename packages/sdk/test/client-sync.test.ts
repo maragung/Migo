@@ -30,6 +30,10 @@
  *   carrying a *Ping* body (section 139 reuses the opcode both directions), so the client
  *   decodes it with the Ping codec and answers it. A client whose own heartbeat interval is
  *   longer than the server's deadline stays alive on that answer alone.
+ * * **Domain wiring** — every domain that carries inbound events is started by the composition
+ *   root and stopped by its teardown. The bots domain was constructed and left unstarted, which
+ *   is invisible to any test of the domain alone (it starts itself there) and to every
+ *   management call (those are outgoing): the client simply never heard a bot event.
  *
  * They drive the real `MigoClient` over a scripted socket — the same harness shape the
  * membership-cache tests use — because the point under test is the client's own wiring, not
@@ -59,6 +63,7 @@ import {
   decodeSubscribeRequest,
   decodeSyncRequest,
   encodeAcknowledged,
+  encodeBotEvent,
   encodeConversationRosterResponse,
   encodeError,
   encodeKeyBundleResponse,
@@ -991,4 +996,41 @@ test('a server probe is a Ping body on the wire, and the client answers it quiet
   } finally {
     await client.disconnect();
   }
+});
+
+test('a bot event reaches a handler registered through the client, and disconnecting ends it', async () => {
+  // The bots domain is constructed by the composition root like every other domain, and its
+  // subscription is only live while the root has started it. A domain that is built but never
+  // started answers every management call and hears no events at all — a failure no test of the
+  // domain alone can see, because the domain starts itself there.
+  const { client, socket } = await connectedClient();
+
+  const seen: string[] = [];
+  const off = client.bots.onBotEvent((event) => seen.push(event.event));
+
+  const deliverBotEvent = (name: string): void => {
+    socket.deliver(
+      encodeFrame({
+        header: frameHeader(OP.BOT_EVENT, 0),
+        payload: encodeBody(encodeBotEvent, { botId: idOf(31), event: name }),
+      }),
+    );
+  };
+
+  deliverBotEvent('webhook_failed');
+  await tick();
+  assert.deepEqual(seen, ['webhook_failed'], 'the started domain delivered the event');
+
+  // The handler's own unsubscribe is the narrow case; disconnecting is the broad one.
+  off();
+  deliverBotEvent('webhook_failed');
+  await tick();
+  assert.deepEqual(seen, ['webhook_failed'], 'an unsubscribed handler hears nothing more');
+
+  const viaClient = client.bots.onBotEvent((event) => seen.push(event.event));
+  await client.disconnect();
+  deliverBotEvent('webhook_failed');
+  await tick();
+  assert.deepEqual(seen, ['webhook_failed'], 'teardown stopped the domain with everything else');
+  viaClient();
 });

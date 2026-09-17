@@ -45,6 +45,7 @@ import { AccountPanel } from './account-panel.js';
 import { AdminsPanel } from './admins-panel.js';
 import { ModerationPanel } from './moderation-panel.js';
 import { ChatActivity } from './chat-activity.js';
+import { BotsPanel } from './bots-panel.js';
 import { ChatWindow } from './chat-window.js';
 import { ConfirmDialog } from './confirm-dialog.js';
 import { ContactsWindow } from './contacts-window.js';
@@ -747,6 +748,8 @@ export function AppShell(): ReactNode {
         return <StorePanel />;
       case 'games':
         return <GamesPanel />;
+      case 'bots':
+        return <BotsPanel />;
     }
   };
 

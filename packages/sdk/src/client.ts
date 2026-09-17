@@ -633,6 +633,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.games.stop();
     ctx.economy.stop();
     ctx.moderation.stop();
+    ctx.bots.stop();
     ctx.transport.close();
     for (const unsubscribe of this.#unsubscribes.splice(0)) {
       unsubscribe();
@@ -1703,6 +1704,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
     ctx.games.start();
     ctx.economy.start();
     ctx.moderation.start();
+    ctx.bots.start();
 
     // Membership movement keeps the membership cache true, so the sender-key audience the next
     // send builds is the group as it stands, not the group as a list row previewed it. A join or

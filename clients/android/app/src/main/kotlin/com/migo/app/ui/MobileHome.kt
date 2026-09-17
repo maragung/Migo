@@ -618,6 +618,12 @@ private fun MeSheet(
             sub = "Refereed by the server, played in a conversation",
             onClick = { onOpenSection(AppState.Section.GAMES) },
         )
+        SheetAction(
+            glyph = "🤖",
+            label = "Bots",
+            sub = "Accounts you run, and the token each signs in with",
+            onClick = { onOpenSection(AppState.Section.BOTS) },
+        )
         // The owner's own entry: the sign-in standing check answers whether to offer it, because
         // the management page's whole point is that its existence is not public information.
         if (state.admins.owner) {
