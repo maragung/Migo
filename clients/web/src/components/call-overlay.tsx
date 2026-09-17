@@ -34,14 +34,23 @@
  * echo in the overlay is a bug every call UI ships once.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import { CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, Id } from '@migo/sdk';
 
 import { applyOutputDevice } from '@/lib/migo/call-devices.js';
 import type { CallDevice } from '@/lib/migo/call-devices.js';
+import {
+  elementPipActive,
+  enterElementPip,
+  exitElementPip,
+  openPipWindow,
+  pipMode,
+  pipWindowSize,
+} from '@/lib/migo/call-pip.js';
 
 import {
   callMediaKindOf,
@@ -123,6 +132,21 @@ export interface CallScreenProps {
    */
   inputId: string | null;
   /**
+   * Whether this browser can float a call at all. Section 180 asks for picture-in-picture, and the
+   * two mechanisms that provide it are not equally useful — the capability is decided by
+   * {@link ./call-pip.ts} and reported here as a fact, so the screen draws no control on a browser
+   * that could not honour it.
+   */
+  pipAvailable: boolean;
+  /** Whether this call is floating right now, so the control offers the way back rather than out. */
+  pipActive: boolean;
+  /**
+   * Moves the call into a floating window, or takes it out of one. The remote video element is
+   * handed over because the fallback mechanism floats that element itself — the browser moves it,
+   * and the page cannot substitute one of its own.
+   */
+  onTogglePip: (video: HTMLVideoElement | null) => void;
+  /**
    * The tier the user pinned the call to, or null while the ladder is automatic. Section 180 asks
    * for manual selection alongside the automatic one, and manual is a ceiling: the call can still
    * descend when its link demands it, so this is what the user is willing to spend rather than a
@@ -175,6 +199,8 @@ export function CallScreen({
   microphones,
   outputId,
   inputId,
+  pipAvailable,
+  pipActive,
   qualityCeiling,
   lowBandwidth,
   nowMs,
@@ -193,6 +219,7 @@ export function CallScreen({
   onSelectInput,
   onSelectQuality,
   onToggleLowBandwidth,
+  onTogglePip,
   onDismiss,
 }: CallScreenProps): ReactNode {
   // The output is applied to the media element rather than carried on the stream: the sink belongs
@@ -200,8 +227,14 @@ export function CallScreen({
   // rather than an object because of that — React re-runs it on every change of identity, which is
   // exactly the "this element's output just moved" case. A rejection is a device that disappeared
   // between the menu opening and the press, and the call keeps playing where it was.
+  //
+  // The same element is kept in an object ref as well, for the one caller that has to hand the
+  // element itself to the browser rather than a stream: the fallback picture-in-picture mechanism
+  // floats that element, and the page cannot substitute one of its own.
+  const remoteElement = useRef<HTMLVideoElement | null>(null);
   const remoteRef = useCallback(
     (element: HTMLVideoElement | null): void => {
+      remoteElement.current = element;
       if (element === null) {
         return;
       }
@@ -487,6 +520,21 @@ export function CallScreen({
                 🖥️
               </button>
             ) : null}
+            {pipAvailable ? (
+              // Drawn on a voice call as well as a video call, because the floating window is a
+              // placement of the call and not of its picture: a voice call floated keeps its name,
+              // its timer, and its controls in front of whatever else the user is doing, which is
+              // the whole point of the requirement on a call that has nothing to show.
+              <button
+                type="button"
+                className={`call-action pip${pipActive ? ' on' : ''}`}
+                aria-label={pipActive ? 'Leave picture in picture' : 'Picture in picture'}
+                aria-pressed={pipActive}
+                onClick={() => onTogglePip(remoteElement.current)}
+              >
+                🖼️
+              </button>
+            ) : null}
             <button
               type="button"
               className="call-action hang-up"
@@ -506,6 +554,190 @@ export function CallScreen({
     </div>
   );
 }
+
+/**
+ * The call, rendered into its own floating window.
+ *
+ * A Document Picture-in-Picture window is a real window with a real document, and that document is
+ * not this page: no stylesheet of the app reaches it, and there is no shell, no chat list and no
+ * overlay behind it. So this card brings what it needs — a style block of its own as its first
+ * child, and the peer's picture or avatar as its body — and everything else it shows is what the
+ * user would otherwise have to come back to the tab to see: who the call is with, how long it has
+ * run, whether the microphone is muted, and the controls that act on it — muting, the camera, and
+ * hanging up — because a floating call the user has to come back to the tab to end is not a call
+ * that has been moved out of the tab.
+ *
+ * It is a pure component rendering into whatever document it is portalled into, which is what makes
+ * it pinnable by a test: the window itself cannot be opened in a test runner, but the markup a
+ * window would receive can be rendered and read.
+ */
+export interface CallPipCardProps {
+  /** The peer's display name, the card's one identity line. */
+  peerName: string;
+  /** The peer's id, for the avatar's stable colour. */
+  peerId: string;
+  /** The peer's avatar image, when their profile has one. */
+  peerAvatarUrl?: string;
+  /** Whether this is a video call, which decides picture or avatar. */
+  isVideo: boolean;
+  /** Whether this side's camera is on; a video call with it off shows the peer's picture only. */
+  cameraOn: boolean;
+  /** Whether this side's microphone is muted, so the control can say which way it goes. */
+  muted: boolean;
+  /** Whether this side is sharing its screen, which the sharer must keep being told. */
+  sharingScreen: boolean;
+  /** The call state as a word — the same word the full screen shows, not a second vocabulary. */
+  statusLabel: string;
+  /** The running duration as M:SS, or null before the call has one. */
+  durationLabel: string | null;
+  /** The peer's stream, which the floating picture plays. */
+  remoteStream: MediaStream | null;
+  /** This side's own stream, for the small self-view a video call with a camera on gets. */
+  localStream: MediaStream | null;
+  onToggleMute: () => void;
+  onToggleCamera: () => void;
+  onEnd: () => void;
+  /** Takes the call back into the page: closes the window without ending the call. */
+  onClose: () => void;
+}
+
+export function CallPipCard({
+  peerName,
+  peerId,
+  peerAvatarUrl,
+  isVideo,
+  cameraOn,
+  muted,
+  sharingScreen,
+  statusLabel,
+  durationLabel,
+  remoteStream,
+  localStream,
+  onToggleMute,
+  onToggleCamera,
+  onEnd,
+  onClose,
+}: CallPipCardProps): ReactNode {
+  return (
+    <div className="pip-card">
+      {/* The window's document has no stylesheet of its own, so the card carries one. It is scoped
+          to this card and written for a window the size of a thumbnail: no sidebar widths, no
+          desktop breakpoints, nothing that assumes the shell is behind it. */}
+      <style>{PIP_CARD_STYLES}</style>
+      <div className="pip-video">
+        {isVideo ? (
+          <video
+            className="pip-remote"
+            autoPlay
+            playsInline
+            aria-label={`${peerName}’s video`}
+            ref={(element: HTMLVideoElement | null): void => {
+              if (element !== null) {
+                element.srcObject = remoteStream;
+              }
+            }}
+          />
+        ) : (
+          // A voice call has no picture, so the window shows who it is with. This is the only case
+          // the avatar covers: a video call with the peer's camera off is still a video call, and
+          // the element is left to render whatever the peer is actually publishing.
+          <div className="pip-avatar">
+            <Avatar name={peerName} id={peerId} size={56} avatarUrl={peerAvatarUrl} />
+          </div>
+        )}
+        {isVideo && cameraOn ? (
+          // The self-view, small and in the corner, for the same reason the full screen has one:
+          // the user cannot otherwise tell whether their own camera is publishing.
+          <video
+            className="pip-local"
+            autoPlay
+            playsInline
+            muted
+            aria-label="Your video"
+            ref={(element: HTMLVideoElement | null): void => {
+              if (element !== null) {
+                element.srcObject = localStream;
+              }
+            }}
+          />
+        ) : null}
+      </div>
+      <div className="pip-identity">
+        <div className="pip-name">{peerName}</div>
+        <div className="pip-status" aria-live="polite">
+          {statusLabel}
+          {durationLabel !== null ? ` · ${durationLabel}` : ''}
+        </div>
+        {sharingScreen ? (
+          // The sharer's reminder, carried into the floating window rather than left behind in the
+          // tab: a share the user has stopped looking at is exactly the one they forget.
+          <div className="pip-sharing" role="status">
+            Sharing your screen
+          </div>
+        ) : null}
+      </div>
+      <div className="pip-actions">
+        <button
+          type="button"
+          className={`pip-action mute${muted ? ' muted' : ''}`}
+          aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+          onClick={onToggleMute}
+        >
+          {muted ? '🔇' : '🎙️'}
+        </button>
+        {isVideo ? (
+          <button
+            type="button"
+            className={`pip-action camera${cameraOn ? '' : ' off'}`}
+            aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+            onClick={onToggleCamera}
+          >
+            {cameraOn ? '📷' : '🚫'}
+          </button>
+        ) : null}
+        <button type="button" className="pip-action hang-up" aria-label="End call" onClick={onEnd}>
+          ✕
+        </button>
+        <button
+          type="button"
+          className="pip-action"
+          aria-label="Back to the call"
+          onClick={onClose}
+        >
+          ⤢
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The floating card's stylesheet, as text because it is written into another document.
+ *
+ * Kept beside the card rather than in the app's stylesheet for the same reason: the app's
+ * stylesheet never reaches a picture-in-picture window, so a rule written there would look correct
+ * in review and do nothing at runtime.
+ */
+const PIP_CARD_STYLES = `
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0f14; color: #e6edf3;
+         font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .pip-card { display: flex; flex-direction: column; height: 100vh; }
+  .pip-video { position: relative; flex: 1; min-height: 0; background: #05080b; }
+  .pip-remote { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .pip-local { position: absolute; right: 8px; bottom: 8px; width: 84px; border-radius: 6px; }
+  .pip-avatar { position: absolute; inset: 0; display: flex; align-items: center;
+                justify-content: center; }
+  .pip-identity { padding: 6px 10px; min-width: 0; }
+  .pip-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pip-status { color: #9aa7b4; font-size: 12px; }
+  .pip-sharing { color: #f0b429; font-size: 12px; }
+  .pip-actions { display: flex; gap: 8px; padding: 0 10px 10px; }
+  .pip-action { flex: 1; border: 0; border-radius: 8px; padding: 6px 0; font-size: 15px;
+                background: #1b2430; color: inherit; cursor: pointer; }
+  .pip-action.muted, .pip-action.off { background: #7f1d1d; }
+  .pip-action.hang-up { background: #b91c1c; }
+`;
 
 /**
  * The small card for a call that could not even be placed: the fact, and a way past it. The
@@ -603,45 +835,156 @@ export function CallOverlay(): ReactNode {
     return () => window.clearInterval(timer);
   }, [activeCall]);
 
+  // The floating window, when this call has one. Held as the window rather than as a boolean,
+  // because the window is what the card's markup is portalled into and what has to be closed on the
+  // way out; the fallback mechanism floats an element instead and reports itself through the
+  // browser's own events, so the two are tracked apart.
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  const [floatingElement, setFloatingElement] = useState<boolean>(false);
+  // The capability is read in an effect rather than during render for the same reason the audio
+  // output list is: this shell is exported as static HTML, and a control that exists on the client
+  // and not in the server's markup is a hydration mismatch rather than a feature.
+  const [pipAvailable, setPipAvailable] = useState<boolean>(false);
+
+  useEffect(() => {
+    setPipAvailable(pipMode() !== 'none');
+  }, []);
+
+  useEffect(() => {
+    if (pipWindow === null) {
+      return;
+    }
+    // The user closed the window, with its own close button or the browser's. The call is not
+    // affected — a floating window is a placement of the call, not the call — so this only has to
+    // stop the overlay claiming to be floating.
+    const onClosed = (): void => setPipWindow(null);
+    pipWindow.addEventListener('pagehide', onClosed);
+    return () => pipWindow.removeEventListener('pagehide', onClosed);
+  }, [pipWindow]);
+
+  useEffect(() => {
+    // No call left to float: a window that outlived its call would be a peer's picture with no way
+    // to hang up a call that has already ended.
+    if (activeCall === null && pipWindow !== null) {
+      pipWindow.close();
+      setPipWindow(null);
+    }
+  }, [activeCall, pipWindow]);
+
+  const togglePip = useCallback(
+    async (video: HTMLVideoElement | null): Promise<void> => {
+      if (pipWindow !== null) {
+        pipWindow.close();
+        setPipWindow(null);
+        return;
+      }
+      if (elementPipActive()) {
+        await exitElementPip();
+        return;
+      }
+      // The document window first, because it is the only one of the two that carries the call's
+      // controls; the element fallback is what a browser without it is left with.
+      if (pipMode() === 'document') {
+        const opened = await openPipWindow(
+          pipWindowSize(activeCall?.mediaKind === CallMediaKind.Video),
+        );
+        if (opened !== null) {
+          setPipWindow(opened);
+        }
+        return;
+      }
+      // The float can end without this client asking — the user closes the browser's window, or the
+      // call ends and the element leaves the document — so the state is cleared from the element's
+      // own event rather than left claiming a call is still floating.
+      if (await enterElementPip(video, () => setFloatingElement(false))) {
+        setFloatingElement(true);
+      }
+    },
+    [pipWindow, activeCall],
+  );
+
   if (incomingCall !== null || activeCall !== null) {
+    const pipActive = pipWindow !== null || floatingElement;
+    const floatingCall = activeCall;
     return (
-      <CallScreen
-        call={activeCall}
-        incoming={incomingCall}
-        peerName={peerName}
-        peerId={peerId ?? 'peer'}
-        peerAvatarUrl={profile?.avatarUrl}
-        muted={muted}
-        cameraOn={cameraOn}
-        degraded={degraded}
-        quality={quality}
-        sharingScreen={sharingScreen}
-        screenStream={screenStream}
-        outputs={outputs}
-        cameras={cameras}
-        microphones={microphones}
-        outputId={outputId}
-        inputId={inputId}
-        qualityCeiling={qualityCeiling}
-        lowBandwidth={lowBandwidth}
-        nowMs={nowMs}
-        endedAt={endedAt}
-        localStream={localStream}
-        remoteStream={remoteStream}
-        onAccept={() => void acceptCall()}
-        onDecline={() => void declineCall()}
-        onCancel={() => void cancelCall()}
-        onEnd={(reason) => void endCall(reason)}
-        onToggleMute={toggleMute}
-        onToggleCamera={toggleCamera}
-        onSwitchCamera={() => void switchCamera()}
-        onToggleScreenShare={() => void toggleScreenShare()}
-        onSelectOutput={setOutputDevice}
-        onSelectInput={(deviceId) => void setInputDevice(deviceId)}
-        onSelectQuality={setQualityCeiling}
-        onToggleLowBandwidth={setLowBandwidth}
-        onDismiss={dismissCall}
-      />
+      <>
+        <CallScreen
+          call={activeCall}
+          incoming={incomingCall}
+          peerName={peerName}
+          peerId={peerId ?? 'peer'}
+          peerAvatarUrl={profile?.avatarUrl}
+          muted={muted}
+          cameraOn={cameraOn}
+          degraded={degraded}
+          quality={quality}
+          sharingScreen={sharingScreen}
+          screenStream={screenStream}
+          outputs={outputs}
+          cameras={cameras}
+          microphones={microphones}
+          outputId={outputId}
+          inputId={inputId}
+          pipAvailable={pipAvailable}
+          pipActive={pipActive}
+          qualityCeiling={qualityCeiling}
+          lowBandwidth={lowBandwidth}
+          nowMs={nowMs}
+          endedAt={endedAt}
+          localStream={localStream}
+          remoteStream={remoteStream}
+          onAccept={() => void acceptCall()}
+          onDecline={() => void declineCall()}
+          onCancel={() => void cancelCall()}
+          onEnd={(reason) => void endCall(reason)}
+          onToggleMute={toggleMute}
+          onToggleCamera={toggleCamera}
+          onSwitchCamera={() => void switchCamera()}
+          onToggleScreenShare={() => void toggleScreenShare()}
+          onSelectOutput={setOutputDevice}
+          onSelectInput={(deviceId) => void setInputDevice(deviceId)}
+          onSelectQuality={setQualityCeiling}
+          onToggleLowBandwidth={setLowBandwidth}
+          onTogglePip={(video) => void togglePip(video)}
+          onDismiss={dismissCall}
+        />
+        {pipWindow !== null && floatingCall !== null
+          ? createPortal(
+              // The floating window's whole content, rendered into its own document. It is the same
+              // call and the same handlers as the screen behind it, so the two views cannot
+              // disagree about anything: there is one piece of state and two places showing it.
+              <CallPipCard
+                peerName={peerName}
+                peerId={peerId ?? 'peer'}
+                peerAvatarUrl={profile?.avatarUrl}
+                isVideo={floatingCall.mediaKind === CallMediaKind.Video}
+                cameraOn={cameraOn}
+                muted={muted}
+                sharingScreen={sharingScreen}
+                statusLabel={callStateLabel(displayStateOf(floatingCall, degraded))}
+                durationLabel={
+                  floatingCall.startedAt !== undefined
+                    ? formatCallDuration((endedAt ?? nowMs) - floatingCall.startedAt)
+                    : null
+                }
+                remoteStream={remoteStream}
+                localStream={localStream}
+                onToggleMute={toggleMute}
+                onToggleCamera={toggleCamera}
+                onEnd={() =>
+                  void endCall(
+                    floatingCall.isCaller ? CallEndReason.ByCaller : CallEndReason.ByCallee,
+                  )
+                }
+                onClose={() => {
+                  pipWindow.close();
+                  setPipWindow(null);
+                }}
+              />,
+              pipWindow.document.body,
+            )
+          : null}
+      </>
     );
   }
 
