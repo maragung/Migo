@@ -122,6 +122,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     peerName: 'Ada Lovelace',
     peerId: 'ada',
     muted: false,
+    cameraOn: false,
     degraded: false,
     quality: null,
     sharingScreen: false,
@@ -135,6 +136,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onCancel: () => {},
     onEnd: () => {},
     onToggleMute: () => {},
+    onToggleCamera: () => {},
     onToggleScreenShare: () => {},
     onDismiss: () => {},
     ...overrides,
@@ -425,6 +427,59 @@ test('a connected video call offers screen sharing, and a voice call never does'
   assert.ok(!ringing.includes('Share your screen'), 'nothing is shared before a call connects');
 });
 
+test('the camera control belongs to a video call, and says which way it will go', () => {
+  const video = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 5_000,
+  });
+  // Section 180 lists camera on and off among the controls a call screen carries, and the label is
+  // the state rather than the action: a button that always read "Camera" would leave the user
+  // guessing which way the press goes.
+  assert.ok(screen({ call: video, cameraOn: true }).includes('aria-label="Turn camera off"'));
+  assert.ok(screen({ call: video, cameraOn: false }).includes('aria-label="Turn camera on"'));
+
+  // A voice call publishes no camera, so there is no control to draw — and the same rule the share
+  // button follows keeps it off the states either side of a live call.
+  const voice = screen({
+    call: activeCall({ state: CallState.Connected, mediaKind: CallMediaKind.Audio }),
+  });
+  assert.ok(!voice.includes('Turn camera'), 'a voice call has no camera to turn');
+  const ringing = screen({
+    call: activeCall({ state: CallState.Ringing, mediaKind: CallMediaKind.Video }),
+    cameraOn: true,
+  });
+  assert.ok(!ringing.includes('Turn camera'), 'the controls belong to a connected call');
+});
+
+test('the self-view says a camera that is off is off, rather than showing a black frame', () => {
+  const call = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 5_000,
+  });
+  const camera = { id: 'cam' } as unknown as MediaStream;
+  assert.ok(
+    screen({ call, cameraOn: true, localStream: camera }).includes('aria-label="Your video"'),
+  );
+  // A user who pressed "camera off" and still sees a video element labelled as their video is
+  // looking at the one thing that would make them press it again.
+  assert.ok(
+    screen({ call, cameraOn: false, localStream: camera }).includes('aria-label="Camera off"'),
+  );
+  // Except while sharing: the screen is what is being sent, and it wins over a camera that is off.
+  const desktop = { id: 'screen' } as unknown as MediaStream;
+  assert.ok(
+    screen({
+      call,
+      cameraOn: false,
+      localStream: camera,
+      screenStream: desktop,
+      sharingScreen: true,
+    }).includes('aria-label="The screen you are sharing"'),
+  );
+});
+
 test('the sharer keeps reading that the screen is being shared, for as long as it is', () => {
   const call = activeCall({
     state: CallState.Connected,
@@ -460,7 +515,9 @@ test('the self-view shows what is being sent: the screen while sharing, the came
   // The label is the only part of this a static render can read, and it is the part that matters:
   // a self-view labelled "Your video" over a shared desktop tells the user the wrong thing about
   // what the peer is receiving.
-  assert.ok(screen({ call, localStream: camera }).includes('aria-label="Your video"'));
+  assert.ok(
+    screen({ call, cameraOn: true, localStream: camera }).includes('aria-label="Your video"'),
+  );
   const sharing = screen({ call, localStream: camera, screenStream: desktop, sharingScreen: true });
   assert.ok(sharing.includes('aria-label="The screen you are sharing"'));
 });
@@ -593,6 +650,8 @@ test('the call manager context starts with no call, no invite, and its actions b
         typeof call.cancelCall === 'function' &&
         typeof call.endCall === 'function' &&
         typeof call.toggleMute === 'function' &&
+        typeof call.toggleCamera === 'function' &&
+        typeof call.toggleScreenShare === 'function' &&
         typeof call.dismissCall === 'function'
           ? 'bound'
           : 'missing'}
