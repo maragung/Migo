@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.migo.app.call.ActiveCall
+import com.migo.app.call.CallManager
 import com.migo.app.call.CallUiState
 import com.migo.core.domain.CallDisplayState
 import com.migo.core.domain.CallMediaKind
@@ -120,6 +123,9 @@ fun CallOverlay(
     remoteVideo: VideoTrack?,
     onMinimize: (() -> Unit)? = null,
     onSwitchCamera: (() -> Unit)? = null,
+    outputs: List<CallManager.AudioOutput> = emptyList(),
+    chosenOutput: Int? = null,
+    onChooseOutput: ((Int) -> Unit)? = null,
     inPictureInPicture: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -167,6 +173,9 @@ fun CallOverlay(
                 onRateCall = onRateCall,
                 onMinimize = onMinimize,
                 onSwitchCamera = onSwitchCamera,
+                outputs = outputs,
+                chosenOutput = chosenOutput,
+                onChooseOutput = onChooseOutput,
                 inPictureInPicture = inPictureInPicture,
             )
 
@@ -224,6 +233,9 @@ private fun ActiveCallScreen(
     onRateCall: (CallRating, ULong) -> Unit,
     onMinimize: (() -> Unit)?,
     onSwitchCamera: (() -> Unit)?,
+    outputs: List<CallManager.AudioOutput>,
+    chosenOutput: Int?,
+    onChooseOutput: ((Int) -> Unit)?,
     inPictureInPicture: Boolean,
 ) {
     // One tick per second while connected: the duration is the only number on screen that moves.
@@ -413,6 +425,19 @@ private fun ActiveCallScreen(
                             onClick = onMinimize,
                         )
                     }
+                    // The routing menu is offered only where the phone listed more than one route
+                    // and the app can act on the list: a phone whose only output is the one it is
+                    // already using gets no control rather than a menu with a single row, and a
+                    // platform with no honest way to route a call gets none at all. Voice and
+                    // video both take it, because where a call is played is not a property of
+                    // whether it has a picture.
+                    if (onChooseOutput != null && outputs.size > 1) {
+                        AudioRouteButton(
+                            outputs = outputs,
+                            chosenOutput = chosenOutput,
+                            onChooseOutput = onChooseOutput,
+                        )
+                    }
                     CallActionButton(
                         glyph = if (state.muted) "🔇" else "🎙️",
                         label = if (state.muted) "Unmute microphone" else "Mute microphone",
@@ -583,6 +608,45 @@ private fun CallActionButton(
         contentAlignment = Alignment.Center,
     ) {
         Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
+    }
+}
+
+/**
+ * Where the call is played, as a menu of the routes the phone listed.
+ *
+ * Drawn in the same circle as the neighbouring controls rather than as a text button, because the
+ * row is a row of round controls and a labelled button beside them would read as belonging to a
+ * different bar. The tick marks the route the call is on, and no tick is a real state rather than a
+ * missing one: the app has not routed the call anywhere itself, so the phone is choosing, and
+ * ticking a device on a guess would tell the user their sound is somewhere it may not be.
+ */
+@Composable
+private fun AudioRouteButton(
+    outputs: List<CallManager.AudioOutput>,
+    chosenOutput: Int?,
+    onChooseOutput: (Int) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(contentAlignment = Alignment.Center) {
+        CallActionButton(
+            glyph = "🔊",
+            label = "Call audio",
+            background = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            onClick = { open = true },
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            outputs.forEach { output ->
+                val marked = if (output.id == chosenOutput) "✓ ${output.label}" else output.label
+                DropdownMenuItem(
+                    text = { Text(marked) },
+                    onClick = {
+                        onChooseOutput(output.id)
+                        open = false
+                    },
+                )
+            }
+        }
     }
 }
 

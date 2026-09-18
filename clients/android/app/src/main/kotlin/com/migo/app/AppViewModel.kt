@@ -1204,6 +1204,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callManager?.switchCamera()
     }
 
+    /**
+     * The routes the phone is offering the live call, read through from the manager so the menu
+     * and the call cannot disagree about what is available. Empty before a session exists and on a
+     * phone whose platform has no honest way to route a call, and the screen draws no control for
+     * either of those -- nor for a phone with only one route, which has nothing to choose.
+     */
+    val callOutputs: StateFlow<List<CallManager.AudioOutput>>
+        get() = callManager?.outputs ?: EMPTY_CALL_OUTPUTS
+
+    /** The route the call is playing through, or null while the phone is choosing for itself. */
+    val callOutput: StateFlow<Int?>
+        get() = callManager?.chosenOutputId ?: NO_CALL_OUTPUT
+
+    /**
+     * Plays the live call through one of the routes the phone listed. A refusal is the phone
+     * saying the route is gone -- a Bluetooth headset that dropped since the menu was drawn -- and
+     * it leaves the call on the route it was already using.
+     */
+    fun chooseCallOutput(deviceId: Int) {
+        callManager?.chooseOutput(deviceId)
+    }
+
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
     fun dismissCallScreen() {
         callManager?.dismissCall()
@@ -6877,6 +6899,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         /** How long the search field must be quiet before its query reaches the wire. */
         const val SEARCH_DEBOUNCE_MS = 300L
+
+        /**
+         * What the routing menu reads when there is no session: no routes at all. A constant
+         * rather than a fresh flow per read, because the screen collects this one and a new
+         * instance on every recomposition would restart the collection it is watching.
+         */
+        val EMPTY_CALL_OUTPUTS: StateFlow<List<CallManager.AudioOutput>> =
+            MutableStateFlow(emptyList())
+
+        /** What the routing menu reads when there is no session: no route chosen. */
+        val NO_CALL_OUTPUT: StateFlow<Int?> = MutableStateFlow(null)
 
         /**
          * How long the friend-graph cues must be quiet before the re-read reaches the wire. The
