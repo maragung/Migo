@@ -507,7 +507,7 @@ pub async fn a_patch_tells_keep_apart_from_clear(store: &SharedStore) {
         .update_profile(
             fresh,
             ProfilePatch {
-                display_name: "budi santoso".to_string(),
+                display_name: Some("budi santoso".to_string()),
                 ..Default::default()
             },
             ts(2_200),

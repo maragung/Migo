@@ -80,6 +80,7 @@ impl MigratorTrait for Migrator {
             Box::new(ConversationHomeRegion),
             Box::new(DeviceInvisible),
             Box::new(KickVote),
+            Box::new(ProfileCallPermissions),
         ]
     }
 }
@@ -566,6 +567,39 @@ impl MigrationTrait for KickVote {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0015_kick_vote cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0016_profile_call_permissions` -- the two per-kind call policies section 180
+/// asks for, on the profile rather than in a deployment default, so that the
+/// account they belong to is the one that can widen them.
+/// See `server/migrations/0016_profile_call_permissions.sql`.
+struct ProfileCallPermissions;
+
+impl MigrationName for ProfileCallPermissions {
+    fn name(&self) -> &str {
+        "0016_profile_call_permissions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ProfileCallPermissions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0016_profile_call_permissions.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0016_profile_call_permissions cannot be rolled back: create a new database instead"
+                .to_owned(),
         ))
     }
 }
