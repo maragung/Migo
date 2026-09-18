@@ -72,4 +72,72 @@ class VideoCapsTest {
         assertFalse(degradedAt(LinkQuality.FrameRateLowered, isVideo = true))
         assertFalse(degradedAt(LinkQuality.Full, isVideo = true))
     }
+
+    @Test
+    fun theRungsAUserMayPinAreAllButTheBottomOne() {
+        assertEquals(
+            listOf(
+                LinkQuality.Full,
+                LinkQuality.BitrateCapped,
+                LinkQuality.ResolutionLowered,
+                LinkQuality.FrameRateLowered,
+            ),
+            QUALITY_CEILINGS,
+        )
+        // Video off is the camera button's job: pinning it would put the call into a state that says
+        // the quality dropped, which is not what a user choosing it did.
+        assertFalse(QUALITY_CEILINGS.contains(LinkQuality.VideoOff))
+    }
+
+    @Test
+    fun aCeilingNeverLiftsACallAboveItsOwnLink() {
+        // Automatic: the ladder's own rung, untouched.
+        assertEquals(
+            LinkQuality.BitrateCapped,
+            cappedQuality(LinkQuality.BitrateCapped, ceiling = null, lowBandwidth = false),
+        )
+        // A pin below the measured rung lowers the call.
+        assertEquals(
+            LinkQuality.FrameRateLowered,
+            cappedQuality(LinkQuality.BitrateCapped, LinkQuality.FrameRateLowered, lowBandwidth = false),
+        )
+        // A pin above it changes nothing: no control makes a link carry more than it can.
+        assertEquals(
+            LinkQuality.BitrateCapped,
+            cappedQuality(LinkQuality.BitrateCapped, LinkQuality.Full, lowBandwidth = false),
+        )
+    }
+
+    @Test
+    fun lowBandwidthIsASecondCeilingAndNotItsOwnState() {
+        // The mode alone pins the call to the lowest rung that still carries video.
+        assertEquals(
+            LinkQuality.FrameRateLowered,
+            cappedQuality(LinkQuality.Full, ceiling = null, lowBandwidth = true),
+        )
+        // It is a ceiling like the pin is, so the lower of the two wins and neither lifts the other.
+        assertEquals(
+            LinkQuality.FrameRateLowered,
+            cappedQuality(LinkQuality.Full, LinkQuality.BitrateCapped, lowBandwidth = true),
+        )
+        // Turning the mode off leaves the rung the pin alone would have left, because the mode was
+        // never a state of its own to restore.
+        assertEquals(
+            LinkQuality.ResolutionLowered,
+            cappedQuality(LinkQuality.Full, LinkQuality.ResolutionLowered, lowBandwidth = false),
+        )
+        // The ladder may still descend below both: a control is a ceiling, not a floor, so a call
+        // whose link fell to the bottom is not lifted off it by anything the user pinned.
+        assertEquals(
+            LinkQuality.VideoOff,
+            cappedQuality(LinkQuality.VideoOff, LinkQuality.Full, lowBandwidth = true),
+        )
+    }
+
+    @Test
+    fun theAudioCapIsWrittenInBothDirections() {
+        assertEquals(16_000, audioCaps(lowBandwidth = true))
+        // Lifted by a number rather than by an omission, or the call stays in narrowband for life.
+        assertEquals(100_000_000, audioCaps(lowBandwidth = false))
+    }
 }

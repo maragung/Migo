@@ -101,3 +101,76 @@ private fun cappedBps(measuredKbps: Long, pct: Long): Int =
     maxOf(MIN_CAP_KBPS, (measuredKbps * pct / 100.0).roundToLong()).bps()
 
 private fun Long.bps(): Int = (this * 1000).toInt()
+
+/**
+ * The rungs a user may pin a call to, top first.
+ *
+ * The bottom rung is deliberately not among them. A user who wants no video has the camera button,
+ * which says so plainly; a ceiling of "video off" would instead put the call into Degraded, a state
+ * section 180 defines as video paused because the quality dropped -- and a sacrifice the user chose
+ * is not a drop, so offering it here would make the screen say something untrue about why the camera
+ * is off.
+ */
+val QUALITY_CEILINGS: List<LinkQuality> = LinkQuality.entries.dropLast(1)
+
+/**
+ * Where low bandwidth mode pins a call: the lowest rung that still carries video.
+ *
+ * The mode is for a link the user knows is expensive or thin, and it asks for the smallest call that
+ * is still the call they started. Audio is capped as well, through [LOW_BANDWIDTH_AUDIO_BPS],
+ * because on a voice call the ladder has nothing to give up and the mode would otherwise mean
+ * nothing at all.
+ */
+val LOW_BANDWIDTH_CEILING = LinkQuality.FrameRateLowered
+
+/**
+ * What low bandwidth mode asks of the audio sender, bits per second.
+ *
+ * Audio is never a rung of the ladder -- the bottom of the ladder is "video off, audio alive" -- so
+ * the mode reaches a voice call through the audio sender's own cap instead, which is what section
+ * 180's low audio bitrate mode asks for. Opus at sixteen kilobits is narrowband speech:
+ * intelligible, and about a fifth of what a comfortable full-band call uses. The number is chosen to
+ * keep the call alive rather than to sound good, because the mode exists for a link that cannot
+ * carry the call the user would rather have.
+ */
+const val LOW_BANDWIDTH_AUDIO_BPS = 16_000
+
+/**
+ * What one audio sender's cap should be, given the mode.
+ *
+ * Both directions are written, and the lifted one is a number rather than an omission, for the same
+ * reason every video cap is: a member left out of a sender's parameters is a member the receiver
+ * keeps, so clearing the cap by omitting it would leave a call in narrowband for the rest of its
+ * life.
+ */
+fun audioCaps(lowBandwidth: Boolean): Int =
+    if (lowBandwidth) LOW_BANDWIDTH_AUDIO_BPS else NO_CAP_KBPS.bps()
+
+/**
+ * The rung a call is actually on, once the two controls that cap it have had their say.
+ *
+ * A ceiling, never a floor: the ladder may still descend below whatever the user pinned, because no
+ * control can make a link carry more than it can, and a client that pretended otherwise would send
+ * video into a congested path while the screen claimed a tier the call was not on. [ceiling] is the
+ * manual choice and null means automatic; [lowBandwidth] is the mode, and it is applied as a second
+ * ceiling rather than as its own state, so turning it off restores exactly the rung that was there
+ * before it.
+ */
+fun cappedQuality(
+    quality: LinkQuality,
+    ceiling: LinkQuality?,
+    lowBandwidth: Boolean,
+): LinkQuality {
+    var capped = quality
+    if (ceiling != null) {
+        capped = lowerOf(capped, ceiling)
+    }
+    if (lowBandwidth) {
+        capped = lowerOf(capped, LOW_BANDWIDTH_CEILING)
+    }
+    return capped
+}
+
+/** The rung that gives up more of the two. The ladder's order is what decides, not a second table. */
+private fun lowerOf(a: LinkQuality, b: LinkQuality): LinkQuality =
+    if (a.rung >= b.rung) a else b

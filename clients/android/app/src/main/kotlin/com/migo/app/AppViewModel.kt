@@ -17,6 +17,7 @@ import com.migo.app.call.CallService
 import com.migo.app.call.CallUiState
 import com.migo.app.call.GroupCallManager
 import com.migo.app.call.GroupCallUiState
+import com.migo.app.call.LinkQuality
 import com.migo.app.call.MICROPHONE_UNAVAILABLE
 import com.migo.app.media.MEDIA_SEAL_DOMAIN
 import com.migo.app.media.VOICE_NOTE_MAX_MS
@@ -1191,6 +1192,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun toggleCallCamera() {
         callManager?.toggleCamera()
+    }
+
+    /**
+     * Pins the call to a rung, or returns it to automatic with null.
+     *
+     * A ceiling and not a floor: the call still descends if its link does, and what the pin buys is
+     * that it never rises above the chosen rung.
+     */
+    fun setCallQualityCeiling(ceiling: LinkQuality?) {
+        callManager?.setQualityCeiling(ceiling)
+    }
+
+    /**
+     * Turns low bandwidth mode on or off for the call. On a video call it caps the ladder at its
+     * lowest rung that still carries video; on a voice call it caps the audio bitrate, which is the
+     * only thing there is to give up.
+     */
+    fun setCallLowBandwidth(on: Boolean) {
+        callManager?.setLowBandwidth(on)
     }
 
     /**

@@ -297,6 +297,11 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             } else {
                 null
             },
+            // The two quality controls are always handed down: the ceiling is the ladder's own
+            // rungs and the mode reaches a voice call through its audio, so neither of them needs
+            // the call to have a picture to be worth offering.
+            onChooseQuality = model::setCallQualityCeiling,
+            onToggleLowBandwidth = model::setCallLowBandwidth,
         )
     }
 
