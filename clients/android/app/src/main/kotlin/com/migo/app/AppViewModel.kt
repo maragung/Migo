@@ -39,6 +39,7 @@ import com.migo.app.model.Attachment
 import com.migo.app.model.AttachmentKind
 import com.migo.app.model.BotEventNote
 import com.migo.app.model.BotReveal
+import com.migo.app.model.CallsState
 import com.migo.app.model.ChainNetworkChoice
 import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
@@ -2667,6 +2668,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.SEARCH -> Unit
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
+            AppState.Section.CALLS -> if (!callsLoaded()) loadCalls()
             AppState.Section.PROFILE -> {
                 if (signedInState?.devices?.devices == null) loadDevices()
                 if (!checkupLoaded()) loadSecurityCheckup()
@@ -4392,6 +4394,69 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * How many rows one page asks for, and the size that decides when the history has
+     * ended: a page shorter than this is the last one.
+     */
+    private val CALLS_PAGE_SIZE = 50
+
+    /**
+     * The Calls section's first page.
+     *
+     * Re-entering an already-read section asks for nothing: a page is a read of the past and the
+     * past does not move, so the only thing that would change the answer is a call ending, which
+     * arrives as its own event rather than as something to poll for.
+     */
+    fun loadCalls() {
+        readCalls(before = null, first = true)
+    }
+
+    /** The page behind the oldest row held; that row's own end time is the cursor. */
+    fun loadOlderCalls() {
+        val oldest = signedInState?.calls?.rows?.lastOrNull() ?: return
+        readCalls(before = oldest.endedAt, first = false)
+    }
+
+    /**
+     * One page of the call history.
+     *
+     * The cursor is exclusive on the server, so the row whose end time is passed is never returned
+     * again and pages cannot overlap however slowly they are read. A page shorter than the size
+     * asked for is the end: there is no total to count against, and a full page is the only reason
+     * the button that asks for more is offered.
+     */
+    private fun readCalls(before: Long?, first: Boolean) {
+        val live = session ?: return
+        if (first) {
+            signedIn { it.copy(calls = CallsState(loading = true)) }
+        } else {
+            signedIn { it.copy(calls = it.calls.copy(loading = true)) }
+        }
+        viewModelScope.launch {
+            try {
+                val page = live.client.calls.callHistory(
+                    before = before,
+                    limit = CALLS_PAGE_SIZE.toLong(),
+                )
+                signedIn { current ->
+                    val held = if (first) emptyList() else current.calls.rows
+                    current.copy(
+                        calls = CallsState(
+                            rows = held + page,
+                            loading = false,
+                            complete = page.size < CALLS_PAGE_SIZE,
+                            loaded = true,
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(calls = it.calls.copy(loading = false), failure = readable(failure)) }
+            }
+        }
+    }
+
     /** The Alerts inbox read. */
     fun loadAlerts() {
         val live = session ?: return
@@ -5061,6 +5126,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun checkupLoaded(): Boolean = signedInState?.securityCheckup?.recoveryConfigured != null
 
     private fun alertsLoaded(): Boolean = signedInState?.alerts?.loading == false && signedInState?.alerts?.items?.isNotEmpty() == true
+
+    /** True once a Calls page has landed, so re-entering the section asks for nothing more. */
+    private fun callsLoaded(): Boolean = signedInState?.calls?.loaded == true
 
     // --- lifecycle ---
 

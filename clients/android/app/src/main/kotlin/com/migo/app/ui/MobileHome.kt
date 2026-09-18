@@ -595,6 +595,12 @@ private fun MeSheet(
             onClick = { onOpenSection(AppState.Section.PROFILE) },
         )
         SheetAction(
+            glyph = "☏",
+            label = "Calls",
+            sub = "Recent, missed and outgoing calls",
+            onClick = { onOpenSection(AppState.Section.CALLS) },
+        )
+        SheetAction(
             glyph = "✉",
             label = "Messages & alerts",
             sub = "The inbox and the notifications feed",

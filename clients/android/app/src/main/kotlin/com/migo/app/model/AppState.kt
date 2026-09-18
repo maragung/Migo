@@ -10,6 +10,7 @@ import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.BotView
+import com.migo.core.protocol.CallHistoryEntry
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
@@ -141,6 +142,7 @@ sealed interface AppState {
         val search: SearchState = SearchState(),
         val wallet: WalletState = WalletState(),
         val alerts: AlertsState = AlertsState(),
+        val calls: CallsState = CallsState(),
         val devices: DevicesState = DevicesState(),
         val backup: BackupState = BackupState(),
         /**
@@ -176,11 +178,12 @@ sealed interface AppState {
      * which is how a phone wears a second pane.
      */
     enum class Section {
-        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS, BOTS, SETTINGS;
+        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, CALLS, SEARCH, WALLET, PROFILE, ADMINS, BOTS,
+        SETTINGS;
 
         /** True for the panels the me sheet opens, which cover the strip rather than join it. */
         val isPanel: Boolean
-            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES || this == BOTS || this == SETTINGS
+            get() = this == ALERTS || this == CALLS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES || this == BOTS || this == SETTINGS
     }
 }
 
@@ -452,6 +455,32 @@ data class ChainState(
 )
 
 /** The Alerts section: the durable inbox and its read state. */
+/**
+ * The Calls section: what this account's calls came to.
+ *
+ * The one call surface that reads the past. Every other call screen in the app is about a call that
+ * is happening, and the server's listing is exactly that — a filter on calls that are still alive —
+ * so an ended call falls out of it the moment it ends. This holds the other read's answer, and the
+ * shape is a paging one: rows accumulate oldest-page-behind-newest, because that is the order the
+ * server answers in and the order the screen draws.
+ */
+data class CallsState(
+    /** The rows read so far, newest first. */
+    val rows: List<CallHistoryEntry> = emptyList(),
+    /** True while a page is being read. */
+    val loading: Boolean = false,
+    /** True once a page came back shorter than asked for: the end of the history. */
+    val complete: Boolean = false,
+    /**
+     * True once the first page has landed.
+     *
+     * Held apart from an empty row list, because "no calls yet" and "nothing read yet" are
+     * different sentences and a screen that showed the first while it meant the second would be
+     * telling the user something it does not know.
+     */
+    val loaded: Boolean = false,
+)
+
 data class AlertsState(
     val items: List<InboxItem> = emptyList(),
     /** True while the inbox page is being read. */
