@@ -1,6 +1,12 @@
 package com.migo.app.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -126,6 +133,8 @@ fun CallOverlay(
     outputs: List<CallManager.AudioOutput> = emptyList(),
     chosenOutput: Int? = null,
     onChooseOutput: ((Int) -> Unit)? = null,
+    onStartScreenShare: ((Intent) -> Unit)? = null,
+    onStopScreenShare: (() -> Unit)? = null,
     inPictureInPicture: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -163,7 +172,15 @@ fun CallOverlay(
                 state = state,
                 call = call,
                 peerName = peerName,
-                localVideo = if (state.cameraOn == false) null else localVideo,
+                // The self-view is hidden while the camera is off, because a stopped capturer
+                // leaves the last frame frozen on the surface and a still picture of somebody's
+                // face is a lie about a camera that is not on -- but a screen on that track is a
+                // picture of its own, and it keeps the self-view alive.
+                localVideo = if (state.cameraOn == false && state.screenSharing != true) {
+                    null
+                } else {
+                    localVideo
+                },
                 remoteVideo = remoteVideo,
                 onCancel = onCancel,
                 onHangUp = onHangUp,
@@ -176,6 +193,8 @@ fun CallOverlay(
                 outputs = outputs,
                 chosenOutput = chosenOutput,
                 onChooseOutput = onChooseOutput,
+                onStartScreenShare = onStartScreenShare,
+                onStopScreenShare = onStopScreenShare,
                 inPictureInPicture = inPictureInPicture,
             )
 
@@ -236,8 +255,15 @@ private fun ActiveCallScreen(
     outputs: List<CallManager.AudioOutput>,
     chosenOutput: Int?,
     onChooseOutput: ((Int) -> Unit)?,
+    onStartScreenShare: ((Intent) -> Unit)?,
+    onStopScreenShare: (() -> Unit)?,
     inPictureInPicture: Boolean,
 ) {
+    // Read into a name of its own because the control row asks the question twice -- whether a
+    // share is possible at all, and whether one is running -- and a property of the state cannot
+    // be smart cast the way a local can, so the two questions would have to be asked of a nullable
+    // value that only one of them has already ruled out.
+    val screenSharing = state.screenSharing
     // One tick per second while connected: the duration is the only number on screen that moves.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val connected = call.state == CallState.Connected
@@ -388,11 +414,27 @@ private fun ActiveCallScreen(
                 )
 
                 CallDisplayState.Connected, CallDisplayState.Degraded -> {
+                    // The share control stands where the camera's do and takes their place while
+                    // it is on: a call whose video track is carrying the screen has a camera
+                    // button that would stop a camera already stopped and a switch button that
+                    // would move a camera nobody is watching, so both are gone for as long as the
+                    // screen is on the track and come back with it.
+                    if (
+                        screenSharing != null &&
+                        onStartScreenShare != null &&
+                        onStopScreenShare != null
+                    ) {
+                        ScreenShareButton(
+                            sharing = screenSharing,
+                            onStart = onStartScreenShare,
+                            onStop = onStopScreenShare,
+                        )
+                    }
                     // The camera button is offered only where the call really has a camera to give
                     // back: `cameraOn` is null for a voice call and for a video call whose camera
                     // never opened, and both of those would get a control that cannot change
                     // anything.
-                    if (state.cameraOn != null) {
+                    if (state.cameraOn != null && screenSharing != true) {
                         CallActionButton(
                             glyph = if (state.cameraOn) "📷" else "🚫",
                             label = if (state.cameraOn) "Turn camera off" else "Turn camera on",
@@ -404,7 +446,11 @@ private fun ActiveCallScreen(
                     // The camera switch is offered for a video call on a device that has somewhere
                     // to switch to; a phone with one camera gets no control rather than one that
                     // cannot move.
-                    if (onSwitchCamera != null && call.mediaKind == CallMediaKind.Video) {
+                    if (
+                        onSwitchCamera != null &&
+                        call.mediaKind == CallMediaKind.Video &&
+                        screenSharing != true
+                    ) {
                         CallActionButton(
                             glyph = "🔄",
                             label = "Switch camera",
@@ -648,6 +694,58 @@ private fun AudioRouteButton(
             }
         }
     }
+}
+
+/**
+ * The screen-share control: it asks the platform for permission to record the display and hands
+ * the granted projection to the call.
+ *
+ * The asking happens here rather than in the activity for the same reason the button does: the
+ * consent belongs to the moment somebody presses it, and a permission prompt that opened on its
+ * own -- at a call's start, say -- would be asking about a screen the user has not offered yet.
+ * The platform answers on its own activity, which is why this is a launcher and not a call: a
+ * launch that comes back refused, or with no projection at all, leaves the share where it was,
+ * since a share nobody consented to is not a share this app can build.
+ *
+ * The stop side takes no permission and shows no prompt: ending a share is always allowed, and
+ * leaving is the one thing a control like this must never be able to refuse.
+ */
+@Composable
+private fun ScreenShareButton(
+    sharing: Boolean,
+    onStart: (Intent) -> Unit,
+    onStop: () -> Unit,
+) {
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { answer ->
+        val projection = answer.data
+        if (answer.resultCode == Activity.RESULT_OK && projection != null) {
+            onStart(projection)
+        }
+    }
+    CallActionButton(
+        glyph = if (sharing) "🛑" else "🖥️",
+        label = if (sharing) "Stop sharing screen" else "Share screen",
+        background = if (sharing) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        contentColor = if (sharing) Color.White else MaterialTheme.colorScheme.onSurface,
+        onClick = {
+            if (sharing) {
+                onStop()
+            } else {
+                val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                    as? MediaProjectionManager
+                if (manager != null) {
+                    picker.launch(manager.createScreenCaptureIntent())
+                }
+            }
+        },
+    )
 }
 
 /**

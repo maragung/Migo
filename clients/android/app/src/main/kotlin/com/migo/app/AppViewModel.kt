@@ -1205,6 +1205,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Puts this device's screen on the live call's video track, given the projection the platform
+     * granted. Handed straight through: what the projection means is the manager's to decide, and
+     * the screen is not the view model's to hold.
+     */
+    fun startCallScreenShare(projection: Intent) {
+        callManager?.startScreenShare(projection)
+    }
+
+    /** Takes the screen off the live call's video track and gives it back to the camera. */
+    fun stopCallScreenShare() {
+        callManager?.stopScreenShare()
+    }
+
+    /**
      * The routes the phone is offering the live call, read through from the manager so the menu
      * and the call cannot disagree about what is available. Empty before a session exists and on a
      * phone whose platform has no honest way to route a call, and the screen draws no control for

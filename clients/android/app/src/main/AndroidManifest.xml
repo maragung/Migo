@@ -21,6 +21,16 @@
          prose would reach for one. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- The screen share's foreground service. Android refuses a display projection to an
+         application with no running service of the mediaProjection type, and from API 34 it also
+         wants the type permission declared before a service may claim it. Both are declared for
+         every device rather than only for the versions that check them, because a manifest is read
+         by the platform that installs the app and not by the one it was compiled against. XML
+         comments cannot contain a double hyphen, so this comment uses parentheses where prose
+         would reach for one. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <application
         android:name=".MigoApplication"
         android:allowBackup="false"
@@ -66,6 +76,18 @@
             android:supportsPictureInPicture="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
             android:theme="@style/Theme.Migo" />
+
+        <!-- The screen share's service, and the reason it is a service at all: the projection is
+             the platform's to grant and the platform grants it to a running foreground service of
+             this type, never to an activity. It is started the moment the user consents and
+             stopped wherever the share stops, so it lives exactly as long as a screen is being
+             sent and not one moment more. Not exported: nothing outside this app starts it, and
+             nothing outside it should be able to. XML comments cannot contain a double hyphen, so
+             this comment uses parentheses where prose would reach for one. -->
+        <service
+            android:name=".call.ScreenShareService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <!-- The camera shot's door: TakePicture hands the camera app a content uri rather than a
              file path, because the camera is another app and must not see this app's private

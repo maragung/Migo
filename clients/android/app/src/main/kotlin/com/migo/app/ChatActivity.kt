@@ -283,6 +283,20 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             } else {
                 null
             },
+            // The share control is handed over only where the call really has a video track to
+            // put a screen on, which is the same fact the state's null already carries: a voice
+            // call, or a video call whose camera never opened, gets no control rather than one
+            // that cannot send a picture anywhere.
+            onStartScreenShare = if (callState.screenSharing != null) {
+                { model.startCallScreenShare(it) }
+            } else {
+                null
+            },
+            onStopScreenShare = if (callState.screenSharing != null) {
+                { model.stopCallScreenShare() }
+            } else {
+                null
+            },
         )
     }
 
