@@ -65,7 +65,8 @@ pub trait CallGate: Send + Sync {
     /// rule `migo-social` enforces for messages, applied to the ring.
     async fn blocked_either_way(&self, a: Id, b: Id) -> bool;
 
-    /// Whether the social graph lets `caller` ring `callee_id` at all.
+    /// Whether the social graph lets `caller` ring `callee_id` at all, with
+    /// a call of this kind.
     ///
     /// The callee's own call policy and friendship standing, which
     /// `migo-social` already answers for every other kind of contact; a ring
@@ -75,7 +76,17 @@ pub trait CallGate: Send + Sync {
     /// bare ids. `false` fails closed: the invite is refused exactly as a
     /// block refuses it, so the caller cannot tell a policy from a block
     /// (brief section 180).
-    async fn can_call(&self, caller: &Caller, callee_id: Id) -> bool;
+    ///
+    /// `media_kind` is the invite's own field, untyped here on purpose: this
+    /// crate does not depend on the social graph's types and the gate's
+    /// implementation is the composition root, which owns the mapping. Zero
+    /// is audio and one is video — the two values `Callkeeper::invite` has
+    /// already refused anything else for, so an implementation may match on
+    /// them without a fallback. Section 180 decides the two separately,
+    /// because an account that wants video calls off while voice calls keep
+    /// ringing is the case the split exists for, and a gate asked without the
+    /// kind could only answer for both at once.
+    async fn can_call(&self, caller: &Caller, callee_id: Id, media_kind: u32) -> bool;
 }
 
 /// A shared, fully erased gate.
@@ -102,7 +113,7 @@ impl CallGate for OpenGate {
         false
     }
 
-    async fn can_call(&self, _caller: &Caller, _callee_id: Id) -> bool {
+    async fn can_call(&self, _caller: &Caller, _callee_id: Id, _media_kind: u32) -> bool {
         true
     }
 }

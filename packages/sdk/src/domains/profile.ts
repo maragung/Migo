@@ -108,6 +108,12 @@ export class ProfileDomain {
     if (patch.whoCanAdd !== undefined) {
       request.whoCanAdd = patch.whoCanAdd;
     }
+    if (patch.whoCanCallVoice !== undefined) {
+      request.whoCanCallVoice = patch.whoCanCallVoice;
+    }
+    if (patch.whoCanCallVideo !== undefined) {
+      request.whoCanCallVideo = patch.whoCanCallVideo;
+    }
     if (patch.searchable !== undefined) {
       request.searchable = patch.searchable;
     }

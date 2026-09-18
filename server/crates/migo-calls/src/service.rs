@@ -447,7 +447,11 @@ where
                 None,
             ));
         }
-        if !self.gate.can_call(caller, invite.callee_id).await {
+        if !self
+            .gate
+            .can_call(caller, invite.callee_id, invite.media_kind)
+            .await
+        {
             self.meters.invite(InviteOutcome::Blocked);
             // The same outcome, deliberately, and for the same reason the
             // block returns one: a callee whose policy excludes the caller

@@ -76,7 +76,7 @@ use migo_store::{SharedStore, Store};
 
 use crate::metrics::{EdgeKind, GateOutcome, Meters, RequestOutcome, ResponseOutcome};
 use crate::model::{
-    query_is_usable, strictest, BlockOutcome, Caller, Edge, Found, FriendOutcome, Interaction,
+    query_is_usable, BlockOutcome, CallKind, Caller, Edge, Found, FriendOutcome, Interaction,
     Pending, ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE,
     MAX_FAVORITES, MAX_MUTUAL_SCAN, MAX_PAGE, MAX_PROFILE_BATCH,
 };
@@ -372,12 +372,20 @@ where
     }
 
     /// The visibility that governs one interaction.
+    ///
+    /// Every branch reads one column of the subject's profile and nothing else. A call
+    /// used to be the exception — it took the stricter of a deployment default and the
+    /// message policy, because no call column existed — and that combination is gone
+    /// rather than kept as a fallback: a call policy is now the user's own choice, and
+    /// a deployment default folded into it would make that choice unwidenable, which is
+    /// the one thing a privacy control must never be.
     fn policy_for(&self, interaction: Interaction, profile: &Profile) -> Visibility {
         match interaction {
             Interaction::Message => profile.who_can_message,
-            // No `who_can_call` column exists, so the deployment default is combined
-            // with the message policy. See `SocialConfig::call_default`.
-            Interaction::Call => strictest(self.config.call_default, profile.who_can_message),
+            Interaction::Call(kind) => match kind {
+                CallKind::Voice => profile.who_can_call_voice,
+                CallKind::Video => profile.who_can_call_video,
+            },
             Interaction::FriendRequest => profile.who_can_add,
             Interaction::LastSeen => profile.show_last_seen,
         }

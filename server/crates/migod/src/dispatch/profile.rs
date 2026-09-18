@@ -104,6 +104,16 @@ pub(crate) async fn handle_profile_update(
             .and_then(visibility_of)
             .map(Option::Some)
             .unwrap_or(None),
+        who_can_call_voice: request
+            .who_can_call_voice
+            .and_then(visibility_of)
+            .map(Option::Some)
+            .unwrap_or(None),
+        who_can_call_video: request
+            .who_can_call_video
+            .and_then(visibility_of)
+            .map(Option::Some)
+            .unwrap_or(None),
         searchable: request.searchable,
     };
 

@@ -1211,6 +1211,8 @@ where
                 show_last_seen: Visibility::Friends,
                 who_can_message: Visibility::Friends,
                 who_can_add: Visibility::Everyone,
+                who_can_call_voice: Visibility::Friends,
+                who_can_call_video: Visibility::Friends,
                 searchable: true,
                 custom_status: None,
                 updated_at: now,

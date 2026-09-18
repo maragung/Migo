@@ -499,7 +499,8 @@ data class BackupState(
  * form's saving state. The profile rows are a read; this is the write side, and the two stay in
  * one holder because the form the person edits is primed from the same fetch that renders it.
  *
- * The privacy choices (showLastSeen / whoCanMessage / whoCanAdd) and the search switch are
+ * The privacy choices (showLastSeen / whoCanMessage / whoCanAdd / whoCanCallVoice /
+ * whoCanCallVideo) and the search switch are
  * absent-means-unchanged, exactly as on the web: the controls start as "leave as-is" and join the
  * save only once the person touches them, because the server never sends current values back and
  * a naive form would overwrite them with defaults.

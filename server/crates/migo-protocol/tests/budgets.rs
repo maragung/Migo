@@ -963,6 +963,8 @@ fn federation_frames_fit_their_budgets() {
             birth_year: Some(1990),
             gender: Some(1),
             custom_status: None,
+            who_can_call_voice: Some(1),
+            who_can_call_video: Some(1),
         },
     );
     assert!(

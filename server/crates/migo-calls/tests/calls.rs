@@ -55,6 +55,9 @@ const CAROL_PHONE: u128 = 104;
 
 const CONVERSATION: u128 = 50;
 const CALL: u128 = 60;
+/// A second call id: a refusal stores nothing, so the video invite below needs
+/// an id of its own rather than reusing the ringing one.
+const CALL_VIDEO: u128 = 61;
 
 type TestCalls = Calls<MemoryCallStore, CacheRateLimiter<MemoryCache>>;
 
@@ -90,12 +93,24 @@ fn invite(call_id: u128, callee: u128) -> CallInviteWire {
     }
 }
 
+/// The same invite, as a video call: the only field that differs is the one
+/// section 180's split is about.
+fn video_invite(call_id: u128, callee: u128) -> CallInviteWire {
+    CallInviteWire {
+        media_kind: 1,
+        ..invite(call_id, callee)
+    }
+}
+
 /// The gate as a test needs it: a membership list, a block list, and a list
 /// of callees the social graph refuses, all answerable without a store.
 struct TestGate {
     members: HashMap<Id, Vec<Id>>,
     blocked: Vec<(Id, Id)>,
     unreachable: Vec<Id>,
+    /// Callees who take an audio call and refuse a video one — the split
+    /// section 180 asks for, as a gate answer.
+    no_video: Vec<Id>,
 }
 
 impl TestGate {
@@ -105,6 +120,7 @@ impl TestGate {
             members: HashMap::from([(id(CONVERSATION), vec![id(ALICE), id(BOB), id(CAROL)])]),
             blocked: Vec::new(),
             unreachable: Vec::new(),
+            no_video: Vec::new(),
         }
     }
 
@@ -125,12 +141,21 @@ impl TestGate {
         }
     }
 
+    /// The same, with Bob refusing video calls only: his voice line stays open.
+    fn refused_video_only() -> Self {
+        Self {
+            no_video: vec![id(BOB)],
+            ..Self::open()
+        }
+    }
+
     /// Nobody may call: the conversation is closed to the caller.
     fn closed() -> Self {
         Self {
             members: HashMap::new(),
             blocked: Vec::new(),
             unreachable: Vec::new(),
+            no_video: Vec::new(),
         }
     }
 
@@ -159,8 +184,13 @@ impl CallGate for TestGate {
         self.blocked.contains(&(a, b)) || self.blocked.contains(&(b, a))
     }
 
-    async fn can_call(&self, _caller: &migo_calls::Caller, callee_id: Id) -> bool {
-        !self.unreachable.contains(&callee_id)
+    async fn can_call(&self, _caller: &migo_calls::Caller, callee_id: Id, media_kind: u32) -> bool {
+        if self.unreachable.contains(&callee_id) {
+            return false;
+        }
+        // Video is the one kind that is not audio; the service refuses any other
+        // value before the gate is asked.
+        !(media_kind == migo_calls::MEDIA_VIDEO && self.no_video.contains(&callee_id))
     }
 }
 
@@ -182,6 +212,10 @@ impl Harness {
 
     fn refused() -> Self {
         Self::gated(TestGate::refused())
+    }
+
+    fn refused_video_only() -> Self {
+        Self::gated(TestGate::refused_video_only())
     }
 
     fn closed() -> Self {
@@ -380,6 +414,36 @@ async fn a_graph_refusal_never_rings_and_stores_nothing() {
     assert_eq!(outcome.expires_at, ts(NOW));
     assert!(event.is_none());
     assert!(harness.store.get(id(CALL)).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn turning_video_off_leaves_the_voice_line_ringing() {
+    let harness = Harness::refused_video_only();
+
+    // The audio call rings, which is the whole point of deciding the two kinds
+    // separately: a callee who does not want to be seen has not said anything
+    // about being spoken to.
+    let (outcome, event) = harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    assert_ne!(outcome.status, invite_status::BLOCKED);
+    assert!(event.is_some(), "an audio invite reaches the callee");
+    assert!(harness.store.get(id(CALL)).await.unwrap().is_some());
+
+    // The video call answers exactly what a block answers, and stores nothing —
+    // so the caller cannot read the callee's video policy off the reply, and a
+    // policy widened tomorrow does not find a row answering with today's refusal.
+    let (refused, event) = harness
+        .calls
+        .invite(&alice(NOW), video_invite(CALL_VIDEO, BOB))
+        .await
+        .unwrap();
+    assert_eq!(refused.status, invite_status::BLOCKED);
+    assert_eq!(refused.expires_at, ts(NOW));
+    assert!(event.is_none());
+    assert!(harness.store.get(id(CALL_VIDEO)).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -2291,6 +2355,7 @@ async fn a_listing_reports_the_calls_this_account_can_see_and_nothing_else() {
         members: HashMap::from([(closed, vec![id(BOB)])]),
         blocked: Vec::new(),
         unreachable: Vec::new(),
+        no_video: Vec::new(),
     });
     stranger
         .calls

@@ -585,6 +585,12 @@ impl AccountStore for MemoryStore {
         if let Some(v) = patch.who_can_add {
             profile.who_can_add = v;
         }
+        if let Some(v) = patch.who_can_call_voice {
+            profile.who_can_call_voice = v;
+        }
+        if let Some(v) = patch.who_can_call_video {
+            profile.who_can_call_video = v;
+        }
         if let Some(v) = patch.searchable {
             profile.searchable = v;
         }
@@ -3502,6 +3508,9 @@ impl BotStore for MemoryStore {
             show_last_seen: Visibility::Friends,
             who_can_message: Visibility::Friends,
             who_can_add: Visibility::Everyone,
+            // Section 180's stated default for both kinds of call.
+            who_can_call_voice: Visibility::Friends,
+            who_can_call_video: Visibility::Friends,
             searchable: true,
             custom_status: None,
             updated_at: new.created_at,

@@ -2587,6 +2587,18 @@
           "type": "string",
           "optional": true,
           "id": 8
+        },
+        {
+          "name": "who_can_call_voice",
+          "type": "u32",
+          "optional": true,
+          "id": 9
+        },
+        {
+          "name": "who_can_call_video",
+          "type": "u32",
+          "optional": true,
+          "id": 10
         }
       ]
     },
@@ -2898,6 +2910,20 @@
           "optional": true,
           "id": 9,
           "doc": "New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit."
+        },
+        {
+          "name": "who_can_call_voice",
+          "type": "u32",
+          "optional": true,
+          "id": 10,
+          "doc": "New audio-call policy: the same 0 nobody, 1 friends, 2 everyone numbering the other visibility fields use. Absent means leave it, exactly as an absent who_can_message does, so saving a display name never re-states a call policy the user never saw."
+        },
+        {
+          "name": "who_can_call_video",
+          "type": "u32",
+          "optional": true,
+          "id": 11,
+          "doc": "New video-call policy, separate from the audio one because refusing to be seen is not refusing to be spoken to: video set to 0 while audio stays at 1 is the control that turns off video calls and keeps voice calls ringing."
         }
       ]
     },

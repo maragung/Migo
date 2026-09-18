@@ -5820,6 +5820,8 @@ data class FedAccountRows(
     /** The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for. */
     val gender: Long? = null,
     val customStatus: String? = null,
+    val whoCanCallVoice: Long? = null,
+    val whoCanCallVideo: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -5845,6 +5847,8 @@ data class FedAccountRows(
         if (birthYear != null) present++
         if (gender != null) present++
         if (customStatus != null) present++
+        if (whoCanCallVoice != null) present++
+        if (whoCanCallVideo != null) present++
         w.u32(present)
         if (email != null) {
             val value = email
@@ -5894,6 +5898,18 @@ data class FedAccountRows(
                 w.str(value)
             }
         }
+        if (whoCanCallVoice != null) {
+            val value = whoCanCallVoice
+            w.optional(9) { w ->
+                w.u32(value)
+            }
+        }
+        if (whoCanCallVideo != null) {
+            val value = whoCanCallVideo
+            w.optional(10) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -5920,6 +5936,8 @@ data class FedAccountRows(
             var birthYear: Long? = null
             var gender: Long? = null
             var customStatus: String? = null
+            var whoCanCallVoice: Long? = null
+            var whoCanCallVideo: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -5932,11 +5950,13 @@ data class FedAccountRows(
                     6L -> birthYear = sub.u32()
                     7L -> gender = sub.u32()
                     8L -> customStatus = sub.str()
+                    9L -> whoCanCallVoice = sub.u32()
+                    10L -> whoCanCallVideo = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return FedAccountRows(accountId, username, passphraseHash, locale, createdAt, displayName, showLastSeen, whoCanMessage, whoCanAdd, searchable, profileUpdatedAt, edges, email, phone, country, bio, avatarMediaId, birthYear, gender, customStatus)
+            return FedAccountRows(accountId, username, passphraseHash, locale, createdAt, displayName, showLastSeen, whoCanMessage, whoCanAdd, searchable, profileUpdatedAt, edges, email, phone, country, bio, avatarMediaId, birthYear, gender, customStatus, whoCanCallVoice, whoCanCallVideo)
         }
     }
 }
@@ -6382,6 +6402,10 @@ data class ProfileUpdate(
     val searchable: Boolean? = null,
     /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
     val customStatus: String? = null,
+    /** New audio-call policy: the same 0 nobody, 1 friends, 2 everyone numbering the other visibility fields use. Absent means leave it, exactly as an absent who_can_message does, so saving a display name never re-states a call policy the user never saw. */
+    val whoCanCallVoice: Long? = null,
+    /** New video-call policy, separate from the audio one because refusing to be seen is not refusing to be spoken to: video set to 0 while audio stays at 1 is the control that turns off video calls and keeps voice calls ringing. */
+    val whoCanCallVideo: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -6395,6 +6419,8 @@ data class ProfileUpdate(
         if (whoCanAdd != null) present++
         if (searchable != null) present++
         if (customStatus != null) present++
+        if (whoCanCallVoice != null) present++
+        if (whoCanCallVideo != null) present++
         w.u32(present)
         if (displayName != null) {
             val value = displayName
@@ -6450,6 +6476,18 @@ data class ProfileUpdate(
                 w.str(value)
             }
         }
+        if (whoCanCallVoice != null) {
+            val value = whoCanCallVoice
+            w.optional(10) { w ->
+                w.u32(value)
+            }
+        }
+        if (whoCanCallVideo != null) {
+            val value = whoCanCallVideo
+            w.optional(11) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -6465,6 +6503,8 @@ data class ProfileUpdate(
             var whoCanAdd: Long? = null
             var searchable: Boolean? = null
             var customStatus: String? = null
+            var whoCanCallVoice: Long? = null
+            var whoCanCallVideo: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -6478,11 +6518,13 @@ data class ProfileUpdate(
                     7L -> whoCanAdd = sub.u32()
                     8L -> searchable = sub.bool()
                     9L -> customStatus = sub.str()
+                    10L -> whoCanCallVoice = sub.u32()
+                    11L -> whoCanCallVideo = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return ProfileUpdate(displayName, bio, avatarMediaId, birthYear, showLastSeen, whoCanMessage, whoCanAdd, searchable, customStatus)
+            return ProfileUpdate(displayName, bio, avatarMediaId, birthYear, showLastSeen, whoCanMessage, whoCanAdd, searchable, customStatus, whoCanCallVoice, whoCanCallVideo)
         }
     }
 }

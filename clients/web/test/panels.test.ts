@@ -37,6 +37,8 @@ const UNCHANGED = {
   showLastSeen: '',
   whoCanMessage: '',
   whoCanAdd: '',
+  whoCanCallVoice: '',
+  whoCanCallVideo: '',
 };
 
 test('a profile patch with nothing moved is empty, so no request is sent at all', () => {
@@ -61,6 +63,35 @@ test('an explicitly chosen privacy audience joins the patch as its numeric value
     },
   );
   assert.deepEqual(patch, { showLastSeen: 0, whoCanAdd: 1 });
+});
+
+test('the two call audiences are decided separately and only when chosen', () => {
+  // Section 180's split, pinned where it can regress silently: one control per kind, so
+  // video set to Nobody joins the patch while the voice line the user never touched stays
+  // out of it — and a patch that named neither leaves both where they are.
+  assert.deepEqual(
+    buildProfilePatch(
+      PROFILE,
+      { displayName: 'Ada', bio: '' },
+      {
+        ...UNCHANGED,
+        whoCanCallVideo: '0',
+      },
+    ),
+    { whoCanCallVideo: 0 },
+  );
+  assert.deepEqual(
+    buildProfilePatch(
+      PROFILE,
+      { displayName: 'Ada', bio: '' },
+      {
+        ...UNCHANGED,
+        whoCanCallVoice: '2',
+        whoCanCallVideo: '0',
+      },
+    ),
+    { whoCanCallVoice: 2, whoCanCallVideo: 0 },
+  );
 });
 
 test('a bio is sent when it changed and the stored profile had none', () => {

@@ -125,6 +125,8 @@ impl Harness {
                 show_last_seen: last_seen,
                 who_can_message: Visibility::Everyone,
                 who_can_add: Visibility::Everyone,
+                who_can_call_voice: Visibility::Friends,
+                who_can_call_video: Visibility::Friends,
                 searchable: true,
                 custom_status: None,
                 updated_at: ts(SECOND),

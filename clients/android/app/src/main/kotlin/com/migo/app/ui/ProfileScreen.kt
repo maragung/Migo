@@ -101,6 +101,8 @@ fun ProfileScreen(
         showLastSeen: Long?,
         whoCanMessage: Long?,
         whoCanAdd: Long?,
+        whoCanCallVoice: Long?,
+        whoCanCallVideo: Long?,
     ) -> Unit,
     onSaveStatus: (String) -> Unit,
     onChangePassphrase: (current: String, next: String) -> Unit,
@@ -424,6 +426,8 @@ private fun ProfileEditSection(
         showLastSeen: Long?,
         whoCanMessage: Long?,
         whoCanAdd: Long?,
+        whoCanCallVoice: Long?,
+        whoCanCallVideo: Long?,
     ) -> Unit,
     onSaveStatus: (String) -> Unit,
 ) {
@@ -471,6 +475,11 @@ private fun ProfileEditSection(
     var showLastSeenChoice by remember(profile) { mutableStateOf(-1) }
     var whoCanMessageChoice by remember(profile) { mutableStateOf(-1) }
     var whoCanAddChoice by remember(profile) { mutableStateOf(-1) }
+    // Two call audiences rather than one, because refusing to be seen is not refusing to be
+    // spoken to: video set to Nobody with voice left open is the combination section 180 asks
+    // for, and one control could not express it.
+    var whoCanCallVoiceChoice by remember(profile) { mutableStateOf(-1) }
+    var whoCanCallVideoChoice by remember(profile) { mutableStateOf(-1) }
     var searchableChoice by remember(profile) { mutableStateOf(-1) }
 
     OutlinedTextField(
@@ -526,6 +535,18 @@ private fun ProfileEditSection(
         onChoice = { whoCanAddChoice = it },
         enabled = !edit.busy,
     )
+    PrivacyDropdown(
+        label = "Who can call you by voice",
+        choice = whoCanCallVoiceChoice,
+        onChoice = { whoCanCallVoiceChoice = it },
+        enabled = !edit.busy,
+    )
+    PrivacyDropdown(
+        label = "Who can call you with video",
+        choice = whoCanCallVideoChoice,
+        onChoice = { whoCanCallVideoChoice = it },
+        enabled = !edit.busy,
+    )
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -559,6 +580,8 @@ private fun ProfileEditSection(
                 VISIBILITY_VALUES.getOrNull(showLastSeenChoice),
                 VISIBILITY_VALUES.getOrNull(whoCanMessageChoice),
                 VISIBILITY_VALUES.getOrNull(whoCanAddChoice),
+                VISIBILITY_VALUES.getOrNull(whoCanCallVoiceChoice),
+                VISIBILITY_VALUES.getOrNull(whoCanCallVideoChoice),
             )
             // The status saves on its own wire, so it does not wait for this button.
             onSaveStatus(status.trim())

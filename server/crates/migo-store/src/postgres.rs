@@ -374,6 +374,8 @@ impl From<entity::profile::Model> for Profile {
             show_last_seen: Visibility::from_i16(row.show_last_seen),
             who_can_message: Visibility::from_i16(row.who_can_message),
             who_can_add: Visibility::from_i16(row.who_can_add),
+            who_can_call_voice: Visibility::from_i16(row.who_can_call_voice),
+            who_can_call_video: Visibility::from_i16(row.who_can_call_video),
             searchable: row.searchable,
             custom_status: row.custom_status,
             updated_at: instant_of(row.updated_at),
@@ -997,6 +999,8 @@ impl AccountStore for PostgresStore {
             show_last_seen: Set(profile.show_last_seen.to_i16()),
             who_can_message: Set(profile.who_can_message.to_i16()),
             who_can_add: Set(profile.who_can_add.to_i16()),
+            who_can_call_voice: Set(profile.who_can_call_voice.to_i16()),
+            who_can_call_video: Set(profile.who_can_call_video.to_i16()),
             searchable: Set(profile.searchable),
             custom_status: Set(profile.custom_status),
             updated_at: Set(stamp_of(profile.updated_at)),
@@ -1071,6 +1075,18 @@ impl AccountStore for PostgresStore {
         if let Some(value) = patch.who_can_add {
             update = update.col_expr(
                 entity::profile::Column::WhoCanAdd,
+                Expr::val(value.to_i16()),
+            );
+        }
+        if let Some(value) = patch.who_can_call_voice {
+            update = update.col_expr(
+                entity::profile::Column::WhoCanCallVoice,
+                Expr::val(value.to_i16()),
+            );
+        }
+        if let Some(value) = patch.who_can_call_video {
+            update = update.col_expr(
+                entity::profile::Column::WhoCanCallVideo,
                 Expr::val(value.to_i16()),
             );
         }
@@ -6306,6 +6322,8 @@ impl BotStore for PostgresStore {
             show_last_seen: Set(Visibility::Friends.to_i16()),
             who_can_message: Set(Visibility::Friends.to_i16()),
             who_can_add: Set(Visibility::Everyone.to_i16()),
+            who_can_call_voice: Set(Visibility::Friends.to_i16()),
+            who_can_call_video: Set(Visibility::Friends.to_i16()),
             searchable: Set(true),
             custom_status: Set(None),
             updated_at: Set(created_at),

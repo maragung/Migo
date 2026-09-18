@@ -38,7 +38,7 @@ use migo_core::{Id, Result, Secret, Timestamp};
 use migo_protocol::{codes, NotificationKind, Opcode, RelationshipKind};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_social::model::{
-    query_is_usable, strictest, Caller, Edge, FriendOutcome, Interaction, RespondOutcome,
+    query_is_usable, strictest, CallKind, Caller, Edge, FriendOutcome, Interaction, RespondOutcome,
     SocialConfig, Standing, DEFAULT_PAGE, MAX_FAVORITES, MAX_MUTUAL_SCAN, MAX_PAGE,
     MAX_PROFILE_BATCH, MAX_QUERY_LEN,
 };
@@ -147,6 +147,31 @@ impl Harness {
         .await;
     }
 
+    /// An account whose two call policies are set individually, everything else open.
+    ///
+    /// A patch rather than a `seed` argument: the call columns are the only ones a test
+    /// ever wants to move on their own, and threading two more parameters through the
+    /// shared fixture would make every caller name them.
+    /// Sets the two call policies of an account that already exists.
+    ///
+    /// A patch and not a second `person`: two accounts cannot share a username, so a helper
+    /// that created one would fail on a unique key rather than on whatever the test meant,
+    /// and the failure would point at the helper instead of at the assertion.
+    async fn person_calls(&self, account: u128, voice: Visibility, video: Visibility) {
+        self.store
+            .update_profile(
+                id(account),
+                ProfilePatch {
+                    who_can_call_voice: Some(voice),
+                    who_can_call_video: Some(video),
+                    ..ProfilePatch::default()
+                },
+                ts(NOW),
+            )
+            .await
+            .expect("a profile's own owner may narrow it");
+    }
+
     /// An account that opted out of being findable.
     async fn unlisted_person(&self, account: u128, username: &str) {
         self.seed(
@@ -193,6 +218,10 @@ impl Harness {
                 show_last_seen,
                 who_can_message,
                 who_can_add,
+                // Friends, the column default section 180 names. A test that needs
+                // another answer patches it: `person_calls` below.
+                who_can_call_voice: Visibility::Friends,
+                who_can_call_video: Visibility::Friends,
                 searchable,
                 custom_status: None,
                 updated_at: ts(SECOND),
@@ -311,10 +340,6 @@ impl Harness {
     }
 
     /// The deployment default the call gate takes the stricter half of.
-    fn social_call_default(&self) -> Visibility {
-        SocialConfig::default().call_default
-    }
-
     fn counter(&self, name: &'static str, labels: &[(&str, &str)]) -> u64 {
         self.registry.counter(name, "", labels).get()
     }
@@ -2180,7 +2205,7 @@ async fn a_block_stops_every_interaction_from_both_sides() {
 
     for interaction in [
         Interaction::Message,
-        Interaction::Call,
+        Interaction::Call(CallKind::Video),
         Interaction::FriendRequest,
         Interaction::LastSeen,
     ] {
@@ -2979,12 +3004,17 @@ async fn a_nobody_policy_refuses_even_a_friend() {
             Visibility::Nobody,
         )
         .await;
+    // Both call lines too, or "a nobody policy" would be a nobody policy everywhere but
+    // the two columns the call gate actually reads.
+    harness
+        .person_calls(BOB, Visibility::Nobody, Visibility::Nobody)
+        .await;
     harness.friendship(ALICE, BOB, NOW).await;
     let alice = caller(ALICE, ALICE_PHONE);
 
     for interaction in [
         Interaction::Message,
-        Interaction::Call,
+        Interaction::Call(CallKind::Video),
         Interaction::FriendRequest,
         Interaction::LastSeen,
     ] {
@@ -3043,76 +3073,88 @@ async fn a_friends_only_message_policy_is_not_friends_of_friends() {
     );
 }
 
-/// A call takes the stricter of the deployment default and the message policy.
+/// A call policy defaults to friends, and it is the account's own column.
 ///
-/// There is no `who_can_call` column, so a call gate that read `who_can_message`
-/// directly would let a deployment whose default is friends-only be talked into ringing
-/// a stranger's phone, and one that read only the default would ignore a user who set
-/// messages to nobody.
+/// Section 180's default, and the rule that makes it a control rather than a suggestion:
+/// the policy is what the account set, with nothing folded into it. A call gate that
+/// still combined a deployment default with `who_can_message` could not represent the
+/// account that opens calls to everybody and messages to nobody — the one configuration
+/// a user reaches for when they want to be reachable by voice and left alone in writing.
 #[tokio::test]
-async fn a_call_takes_the_stricter_of_the_default_and_the_message_policy() {
+async fn a_call_policy_is_the_accounts_own_column_and_defaults_to_friends() {
     let harness = Harness::new();
     harness.person(ALICE, "alice").await;
-    // Open to messages from anybody, but the deployment defaults calls to friends.
     harness.person(BOB, "bob").await;
     harness.person(CAROL, "carol").await;
     harness.friendship(ALICE, CAROL, NOW).await;
     let alice = caller(ALICE, ALICE_PHONE);
 
-    assert_eq!(
-        harness.social_call_default(),
-        Visibility::Friends,
-        "the default this test is about"
-    );
     expect_code(
         harness
             .social
-            .may_interact(&alice, id(BOB), Interaction::Call)
+            .may_interact(&alice, id(BOB), Interaction::Call(CallKind::Voice))
             .await,
         codes::PRIVACY_RESTRICTED,
     );
     harness
         .social
-        .may_interact(&alice, id(CAROL), Interaction::Call)
+        .may_interact(&alice, id(CAROL), Interaction::Call(CallKind::Voice))
         .await
         .expect("a friend may be called under the default");
 }
 
-/// A deployment that opens calls to everybody still honours a closed inbox.
+/// Voice and video are two policies, and the message policy is neither.
 ///
-/// The other half of the same rule. Widening the deployment default must not override
-/// the one column a user actually set.
+/// The split section 180 asks for, and the case it exists for: an account that keeps the
+/// voice line open to a stranger while refusing to be seen, and that leaves messages
+/// closed without that choice reaching the ring.
 #[tokio::test]
-async fn an_open_call_default_still_honours_a_closed_inbox() {
-    let harness = Harness::configured(SocialConfig {
-        call_default: Visibility::Everyone,
-        ..SocialConfig::default()
-    });
+async fn the_two_call_kinds_are_decided_separately() {
+    let harness = Harness::new();
     harness.person(ALICE, "alice").await;
-    harness.person(BOB, "bob").await;
+    // Closed to writing, open to being called by voice, closed to video.
     harness
         .person_with(
-            CAROL,
-            "carol",
+            BOB,
+            "bob",
             Visibility::Nobody,
             Visibility::Everyone,
             Visibility::Everyone,
         )
         .await;
+    harness
+        .person_calls(BOB, Visibility::Everyone, Visibility::Nobody)
+        .await;
+    harness.person(CAROL, "carol").await;
+    harness
+        .person_calls(CAROL, Visibility::Nobody, Visibility::Everyone)
+        .await;
     let alice = caller(ALICE, ALICE_PHONE);
 
     harness
         .social
-        .may_interact(&alice, id(BOB), Interaction::Call)
+        .may_interact(&alice, id(BOB), Interaction::Call(CallKind::Voice))
         .await
-        .expect("a wide default reaches an open inbox");
+        .expect("a message policy of nobody does not close the voice line");
     expect_code(
         harness
             .social
-            .may_interact(&alice, id(CAROL), Interaction::Call)
+            .may_interact(&alice, id(BOB), Interaction::Call(CallKind::Video))
             .await,
         codes::PRIVACY_RESTRICTED,
     );
+    expect_code(
+        harness
+            .social
+            .may_interact(&alice, id(CAROL), Interaction::Call(CallKind::Voice))
+            .await,
+        codes::PRIVACY_RESTRICTED,
+    );
+    harness
+        .social
+        .may_interact(&alice, id(CAROL), Interaction::Call(CallKind::Video))
+        .await
+        .expect("video set to everyone takes a stranger's video call");
 }
 
 /// An account may reach itself, except to befriend itself.
@@ -3136,7 +3178,7 @@ async fn an_account_may_reach_itself_but_not_befriend_itself() {
 
     for interaction in [
         Interaction::Message,
-        Interaction::Call,
+        Interaction::Call(CallKind::Video),
         Interaction::LastSeen,
     ] {
         harness

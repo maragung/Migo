@@ -170,6 +170,11 @@ pub struct ProfilePatch {
     pub who_can_message: Option<u32>,
     /// New friend-request visibility, same absent rule.
     pub who_can_add: Option<u32>,
+    /// New audio-call visibility, same absent rule.
+    pub who_can_call_voice: Option<u32>,
+    /// New video-call visibility, same absent rule. Its own field and not the audio one's
+    /// twin, because an account may refuse to be seen while still agreeing to be heard.
+    pub who_can_call_video: Option<u32>,
     /// New search opt-in: absent is "the switch was never flipped".
     pub searchable: Option<bool>,
 }
@@ -4211,6 +4216,8 @@ impl Worker {
             show_last_seen: patch.show_last_seen,
             who_can_message: patch.who_can_message,
             who_can_add: patch.who_can_add,
+            who_can_call_voice: patch.who_can_call_voice,
+            who_can_call_video: patch.who_can_call_video,
             searchable: patch.searchable,
             custom_status: patch.custom_status,
         };
@@ -4353,6 +4360,8 @@ impl Worker {
             show_last_seen: None,
             who_can_message: None,
             who_can_add: None,
+            who_can_call_voice: None,
+            who_can_call_video: None,
             searchable: None,
             // Pointing the profile at the new avatar is all this patch means to say; the
             // status column is somebody else's business.
