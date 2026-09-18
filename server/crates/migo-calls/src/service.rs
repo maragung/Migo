@@ -801,6 +801,20 @@ where
         if stats.used_turn == Some(true) {
             self.meters.turn_fallback();
         }
+        // The post-call rating rides the same frame as the numbers rather than
+        // earning an opcode of its own: it is the same kind of thing — a
+        // client's own claim about its own call, on a Droppable frame, arriving
+        // after the call has ended — and the call row is never deleted, so a
+        // rating sent on the way out still finds the call it names. Where the
+        // two differ is what an operator does with them: the numbers are
+        // transport, and a verdict is a user telling us the call was bad when
+        // the transport looked fine.
+        if let Some(rating) = stats.rating {
+            self.meters.rated(rating);
+        }
+        if let Some(issues) = stats.issues {
+            self.meters.issues(issues);
+        }
         Ok(())
     }
 

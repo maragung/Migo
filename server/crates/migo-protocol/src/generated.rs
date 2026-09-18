@@ -1319,6 +1319,48 @@ impl MlDsaPurpose {
     }
 }
 
+/// A user's verdict on a call it has just left (section 180). Unknown is what a build that does not know the value decodes to, and is never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum CallRating {
+    #[default]
+    Unknown = 0,
+    Excellent = 1,
+    Good = 2,
+    Average = 3,
+    Poor = 4,
+}
+
+impl CallRating {
+    #[must_use]
+    pub const fn to_wire(self) -> u32 {
+        self as u32
+    }
+
+    /// Unknown discriminants decode to `Unknown` so a new variant never breaks an old peer.
+    #[must_use]
+    pub const fn from_wire(v: u32) -> Self {
+        match v {
+            1 => Self::Excellent,
+            2 => Self::Good,
+            3 => Self::Average,
+            4 => Self::Poor,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Excellent => "Excellent",
+            Self::Good => "Good",
+            Self::Average => "Average",
+            Self::Poor => "Poor",
+        }
+    }
+}
+
 /// Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u32)]
@@ -10406,6 +10448,10 @@ pub struct CallStats {
     pub packet_loss: Option<u32>,
     pub jitter_ms: Option<u32>,
     pub used_turn: Option<bool>,
+    /// The user's verdict on a call that has just ended. Absent when the user did not rate.
+    pub rating: Option<CallRating>,
+    /// Bit 0 audio, 1 video, 2 connection, 3 dropped. Never call content.
+    pub issues: Option<u64>,
 }
 
 impl Encode for CallStats {
@@ -10416,7 +10462,9 @@ impl Encode for CallStats {
             + usize::from(self.rtt_ms.is_some())
             + usize::from(self.packet_loss.is_some())
             + usize::from(self.jitter_ms.is_some())
-            + usize::from(self.used_turn.is_some());
+            + usize::from(self.used_turn.is_some())
+            + usize::from(self.rating.is_some())
+            + usize::from(self.issues.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.setup_ms {
             w.optional(1, |w| {
@@ -10448,6 +10496,18 @@ impl Encode for CallStats {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.rating {
+            w.optional(6, |w| {
+                w.write_u32(v.to_wire());
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.issues {
+            w.optional(7, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10468,6 +10528,8 @@ impl Decode for CallStats {
                 3 => out.packet_loss = Some(sub.read_u32()?),
                 4 => out.jitter_ms = Some(sub.read_u32()?),
                 5 => out.used_turn = Some(sub.read_bool()?),
+                6 => out.rating = Some(CallRating::from_wire(sub.read_u32()?)),
+                7 => out.issues = Some(sub.read_u64()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }

@@ -1900,6 +1900,11 @@ impl Worker {
                     packet_loss: None,
                     jitter_ms: None,
                     used_turn: None,
+                    // The post-call rating section 180 asks for is not collected on the desktop
+                    // yet: this client reports what it measured and says nothing on the user's
+                    // behalf, which is what an absent verdict means on the wire.
+                    rating: None,
+                    issues: None,
                 })
             }
         };

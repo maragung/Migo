@@ -879,6 +879,28 @@ enum class MlDsaPurpose(val wire: Int) {
     }
 }
 
+/** A user's verdict on a call it has just left (section 180). Unknown is what a build that does not know the value decodes to, and is never sent. */
+enum class CallRating(val wire: Int) {
+    Unknown(0),
+    Excellent(1),
+    Good(2),
+    Average(3),
+    Poor(4);
+
+    fun toWire(): Int = wire
+
+    companion object {
+        /** Unknown discriminants decode to [Unknown] so a new variant never breaks an old peer. */
+        fun fromWire(value: Long): CallRating = when (value) {
+            1L -> Excellent
+            2L -> Good
+            3L -> Average
+            4L -> Poor
+            else -> Unknown
+        }
+    }
+}
+
 /** Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008. */
 enum class ConversationRole(val wire: Int) {
     Unknown(0),
@@ -8520,6 +8542,10 @@ data class CallStats(
     val packetLoss: Long? = null,
     val jitterMs: Long? = null,
     val usedTurn: Boolean? = null,
+    /** The user's verdict on a call that has just ended. Absent when the user did not rate. */
+    val rating: CallRating? = null,
+    /** Bit 0 audio, 1 video, 2 connection, 3 dropped. Never call content. */
+    val issues: ULong? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -8530,6 +8556,8 @@ data class CallStats(
         if (packetLoss != null) present++
         if (jitterMs != null) present++
         if (usedTurn != null) present++
+        if (rating != null) present++
+        if (issues != null) present++
         w.u32(present)
         if (setupMs != null) {
             val value = setupMs
@@ -8561,6 +8589,18 @@ data class CallStats(
                 w.bool(value)
             }
         }
+        if (rating != null) {
+            val value = rating
+            w.optional(6) { w ->
+                w.u32(value.toWire())
+            }
+        }
+        if (issues != null) {
+            val value = issues
+            w.optional(7) { w ->
+                w.u64big(value)
+            }
+        }
         w.leave()
     }
 
@@ -8573,6 +8613,8 @@ data class CallStats(
             var packetLoss: Long? = null
             var jitterMs: Long? = null
             var usedTurn: Boolean? = null
+            var rating: CallRating? = null
+            var issues: ULong? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -8582,11 +8624,13 @@ data class CallStats(
                     3L -> packetLoss = sub.u32()
                     4L -> jitterMs = sub.u32()
                     5L -> usedTurn = sub.bool()
+                    6L -> rating = CallRating.fromWire(sub.u32())
+                    7L -> issues = sub.u64big()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return CallStats(callId, setupMs, rttMs, packetLoss, jitterMs, usedTurn)
+            return CallStats(callId, setupMs, rttMs, packetLoss, jitterMs, usedTurn, rating, issues)
         }
     }
 }

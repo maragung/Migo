@@ -30,6 +30,7 @@ import {
   EncryptionMode,
   CallEndReason,
   CallMediaKind,
+  CallRating,
   CallState,
 } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, ConversationSummary, Id } from '@migo/sdk';
@@ -806,6 +807,75 @@ test('an ended call states its reason, its duration if it had one, and offers a 
 
 test('with no call and no invite, the screen renders nothing at all', () => {
   assert.equal(screen(), '');
+});
+
+test('a call that connected is asked about, and a call that never did is not', () => {
+  // The duration is the test, because it is the same fact the screen already shows: a call that
+  // rang out, was declined, or was cancelled before it connected is one nobody experienced, and
+  // asking how it went would collect opinions about a telephone not being answered.
+  const declined = screen({
+    call: activeCall({ state: CallState.Ended, endReason: CallEndReason.Declined }),
+  });
+  assert.ok(
+    !declined.includes('How was the call?'),
+    'a call that never connected must not be rated',
+  );
+
+  const connected = screen({
+    call: activeCall({ state: CallState.Ended, startedAt: NOW - 65_000, isCaller: false }),
+    endedAt: NOW,
+  });
+  assert.ok(connected.includes('How was the call?'));
+  // Section 180's four verdicts, and only those four: Unknown is what a build that does not know a
+  // verdict decodes to and must never be offered as a fifth choice.
+  for (const verdict of ['Excellent', 'Good', 'Average', 'Poor']) {
+    assert.ok(connected.includes(verdict), `the ${verdict} verdict is missing`);
+  }
+  assert.ok(!connected.includes('Unrated'), 'Unknown must not be offered as a verdict');
+  // The note is a detail about a verdict, so it is not asked for until a verdict is picked: eight
+  // controls at once would ask a user who wants to say "good" to first decide what was wrong.
+  assert.ok(!connected.includes('Audio problem'));
+  // A user being asked how a call went is told what of it is sent.
+  assert.ok(connected.includes('Never what was said or shown'));
+
+  // Once a verdict is picked the note appears, and each problem is a toggle rather than a choice —
+  // a call can have had two things wrong with it at once.
+  const picked = screen({
+    call: activeCall({ state: CallState.Ended, startedAt: NOW - 65_000, isCaller: false }),
+    endedAt: NOW,
+    rating: { choice: CallRating.Poor, issues: ['audio', 'dropped'], sent: false },
+  });
+  assert.ok(picked.includes('aria-checked="true"'), 'the picked verdict must read as picked');
+  assert.ok(picked.includes('Send rating'));
+  for (const problem of ['Audio problem', 'Video problem', 'Connection problem', 'Call dropped']) {
+    assert.ok(picked.includes(problem), `the ${problem} toggle is missing`);
+  }
+  assert.ok(picked.includes('aria-pressed="true"'), 'a ticked problem must read as ticked');
+
+  // Sent, the prompt is replaced rather than left standing: there is nothing left to change, and a
+  // screen still offering the four verdicts would invite a second press that goes nowhere.
+  const sent = screen({
+    call: activeCall({ state: CallState.Ended, startedAt: NOW - 65_000, isCaller: false }),
+    endedAt: NOW,
+    rating: { choice: CallRating.Good, issues: [], sent: true },
+  });
+  assert.ok(sent.includes('your rating was sent'));
+  assert.ok(!sent.includes('How was the call?'));
+  assert.ok(!sent.includes('Send rating'));
+
+  // Dismissing the prompt without rating is a real answer — the way back is offered on every ended
+  // call, rated or not — and sending needs no note, so one is never invented for the user.
+  assert.ok(connected.includes('Back to chats'));
+  const noNote = screen({
+    call: activeCall({ state: CallState.Ended, startedAt: NOW - 65_000, isCaller: false }),
+    endedAt: NOW,
+    rating: { choice: CallRating.Excellent, issues: [], sent: false },
+  });
+  assert.ok(noNote.includes('Send rating'));
+  assert.ok(
+    !noNote.includes('aria-pressed="true"'),
+    'nothing was ticked, so nothing reads as ticked',
+  );
 });
 
 test('a placement failure states the fact and offers a close, never a payload', () => {
