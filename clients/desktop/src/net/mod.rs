@@ -179,8 +179,6 @@ pub struct ProfilePatch {
     pub searchable: Option<bool>,
 }
 
-/// What the UI asks the worker to do.
-#[derive(Debug)]
 /// How many call-history rows one page asks for.
 ///
 /// One number in one place, because two readers need it and they must agree: the ask below sends
@@ -189,6 +187,8 @@ pub struct ProfilePatch {
 /// ends or hide one that should be there.
 pub const CALL_HISTORY_PAGE: u32 = 50;
 
+/// What the UI asks the worker to do.
+#[derive(Debug)]
 pub enum Command {
     /// Fetch a fresh image captcha challenge for the auth forms.
     ///
