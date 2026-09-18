@@ -10287,7 +10287,7 @@ pub struct CallHistoryEntry {
     pub peer_id: Id,
     /// 0=Outgoing, 1=Incoming, read from the asking account's side. A group call reads 0 when this account founded it and 1 otherwise, because who started the call is the question this field answers and a roster has no caller of its own.
     pub direction: u32,
-    /// How it ended, in the vocabulary a history screen renders: 0=Answered (it connected and then ended, however long it lasted), 1=Missed (it rang out), 2=Declined, 3=Busy, 4=Cancelled (the caller withdrew it before anyone answered), 5=Failed (a device or the network gave up). Derived rather than relayed: the server reads its own ended row, which records whether the callee answered and the reason the row was closed, so a claim one party made about the other can never be the thing the other party's history repeats back to them.
+    /// How it ended, in the vocabulary a history screen renders: 0=Answered (it connected and then ended, however long it lasted), 1=Missed (it rang out), 2=Declined, 3=Busy, 4=Cancelled (the caller withdrew it before anyone answered), 5=Failed (a device or the network gave up). Derived rather than relayed: whether the call was answered is read from the answer this node itself recorded when the callee picked up, never from anything a party said afterwards, so no claim can turn a missed call into a conversation in the other party's history; the reason is the row's own closing reason, which the server owns for a decline and for a ring that expired and otherwise records as the party who ended the call stated it.
     pub outcome: u32,
     /// When the call ended. Present on every row, because it is both the page order and the cursor a client pages with.
     pub ended_at: Timestamp,
@@ -10297,7 +10297,7 @@ pub struct CallHistoryEntry {
     pub answered_at: Option<Timestamp>,
     /// A group call: when its first seat was taken. Absent for a direct call, whose row has never kept a start, which is the same split CallListEntry's optional fields make.
     pub started_at: Option<Timestamp>,
-    /// A group call: how many seats the roster held when the call ended. Absent for a direct call, which is two by construction.
+    /// A group call: how many accounts the roster seated over its life — the count of distinct accounts that took a seat, not the size at any one instant, because the roster is retired at the moment it empties and a count read then would always be zero. Absent for a direct call, which is two by construction.
     pub participant_count: Option<u32>,
 }
 

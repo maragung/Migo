@@ -47,12 +47,25 @@
 //! the TTL plus a second — bounded by configuration, not by this constant.
 //! Each tick is one indexed store query on a quiet system, which is the whole
 //! cost of never leaving a callee ringing forever.
+//!
+//! # The retention prune rides a slower tick
+//!
+//! An ended call is the call history and is kept, but kept for a while rather
+//! than forever: [`prune_history`](migo_calls::Callkeeper::prune_history)
+//! drops what aged past the configured retention and what overflows an
+//! account's own cap. It runs on the same task and a far slower clock, because
+//! the two halves of this file answer different questions — the ring sweep is
+//! the correctness of every live call and has to be prompt, while the prune is
+//! housekeeping whose result is the same whether it runs now or a minute from
+//! now. A second was the wrong interval for it twice over: it would walk the
+//! whole history sixty times for one minute of progress, and nothing a client
+//! can do reads a row the prune is about to take.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use migo_calls::SharedCallkeeper;
-use migo_core::{Clock, Shutdown};
+use migo_core::{Clock, Shutdown, Timestamp};
 use migo_gateway::Gateway;
 use migo_protocol::{Opcode, Topic, TopicKind};
 
@@ -61,6 +74,16 @@ use crate::presence_relay::PresenceRelay;
 
 /// How often the sweeper looks for expired rings.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often the sweeper prunes the call history.
+///
+/// Sixty seconds. The prune is a walk of both stores' ended rows, so it is the
+/// one thing on this task whose cost grows with how much is being remembered;
+/// an hour would leave a node holding an hour of rows it means to drop, and a
+/// second would spend the whole tick budget re-deciding a question whose
+/// answer changes once per call. A minute is the coarsest interval that keeps
+/// the store within a bounded distance of its intended size.
+const PRUNE_INTERVAL_MS: i64 = 60_000;
 
 impl App {
     /// Spawns the call sweeper, returning its handle.
@@ -94,11 +117,24 @@ fn spawn(
     shutdown: Shutdown,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // The prune's own clock, carried across ticks: `None` until the first
+        // tick prunes, which is what makes a node that just started bound its
+        // history immediately rather than a minute after it began serving.
+        let mut last_prune: Option<Timestamp> = None;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(SWEEP_INTERVAL) => {
-                    sweep_once(&calls, &gateway, &relay, &rooms, &conversations, clock.as_ref()).await;
+                    sweep_once(
+                        &calls,
+                        &gateway,
+                        &relay,
+                        &rooms,
+                        &conversations,
+                        clock.as_ref(),
+                        &mut last_prune,
+                    )
+                    .await;
                 }
             }
         }
@@ -114,6 +150,7 @@ async fn sweep_once(
     rooms: &crate::room_relay::RoomRelay,
     conversations: &crate::conversation_relay::ConversationRelay,
     clock: &dyn Clock,
+    last_prune: &mut Option<Timestamp>,
 ) {
     let now = clock.now();
     match calls.sweep(now).await {
@@ -187,5 +224,26 @@ async fn sweep_once(
             }
         }
         Err(error) => tracing::warn!(%error, "the group seat sweep failed"),
+    }
+    // The retention prune, on its own slower clock: an ended call is kept so
+    // a history screen can read it, and dropped once it is older than the
+    // configured retention or once its parties are each holding more than
+    // their cap. It publishes nothing — a row leaving a store is not an event
+    // any client is owed, because the row it takes is one no client asked
+    // about — and it logs rather than dies, like everything else on this task.
+    let due = last_prune
+        .is_none_or(|last| now.as_millis().saturating_sub(last.as_millis()) >= PRUNE_INTERVAL_MS);
+    if due {
+        // Stamped before the work rather than after: a prune that failed is
+        // retried on the next interval instead of on every tick, so one bad
+        // walk cannot turn the sweeper into a busy loop.
+        *last_prune = Some(now);
+        match calls.prune_history(now).await {
+            Ok(0) => {}
+            Ok(dropped) => {
+                tracing::info!(dropped, "ended calls past their retention left the history");
+            }
+            Err(error) => tracing::warn!(%error, "the call history prune failed"),
+        }
     }
 }

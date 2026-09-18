@@ -87,6 +87,50 @@ pub trait CallStore: Send + Sync {
     /// `NoAnswer` state events, and a background task (when one exists)
     /// would publish them.
     async fn sweep_expired(&self, now: Timestamp) -> Result<Vec<Call>>;
+
+    /// The ended calls `account_id` was a party to, newest first.
+    ///
+    /// The read behind the call history, and the one question the three scans
+    /// above cannot answer: they are all filters on [`CallState`], and the row
+    /// they exclude is exactly the row a history is made of. `before` is the
+    /// paging cursor — a row must have ended *strictly* before it — and a row
+    /// with no `ended_at` is not history yet, because a call whose ending was
+    /// never stamped has no place in an order built on when things ended.
+    ///
+    /// `conversation_id` scopes the read in the store rather than in the caller
+    /// for the reason `limit` makes necessary: filtering after a limit would
+    /// hand a conversation-scoped screen a page shorter than it asked for, and
+    /// the second page it then requested would start past rows it never saw. A
+    /// backend that can answer "the ended calls of this account, newest first,
+    /// ending before this instant" in one indexed query should; the in-memory
+    /// backend's scan of a bounded map is the behaviour to beat.
+    async fn history_for(
+        &self,
+        account_id: Id,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: usize,
+    ) -> Result<Vec<Call>>;
+
+    /// Drops ended rows past their retention, returning how many it dropped.
+    ///
+    /// The bound the map did not have. An ended row is worth keeping — it is
+    /// the whole of the call history — but keeping every row forever is a store
+    /// that grows with the traffic of a node's whole life, and the growth is
+    /// invisible until it is the problem. Two limits, because either one alone
+    /// leaves a hole: `retention_ms` bounds a quiet account's rows by age, and
+    /// `keep_per_account` bounds a busy account's by count, so neither a long
+    /// idle period nor a burst can grow the store without end.
+    ///
+    /// A row is dropped for both of its parties at once when either party is
+    /// over the count: a call is one row, and half-deleting it would show one
+    /// side a call the other side never had.
+    async fn prune_history(
+        &self,
+        now: Timestamp,
+        retention_ms: i64,
+        keep_per_account: usize,
+    ) -> Result<usize>;
 }
 
 /// A shared, fully erased call store.
@@ -187,5 +231,99 @@ impl CallStore for MemoryCallStore {
             })
             .collect();
         Ok(expired)
+    }
+
+    async fn history_for(
+        &self,
+        account_id: Id,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: usize,
+    ) -> Result<Vec<Call>> {
+        let mut ended: Vec<Call> = self
+            .calls
+            .lock()
+            .values()
+            .filter(|call| {
+                let Some(ended_at) = call.ended_at else {
+                    // A row that has not been stamped is not history, however
+                    // it is marked: an order built on the instant a call ended
+                    // has no place to put a row whose instant is unknown.
+                    return false;
+                };
+                call.state == CallState::Ended
+                    && (call.caller_id == account_id || call.callee_id == account_id)
+                    && conversation_id.is_none_or(|id| call.conversation_id == id)
+                    // Strictly before: the cursor is the last row the caller
+                    // already holds, so including it would repeat it on every
+                    // page and a client paging to the end would never get there.
+                    && before.is_none_or(|cursor| !ended_at.is_at_or_after(cursor))
+            })
+            .cloned()
+            .collect();
+        // Newest first, with the id breaking ties: two calls can end in the
+        // same millisecond, and a page boundary falling between them must not
+        // order them one way on this page and the other way on the next.
+        ended.sort_by(|a, b| {
+            b.ended_at
+                .cmp(&a.ended_at)
+                .then_with(|| b.call_id.cmp(&a.call_id))
+        });
+        ended.truncate(limit);
+        Ok(ended)
+    }
+
+    async fn prune_history(
+        &self,
+        now: Timestamp,
+        retention_ms: i64,
+        keep_per_account: usize,
+    ) -> Result<usize> {
+        let horizon = now.saturating_add_millis(-retention_ms);
+        let mut calls = self.calls.lock();
+
+        // Age first, then count. The other order would let a burst of rows
+        // that are about to age out push out rows that are not.
+        let before = calls.len();
+        calls.retain(|_, call| match call.ended_at {
+            Some(ended_at) if call.state == CallState::Ended => ended_at.is_at_or_after(horizon),
+            _ => true,
+        });
+        let mut dropped = before - calls.len();
+
+        if keep_per_account > 0 {
+            // One pass over the ended rows, newest first, counting each party
+            // as it is seen: a row that overflows either party's budget is
+            // struck, so a busy account cannot be trimmed out from under a
+            // quiet one it happened to call.
+            let mut kept: HashMap<Id, usize> = HashMap::new();
+            let mut ended: Vec<(Id, Timestamp)> = calls
+                .iter()
+                .filter(|(_, call)| call.state == CallState::Ended && call.ended_at.is_some())
+                .map(|(id, call)| (*id, call.ended_at.unwrap_or(call.expires_at)))
+                .collect();
+            ended.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+            for (call_id, _) in ended {
+                let Some((caller_id, callee_id)) = calls
+                    .get(&call_id)
+                    .map(|call| (call.caller_id, call.callee_id))
+                else {
+                    continue;
+                };
+                let over = [caller_id, callee_id]
+                    .iter()
+                    .any(|party| kept.get(party).copied().unwrap_or(0) >= keep_per_account);
+                if over {
+                    calls.remove(&call_id);
+                    dropped += 1;
+                } else {
+                    for party in [caller_id, callee_id] {
+                        *kept.entry(party).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(dropped)
     }
 }

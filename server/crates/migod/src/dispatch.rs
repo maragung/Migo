@@ -1528,6 +1528,7 @@ impl Dispatcher for AppDispatcher {
             Opcode::CallStats => calls::handle_stats(context, frame, &self.calls).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
             Opcode::CallList => calls::handle_list(context, frame, &self.calls).await,
+            Opcode::CallHistory => calls::handle_history(context, frame, &self.calls).await,
             Opcode::CallSfuJoin => {
                 calls::handle_sfu_join(
                     context,

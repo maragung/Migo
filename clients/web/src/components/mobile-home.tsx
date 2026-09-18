@@ -809,6 +809,12 @@ export function MobileHome({
           onClick={() => fromSheet(() => onOpenWindow('notifications'))}
         />
         <SheetAction
+          icon="phone"
+          label="Calls"
+          sub="Recent and missed calls"
+          onClick={() => fromSheet(() => onOpenWindow('calls'))}
+        />
+        <SheetAction
           icon="gift"
           label="Store"
           sub="Emoticons · Stickers · Gifts"

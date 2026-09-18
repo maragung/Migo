@@ -56,6 +56,43 @@ pub const MEDIA_VIDEO: u32 = 1;
 /// participant nobody can hear.
 pub const SEAT_GRACE_MS: i64 = 30_000;
 
+/// How many ended calls one history page carries when the client asks for no
+/// particular size.
+///
+/// Twenty-five, the size a phone screen scrolls through before it has to ask
+/// for more, and small enough that the reply is a few kilobytes of ids and
+/// timestamps rather than a listing. The client names its own `limit` when it
+/// wants a different page; this is only the answer to silence.
+pub const HISTORY_PAGE_SIZE: usize = 25;
+
+/// The largest history page a client may ask for.
+///
+/// One hundred, the same ceiling the messaging history uses for the same
+/// reason: a page is bounded per caller by the rate limiter, so an unbounded
+/// page is one frame that costs an operator a multiple of what it charges
+/// for, and a client that wants more pages can page.
+pub const HISTORY_MAX_PAGE: usize = 100;
+
+/// How long an ended call stays in the history.
+///
+/// Ninety days. The history is a convenience, not a record: a call whose row
+/// is older than this is one nobody is scrolling back to, and a store that
+/// keeps every ended call of a node's whole life grows with the node's
+/// traffic rather than with anything a screen shows. Retention is the first
+/// of the two bounds the prune applies; the per-account cap is the second,
+/// because age alone still lets one account's burst grow the store.
+pub const HISTORY_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+
+/// How many ended calls one account's history keeps.
+///
+/// Five hundred, and the cap counts a call once for each of its parties: the
+/// row that overflows is dropped for both of them, because a call is one row
+/// and half-deleting it would show one side a call the other never had. A
+/// heavy user's five hundred most recent calls is far more than any screen
+/// scrolls, and the number bounds the store at (accounts times cap) rather
+/// than at the node's lifetime traffic.
+pub const HISTORY_MAX_PER_ACCOUNT: usize = 500;
+
 /// The `CallInviteResult.status` vocabulary.
 pub mod invite_status {
     /// The invite is ringing; the callee has until `expires_at`.
@@ -286,6 +323,73 @@ pub mod call_kind {
     pub const GROUP: u32 = 1;
 }
 
+/// The `CallHistoryEntry.direction` vocabulary.
+///
+/// Two numbers read from the asking account's side, because that is the only
+/// side a history screen has: the same row is outgoing for the caller and
+/// incoming for the callee, and a client that had to work that out from the
+/// peer id would have to know who it is before it could draw an arrow.
+pub mod call_direction {
+    /// This account placed the call.
+    pub const OUTGOING: u32 = 0;
+    /// This account was called.
+    pub const INCOMING: u32 = 1;
+}
+
+/// The `CallHistoryEntry.outcome` vocabulary.
+///
+/// Six numbers, and they are a *rendering* vocabulary rather than the relay's:
+/// [`EndReason`](super::EndReason) answers "why did this row close", which is
+/// what the relay and the sweeps care about, while this answers "what should
+/// the row say", which is what a screen cares about. The two differ in the one
+/// place that matters: a call that connected and then ended is `Answered`
+/// however it ended, because "you talked for two minutes" is the fact, and
+/// `ByCallee` is not something a history should shout about.
+pub mod call_outcome {
+    /// The call connected and then ended.
+    pub const ANSWERED: u32 = 0;
+    /// The ring ran out with nobody answering.
+    pub const MISSED: u32 = 1;
+    /// The callee refused the ring.
+    pub const DECLINED: u32 = 2;
+    /// The callee's devices were occupied.
+    pub const BUSY: u32 = 3;
+    /// The caller withdrew the call before it was answered.
+    pub const CANCELLED: u32 = 4;
+    /// A device or the network gave up.
+    pub const FAILED: u32 = 5;
+
+    /// The outcome a row's own facts produce.
+    ///
+    /// Whether the call was answered is read from the answer the server itself
+    /// recorded, never from anything a party said afterwards, so a claim can
+    /// never turn a missed call into a conversation in the other party's
+    /// history. The reason is the row's closing reason, which the server owns
+    /// for the two cases it produces — a decline and a ring that expired — and
+    /// otherwise records as the party who ended the call stated it.
+    #[must_use]
+    pub fn of(answered_at: Option<Timestamp>, reason: Option<EndReason>) -> u32 {
+        if answered_at.is_some() {
+            return ANSWERED;
+        }
+        match reason {
+            Some(EndReason::NoAnswer) => MISSED,
+            Some(EndReason::Declined) => DECLINED,
+            Some(EndReason::Busy) => BUSY,
+            Some(EndReason::ByCaller) => CANCELLED,
+            // The callee hanging up a call they never answered is not a path
+            // the decline handler produces — a refusal is `Declined` — but a
+            // relayed claim could say it, and a ring ended by the party being
+            // rung reads as a refusal on the caller's screen.
+            Some(EndReason::ByCallee) => DECLINED,
+            // A device that failed, a connection that dropped, and a row that
+            // closed without saying why are one thing to a history: the call
+            // did not connect and nobody refused it.
+            Some(EndReason::Failed | EndReason::Network) | None => FAILED,
+        }
+    }
+}
+
 impl Call {
     /// The other party, from `account_id`'s side.
     ///
@@ -430,6 +534,20 @@ pub struct CallsConfig {
     /// than a fabricated one, because a client that believes it has a relay
     /// will route media at an address that answers nothing.
     pub turn_servers: Vec<TurnServerWire>,
+    /// How long an ended call stays in the history.
+    ///
+    /// Defaults to [`HISTORY_RETENTION_MS`]. The prune drops an ended row
+    /// once this much time has passed since it ended, so an operator who
+    /// keeps less — or more — than ninety days says so here rather than in a
+    /// recompile.
+    pub history_retention_ms: i64,
+    /// How many ended calls one account's history keeps.
+    ///
+    /// Defaults to [`HISTORY_MAX_PER_ACCOUNT`]. The second bound the prune
+    /// applies, and the one that makes the store's size a function of the
+    /// account count rather than of the node's uptime; zero disables it and
+    /// leaves age as the only limit.
+    pub history_max_per_account: usize,
 }
 
 impl Default for CallsConfig {
@@ -438,6 +556,8 @@ impl Default for CallsConfig {
             ring_ttl_ms: RING_TTL_MS,
             seat_grace_ms: SEAT_GRACE_MS,
             turn_servers: Vec::new(),
+            history_retention_ms: HISTORY_RETENTION_MS,
+            history_max_per_account: HISTORY_MAX_PER_ACCOUNT,
         }
     }
 }

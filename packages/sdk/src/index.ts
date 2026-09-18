@@ -153,6 +153,9 @@ export {
   CallMediaKind,
   CallEndReason,
   CallDeclineReason,
+  CallKind,
+  CallDirection,
+  CallOutcome,
 } from './domains/calls.js';
 export type { ActiveCall } from './domains/calls.js';
 export { GroupCallDomain } from './domains/group-calls.js';
@@ -284,6 +287,8 @@ export type {
   CallIce,
   CallInviteEvent,
   CallInviteResult,
+  CallHistoryEntry,
+  CallHistoryQuery,
   CallKeyUpdate,
   CallListEntry,
   CallRenegotiate,

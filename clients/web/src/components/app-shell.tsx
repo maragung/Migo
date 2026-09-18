@@ -56,6 +56,7 @@ import { MobileHome } from './mobile-home.js';
 import { MobileTabBar } from './mobile-tab-bar.js';
 import type { MobileNavTab } from './mobile-tab-bar.js';
 import { MOBILE_NAV_META, MOBILE_NAV_ORDER, TABBED_NAV_ORDER } from './mobile-tab-bar.js';
+import { CallHistoryPanel } from './call-history-panel.js';
 import { NotificationsPanel } from './notifications-panel.js';
 import { ProfilePanel } from './profile-panel.js';
 import { RetroWindow } from './retro-window.js';
@@ -713,6 +714,26 @@ export function AppShell(): ReactNode {
     switch (w.kind) {
       case 'notifications':
         return <NotificationsPanel onOpenConversation={openChat} />;
+      case 'calls':
+        // The history's two doors are the shell's, because the shell is what holds a call
+        // starter and a conversation opener: a row that could place a call itself would be a
+        // second place a call begins, and one that could navigate would hold its own router.
+        return (
+          <CallHistoryPanel
+            onCallPeer={(peerId, video) => {
+              void ensureDirect(peerId).then((conversationId) => {
+                if (conversationId !== null) {
+                  void startCall(
+                    conversationId,
+                    peerId,
+                    video ? CallMediaKind.Video : CallMediaKind.Audio,
+                  );
+                }
+              });
+            }}
+            onOpenConversation={openChat}
+          />
+        );
       case 'search':
         return <SearchPanel onOpenConversation={openChat} />;
       case 'wallet':

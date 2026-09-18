@@ -55,8 +55,8 @@ pub mod store;
 pub mod traits;
 
 pub use group_store::{
-    participant_wire, roster_wire, GroupCallStore, GroupParticipantWire, MemoryGroupCallStore,
-    SharedGroupCallStore,
+    participant_wire, roster_wire, GroupCallHistory, GroupCallStore, GroupParticipantWire,
+    MemoryGroupCallStore, SharedGroupCallStore,
 };
 pub use model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig, EndReason,
