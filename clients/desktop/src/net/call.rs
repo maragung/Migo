@@ -271,6 +271,12 @@ pub struct CallView {
     /// repaint while the call is connected. `None` for the pre-call screens (a ring, a
     /// placement, an accept) — there is no track yet to decode.
     pub video: Option<call_video::VideoSlot>,
+    /// Whether this ended call may still be rated. True only for a call that really connected
+    /// and has not been rated yet, because the question is about a conversation somebody had:
+    /// a call that never answered, was declined, or was cancelled before it connected is a
+    /// call nobody experienced, and asking how it felt would be collecting opinions about a
+    /// telephone that was never picked up.
+    pub can_rate: bool,
 }
 
 /// The overlay's phases: the wire's states plus the ones the server never sees — this device's
@@ -340,6 +346,11 @@ struct TrackedCall {
     setup_start: Timestamp,
     /// Whether the one-time setup-time report has gone out.
     stats_sent: bool,
+    /// Whether the user's post-call verdict has gone out. Its own flag rather than a second
+    /// use of the one above, because the two reports leave at opposite ends of the call: the
+    /// setup time at the connect, the verdict after the end, and a call that never connects
+    /// sends neither.
+    rating_sent: bool,
     muted: bool,
     /// Shared with the capture pump: mute is silence, substituted at the source.
     muted_flag: Arc<AtomicBool>,
@@ -461,6 +472,7 @@ impl Calls {
             line: ended
                 .then(|| call_signal::ended_reason_line(call.invite_status, call.end_reason)),
             video: Some(call.video.clone()),
+            can_rate: ended && call.started_at.is_some() && !call.rating_sent,
         })
     }
 
@@ -477,6 +489,7 @@ impl Calls {
             ended_at: None,
             line: None,
             video: None,
+            can_rate: false,
         })
     }
 
@@ -494,6 +507,7 @@ impl Calls {
             ended_at: None,
             line: None,
             video: None,
+            can_rate: false,
         })
     }
 
@@ -511,6 +525,7 @@ impl Calls {
             ended_at: None,
             line: None,
             video: None,
+            can_rate: false,
         })
     }
 
@@ -1005,6 +1020,7 @@ impl Worker {
             started_at: None,
             setup_start: Timestamp::now(),
             stats_sent: false,
+            rating_sent: false,
             muted: false,
             muted_flag,
             key: place.key,
@@ -1202,6 +1218,7 @@ impl Worker {
             started_at: None,
             setup_start: Timestamp::now(),
             stats_sent: false,
+            rating_sent: false,
             muted: false,
             muted_flag,
             key,
@@ -1900,13 +1917,53 @@ impl Worker {
                     packet_loss: None,
                     jitter_ms: None,
                     used_turn: None,
-                    // The post-call rating section 180 asks for is not collected on the desktop
-                    // yet: this client reports what it measured and says nothing on the user's
-                    // behalf, which is what an absent verdict means on the wire.
+                    // No verdict rides this report: the question is asked after the call,
+                    // and the frame that carries the answer is the one `rate_call` sends.
                     rating: None,
                     issues: None,
                 })
             }
+        };
+        if let Some(stats) = stats {
+            self.request(Opcode::CallStats, &stats).await;
+        }
+        self.calls.emit(&self.sink);
+    }
+
+    /// Sends the user's verdict on a call that has just ended.
+    ///
+    /// A second CALL_STATS rather than a frame of its own, because a rating is a statement of
+    /// the same kind as the setup time and loss numbers already travelling that way: this
+    /// server never sees the media, so it can check none of it, and the frame is Droppable at
+    /// cost one. It carries the verdict and the problems and nothing else — no numbers are
+    /// re-sent, since a report that repeated the setup time would be a report about a moment
+    /// that has passed.
+    ///
+    /// The call row is what this leans on: the calls store never deletes one, so the id still
+    /// names the call after the call is over. A rating from a call this client never connected
+    /// is refused here rather than sent, because the wire's absent verdict already means the
+    /// user did not rate, and the two must not be confused.
+    pub(super) async fn rate_call(&mut self, rating: migo_protocol::CallRating, issues: u64) {
+        let stats = {
+            let Some(call) = self.calls.active.as_mut() else {
+                return;
+            };
+            if call.rating_sent || call.started_at.is_none() {
+                return;
+            }
+            call.rating_sent = true;
+            Some(migo_protocol::CallStats {
+                call_id: call.call_id,
+                setup_ms: None,
+                rtt_ms: None,
+                packet_loss: None,
+                jitter_ms: None,
+                used_turn: None,
+                rating: Some(rating),
+                // An empty mask is the user describing nothing, which is what an absent field
+                // already says: only a ticked box is a statement.
+                issues: (issues != 0).then_some(issues),
+            })
         };
         if let Some(stats) = stats {
             self.request(Opcode::CallStats, &stats).await;

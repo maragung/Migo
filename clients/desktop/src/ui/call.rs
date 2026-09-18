@@ -25,7 +25,7 @@ use crate::net::call::{CallPhase, CallView};
 use crate::net::call_signal::{format_call_duration, media_kind_label};
 use crate::net::call_video::VideoFrame;
 use crate::net::Command;
-use crate::theme::{font, palette, radius, space, Theme};
+use crate::theme::{font, palette, radius, space, text_style, Theme};
 use crate::ui::widgets;
 
 /// Draws the call overlay for the one call the worker says exists.
@@ -157,6 +157,12 @@ pub fn overlay(
                         });
                     }
                     CallPhase::Ended => {
+                        if view.can_rate {
+                            if let Some((rating, issues)) = rating_question(ui, theme, view) {
+                                commands.push(Command::RateCall { rating, issues });
+                            }
+                        }
+                        ui.add_space(space::SM);
                         if widgets::primary_button(ui, theme, "Close", true).clicked() {
                             commands.push(Command::DismissCall);
                         }
@@ -303,4 +309,132 @@ fn danger_button(ui: &mut egui::Ui, theme: Theme, text: &str) -> egui::Response 
         )
     })
     .inner
+}
+
+/// The verdicts a user can give, best first — the order they are offered in, and the order the
+/// schema numbers them.
+const RATING_CHOICES: [(migo_protocol::CallRating, &str); 4] = [
+    (migo_protocol::CallRating::Excellent, "Excellent"),
+    (migo_protocol::CallRating::Good, "Good"),
+    (migo_protocol::CallRating::Average, "Average"),
+    (migo_protocol::CallRating::Poor, "Poor"),
+];
+
+/// The problems a user can tick, with the schema's own bit for each.
+///
+/// Numbered here rather than at the call site because the bit positions are a wire fact: the
+/// schema fixes audio at bit 0, video at 1, connection at 2 and dropped at 3, and a client that
+/// renumbered them would report a different call's problems with nothing to show for it.
+const RATING_ISSUES: [(u64, &str); 4] = [
+    (1, "Audio"),
+    (2, "Video"),
+    (4, "Connection"),
+    (8, "Dropped"),
+];
+
+/// The rating question's own draft: what the user has picked so far, before they send it.
+///
+/// It lives in the context's transient memory rather than in the worker's call state, because
+/// it is widget state of the same kind as a text box's cursor: nothing else reads it, and the
+/// call it belongs to is over. It is keyed by the call it is about — the peer and the moment
+/// the call ended — so a second call never inherits the first one's answer.
+#[derive(Clone, Copy, Default)]
+struct RatingDraft {
+    /// The verdict picked, or `None` while the question is unanswered. The problems are only
+    /// offered once one is, because the verdict is the question and eight controls at once
+    /// would ask somebody who only wanted to say it was fine to first decide what was wrong.
+    rating: Option<migo_protocol::CallRating>,
+    /// The problems ticked, as the schema's mask.
+    issues: u64,
+    /// Whether the answer has been handed to the worker, which retires the question: a rating
+    /// asked twice is a rating the user has to refuse twice.
+    sent: bool,
+}
+
+/// The post-call rating question, drawn on an ended call that really connected.
+///
+/// Returns the answer on the frame the user sends it, and `None` every other frame — the same
+/// shape every other control in this overlay has, where the screen reports intent and the
+/// worker owns the call. The problems are optional and not exclusive: one call can have had
+/// bad audio and a bad connection at once, so they are ticks rather than a second choice.
+fn rating_question(
+    ui: &mut egui::Ui,
+    theme: Theme,
+    view: &CallView,
+) -> Option<(migo_protocol::CallRating, u64)> {
+    let colors = palette(theme);
+    let id = egui::Id::new((
+        "migo-call-rating",
+        view.peer,
+        view.ended_at.map(migo_core::Timestamp::as_unix_ms),
+    ));
+    let mut draft: RatingDraft = ui.ctx().memory_mut(|memory| {
+        *memory
+            .data
+            .get_temp_mut_or_insert_with(id, RatingDraft::default)
+    });
+    if draft.sent {
+        return None;
+    }
+
+    let mut answer = None;
+    widgets::divider(ui, theme);
+    ui.add_space(space::XS);
+    ui.label(
+        RichText::new("How was this call?")
+            .text_style(crate::theme::named(text_style::OVERLINE))
+            .color(colors.text_muted),
+    );
+    ui.add_space(space::XS);
+    ui.horizontal_wrapped(|ui| {
+        for (rating, label) in RATING_CHOICES {
+            let picked = draft.rating == Some(rating);
+            let text = if picked {
+                format!("\u{2022} {label}")
+            } else {
+                label.to_owned()
+            };
+            if widgets::ghost_button(ui, theme, &text).clicked() {
+                draft.rating = Some(rating);
+            }
+        }
+    });
+
+    if let Some(rating) = draft.rating {
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new("What was wrong? Optional.")
+                .text_style(crate::theme::named(text_style::OVERLINE))
+                .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.horizontal_wrapped(|ui| {
+            for (bit, label) in RATING_ISSUES {
+                let ticked = draft.issues & bit != 0;
+                let text = if ticked {
+                    format!("\u{2713} {label}")
+                } else {
+                    label.to_owned()
+                };
+                if widgets::ghost_button(ui, theme, &text).clicked() {
+                    draft.issues ^= bit;
+                }
+            }
+        });
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new("Only these answers leave your device — never anything that was said.")
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        if widgets::primary_button(ui, theme, "Send rating", true).clicked() {
+            draft.sent = true;
+            answer = Some((rating, draft.issues));
+        }
+    }
+
+    ui.ctx()
+        .memory_mut(|memory| memory.data.insert_temp(id, draft));
+    answer
 }
