@@ -238,6 +238,8 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
     val callPeerId = callState.incoming?.callerId
         ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
     val remoteVideo by model.remoteVideo.collectAsState()
+    val callOutputs by model.callOutputs.collectAsState()
+    val chosenOutput by model.callOutput.collectAsState()
     // The activity drawing this overlay, when it is one that can hold a call: it is the host that
     // knows whether the system is currently showing this screen small, and the only thing that can
     // ask for it. Read from the context rather than passed down, because this layer sits above two
@@ -269,6 +271,15 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             // than present and unable to move.
             onSwitchCamera = if (model.callCanSwitchCamera) {
                 { model.switchCallCamera() }
+            } else {
+                null
+            },
+            outputs = callOutputs,
+            chosenOutput = chosenOutput,
+            // Null where the phone has nowhere else to play the call -- one route, or a platform
+            // with no honest way to route one -- so the menu is absent rather than a list of one.
+            onChooseOutput = if (callOutputs.size > 1) {
+                { model.chooseCallOutput(it) }
             } else {
                 null
             },
