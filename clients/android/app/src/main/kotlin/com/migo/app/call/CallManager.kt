@@ -74,6 +74,7 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
 import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
@@ -306,6 +307,8 @@ class CallManager(
     @Volatile private var videoHelper: SurfaceTextureHelper? = null
     @Volatile private var videoSource: VideoSource? = null
     @Volatile private var videoTrack: VideoTrack? = null
+    /** The sender carrying [videoTrack], which is what the ladder's caps are written on. */
+    @Volatile private var videoSender: RtpSender? = null
 
     /**
      * The capturer sending this device's screen, while one is. A field of its own rather than a
@@ -1193,6 +1196,9 @@ class CallManager(
         linkQuality = LinkQuality.Full
         linkQualityChangedAt = now()
         lastMeasurement = null
+        // A new call starts with no measured tier and no degradation: the indicator is a
+        // measurement, and carrying the last call's rung onto this one would be inventing it.
+        _state.update { it.copy(quality = null, degraded = false) }
         qualityTimer = scope.launch {
             while (true) {
                 delay(QUALITY_POLL_MS)
@@ -1222,9 +1228,45 @@ class CallManager(
                 }
                 linkQuality = step.quality
                 linkQualityChangedAt = at
+                applyQuality(step.quality, step.stats.sentKbps)
                 reportQuality(call.callId, step)
             }
         }
+    }
+
+    /**
+     * Puts one rung onto this side's own video and onto the screen.
+     *
+     * What the ladder measured is what this call does about its own link, so the rung becomes the
+     * encoder's ceiling, the resolution it scales to, and the frame rate it may send -- and the
+     * bottom rung stops the stream *without* detaching the track, which is what makes the rung that
+     * climbs back a parameter change rather than a camera to reopen. The camera keeps capturing
+     * either way, so the self-view stays alive while the peer receives nothing, and a user who turned
+     * their camera off stays a different fact from a link that did.
+     *
+     * Every rung writes every cap it names, the ones it imposes nothing on included, because a
+     * member left out of a sender's parameters is a member the receiver keeps: a climbing call that
+     * omitted the cap it was giving back would keep sending the small picture the screen no longer
+     * claims. A sender that refuses the change is not retried here -- the next rung that moves writes
+     * again -- and a call that cannot be shaped keeps sending what it was sending rather than losing
+     * video over a refused parameter.
+     */
+    private fun applyQuality(rung: LinkQuality, measuredKbps: Long) {
+        val isVideo = active?.mediaKind == CallMediaKind.Video
+        val caps = videoCaps(rung, measuredKbps)
+        val sender = videoSender
+        if (sender != null) {
+            val params = sender.parameters
+            val encoding = params?.encodings?.firstOrNull()
+            if (params != null && encoding != null) {
+                encoding.active = caps.active
+                encoding.maxBitrateBps = caps.maxBitrateBps
+                encoding.scaleResolutionDownBy = caps.scaleResolutionDownBy
+                encoding.maxFramerate = caps.maxFramerate
+                runCatching { sender.setParameters(params) }
+            }
+        }
+        _state.update { it.copy(quality = rung, degraded = degradedAt(rung, isVideo)) }
     }
 
     /** Stops sampling the link; safe to call when nothing is armed. */
@@ -1373,6 +1415,9 @@ class CallManager(
         videoCapturer = null
         videoHelper?.dispose()
         videoHelper = null
+        // The sender goes with the track it was carrying; a shape written onto a released sender
+        // is a parameter change against a connection that is already gone.
+        videoSender = null
         videoTrack?.dispose()
         videoTrack = null
         videoSource?.dispose()
@@ -1535,7 +1580,9 @@ class CallManager(
         camera.initialize(helper, context, surface.capturerObserver)
         camera.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
         val video = factory.createVideoTrack("migo-video", surface)
-        pc.addTrack(video, listOf("migo"))
+        // The sender is kept rather than dropped: it is the one place this call's own video can
+        // be shaped, and every rung of the ladder is written onto it.
+        videoSender = pc.addTrack(video, listOf("migo"))
         videoCapturer = camera
         videoHelper = helper
         videoSource = surface
@@ -2004,6 +2051,18 @@ data class CallUiState(
      * is a control that lies about what it does.
      */
     val screenSharing: Boolean? = null,
+    /**
+     * The rung the call's own link was last classified as, for the quality indicator. Null until the
+     * ladder has moved this call at all, which is why a call that never left the top rung shows
+     * nothing: the tier is a measurement, and a screen that named one before measuring anything would
+     * be inventing it.
+     */
+    val quality: LinkQuality? = null,
+    /**
+     * Whether the call is degraded in section 180's sense: connected, with video paused because the
+     * quality dropped. Never true for a voice call, which has no video to pause.
+     */
+    val degraded: Boolean = false,
     /** When the current (or just-ended) call ended, for the ended screen's duration. */
     val endedAt: Long? = null,
     /** Why a call could not even be placed, when nothing else is showing. */

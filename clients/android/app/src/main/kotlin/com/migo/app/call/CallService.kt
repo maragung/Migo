@@ -83,7 +83,7 @@ class CallService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val posted = notification(model, call, state.muted)
+        val posted = notification(model, call, state.muted, state.degraded)
         // The claim is a step the platform can refuse -- a microphone-typed service it decides the
         // app is not entitled to run right now, on the versions that weigh that -- and a refusal
         // raised here would come out of a service callback, which is the one place an exception
@@ -129,7 +129,10 @@ class CallService : Service() {
                     return@collectLatest
                 }
                 val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                manager.notify(NOTIFICATION_ID, notification(model, call, state.muted))
+                manager.notify(
+                    NOTIFICATION_ID,
+                    notification(model, call, state.muted, state.degraded),
+                )
             }
         }
     }
@@ -144,7 +147,12 @@ class CallService : Service() {
      * The call, as the notification states it: whose call it is, what state it is in, and the two
      * controls somebody away from the screen can use.
      */
-    private fun notification(model: AppViewModel, call: ActiveCall, muted: Boolean): Notification {
+    private fun notification(
+        model: AppViewModel,
+        call: ActiveCall,
+        muted: Boolean,
+        degraded: Boolean,
+    ): Notification {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         // Created on every post rather than guarded by a flag of our own: the platform already
         // answers whether it exists, and a process killed between two calls would otherwise have
@@ -155,12 +163,12 @@ class CallService : Service() {
             )
         }
         val peer = if (call.isCaller) call.calleeId else call.callerId
-        // The same state line the call screen draws, through the same two functions and with the
-        // same neutral degraded flag the screen passes (this client pauses no video for a poor
-        // link), so the notification and the screen can never disagree about what the call is
-        // doing -- a notification that said something the screen does not would be the worse of
-        // the two to believe, since it is the one read while the screen is not being looked at.
-        val status = callStateLabel(displayStateOf(call.state, degraded = false))
+        // The same state line the call screen draws, through the same two functions and the same
+        // degraded fact the screen reads, so the notification and the screen can never disagree
+        // about what the call is doing -- and a notification that said something the screen does
+        // not would be the worse of the two to believe, since it is the one read while the screen
+        // is not being looked at.
+        val status = callStateLabel(displayStateOf(call.state, degraded = degraded))
         val open = PendingIntent.getActivity(
             this,
             0,

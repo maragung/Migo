@@ -49,6 +49,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.migo.app.call.ActiveCall
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallUiState
+import com.migo.app.call.qualityTierLabel
 import com.migo.core.domain.CallDisplayState
 import com.migo.core.domain.CallMediaKind
 import com.migo.core.domain.CallState
@@ -88,10 +89,10 @@ val LocalCallEglContext = staticCompositionLocalOf<EglBase.Context?> { null }
  * A call screen must never go silent with no explanation -- a user who cannot tell ringing from
  * dead hangs up and redials. So every state names itself: *Ringing* ("Calling…" out, "Incoming
  * voice call" in), *Connecting*, *Connected* with a running duration, *Reconnecting* while the
- * transport blips, *Degraded* while quality holds media back (always false in this build,
- * but the plumbing lands in [displayStateOf]), and *Ended* always with the reason -- a declined
- * call, a failed call, and a network death are different facts, and calling them all "Call ended"
- * throws away the one thing the user needs before calling back.
+ * transport blips, *Degraded* while quality holds media back -- a video call whose link fell to the
+ * ladder's bottom rung, which this build now reaches -- and *Ended* always with the reason: a
+ * declined call, a failed call, and a network death are different facts, and calling them all
+ * "Call ended" throws away the one thing the user needs before calling back.
  *
  * # The clock
  *
@@ -279,9 +280,10 @@ private fun ActiveCallScreen(
         }
     }
 
-    // Degraded is always false in this build; the sixth state's plumbing is here for the
-    // statistics feed that will flip it.
-    val display = displayStateOf(call.state, degraded = false)
+    // Degraded is what the ladder measured, never a guess the screen makes for itself: a video
+    // call whose rung fell to the bottom is connected with its video paused, and a voice call on the
+    // same rung is a lossy call that gave nothing up.
+    val display = displayStateOf(call.state, degraded = state.degraded)
     val durationMs = call.startedAt?.let { (state.endedAt ?: nowMs) - it }
 
     // The video stage, on the web overlay's own rule: a video call shows it while media is
@@ -370,6 +372,19 @@ private fun ActiveCallScreen(
                     text = formatCallDuration(durationMs),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // The network indicator, drawn while the call is up and the ladder has a tier for it.
+            // The same word for a voice call and a video call, because a lossy link is a fact about
+            // the call whether or not a camera is on it; a call the ladder has never moved shows
+            // nothing rather than the best tier, since a tier nobody measured is not a tier.
+            val quality = state.quality
+            if (quality != null && (running || display == CallDisplayState.Reconnecting)) {
+                Text(
+                    text = qualityTierLabel(quality),
+                    fontSize = MigoType.meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
             }
         }
