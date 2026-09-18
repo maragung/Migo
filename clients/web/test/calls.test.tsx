@@ -34,7 +34,7 @@ import {
 } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, ConversationSummary, Id } from '@migo/sdk';
 
-import { CallErrorCard, CallScreen } from '../src/components/call-overlay.js';
+import { CallErrorCard, CallPipCard, CallScreen } from '../src/components/call-overlay.js';
 import type { CallScreenProps } from '../src/components/call-overlay.js';
 import { CallButtons } from '../src/components/call-buttons.js';
 import { callPeerFor } from '../src/components/chat-window.js';
@@ -134,6 +134,8 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     microphones: [],
     outputId: null,
     inputId: null,
+    pipAvailable: false,
+    pipActive: false,
     qualityCeiling: null,
     lowBandwidth: false,
     nowMs: NOW,
@@ -152,6 +154,7 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
     onSelectInput: () => {},
     onSelectQuality: () => {},
     onToggleLowBandwidth: () => {},
+    onTogglePip: () => {},
     onDismiss: () => {},
     ...overrides,
   };
@@ -552,6 +555,96 @@ test('the microphone menu appears only where there is a choice, and names what i
     startedAt: NOW - 30_000,
   });
   assert.ok(screen({ call: video, microphones, inputId: 'builtin' }).includes('Microphone'));
+});
+
+test('the picture-in-picture control appears only where the browser can float a call', () => {
+  const video = activeCall({
+    state: CallState.Connected,
+    mediaKind: CallMediaKind.Video,
+    startedAt: NOW - 30_000,
+  });
+  // The gate is the browser's capability rather than the call's state: a browser with neither of the
+  // two mechanisms gets no control, because a button that cannot float anything would be one that
+  // lies about what it did.
+  assert.ok(!screen({ call: video }).includes('Picture in picture'));
+  assert.ok(screen({ call: video, pipAvailable: true }).includes('Picture in picture'));
+
+  // It is drawn on a voice call as well as a video call — unlike the share button beside it, which
+  // needs a video m-line to ride. A floated voice call still keeps the peer's name, the timer, and
+  // the hang-up button in front of whatever the user is doing, which is the whole of the point.
+  const voice = activeCall({ state: CallState.Connected, startedAt: NOW - 30_000 });
+  assert.ok(screen({ call: voice, pipAvailable: true }).includes('Picture in picture'));
+
+  // Nothing is floating before the call is up, so the control is not there to be pressed: it joins
+  // the row at the same moment every other control of a live call does.
+  const ringing = activeCall({ state: CallState.Ringing });
+  assert.ok(!screen({ call: ringing, pipAvailable: true }).includes('Picture in picture'));
+
+  // While the call is floating the control offers the way back rather than out, and says so to a
+  // screen reader through its pressed state as well as its label.
+  const floating = screen({ call: voice, pipAvailable: true, pipActive: true });
+  assert.ok(floating.includes('Leave picture in picture'));
+  assert.ok(floating.includes('aria-pressed="true"'));
+});
+
+test('the floating window carries the call, not only its picture', () => {
+  // The document window is a window with no shell around it: no chat list, no overlay, and none of
+  // this app's stylesheet. So what it shows has to be everything the user would otherwise come back
+  // to the tab for — who the call is with, how long it has run, and the controls that act on it.
+  const video = renderToStaticMarkup(
+    <CallPipCard
+      peerName="Ada Lovelace"
+      peerId="ada"
+      isVideo
+      cameraOn
+      muted={false}
+      sharingScreen={false}
+      statusLabel="Connected"
+      durationLabel="0:42"
+      remoteStream={null}
+      localStream={null}
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onEnd={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  assert.ok(video.includes('Ada Lovelace'));
+  assert.ok(video.includes('Connected'));
+  assert.ok(video.includes('0:42'), 'the timer is the number that moves, so it comes along');
+  assert.ok(video.includes('End call'));
+  assert.ok(video.includes('Mute microphone'));
+  assert.ok(video.includes('Turn camera off'));
+  assert.ok(video.includes('Back to the call'), 'the call can be brought back without ending it');
+  assert.ok(video.includes('Ada Lovelace\u2019s video'), 'the peer is what the window is for');
+  assert.ok(video.includes('Your video'), 'and the self-view, since the tab is not on screen');
+
+  // A voice call has no picture, so the window shows who it is with instead, and no camera control
+  // is drawn for a camera that was never publishing.
+  const voice = renderToStaticMarkup(
+    <CallPipCard
+      peerName="Ada Lovelace"
+      peerId="ada"
+      isVideo={false}
+      cameraOn={false}
+      muted
+      sharingScreen
+      statusLabel="Reconnecting"
+      durationLabel={null}
+      remoteStream={null}
+      localStream={null}
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onEnd={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  assert.ok(voice.includes('Reconnecting'));
+  assert.ok(!voice.includes('Turn camera'));
+  assert.ok(voice.includes('Unmute microphone'), 'the control names the direction it will go');
+  // The screen-share reminder follows the call into the floating window rather than staying behind
+  // in the tab: a share the user has stopped looking at is exactly the one they forget.
+  assert.ok(voice.includes('Sharing your screen'));
 });
 
 test('the tier menu is the ladder without its bottom rung, and a voice call has none', () => {

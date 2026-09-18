@@ -3518,6 +3518,17 @@ main {
 .call-action.low-bandwidth.on {
   color: var(--accent);
 }
+/* Picture-in-picture is a placement rather than a state of the call, but whether it is in effect is
+   something the user has to be able to read: the button takes the accent while the call is floating,
+   because otherwise it looks the same whether the press worked or the browser refused the window. */
+.call-action.pip {
+  background: var(--accent-soft-strong);
+  border-color: var(--accent-border);
+  color: var(--text-dim);
+}
+.call-action.pip.on {
+  color: var(--accent);
+}
 
 /*
  * The group-call roster rides in the same overlay, between the identity and the actions: a
