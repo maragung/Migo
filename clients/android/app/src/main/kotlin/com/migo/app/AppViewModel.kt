@@ -4557,6 +4557,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         showLastSeen: Long?,
         whoCanMessage: Long?,
         whoCanAdd: Long?,
+        whoCanCallVoice: Long?,
+        whoCanCallVideo: Long?,
     ) {
         val live = session ?: return
         val current = _state.value as? AppState.SignedIn ?: return
@@ -4573,6 +4575,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         showLastSeen = showLastSeen,
                         whoCanMessage = whoCanMessage,
                         whoCanAdd = whoCanAdd,
+                        whoCanCallVoice = whoCanCallVoice,
+                        whoCanCallVideo = whoCanCallVideo,
                     ),
                 )
                 signedIn {

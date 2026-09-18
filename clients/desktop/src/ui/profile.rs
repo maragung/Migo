@@ -68,10 +68,15 @@ pub struct ProfileState {
     custom_status: String,
     /// The form's draft birth year — a string, because the field is a person typing digits.
     birth_year: String,
-    /// The three privacy drafts, `-1` meaning "leave as-is" (absent from the save).
+    /// The privacy drafts, `-1` meaning "leave as-is" (absent from the save).
     show_last_seen: i8,
     who_can_message: i8,
     who_can_add: i8,
+    /// The two call audiences of their own, because refusing to be seen is not refusing to be
+    /// spoken to: video left at nobody while voice stays open is the combination section 180
+    /// asks for, and one control could not express it.
+    who_can_call_voice: i8,
+    who_can_call_video: i8,
     /// The searchable draft: `-1` untouched, `0` off, `1` on.
     searchable: i8,
     /// The avatar picker's path draft. Not a save-section field: the avatar acts on its own
@@ -101,6 +106,8 @@ impl ProfileState {
         self.show_last_seen = -1;
         self.who_can_message = -1;
         self.who_can_add = -1;
+        self.who_can_call_voice = -1;
+        self.who_can_call_video = -1;
         self.searchable = -1;
         self.saved = saved;
         self.failure = None;
@@ -150,6 +157,8 @@ impl ProfileState {
             || self.show_last_seen >= 0
             || self.who_can_message >= 0
             || self.who_can_add >= 0
+            || self.who_can_call_voice >= 0
+            || self.who_can_call_video >= 0
             || self.searchable >= 0
     }
 }
@@ -413,6 +422,18 @@ fn form_section(
         "Who can add you as a friend",
         &mut state.who_can_add,
     );
+    privacy_choice(
+        ui,
+        context,
+        "Who can call you by voice",
+        &mut state.who_can_call_voice,
+    );
+    privacy_choice(
+        ui,
+        context,
+        "Who can call you with video",
+        &mut state.who_can_call_video,
+    );
     ui.add_space(space::SM);
 
     // The searchable switch: three states in two positions, because "leave as-is" is the
@@ -548,6 +569,8 @@ fn build_patch(state: &ProfileState, profile: &OwnProfile, rich_presence: bool) 
         show_last_seen: choice_value(state.show_last_seen),
         who_can_message: choice_value(state.who_can_message),
         who_can_add: choice_value(state.who_can_add),
+        who_can_call_voice: choice_value(state.who_can_call_voice),
+        who_can_call_video: choice_value(state.who_can_call_video),
         searchable: (state.searchable >= 0).then_some(state.searchable == 1),
     };
     let changed = patch.display_name.is_some()
@@ -557,6 +580,8 @@ fn build_patch(state: &ProfileState, profile: &OwnProfile, rich_presence: bool) 
         || patch.show_last_seen.is_some()
         || patch.who_can_message.is_some()
         || patch.who_can_add.is_some()
+        || patch.who_can_call_voice.is_some()
+        || patch.who_can_call_video.is_some()
         || patch.searchable.is_some();
     changed.then_some(Command::SaveProfile(patch))
 }
