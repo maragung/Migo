@@ -53,6 +53,7 @@ import { ConversationList } from './conversation-list.js';
 import { GamesPanel } from './games-panel.js';
 import { Icon } from './icons.js';
 import { MobileHome } from './mobile-home.js';
+import { MobileNavBar } from './mobile-nav-bar.js';
 import { MobileTabBar } from './mobile-tab-bar.js';
 import type { MobileNavTab } from './mobile-tab-bar.js';
 import { MOBILE_NAV_META, MOBILE_NAV_ORDER, TABBED_NAV_ORDER } from './mobile-tab-bar.js';
@@ -787,6 +788,13 @@ export function AppShell(): ReactNode {
 
   const visibleNavs = navOrder.filter((tab) => !hiddenNavs.includes(tab));
 
+  // Chat List Mode's phone chrome: the bottom navigation bar stands in for the strip while the
+  // phone is at home, and only then. A strip with nothing to carry is chrome a person has to
+  // read past on the screen they spend their day on; a strip with a panel in it is the only way
+  // back to that panel, so it returns the moment one exists — open or minimized, since
+  // navigating from the bar parks every window rather than closing it.
+  const bottomNav = isMobile && chatList && titledWindows.length === 0;
+
   return (
     <SectionNavProvider navigate={navigate}>
       {/* The desk is one stacking context (its z-index is `var(--z-desk)`, far below every
@@ -796,7 +804,7 @@ export function AppShell(): ReactNode {
           meant to sit above. Overlays that portal to document.body (sheets, dialogs) and this
           element are siblings, so the desk's own z-index is the ceiling for everything inside
           it — the newest overlay always wins, whichever window was focused last. */}
-      <div className="desk-bg desk-root">
+      <div className={`desk-bg desk-root${bottomNav ? ' desk-mnav' : ''}`}>
         {/* ===== the phone's home ===== */}
         {/* In Chat List Mode the home is always on: its main screen is the conversation list,
             which closing the strip's tabs cannot take away. */}
@@ -951,20 +959,24 @@ export function AppShell(): ReactNode {
 
         {/* ===== the strip or the taskbar ===== */}
         {isMobile ? (
-          <MobileTabBar
-            windows={titledWindows}
-            activeId={activeId}
-            unreadWin={unreadWin}
-            navTab={mobileNav}
-            hiddenNavs={hiddenNavs}
-            navUnread={navUnread}
-            chatList={chatList}
-            onSelectNav={selectMobileNav}
-            onCloseNav={closeMobileNav}
-            onReopenNav={reopenMobileNav}
-            onSelectWindow={mobileSelectWin}
-            onCloseWindow={closeWindow}
-          />
+          bottomNav ? (
+            <MobileNavBar navTab={mobileNav} navUnread={navUnread} onSelectNav={selectMobileNav} />
+          ) : (
+            <MobileTabBar
+              windows={titledWindows}
+              activeId={activeId}
+              unreadWin={unreadWin}
+              navTab={mobileNav}
+              hiddenNavs={hiddenNavs}
+              navUnread={navUnread}
+              chatList={chatList}
+              onSelectNav={selectMobileNav}
+              onCloseNav={closeMobileNav}
+              onReopenNav={reopenMobileNav}
+              onSelectWindow={mobileSelectWin}
+              onCloseWindow={closeWindow}
+            />
+          )
         ) : (
           <Taskbar
             windows={titledWindows}

@@ -6354,6 +6354,93 @@ button.activity-row-btn:focus-visible {
   color: #c2530a;
 }
 
+/* --- the phone's home navigation bar (Chat List Mode) --- */
+
+:root {
+  --mnav-h: 56px;
+}
+
+/* The bar is the phone's own chrome, so it sits on the desk's ground colour rather than a themed
+   surface, exactly as the strip and the taskbar do — the three are one band of chrome in three
+   places. The safe-area inset is padding rather than height, so the bar's own 56px stay tappable
+   on a phone with a home indicator under it. */
+.mnav-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 800;
+  display: flex;
+  height: calc(var(--mnav-h) + env(safe-area-inset-bottom, 0px));
+  align-items: stretch;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--migo-teal-dark);
+  border-top: 1px solid rgba(0, 0, 0, 0.18);
+  user-select: none;
+}
+
+/* Every tab is an equal share of the width, and the whole share is the target: on a phone the
+   label is most of what a thumb aims at, so the button is the column and not the glyph. */
+.mnav-item {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.mnav-item-on {
+  color: #fff;
+}
+.mnav-icon {
+  position: relative;
+  display: flex;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+}
+.mnav-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mnav-badge {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 3px;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--migo-teal-dark);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  padding: 0 4px;
+}
+
+/* The home and the windows both measure themselves against the strip's height and reach the
+   viewport's foot. When the bar stands in for the strip the band moves to the bottom, so the
+   room it holds moves with it: the home starts at the top edge and stops above the bar instead
+   of starting below the strip and running to the bottom. */
+.desk-mnav .mhome {
+  top: 0;
+  bottom: calc(var(--mnav-h) + env(safe-area-inset-bottom, 0px));
+}
+
 /* --- the phone's tab strip --- */
 
 :root {
