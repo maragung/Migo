@@ -299,7 +299,16 @@ impl GroupCallStore for MemoryGroupCallStore {
         if seated.participants.is_empty() {
             // An empty roster is an over call, whether the leaver emptied it
             // or the guard just did: the id is released for a fresh join, the
-            // same release `retire_if_empty` performs.
+            // same release `retire_if_empty` performs. The moment the call
+            // ended arrives on the caller's own copy and not on the stored
+            // one, which still reads as live, so it is carried across before
+            // the retirement reads the row it is about to keep: a store that
+            // let the stored copy win would drop every group call that ended
+            // when its last seat left, and a history missing exactly the
+            // calls that used the ordinary way out is worse than no history.
+            if let Some(stored) = rows.calls.get_mut(&call.call_id) {
+                stored.ended_at = stored.ended_at.or(call.ended_at);
+            }
             rows.retire(call.call_id);
         } else {
             // Recorded before the insert, and deduplicated, because the roster
