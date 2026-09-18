@@ -486,7 +486,9 @@ test('the floating card shows the roster, the words, and the controls the call h
   assert.ok(card.includes('Me First'));
   assert.ok(card.includes('Ada Lovelace'));
   assert.ok(card.includes('Degraded'));
-  assert.ok(card.includes('Group Video'));
+  // The card names the call in the full screen's own words, which is the same
+  // label the one-to-one screen prints: the mode, then the word call.
+  assert.ok(card.includes('Group video call'));
   assert.ok(card.includes('2 in this call'));
   assert.ok(card.includes('1:04'));
   // The state words are the full screen's own, and the controls act on the same call.
@@ -513,7 +515,7 @@ test('the floating card shows the roster, the words, and the controls the call h
       onClose={() => {}}
     />,
   );
-  assert.ok(quiet.includes('Group Voice'));
+  assert.ok(quiet.includes('Group voice call'));
   assert.ok(!quiet.includes('Turn camera'));
   assert.ok(!quiet.includes('Sharing your screen'));
 });
