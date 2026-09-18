@@ -339,7 +339,7 @@ pub mod call_direction {
 /// The `CallHistoryEntry.outcome` vocabulary.
 ///
 /// Six numbers, and they are a *rendering* vocabulary rather than the relay's:
-/// [`EndReason`](super::EndReason) answers "why did this row close", which is
+/// [`EndReason`] answers "why did this row close", which is
 /// what the relay and the sweeps care about, while this answers "what should
 /// the row say", which is what a screen cares about. The two differ in the one
 /// place that matters: a call that connected and then ended is `Answered`
