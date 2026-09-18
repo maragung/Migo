@@ -2355,6 +2355,7 @@ async fn a_listing_reports_the_calls_this_account_can_see_and_nothing_else() {
         members: HashMap::from([(closed, vec![id(BOB)])]),
         blocked: Vec::new(),
         unreachable: Vec::new(),
+        no_video: Vec::new(),
     });
     stranger
         .calls

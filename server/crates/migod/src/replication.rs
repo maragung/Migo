@@ -80,7 +80,9 @@ use migo_protocol::{
     FedAccountEdge, FedAccountQuery, FedAccountRows, FedCallQuery, FedCallRows,
     FedConversationQuery, FedConversationRows, Opcode, RelationshipKind,
 };
-use migo_store::model::{AccountStatus, Conversation, Gender, NewAccount, Profile, Relationship};
+use migo_store::model::{
+    AccountStatus, Conversation, Gender, NewAccount, Profile, Relationship, Visibility,
+};
 use migo_store::SharedStore;
 
 use crate::room_relay::encode_envelope;

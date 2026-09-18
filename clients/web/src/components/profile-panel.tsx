@@ -213,6 +213,8 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
         showLastSeen: UNCHANGED,
         whoCanMessage: UNCHANGED,
         whoCanAdd: UNCHANGED,
+        whoCanCallVoice: UNCHANGED,
+        whoCanCallVideo: UNCHANGED,
       });
       setBirthYear(resolved.birthYear === undefined ? '' : String(resolved.birthYear));
       setSearchableTouched(false);
