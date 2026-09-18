@@ -26,12 +26,14 @@
  * because a screen that labels everything labels nothing.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 
 import { CallMediaKind } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
+import { groupPipWindowSize, openPipWindow, pipMode } from '@/lib/migo/call-pip.js';
 import { formatCallDuration, mediaKindLabel } from '@/lib/migo/call-signal.js';
 import type { ActiveGroupCall } from '@/lib/migo/group-call-manager.js';
 import { groupCallNoteLabel } from '@/lib/migo/group-roster.js';
@@ -163,6 +165,17 @@ export interface GroupCallScreenProps {
   onToggleCamera: () => boolean | null;
   /** Starts or stops this seat's screen share; the manager's, already bound. */
   onToggleScreenShare: () => Promise<boolean>;
+  /**
+   * Whether this browser can float the call at all.
+   *
+   * For a group call this means the document window specifically, not either mechanism: a floated
+   * element carries one video and no controls, which is one seat's picture and not the call, so a
+   * group call is floated or it stays in the tab.
+   */
+  pipAvailable: boolean;
+  /** Whether the call is floating right now, so the control can say which way it goes. */
+  pipActive: boolean;
+  onTogglePip: () => void;
 }
 
 /**
@@ -182,6 +195,9 @@ export function GroupCallScreen({
   onToggleMute,
   onToggleCamera,
   onToggleScreenShare,
+  pipAvailable,
+  pipActive,
+  onTogglePip,
 }: GroupCallScreenProps): ReactNode {
   const live = call.note === null;
   const seated = live && call.phase === 'seated';
@@ -275,6 +291,21 @@ export function GroupCallScreen({
                 {call.sharingScreen ? '🛑' : '🖥️'}
               </button>
             ) : null}
+            {pipAvailable ? (
+              // Drawn on a voice call as well as a video call, the same rule the one-to-one screen
+              // keeps: floating is a placement of the call rather than of its picture, and a group
+              // voice call floated keeps its roster, its count and its controls in front of whatever
+              // else the user is doing.
+              <button
+                type="button"
+                className={`call-action pip${pipActive ? ' on' : ''}`}
+                aria-label={pipActive ? 'Leave picture in picture' : 'Picture in picture'}
+                aria-pressed={pipActive}
+                onClick={onTogglePip}
+              >
+                🖼️
+              </button>
+            ) : null}
             <button
               type="button"
               className="call-action hang-up"
@@ -293,6 +324,152 @@ export function GroupCallScreen({
     </div>
   );
 }
+
+/**
+ * The floating window's whole content for a group call.
+ *
+ * The window is a document of its own, so no stylesheet of the app reaches it and there is no shell
+ * or overlay behind it: this card brings a style block of its own and everything the user would
+ * otherwise have to come back to the tab to see — which call it is, how many are on it and who they
+ * are, how long it has run, whether this seat is muted or sharing, and the controls that act on it.
+ *
+ * It has no video element, and that is the difference from the one-to-one card rather than an
+ * omission: a group call is a roster of streams and a floated element carries exactly one, so the
+ * card shows the roster as names and leaves the pictures where they belong. A floating group call
+ * that showed one arbitrary participant would be a picture of a call that is not this one.
+ *
+ * Pure, so a test can render the markup a window would receive even though no test runner can open
+ * the window itself.
+ */
+export interface GroupCallPipCardProps {
+  /** The call's kind, for the card's one identity line. */
+  mediaKind: CallMediaKind;
+  /** The seat names in join order, this session's own included and marked. */
+  seats: ReadonlyArray<{ name: string; isMe: boolean; state: string | null }>;
+  /** The status word the full screen shows — the same word, not a second vocabulary. */
+  statusLabel: string;
+  /** The running duration as M:SS, or null before the call has one. */
+  durationLabel: string | null;
+  muted: boolean;
+  /** Whether this seat publishes video at all; `null` when it does not, which hides the control. */
+  cameraOn: boolean | null;
+  sharingScreen: boolean;
+  onToggleMute: () => void;
+  onToggleCamera: () => void;
+  /** Leaves the call, from the floating window: the one action nobody should have to go back for. */
+  onLeave: () => void;
+  /** Takes the call back into the page: closes the window without leaving the call. */
+  onClose: () => void;
+}
+
+export function GroupCallPipCard({
+  mediaKind,
+  seats,
+  statusLabel,
+  durationLabel,
+  muted,
+  cameraOn,
+  sharingScreen,
+  onToggleMute,
+  onToggleCamera,
+  onLeave,
+  onClose,
+}: GroupCallPipCardProps): ReactNode {
+  return (
+    <div className="pip-card">
+      {/* The window's document has no stylesheet of its own, so the card carries one. */}
+      <style>{GROUP_PIP_CARD_STYLES}</style>
+      <div className="pip-roster" role="list" aria-label="Participants">
+        {seats.map((seat, index) => (
+          <div className="pip-seat" role="listitem" key={`${seat.name}-${index}`}>
+            <span className="pip-seat-name">{seat.name}</span>
+            {seat.isMe ? <span className="pip-seat-tag">You</span> : null}
+            {seat.state !== null ? <span className="pip-seat-state">{seat.state}</span> : null}
+          </div>
+        ))}
+      </div>
+      <div className="pip-identity">
+        <div className="pip-name">Group {mediaKindLabel(mediaKind)}</div>
+        <div className="pip-status" aria-live="polite">
+          {statusLabel}
+          {durationLabel !== null ? ` · ${durationLabel}` : ''}
+        </div>
+        {sharingScreen ? (
+          // The sharer's reminder, carried into the floating window rather than left behind in the
+          // tab: a share the user has stopped looking at is exactly the one they forget.
+          <div className="pip-sharing" role="status">
+            Sharing your screen
+          </div>
+        ) : null}
+      </div>
+      <div className="pip-actions">
+        <button
+          type="button"
+          className={`pip-action mute${muted ? ' muted' : ''}`}
+          aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+          onClick={onToggleMute}
+        >
+          {muted ? '🔇' : '🎙️'}
+        </button>
+        {cameraOn !== null ? (
+          <button
+            type="button"
+            className={`pip-action camera${cameraOn ? '' : ' off'}`}
+            aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+            onClick={onToggleCamera}
+          >
+            {cameraOn ? '📷' : '🚫'}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="pip-action hang-up"
+          aria-label="Leave call"
+          onClick={onLeave}
+        >
+          ✕
+        </button>
+        <button
+          type="button"
+          className="pip-action"
+          aria-label="Back to the call"
+          onClick={onClose}
+        >
+          ⤢
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The floating card's stylesheet, as text because it is written into another document.
+ *
+ * Kept beside the card rather than in the app's stylesheet for the same reason the one-to-one card's
+ * is: the app's stylesheet never reaches a picture-in-picture window, so a rule written there would
+ * look correct in review and do nothing at runtime.
+ */
+const GROUP_PIP_CARD_STYLES = `
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0f14; color: #e6edf3;
+         font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .pip-card { display: flex; flex-direction: column; height: 100vh; }
+  .pip-roster { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px; }
+  .pip-seat { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; min-width: 0; }
+  .pip-seat-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pip-seat-tag { color: #9aa7b4; font-size: 11px; border: 1px solid #303a46;
+                  border-radius: 999px; padding: 0 6px; }
+  .pip-seat-state { color: #9aa7b4; font-size: 11px; }
+  .pip-identity { padding: 6px 10px; min-width: 0; }
+  .pip-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pip-status { color: #9aa7b4; font-size: 12px; }
+  .pip-sharing { color: #f0b429; font-size: 12px; }
+  .pip-actions { display: flex; gap: 8px; padding: 0 10px 10px; }
+  .pip-action { flex: 1; border: 0; border-radius: 8px; padding: 6px 0; font-size: 15px;
+                background: #1b2430; color: inherit; cursor: pointer; }
+  .pip-action.muted, .pip-action.off { background: #7f1d1d; }
+  .pip-action.hang-up { background: #b91c1c; }
+`;
 
 /**
  * The context-connected half: renders over the whole shell while this device holds a group-call
@@ -343,6 +520,52 @@ export function GroupCallOverlay(): ReactNode {
     return () => window.clearInterval(timer);
   }, [activeGroupCall]);
 
+  // The floating window, when this call has one. Held as the window rather than as a boolean,
+  // because the window is what the card's markup is portalled into and what has to be closed on
+  // the way out.
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  // The capability is read in an effect rather than during render: this shell is exported as
+  // static HTML, and a control that exists on the client and not in the server's markup is a
+  // hydration mismatch rather than a feature. A group call floats only in a document window, since
+  // a floated element cannot stand for a roster.
+  const [pipAvailable, setPipAvailable] = useState<boolean>(false);
+  useEffect(() => {
+    setPipAvailable(pipMode() === 'document');
+  }, []);
+
+  useEffect(() => {
+    if (pipWindow === null) {
+      return;
+    }
+    // The user closed the window, with its own close button or the browser's. The call is not
+    // affected — a floating window is a placement of the call, not the call — so this only has to
+    // stop the overlay claiming to be floating.
+    const onClosed = (): void => setPipWindow(null);
+    pipWindow.addEventListener('pagehide', onClosed);
+    return () => pipWindow.removeEventListener('pagehide', onClosed);
+  }, [pipWindow]);
+
+  useEffect(() => {
+    // No call left to float, and no note either: a window that outlived its call would be a roster
+    // with no way to leave a call that has already ended.
+    if ((activeGroupCall === null || activeGroupCall.note !== null) && pipWindow !== null) {
+      pipWindow.close();
+      setPipWindow(null);
+    }
+  }, [activeGroupCall, pipWindow]);
+
+  const togglePip = useCallback(async (): Promise<void> => {
+    if (pipWindow !== null) {
+      pipWindow.close();
+      setPipWindow(null);
+      return;
+    }
+    const opened = await openPipWindow(groupPipWindowSize());
+    if (opened !== null) {
+      setPipWindow(opened);
+    }
+  }, [pipWindow]);
+
   if (activeGroupCall === null) {
     if (groupCallError !== null) {
       return (
@@ -357,17 +580,58 @@ export function GroupCallOverlay(): ReactNode {
   }
 
   return (
-    <GroupCallScreen
-      call={activeGroupCall}
-      names={names}
-      meId={accountId}
-      nowMs={nowMs}
-      streams={streams}
-      onLeave={() => void leaveGroupCall()}
-      onDismiss={dismissGroupCall}
-      onToggleMute={() => toggleGroupMute()}
-      onToggleCamera={() => toggleGroupCamera()}
-      onToggleScreenShare={toggleGroupScreenShare}
-    />
+    <>
+      <GroupCallScreen
+        call={activeGroupCall}
+        names={names}
+        meId={accountId}
+        nowMs={nowMs}
+        streams={streams}
+        onLeave={() => void leaveGroupCall()}
+        onDismiss={dismissGroupCall}
+        onToggleMute={() => toggleGroupMute()}
+        onToggleCamera={() => toggleGroupCamera()}
+        onToggleScreenShare={toggleGroupScreenShare}
+        pipAvailable={pipAvailable && activeGroupCall.note === null}
+        pipActive={pipWindow !== null}
+        onTogglePip={() => void togglePip()}
+      />
+      {pipWindow !== null && activeGroupCall.note === null
+        ? createPortal(
+            // The floating window's whole content, rendered into its own document. It is the same
+            // call and the same handlers as the screen behind it, so the two views cannot disagree
+            // about anything: there is one piece of state and two places showing it.
+            <GroupCallPipCard
+              mediaKind={activeGroupCall.mediaKind}
+              seats={activeGroupCall.seats.map((seat) => ({
+                name: names.get(seat.userId) ?? 'Migo member',
+                isMe: accountId !== null && seat.userId === accountId,
+                state: groupSeatState(seat, activeGroupCall, accountId),
+              }))}
+              statusLabel={
+                activeGroupCall.mediaError !== null
+                  ? activeGroupCall.mediaError
+                  : `${activeGroupCall.participantCount} in this call`
+              }
+              durationLabel={
+                activeGroupCall.joinedAt !== null
+                  ? formatCallDuration(nowMs - activeGroupCall.joinedAt)
+                  : null
+              }
+              muted={activeGroupCall.muted}
+              cameraOn={activeGroupCall.cameraOn}
+              sharingScreen={activeGroupCall.sharingScreen}
+              onToggleMute={() => toggleGroupMute()}
+              onToggleCamera={() => toggleGroupCamera()}
+              onLeave={() => void leaveGroupCall()}
+              onClose={() => {
+                pipWindow.close();
+                setPipWindow(null);
+              }}
+            />,
+            pipWindow.document.body,
+          )
+        : null}
+    </>
   );
 }

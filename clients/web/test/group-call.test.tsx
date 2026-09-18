@@ -43,6 +43,7 @@ import type {
 
 import { GroupCallButton } from '../src/components/call-buttons.js';
 import {
+  GroupCallPipCard,
   GroupCallScreen,
   groupSeatState,
   ownSeatState,
@@ -154,6 +155,9 @@ function screen(overrides: Partial<GroupCallScreenProps> = {}): string {
     onToggleMute: () => null,
     onToggleCamera: () => null,
     onToggleScreenShare: () => Promise.resolve(false),
+    pipAvailable: false,
+    pipActive: false,
+    onTogglePip: () => {},
     ...overrides,
   };
   return renderToStaticMarkup(<GroupCallScreen {...props} />);
@@ -442,8 +446,79 @@ test('the self-view shows the screen while one is shared, and stays away when th
   );
 });
 
-// --- the join button's gate ---
+test('the floating control exists only where the browser can float a roster, and says which way it goes', () => {
+  // A browser with neither mechanism, and one with only the element mechanism, get no control: a
+  // floated element carries one participant's video and no controls, which is not this call.
+  assert.ok(!screen().includes('aria-label="Picture in picture"'));
+  assert.ok(
+    !screen({ pipAvailable: false }).includes('aria-label="Picture in picture"'),
+    'an element-only browser is not offered a group float',
+  );
+  const floating = screen({ pipAvailable: true, pipActive: true });
+  assert.ok(floating.includes('aria-label="Leave picture in picture"'));
+  assert.ok(floating.includes('aria-pressed="true"'));
+  const idle = screen({ pipAvailable: true });
+  assert.ok(idle.includes('aria-label="Picture in picture"'));
+  assert.ok(idle.includes('aria-pressed="false"'));
+});
 
+test('the floating card shows the roster, the words, and the controls the call has', () => {
+  const call = activeCall({ mediaKind: CallMediaKind.Video, videoPublished: true, cameraOn: true });
+  const card = renderToStaticMarkup(
+    <GroupCallPipCard
+      mediaKind={call.mediaKind}
+      seats={[
+        { name: 'Me First', isMe: true, state: null },
+        { name: 'Ada Lovelace', isMe: false, state: 'Degraded' },
+      ]}
+      statusLabel="2 in this call"
+      durationLabel="1:04"
+      muted
+      cameraOn={true}
+      sharingScreen
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onLeave={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  // The roster travels with the call: one participant's picture is not what a group call is.
+  assert.ok(card.includes('Me First'));
+  assert.ok(card.includes('Ada Lovelace'));
+  assert.ok(card.includes('Degraded'));
+  assert.ok(card.includes('Group Video'));
+  assert.ok(card.includes('2 in this call'));
+  assert.ok(card.includes('1:04'));
+  // The state words are the full screen's own, and the controls act on the same call.
+  assert.ok(card.includes('aria-label="Unmute microphone"'));
+  assert.ok(card.includes('aria-label="Turn camera off"'));
+  assert.ok(card.includes('aria-label="Leave call"'));
+  assert.ok(card.includes('aria-label="Back to the call"'));
+  assert.ok(card.includes('Sharing your screen'));
+  // Its own stylesheet, because the app's never reaches a picture-in-picture document.
+  assert.ok(card.includes('.pip-card'));
+  // An audio seat has no camera to toggle, so the control is not drawn for it.
+  const quiet = renderToStaticMarkup(
+    <GroupCallPipCard
+      mediaKind={CallMediaKind.Audio}
+      seats={[{ name: 'Me First', isMe: true, state: null }]}
+      statusLabel="1 in this call"
+      durationLabel={null}
+      muted={false}
+      cameraOn={null}
+      sharingScreen={false}
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onLeave={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  assert.ok(quiet.includes('Group Voice'));
+  assert.ok(!quiet.includes('Turn camera'));
+  assert.ok(!quiet.includes('Sharing your screen'));
+});
+
+// --- the join button's gate ---
 test('the group-call buttons exist only where a group conversation is', () => {
   assert.equal(
     renderToStaticMarkup(

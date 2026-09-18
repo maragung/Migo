@@ -16,6 +16,7 @@ import {
   elementPipActive,
   enterElementPip,
   exitElementPip,
+  groupPipWindowSize,
   openPipWindow,
   pipMode,
   pipModeOf,
@@ -67,6 +68,13 @@ test('the floating window opens at the picture’s proportions, and as a strip f
   const voice = pipWindowSize(false);
   assert.ok(voice.height < video.height);
   assert.ok(voice.width > voice.height);
+
+  // A group call has no picture to follow at all — its card is a roster — so its window is a column
+  // tall enough for several seats rather than either of the one-to-one shapes, and it does not vary
+  // with the media kind the way the one-to-one pair does.
+  const group = groupPipWindowSize();
+  assert.ok(group.height > video.height, 'a roster needs more height than a picture');
+  assert.ok(group.width <= video.width, 'and no more width than the picture window');
 });
 
 test('a refused window leaves the call where it is', async () => {

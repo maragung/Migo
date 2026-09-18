@@ -117,6 +117,18 @@ export function pipWindowSize(hasVideo: boolean): PipWindowSize {
 }
 
 /**
+ * How large the floating window is asked to be for a group call.
+ *
+ * A group call's card is a roster rather than a picture — one floated element can carry one
+ * participant's video and no controls, which is not what a group call is — so the window asks for a
+ * column tall enough that several seats, the count and a row of controls are all visible at once,
+ * and its proportions follow that list rather than any video the call may also be carrying.
+ */
+export function groupPipWindowSize(): PipWindowSize {
+  return { width: 320, height: 360 };
+}
+
+/**
  * Opens the floating window, or reports that it did not open.
  *
  * A request that is refused — the user has turned the API off, or the browser declines a window
