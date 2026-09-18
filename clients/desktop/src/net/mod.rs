@@ -640,6 +640,14 @@ pub enum Command {
     /// Put an ended call's overlay away. The call is over on the wire; this only clears the
     /// screen.
     DismissCall,
+    /// Send the user's verdict on the call that just ended, with the problems they ticked as
+    /// the schema's own bitmask — a set rather than a choice, because one call can have had
+    /// bad audio and a bad connection at once. Sent when the user answers, which is after the
+    /// call, and the call row it names is one the calls store never deletes.
+    RateCall {
+        rating: migo_protocol::CallRating,
+        issues: u64,
+    },
     /// Join the group call of one conversation — or re-send a join already in flight, because
     /// the call id the join carries is its idempotency key and a press that lands twice must
     /// seat the same call, not a second one. `call_id` names a call already running in the
@@ -2843,6 +2851,7 @@ impl Worker {
             Command::EndCall => self.end_call().await,
             Command::ToggleCallMute => self.toggle_call_mute(),
             Command::DismissCall => self.dismiss_call(),
+            Command::RateCall { rating, issues } => self.rate_call(rating, issues).await,
             Command::JoinGroupCall {
                 conversation_id,
                 call_id,
