@@ -415,13 +415,17 @@ class FakeStream {
       this.tracks.splice(at, 1);
     }
   }
+
+  addTrack(track: FakeTrack): void {
+    this.tracks.push(track);
+  }
 }
 
 /** One link's sending half: the surface `#shapeVideo` and `replaceTrack` touch. */
 class FakeSender {
   parameters: { encodings: Array<Record<string, number>> } = { encodings: [{}] };
   track: FakeTrack | null;
-  constructor(track: FakeTrack) {
+  constructor(track: FakeTrack | null) {
     this.track = track;
   }
   replaceTrack(track: FakeTrack | null): Promise<void> {
@@ -454,6 +458,7 @@ class FakePeerConnection {
   hasRemote = false;
   link: FakeLink | null = null;
   readonly added: Array<{ track: FakeTrack; stream: FakeStream; sender: FakeSender }> = [];
+  readonly transceivers: Array<{ kind: 'audio' | 'video'; sender: FakeSender }> = [];
   readonly addedCandidates: RTCIceCandidateInit[] = [];
   readonly iceServers: RTCIceServer[];
 
@@ -469,6 +474,16 @@ class FakePeerConnection {
     const sender = new FakeSender(track);
     this.added.push({ track, stream, sender });
     return sender;
+  }
+
+  /**
+   * A video m-line opened with nothing on it: what a link is dialled with when the seat's camera is
+   * off, since the sender has to exist for a camera to come back onto it.
+   */
+  addTransceiver(kind: 'audio' | 'video'): { sender: FakeSender } {
+    const sender = new FakeSender(null);
+    this.transceivers.push({ kind, sender });
+    return { sender };
   }
 
   createOffer(): Promise<{ type: 'offer'; sdp: string }> {
@@ -725,6 +740,8 @@ function makeParticipant(
      * each other's frames — the negotiation dies silently and no link ever connects.
      */
     keys?: CallKeyState;
+    /** Scripts the camera that is opened after the seat turned its own off as unavailable. */
+    cameraFails?: boolean;
   } = {},
 ): { plane: GroupMediaPlane; keys: CallKeyState; links: GroupMediaLink[] } {
   const keys = opts.keys ?? mesh.keys.get(device) ?? CallKeyState.create(CALL);
@@ -746,6 +763,12 @@ function makeParticipant(
           kind === CallMediaKind.Video ? ['audio', 'video'] : ['audio'],
         ) as unknown as MediaStream,
       ),
+    // `cameraFails` is the one scripted outcome the toggle cannot argue its way around: a camera
+    // another application has taken since the seat turned its own off cannot be reopened, and the
+    // plane has to state that rather than hold a device it cannot use.
+    acquireCamera: opts.cameraFails
+      ? () => Promise.resolve(null)
+      : () => Promise.resolve(new FakeTrack('video') as unknown as MediaStreamTrack),
     sendSdp: (to, sealed) => mesh.sendSdp(device, to, sealed),
     sendIce: (to, sealed) => mesh.sendIce(device, to, sealed),
     seal: (frame) => keys.sealFrame(frame),
@@ -960,6 +983,7 @@ test('a microphone that cannot be acquired is stated as a failure, not faked', a
     iceServers: groupIceServers([]),
     createPeer: (iceServers) => mesh.newPeer(DEV_A, iceServers),
     acquire: () => Promise.reject(new Error('no microphone')),
+    acquireCamera: () => Promise.resolve(null),
     sendSdp: () => Promise.resolve(),
     sendIce: () => Promise.resolve(),
     seal: (frame) => mesh.keys.get(DEV_A)!.sealFrame(frame),
@@ -975,6 +999,96 @@ test('a microphone that cannot be acquired is stated as a failure, not faked', a
     [],
     'no link is built around a microphone that does not exist',
   );
+});
+
+test('a camera turned off releases the device, and turning it back on opens one again', async () => {
+  const mesh = new VirtualMesh();
+  const aKeys = CallKeyState.create(CALL);
+  const secret = new Uint8Array(32).fill(7);
+  const bKeys = CallKeyState.fromJoinDistribution(
+    secret,
+    CALL,
+    aKeys.sealedJoinDistribution(secret),
+  );
+  const a = makeParticipant(mesh, DEV_A, ACC_A, { mediaKind: CallMediaKind.Video, keys: aKeys });
+  const b = makeParticipant(mesh, DEV_B, ACC_B, { keys: bKeys });
+  await a.plane.begin([SEAT_A]);
+  a.plane.seatsChanged([SEAT_A, SEAT_B]);
+  await b.plane.begin([SEAT_A, SEAT_B]);
+  await settle();
+  assert.equal(a.plane.videoPublished, true);
+
+  const camera = a.plane.localStream?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(camera !== undefined, 'the seat has a camera to turn off');
+  const sender = (mesh.pcs.get(DEV_A) ?? [])[0]?.added.find(
+    (added) => added.track.kind === 'video',
+  )?.sender;
+  assert.ok(sender !== undefined, 'the connected link has a video sender');
+
+  // Off: released rather than held disabled, which is what puts the system's indicator out, and no
+  // link goes on carrying a track that no longer exists.
+  assert.equal(a.plane.toggleCamera(), false);
+  assert.equal(camera.stopped, true, 'the device is handed back');
+  assert.deepEqual(a.plane.localStream?.getVideoTracks(), [], 'and it leaves the local stream');
+  assert.equal(sender.track, null, 'the link stops carrying it');
+
+  // On: a camera is opened again — not the one that was released — and every link carries it.
+  assert.equal(a.plane.toggleCamera(), true);
+  await settle();
+  const reopened = a.plane.localStream?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(reopened !== undefined, 'a camera is open again');
+  assert.notEqual(reopened, camera);
+  assert.equal(sender.track, reopened, 'and the link carries the new one');
+});
+
+test('a link dialled while the camera is off still carries the video m-line', async () => {
+  const mesh = new VirtualMesh();
+  const aKeys = CallKeyState.create(CALL);
+  const secret = new Uint8Array(32).fill(7);
+  const bKeys = CallKeyState.fromJoinDistribution(
+    secret,
+    CALL,
+    aKeys.sealedJoinDistribution(secret),
+  );
+  const a = makeParticipant(mesh, DEV_A, ACC_A, { mediaKind: CallMediaKind.Video, keys: aKeys });
+  const b = makeParticipant(mesh, DEV_B, ACC_B, { keys: bKeys });
+  await a.plane.begin([SEAT_A]);
+  assert.equal(a.plane.toggleCamera(), false);
+  // The second seat arrives with the camera already off, so the link is dialled with no camera
+  // track in the stream — and a link dialled that way must still offer video, or the camera has no
+  // sender to come back to and the other seat's video has no line to arrive on.
+  a.plane.seatsChanged([SEAT_A, SEAT_B]);
+  await b.plane.begin([SEAT_A, SEAT_B]);
+  await settle();
+
+  const pc = (mesh.pcs.get(DEV_A) ?? [])[0];
+  assert.equal(
+    pc?.added.some((added) => added.track.kind === 'video'),
+    false,
+    'no camera track is added to a link dialled with the camera off',
+  );
+  const sender = pc?.transceivers.find((opened) => opened.kind === 'video')?.sender;
+  assert.ok(sender !== undefined, 'the m-line is there for a camera to come back to');
+
+  assert.equal(a.plane.toggleCamera(), true);
+  await settle();
+  const reopened = a.plane.localStream?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(reopened !== undefined, 'a camera is open again');
+  assert.equal(sender.track, reopened, 'and it lands on the m-line the link already had');
+});
+
+test('a camera that will not open puts the seat camera back off', async () => {
+  const mesh = new VirtualMesh();
+  mesh.keys.set(DEV_A, CallKeyState.create(CALL));
+  const a = makeParticipant(mesh, DEV_A, ACC_A, {
+    mediaKind: CallMediaKind.Video,
+    cameraFails: true,
+  });
+  await a.plane.begin([SEAT_A]);
+  assert.equal(a.plane.toggleCamera(), false);
+  assert.equal(a.plane.toggleCamera(), true, 'the press states the wish at once');
+  await settle();
+  assert.equal(a.plane.cameraOn, false, 'and the wish is corrected to the fact');
 });
 
 test('leave closes every link and stops every local track; a departure closes exactly its own', async () => {

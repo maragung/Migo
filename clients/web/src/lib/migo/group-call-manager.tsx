@@ -255,6 +255,16 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
           audio: true,
           video: kind === CallMediaKind.Video,
         }),
+      // The camera on its own, for the seat that turned its own off and wants it back: a second
+      // `acquire` would reopen the microphone too, which the seat is speaking into.
+      acquireCamera: async () => {
+        try {
+          const camera = await navigator.mediaDevices.getUserMedia({ video: true });
+          return camera.getVideoTracks()[0] ?? null;
+        } catch {
+          return null;
+        }
+      },
       sendSdp: (toDevice, sealed) => current.calls.sendSdp(callId, toDevice, sealed),
       sendIce: (toDevice, sealed) => current.calls.sendIce(callId, toDevice, sealed),
       seal: (frame) => current.callKeys.sealFrame(callId, frame),

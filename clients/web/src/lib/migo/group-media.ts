@@ -617,6 +617,16 @@ export interface GroupMediaPlaneDeps {
   createPeer: (iceServers: RTCIceServer[]) => RTCPeerConnection;
   /** Acquires the local microphone (and camera, when video is published). */
   acquire: (kind: CallMediaKind) => Promise<MediaStream>;
+  /**
+   * Opens a camera on its own, for a seat that turned its own off and wants it back.
+   *
+   * The camera alone, because re-running {@link acquire} for a whole stream would interrupt the
+   * microphone the seat is speaking into — the same reason the one-to-one plane replaces its camera
+   * track rather than re-acquiring media. The answer is a track or null, and null is the honest one:
+   * a camera another application has taken since cannot be opened, and the plane states that rather
+   * than holding a device it cannot use.
+   */
+  acquireCamera: () => Promise<MediaStreamTrack | null>;
   /** Sends one sealed SDP description to a roster device (`CALL_SDP`). */
   sendSdp: (toDevice: Id, sealed: Uint8Array) => Promise<void>;
   /** Sends one sealed ICE batch to a roster device (`CALL_ICE`). */
@@ -969,19 +979,31 @@ export class GroupMediaPlane {
    * Turns this seat's camera on or off, everywhere at once. A camera that was never published
    * (refused by the product limit, or an audio call) has no toggle to give — `null` says that, so
    * a screen never shows a button that does nothing.
+   *
+   * Off releases the capture device rather than only disabling the track, which is what puts the
+   * system's camera indicator out: a disabled track still holds the camera, so a seat that is
+   * publishing nothing would leave the light next to the user's lens claiming otherwise. On opens a
+   * camera again, which is the one part of this that can fail — another application may have taken
+   * it since — so the wish is stated now and corrected to the fact when the answer arrives, through
+   * the same projection the roster is built from. A caller that read the returned wish as a
+   * guarantee would be reading it as the intent, which is what the return value has always been.
    */
   toggleCamera(): boolean | null {
-    if (!this.#videoPublished || this.#localVideoTrack === null) {
+    if (!this.#videoPublished) {
       return null;
     }
     this.#cameraOn = !this.#cameraOn;
-    this.#localVideoTrack.enabled = this.#cameraOn;
+    if (this.#cameraOn) {
+      void this.#openCamera();
+    } else {
+      this.#releaseCamera();
+    }
     return this.#cameraOn;
   }
 
   /** Whether this seat's camera is on; `null` when no camera was published. */
   get cameraOn(): boolean | null {
-    if (!this.#videoPublished || this.#localVideoTrack === null) {
+    if (!this.#videoPublished) {
       return null;
     }
     return this.#cameraOn;
@@ -1135,6 +1157,14 @@ export class GroupMediaPlane {
         link.sendingVideo = true;
       }
     }
+    // A seat whose camera is off has no camera track in its stream, and a link dialled in that state
+    // still has to carry the video m-line: without it the offer is audio-only, there is no sender to
+    // attach a camera to when the seat turns it back on, and the other seat's video has no line to
+    // arrive on either. An empty transceiver is a sender that sends nothing, which is exactly the
+    // state the seat is in, and it is the same m-line `addTrack` would have produced.
+    if (this.#videoPublished && link.videoSender === null) {
+      link.videoSender = pc.addTransceiver('video', { direction: 'sendrecv' }).sender;
+    }
     return link;
   }
 
@@ -1173,9 +1203,12 @@ export class GroupMediaPlane {
    */
   #shapeVideo(link: PeerLink): void {
     const sender = link.videoSender;
-    if (sender === null || this.#localVideoTrack === null) {
+    if (sender === null) {
       return;
     }
+    // A null track is the bottom rung's answer and this seat's camera-off answer both: `replaceTrack`
+    // with nothing is how a sender stops carrying video, so there is no early return for a seat with
+    // no camera track — that is precisely the state every link has to be told about.
     link.sendingVideo = shapeVideoSender(
       sender,
       this.#cameraOn ? this.#localVideoTrack : null,
@@ -1183,6 +1216,68 @@ export class GroupMediaPlane {
       link.sentKbps,
       link.sendingVideo,
     );
+  }
+
+  /**
+   * Stops this seat's camera and tells every link to stop carrying it.
+   *
+   * The track leaves the local stream as well as the senders, because a stopped track still lingers
+   * in a stream's track list and the roster screen reads that list — what it must never show is a
+   * camera this seat is not publishing, which is the same reasoning the product limit's refusal
+   * runs on at start.
+   */
+  #releaseCamera(): void {
+    const track = this.#localVideoTrack;
+    this.#localVideoTrack = null;
+    if (track !== null) {
+      this.#localStream?.removeTrack(track);
+      track.stop();
+    }
+    for (const link of this.#links.values()) {
+      this.#shapeVideo(link);
+    }
+  }
+
+  /**
+   * Opens a camera again after the seat turned its own off, and publishes it to every link.
+   *
+   * Both facts are re-read after the await: the seat can turn the camera back off, or leave the
+   * call, while the platform is opening one — and a camera attached to either is a device held for
+   * a call that is not using it, which is the state releasing exists to end. A failure states
+   * itself by correcting the wish rather than by failing silently, because the roster renders the
+   * wish: a seat shown with a camera that never opened is a picture the other seats would wait for.
+   */
+  async #openCamera(): Promise<void> {
+    let track: MediaStreamTrack | null;
+    try {
+      track = await this.#deps.acquireCamera();
+    } catch {
+      track = null;
+    }
+    // The wish is read again here rather than trusted from the press: a camera attached to a seat
+    // that turned itself back off, or left, is a device held for a call that is not using it.
+    const stream = this.#localStream;
+    if (track !== null && (this.#stopped || !this.#cameraOn || stream === null)) {
+      track.stop();
+      return;
+    }
+    if (track === null || stream === null) {
+      // The camera this seat had before it turned video off is not the camera it gets back: another
+      // application may have taken it in the meantime. The wish is corrected to that fact rather
+      // than left standing, because the roster renders the wish and would otherwise show a seat
+      // whose picture the other seats wait for.
+      if (!this.#stopped) {
+        this.#cameraOn = false;
+        this.#emit();
+      }
+      return;
+    }
+    this.#localVideoTrack = track;
+    stream.addTrack(track);
+    for (const link of this.#links.values()) {
+      this.#shapeVideo(link);
+    }
+    this.#emit();
   }
 
   /** Closes one link's connection and disarms its timer. */
