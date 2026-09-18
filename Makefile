@@ -107,8 +107,10 @@ kotlin-check: ## Static checks on the Android Kotlin, which nothing here can com
 	# costs a push and a runner. This target checks the handful of properties that are
 	# cheap to read off the text: block comments that never close (Kotlin's nest, so a
 	# slash-star in prose swallows the rest of the file and reports at EOF), Cyrillic
-	# homoglyphs, and imports that are unused, duplicated or unsorted. It is not a type
-	# checker and cannot be one without the classpath; see the script's header.
+	# homoglyphs, imports that are unused, duplicated or unsorted, and a double hyphen
+	# inside an XML comment (the manifest's parser forbids it and refuses the whole file,
+	# which fails the build in the manifest merger before Kotlin is reached). It is not a
+	# type checker and cannot be one without the classpath; see the script's header.
 	#
 	# The checker runs against itself first. It is the only gate here with no compiler
 	# standing behind it, so a regex that quietly stops matching would turn it into a
