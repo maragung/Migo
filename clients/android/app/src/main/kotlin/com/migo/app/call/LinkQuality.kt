@@ -363,3 +363,16 @@ private fun millis(value: Any?): Long {
     val seconds = (value as? Number)?.toDouble() ?: 0.0
     return if (seconds.isNaN()) 0L else (seconds * 1000).roundToLong()
 }
+
+/**
+ * Section 180's word for each rung. The ladder has five rungs and the requirement has five tiers in
+ * the same order, so this is a rename rather than a second classification -- and the order is the
+ * ladder's, not this function's argument order.
+ */
+fun qualityTierLabel(quality: LinkQuality): String = when (quality) {
+    LinkQuality.Full -> "Excellent"
+    LinkQuality.BitrateCapped -> "Good"
+    LinkQuality.ResolutionLowered -> "Average"
+    LinkQuality.FrameRateLowered -> "Poor"
+    LinkQuality.VideoOff -> "Very poor"
+}
