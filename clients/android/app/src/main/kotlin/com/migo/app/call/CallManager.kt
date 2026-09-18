@@ -1,9 +1,11 @@
 package com.migo.app.call
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -47,6 +49,7 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,6 +58,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AddIceObserver
 import org.webrtc.AudioSource
@@ -71,6 +75,7 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpTransceiver
+import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
@@ -244,6 +249,25 @@ class CallManager(
         const val VIDEO_WIDTH = 640
         const val VIDEO_HEIGHT = 480
         const val VIDEO_FPS = 30
+
+        /**
+         * What a shared screen is asked for: a wide stage rather than the camera's squarer one,
+         * because a desk screen is wide and a phone screen is tall, and a rate below the camera's
+         * because a screen changes in bursts -- a page of text nobody is touching costs nothing to
+         * hold, and the encoder's budget is better spent on the moment it moves than on sending
+         * the same still frame thirty times a second.
+         */
+        const val SHARE_WIDTH = 1280
+        const val SHARE_HEIGHT = 720
+        const val SHARE_FPS = 15
+
+        /**
+         * How long a share waits for the foreground service that has to be running before the
+         * platform will hand over a projection. Long enough for the platform to start a service in
+         * this same process, short enough that a service which never comes up fails the share
+         * rather than hanging it.
+         */
+        const val SHARE_SERVICE_WAIT_MS = 3000L
     }
 
     /**
@@ -264,6 +288,14 @@ class CallManager(
     @Volatile private var videoHelper: SurfaceTextureHelper? = null
     @Volatile private var videoSource: VideoSource? = null
     @Volatile private var videoTrack: VideoTrack? = null
+
+    /**
+     * The capturer sending this device's screen, while one is. A field of its own rather than a
+     * replacement for [videoCapturer], because the camera's capturer is *kept* while the screen is
+     * on the track: it is stopped, not disposed, so that ending the share restarts something that
+     * still exists instead of opening a camera another app may have taken in the meantime.
+     */
+    @Volatile private var screenCapturer: ScreenCapturerAndroid? = null
 
     /**
      * Whether this side wants its camera open. Its own flag rather than a read of the capturer,
@@ -708,6 +740,135 @@ class CallManager(
     }
 
     /**
+     * Puts this device's screen on the call's video track, in the camera's place.
+     *
+     * A share here is the m-line the camera was already using and not a second one: the screen
+     * capturer is attached to the very source the video track is built on, so the peer sees the
+     * screen the moment the frames change and nothing is renegotiated -- which is what the web
+     * build does when it swaps the track on the video sender, and the only shape available here,
+     * since this manager has no renegotiation path to add a track with. The camera's capturer is
+     * stopped rather than disposed for that same reason turned around: ending the share has to put
+     * the picture back, and a capturer that still exists is one that can simply be started again.
+     *
+     * Refused where there is no track to put a screen on -- a voice call, and a video call whose
+     * camera never opened -- because half a share is a share nobody can see.
+     */
+    fun startScreenShare(projection: Intent) {
+        val call = active ?: return
+        if (call.mediaKind != CallMediaKind.Video || screenCapturer != null) {
+            return
+        }
+        val source = videoSource ?: return
+        val helper = videoHelper ?: return
+        val service = Intent(context, ScreenShareService::class.java)
+        scope.launch {
+            val started = withContext(Dispatchers.IO) {
+                // The service goes up first, on its own thread: the projection is claimed on the
+                // line after it and the platform refuses the claim outright where no service of
+                // the type is running yet, so the order is a requirement and not a preference.
+                runCatching { context.startForegroundService(service) }
+                if (!ScreenShareService.awaitUp(SHARE_SERVICE_WAIT_MS)) {
+                    runCatching { context.stopService(service) }
+                    return@withContext false
+                }
+                val capturer = ScreenCapturerAndroid(
+                    projection,
+                    object : MediaProjection.Callback() {
+                        // The user can end a share from the platform's own controls rather than
+                        // from this app, and this is how that arrives: the projection stops and
+                        // the call is told, so the control follows the screen that is really being
+                        // sent instead of claiming one that is not.
+                        override fun onStop() {
+                            stopScreenShare()
+                        }
+                    },
+                )
+                val attached = runCatching {
+                    videoCapturer?.stopCapture()
+                    capturer.initialize(helper, context, source.capturerObserver)
+                    capturer.startCapture(SHARE_WIDTH, SHARE_HEIGHT, SHARE_FPS)
+                }.isSuccess
+                if (!attached) {
+                    // A share that could not be built leaves nothing behind: the capturer is
+                    // disposed so the projection is released, and the service goes with it, since
+                    // a notification about a screen nobody is sending is worse than none.
+                    runCatching { capturer.dispose() }
+                    runCatching { context.stopService(service) }
+                    return@withContext false
+                }
+                screenCapturer = capturer
+                // The call can end while a share is being built, and this is the last moment the
+                // two can be reconciled: the source is the call's own and a call that is gone has
+                // taken its source with it, so a capturer stored onto that source would hold a
+                // projection nothing would ever release.
+                if (videoSource !== source) {
+                    screenCapturer = null
+                    runCatching { capturer.stopCapture() }
+                    runCatching { capturer.dispose() }
+                    runCatching { context.stopService(service) }
+                    return@withContext false
+                }
+                true
+            }
+            if (started) {
+                _state.update { it.copy(screenSharing = true) }
+                return@launch
+            }
+            // The camera goes back on the track it left, and only where it was on it: somebody who
+            // turned their camera off before sharing asked for no picture of themselves, and a
+            // share that failed is no reason to hand them one.
+            if (cameraWanted) {
+                val restored = runCatching {
+                    videoCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+                }.isSuccess
+                if (!restored) {
+                    cameraWanted = false
+                }
+            }
+            _state.update {
+                it.copy(cameraOn = if (videoCapturer == null) null else cameraWanted)
+            }
+        }
+    }
+
+    /**
+     * Takes the screen off the call's video track and gives that track back to the camera.
+     *
+     * The field is cleared before anything is stopped, and that order is the whole of the
+     * reentrancy: disposing the capturer stops the projection, a projection that stops calls back
+     * into the callback above, and a release that read the field afterwards would find a capturer
+     * on its way out and run this a second time. A camera that was on before the share is started
+     * again here, which is the same restart the camera button does and can fail the same way -- a
+     * failure leaves the wish off rather than a button claiming a picture that is not being sent.
+     */
+    fun stopScreenShare() {
+        val capturer = screenCapturer ?: return
+        screenCapturer = null
+        val service = Intent(context, ScreenShareService::class.java)
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { capturer.stopCapture() }
+                runCatching { capturer.dispose() }
+                runCatching { context.stopService(service) }
+                if (cameraWanted) {
+                    val restored = runCatching {
+                        videoCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+                    }.isSuccess
+                    if (!restored) {
+                        cameraWanted = false
+                    }
+                }
+            }
+            _state.update {
+                it.copy(
+                    screenSharing = false,
+                    cameraOn = if (videoCapturer == null) null else cameraWanted,
+                )
+            }
+        }
+    }
+
+    /**
      * One route this phone can play a call through, named the way the phone names it.
      *
      * The id is the platform's own device id and not an index into the list: the list is re-read
@@ -1081,7 +1242,21 @@ class CallManager(
         audioTrack = null
         audioSource?.dispose()
         audioSource = null
-        // The camera stops first -- a capturer stopped after its source is disposed is a native
+        // A screen on the track is released in the same order as the camera and before it, because
+        // it draws through the same helper and the same source: the projection goes first, then the
+        // capturer that holds it, then the foreground service that exists only to keep the platform
+        // willing to grant one -- a share that outlived its call would be a notification telling
+        // the user their screen is being sent after it stopped being sent. The field is cleared
+        // before any of that runs, since disposing the capturer stops the projection and a stopped
+        // projection calls back into the release that would otherwise run this twice.
+        val sharing = screenCapturer
+        screenCapturer = null
+        if (sharing != null) {
+            runCatching { sharing.stopCapture() }
+            runCatching { sharing.dispose() }
+            runCatching { context.stopService(Intent(context, ScreenShareService::class.java)) }
+        }
+        // The camera stops next -- a capturer stopped after its source is disposed is a native
         // crash on some devices -- then the helper that carried its frames, then the track and
         // the source, then the remote track is dropped from the state so no screen keeps
         // rendering a dead one.
@@ -1099,7 +1274,7 @@ class CallManager(
         // A camera that was off when the call ended is a camera this device does not want opened
         // for the next one, so the wish goes back to its starting state with the rest of the call's.
         cameraWanted = true
-        _state.update { it.copy(muted = false, cameraOn = null) }
+        _state.update { it.copy(muted = false, cameraOn = null, screenSharing = null) }
     }
 
     // --- the call key: adopt, forget, wait ---
@@ -1260,7 +1435,10 @@ class CallManager(
         // The button exists from the moment the call has a camera to give back, and the wish starts
         // on because a video call opens its camera rather than waiting to be asked.
         cameraWanted = true
-        _state.update { it.copy(cameraOn = true) }
+        // The share control arrives with the track it needs and not a moment before: a call with
+        // no video m-line has nowhere to put a screen, so the state stays null there and the
+        // control is absent rather than present and unable to send anything.
+        _state.update { it.copy(cameraOn = true, screenSharing = false) }
     }
 
     /**
@@ -1711,6 +1889,13 @@ data class CallUiState(
      * because a button that cannot change anything is a control that lies about what it does.
      */
     val cameraOn: Boolean? = null,
+    /**
+     * Whether this device's screen is on the call's video track, for the share control. Null where
+     * the call has no such track at all -- a voice call, or a video call whose camera never opened
+     * -- for the same reason [cameraOn] is null there: a control that cannot put a picture anywhere
+     * is a control that lies about what it does.
+     */
+    val screenSharing: Boolean? = null,
     /** When the current (or just-ended) call ended, for the ended screen's duration. */
     val endedAt: Long? = null,
     /** Why a call could not even be placed, when nothing else is showing. */
