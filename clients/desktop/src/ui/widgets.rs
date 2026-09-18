@@ -208,6 +208,13 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
             painter.line_segment([p(0.6, 0.5), p(0.9, 0.5)], stroke);
             painter.line_segment([p(0.6, 0.7), p(0.82, 0.7)], stroke);
         }
+        crate::ui::Place::Calls => {
+            // A handset laid along its own diagonal: the earpiece end, the mouthpiece end, and
+            // the grip between them. The one mark every call surface in this product wears.
+            painter.line_segment([p(0.26, 0.26), p(0.74, 0.74)], stroke);
+            painter.line_segment([p(0.1, 0.38), p(0.38, 0.1)], stroke);
+            painter.line_segment([p(0.62, 0.9), p(0.9, 0.62)], stroke);
+        }
         crate::ui::Place::Settings => {
             // A dial: a circle with spokes, the honest settings mark.
             painter.add(egui::Shape::circle_stroke(p(0.5, 0.5), side * 0.22, stroke));

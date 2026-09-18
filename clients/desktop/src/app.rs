@@ -30,6 +30,7 @@ use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
 use crate::ui::bots::BotsState;
+use crate::ui::calls::CallsState;
 use crate::ui::chat::{
     ChatState, ImageBlob, NotePreview, RecordingView, RoomNotice, MAX_ROOM_NOTICES,
 };
@@ -75,6 +76,9 @@ pub struct App {
     rooms: RoomsState,
     space: SpaceState,
     alerts: AlertsState,
+    /// The calls this account was party to that have already ended, and how many pages of
+    /// them the window has walked.
+    calls: CallsState,
     games: GamesState,
     /// The bots this account runs, and the one-time token a register or a rotation just minted.
     bots: BotsState,
@@ -185,6 +189,7 @@ impl App {
             rooms: RoomsState::default(),
             space: SpaceState::default(),
             alerts: AlertsState::default(),
+            calls: CallsState::default(),
             games: GamesState::default(),
             bots: BotsState::default(),
             search: SearchState::default(),
@@ -1095,6 +1100,12 @@ impl App {
                         at: migo_core::Timestamp::now(),
                     });
                 }
+                Event::CallHistory(rows) => {
+                    // The page, folded in whole. Whether it appends or replaces is the pane's
+                    // own business — it is the thing that knows whether it pressed for the
+                    // first page or the one behind, and it holds that across the ask.
+                    self.calls.file_page(rows);
+                }
                 Event::Bots(rows) => {
                     // The whole list at once, which is what makes the pane's "not read yet"
                     // state — a `None` — different from a server that answered with nothing.
@@ -1742,6 +1753,14 @@ impl App {
                                                     menu = Some(Place::Alerts);
                                                     ui.close();
                                                 }
+                                                // The calls that already ended. A window of
+                                                // its own rather than a tab: it is a record
+                                                // somebody consults, not a place anybody passes
+                                                // through on the way to a conversation.
+                                                if ui.button("Calls").clicked() {
+                                                    menu = Some(Place::Calls);
+                                                    ui.close();
+                                                }
                                                 if ui.button("Search").clicked() {
                                                     menu = Some(Place::Search);
                                                     ui.close();
@@ -2135,6 +2154,7 @@ impl App {
                 self.activity = activity;
             }
             Place::Alerts => crate::ui::alerts::show(ui, &mut context, &mut self.alerts),
+            Place::Calls => crate::ui::calls::show(ui, &mut context, &mut self.calls, &self.chat),
             Place::Search => {
                 crate::ui::search::show(ui, &mut context, &mut self.search, &mut self.chat)
             }
@@ -2168,6 +2188,16 @@ impl App {
                 query: self.rooms.query.clone(),
             }),
             Place::Alerts | Place::Feed => self.commands.push(Command::Notifications),
+            // Read once, unlike the inbox above it: a history is a read of the past and the past
+            // does not move, so re-entering the window keeps the pages already walked rather
+            // than throwing them away for a first page the pane is already holding. The pane's
+            // own Refresh is the way to start over, and only a call that ended since is news.
+            Place::Calls => {
+                if !self.calls.loaded {
+                    self.calls.begin_first();
+                    self.commands.push(Command::CallHistory { before: None });
+                }
+            }
             Place::Wallet => self.commands.push(Command::Wallet),
             Place::Profile => self.commands.push(Command::OwnProfile),
             Place::Admins => self.commands.push(Command::Admins),

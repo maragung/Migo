@@ -181,6 +181,14 @@ pub struct ProfilePatch {
 
 /// What the UI asks the worker to do.
 #[derive(Debug)]
+/// How many call-history rows one page asks for.
+///
+/// One number in one place, because two readers need it and they must agree: the ask below sends
+/// it as the limit, and the pane reads a page shorter than it as the end of the history. Split
+/// across the two, a page size that drifted would make the pane either offer a button that never
+/// ends or hide one that should be there.
+pub const CALL_HISTORY_PAGE: u32 = 50;
+
 pub enum Command {
     /// Fetch a fresh image captcha challenge for the auth forms.
     ///
@@ -639,6 +647,17 @@ pub enum Command {
     /// live call. The worker picks the honest wire message for each (Cancel before the answer,
     /// End after it, nothing at all for a placement that never reached the wire).
     EndCall,
+    /// Read one page of this account's call history: the calls it was party to that have already
+    /// ended, newest first, `before` naming the cursor the page starts under.
+    ///
+    /// A read of its own rather than a flag on the listing, because the wire draws the line
+    /// there: `CallList` is what is happening now and has no ended state to name, and a screen
+    /// that asked what is running must not be handed rows the store keeps only to remember.
+    /// `None` asks for the newest page, which is what a window opening asks; a timestamp asks
+    /// for the page behind it, which is what the pane's own button asks.
+    CallHistory {
+        before: Option<migo_core::Timestamp>,
+    },
     /// Flip this side's microphone mute. Muting is silence at the capture source, not a
     /// signalling fact: the far side hears quiet, the same mute every other client shows.
     ToggleCallMute,
@@ -1108,6 +1127,13 @@ pub enum Event {
     /// the bot it changed and the pane folds that one row back in — so this event is the list's
     /// own read and the re-read after anything the pane could not fold itself.
     Bots(Vec<migo_protocol::BotView>),
+    /// One page of this account's call history, as the read answered it.
+    ///
+    /// The rows alone and not the cursor they were asked under: the pane is the only thing that
+    /// knows whether it pressed for the first page or the one behind, and it holds that in its
+    /// own state across the ask — the same reason the bot list's read carries no correlation,
+    /// because a page this pane cannot correlate is a page it already knows the shape of.
+    CallHistory(Vec<migo_protocol::CallHistoryEntry>),
     /// One bot's own row, as the call that changed it answered.
     ///
     /// `token` is present exactly twice in a bot's life — the register that made it and a
@@ -2790,6 +2816,7 @@ impl Worker {
                 self.revoke_admin(account_id).await;
             }
             Command::BotList => self.request_bots().await,
+            Command::CallHistory { before } => self.request_call_history(before).await,
             Command::BotRegister {
                 username,
                 display_name,
@@ -8222,6 +8249,31 @@ impl Worker {
         self.sink.send(Event::BotChanged { view, token });
     }
 
+    /// Asks for one page of this account's call history.
+    ///
+    /// No conversation filter: the window is the whole history, which is what the pane draws.
+    /// The cursor is the end time of the oldest row the pane holds, and the server treats it as
+    /// exclusive, so the row it names never comes back and two pages cannot overlap.
+    async fn request_call_history(&mut self, before: Option<migo_core::Timestamp>) {
+        self.request(
+            Opcode::CallHistory,
+            &migo_protocol::CallHistoryQuery {
+                conversation_id: None,
+                before,
+                limit: Some(CALL_HISTORY_PAGE),
+            },
+        )
+        .await;
+    }
+
+    /// The call history came back.
+    fn on_call_history(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::CallHistoryResult>(frame) else {
+            return;
+        };
+        self.sink.send(Event::CallHistory(response.calls));
+    }
+
     /// Asks for this account's bots.
     async fn request_bots(&mut self) {
         self.request(Opcode::BotList, &migo_protocol::BotListReq {})
@@ -8817,6 +8869,9 @@ impl Worker {
             // The one call read: what this session's announcements could not have told it,
             // folded into the spectator ledger as a join would have been (section 165).
             Opcode::CallList => self.on_call_list(&frame).await,
+            // The call plane's one read of the past: the rows this account's calls came to,
+            // which the listing above cannot describe because an ended call is not in it.
+            Opcode::CallHistory => self.on_call_history(&frame),
             // The group call's own pushes: roster movement off the SFU and the sealed frame
             // key a rotating peer fanned out. The mid-call join's ask and answer ride the
             // `CallSdp` arm above, because that is the frame the server projects both into.
