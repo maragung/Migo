@@ -152,14 +152,12 @@ impl Harness {
     /// A patch rather than a `seed` argument: the call columns are the only ones a test
     /// ever wants to move on their own, and threading two more parameters through the
     /// shared fixture would make every caller name them.
-    async fn person_calls(
-        &self,
-        account: u128,
-        username: &str,
-        voice: Visibility,
-        video: Visibility,
-    ) {
-        self.person(account, username).await;
+    /// Sets the two call policies of an account that already exists.
+    ///
+    /// A patch and not a second `person`: two accounts cannot share a username, so a helper
+    /// that created one would fail on a unique key rather than on whatever the test meant,
+    /// and the failure would point at the helper instead of at the assertion.
+    async fn person_calls(&self, account: u128, voice: Visibility, video: Visibility) {
         self.store
             .update_profile(
                 id(account),
@@ -3006,6 +3004,11 @@ async fn a_nobody_policy_refuses_even_a_friend() {
             Visibility::Nobody,
         )
         .await;
+    // Both call lines too, or "a nobody policy" would be a nobody policy everywhere but
+    // the two columns the call gate actually reads.
+    harness
+        .person_calls(BOB, Visibility::Nobody, Visibility::Nobody)
+        .await;
     harness.friendship(ALICE, BOB, NOW).await;
     let alice = caller(ALICE, ALICE_PHONE);
 
@@ -3120,10 +3123,11 @@ async fn the_two_call_kinds_are_decided_separately() {
         )
         .await;
     harness
-        .person_calls(BOB, "bob", Visibility::Everyone, Visibility::Nobody)
+        .person_calls(BOB, Visibility::Everyone, Visibility::Nobody)
         .await;
+    harness.person(CAROL, "carol").await;
     harness
-        .person_calls(CAROL, "carol", Visibility::Nobody, Visibility::Everyone)
+        .person_calls(CAROL, Visibility::Nobody, Visibility::Everyone)
         .await;
     let alice = caller(ALICE, ALICE_PHONE);
 
