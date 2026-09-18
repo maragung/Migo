@@ -43,6 +43,7 @@ import type {
 
 import { GroupCallButton } from '../src/components/call-buttons.js';
 import {
+  GroupCallPipCard,
   GroupCallScreen,
   groupSeatState,
   ownSeatState,
@@ -132,6 +133,8 @@ function activeCall(overrides: Partial<ActiveGroupCall> = {}): ActiveGroupCall {
     videoPublished: false,
     muted: false,
     cameraOn: null,
+    sharingScreen: false,
+    screenStream: null,
     mediaError: null,
     ...overrides,
   };
@@ -151,6 +154,10 @@ function screen(overrides: Partial<GroupCallScreenProps> = {}): string {
     onDismiss: () => {},
     onToggleMute: () => null,
     onToggleCamera: () => null,
+    onToggleScreenShare: () => {},
+    pipAvailable: false,
+    pipActive: false,
+    onTogglePip: () => {},
     ...overrides,
   };
   return renderToStaticMarkup(<GroupCallScreen {...props} />);
@@ -395,8 +402,125 @@ test('the screen renders the state words and the controls that exist, and only t
   );
 });
 
-// --- the join button's gate ---
+test('the self-view shows the screen while one is shared, and stays away when there is neither', () => {
+  const camera = { getVideoTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream;
+  const desktop = { getVideoTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream;
+  const video = { mediaKind: CallMediaKind.Video, videoPublished: true };
 
+  // A camera on its own is previewed, and a camera the seat turned off is not: the preview would be
+  // of a device this seat has already handed back.
+  assert.ok(
+    screen({ call: activeCall({ ...video, cameraOn: true, localStream: camera }) }).includes(
+      'group-call-self-video',
+    ),
+  );
+  assert.ok(
+    !screen({ call: activeCall({ ...video, cameraOn: false, localStream: camera }) }).includes(
+      'group-call-self-video',
+    ),
+  );
+  // A share is previewed even with the camera off — it is what the other seats are watching, and the
+  // sharer is the one person who cannot see the wire to check.
+  const sharing = screen({
+    call: activeCall({
+      ...video,
+      cameraOn: false,
+      localStream: null,
+      sharingScreen: true,
+      screenStream: desktop,
+    }),
+  });
+  assert.ok(sharing.includes('group-call-self-video'), 'the share is what the sharer previews');
+  assert.ok(sharing.includes('Sharing screen'));
+  // A share whose capture has already been handed back shows nothing rather than an empty frame.
+  assert.ok(
+    !screen({
+      call: activeCall({
+        ...video,
+        sharingScreen: true,
+        screenStream: null,
+        cameraOn: true,
+        localStream: camera,
+      }),
+    }).includes('group-call-self-video'),
+  );
+});
+
+test('the floating control exists only where the browser can float a roster, and says which way it goes', () => {
+  // A browser with neither mechanism, and one with only the element mechanism, get no control: a
+  // floated element carries one participant's video and no controls, which is not this call.
+  assert.ok(!screen().includes('aria-label="Picture in picture"'));
+  assert.ok(
+    !screen({ pipAvailable: false }).includes('aria-label="Picture in picture"'),
+    'an element-only browser is not offered a group float',
+  );
+  const floating = screen({ pipAvailable: true, pipActive: true });
+  assert.ok(floating.includes('aria-label="Leave picture in picture"'));
+  assert.ok(floating.includes('aria-pressed="true"'));
+  const idle = screen({ pipAvailable: true });
+  assert.ok(idle.includes('aria-label="Picture in picture"'));
+  assert.ok(idle.includes('aria-pressed="false"'));
+});
+
+test('the floating card shows the roster, the words, and the controls the call has', () => {
+  const call = activeCall({ mediaKind: CallMediaKind.Video, videoPublished: true, cameraOn: true });
+  const card = renderToStaticMarkup(
+    <GroupCallPipCard
+      mediaKind={call.mediaKind}
+      seats={[
+        { name: 'Me First', isMe: true, state: null },
+        { name: 'Ada Lovelace', isMe: false, state: 'Degraded' },
+      ]}
+      statusLabel="2 in this call"
+      durationLabel="1:04"
+      muted
+      cameraOn={true}
+      sharingScreen
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onLeave={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  // The roster travels with the call: one participant's picture is not what a group call is.
+  assert.ok(card.includes('Me First'));
+  assert.ok(card.includes('Ada Lovelace'));
+  assert.ok(card.includes('Degraded'));
+  // The card names the call in the full screen's own words, which is the same
+  // label the one-to-one screen prints: the mode, then the word call.
+  assert.ok(card.includes('Group video call'));
+  assert.ok(card.includes('2 in this call'));
+  assert.ok(card.includes('1:04'));
+  // The state words are the full screen's own, and the controls act on the same call.
+  assert.ok(card.includes('aria-label="Unmute microphone"'));
+  assert.ok(card.includes('aria-label="Turn camera off"'));
+  assert.ok(card.includes('aria-label="Leave call"'));
+  assert.ok(card.includes('aria-label="Back to the call"'));
+  assert.ok(card.includes('Sharing your screen'));
+  // Its own stylesheet, because the app's never reaches a picture-in-picture document.
+  assert.ok(card.includes('.pip-card'));
+  // An audio seat has no camera to toggle, so the control is not drawn for it.
+  const quiet = renderToStaticMarkup(
+    <GroupCallPipCard
+      mediaKind={CallMediaKind.Audio}
+      seats={[{ name: 'Me First', isMe: true, state: null }]}
+      statusLabel="1 in this call"
+      durationLabel={null}
+      muted={false}
+      cameraOn={null}
+      sharingScreen={false}
+      onToggleMute={() => {}}
+      onToggleCamera={() => {}}
+      onLeave={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  assert.ok(quiet.includes('Group voice call'));
+  assert.ok(!quiet.includes('Turn camera'));
+  assert.ok(!quiet.includes('Sharing your screen'));
+});
+
+// --- the join button's gate ---
 test('the group-call buttons exist only where a group conversation is', () => {
   assert.equal(
     renderToStaticMarkup(

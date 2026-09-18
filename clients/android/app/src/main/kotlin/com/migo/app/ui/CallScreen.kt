@@ -113,6 +113,7 @@ fun CallOverlay(
     onCancel: () -> Unit,
     onHangUp: () -> Unit,
     onToggleMute: () -> Unit,
+    onToggleCamera: () -> Unit,
     onDismiss: () -> Unit,
     onRateCall: (CallRating, ULong) -> Unit,
     localVideo: VideoTrack?,
@@ -156,11 +157,12 @@ fun CallOverlay(
                 state = state,
                 call = call,
                 peerName = peerName,
-                localVideo = localVideo,
+                localVideo = if (state.cameraOn == false) null else localVideo,
                 remoteVideo = remoteVideo,
                 onCancel = onCancel,
                 onHangUp = onHangUp,
                 onToggleMute = onToggleMute,
+                onToggleCamera = onToggleCamera,
                 onDismiss = onDismiss,
                 onRateCall = onRateCall,
                 onMinimize = onMinimize,
@@ -217,6 +219,7 @@ private fun ActiveCallScreen(
     onCancel: () -> Unit,
     onHangUp: () -> Unit,
     onToggleMute: () -> Unit,
+    onToggleCamera: () -> Unit,
     onDismiss: () -> Unit,
     onRateCall: (CallRating, ULong) -> Unit,
     onMinimize: (() -> Unit)?,
@@ -373,6 +376,19 @@ private fun ActiveCallScreen(
                 )
 
                 CallDisplayState.Connected, CallDisplayState.Degraded -> {
+                    // The camera button is offered only where the call really has a camera to give
+                    // back: `cameraOn` is null for a voice call and for a video call whose camera
+                    // never opened, and both of those would get a control that cannot change
+                    // anything.
+                    if (state.cameraOn != null) {
+                        CallActionButton(
+                            glyph = if (state.cameraOn) "📷" else "🚫",
+                            label = if (state.cameraOn) "Turn camera off" else "Turn camera on",
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            onClick = onToggleCamera,
+                        )
+                    }
                     // The camera switch is offered for a video call on a device that has somewhere
                     // to switch to; a phone with one camera gets no control rather than one that
                     // cannot move.

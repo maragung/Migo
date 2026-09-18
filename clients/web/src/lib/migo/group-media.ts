@@ -617,6 +617,24 @@ export interface GroupMediaPlaneDeps {
   createPeer: (iceServers: RTCIceServer[]) => RTCPeerConnection;
   /** Acquires the local microphone (and camera, when video is published). */
   acquire: (kind: CallMediaKind) => Promise<MediaStream>;
+  /**
+   * Opens a camera on its own, for a seat that turned its own off and wants it back.
+   *
+   * The camera alone, because re-running {@link acquire} for a whole stream would interrupt the
+   * microphone the seat is speaking into — the same reason the one-to-one plane replaces its camera
+   * track rather than re-acquiring media. The answer is a track or null, and null is the honest one:
+   * a camera another application has taken since cannot be opened, and the plane states that rather
+   * than holding a device it cannot use.
+   */
+  acquireCamera: () => Promise<MediaStreamTrack | null>;
+  /**
+   * Opens a screen to share, through whatever picker the platform has.
+   *
+   * The whole stream rather than one track, because the picker decides what is being shared and a
+   * capture this plane stops holding is a capture it has to stop: the answer is null when the user
+   * dismissed the picker, which is a choice rather than a failure to state.
+   */
+  acquireScreen: () => Promise<MediaStream | null>;
   /** Sends one sealed SDP description to a roster device (`CALL_SDP`). */
   sendSdp: (toDevice: Id, sealed: Uint8Array) => Promise<void>;
   /** Sends one sealed ICE batch to a roster device (`CALL_ICE`). */
@@ -691,6 +709,13 @@ export class GroupMediaPlane {
   #links = new Map<Id, PeerLink>();
   #localStream: MediaStream | null = null;
   #localVideoTrack: MediaStreamTrack | null = null;
+  /**
+   * The seat's screen while one is being shared, kept apart from the local stream on purpose: the
+   * self-view and the roster read that stream as "this seat's camera", and a share is not a camera —
+   * the seat still has both, and which one goes on the wire is decided per link by
+   * {@link videoTrackToSend}.
+   */
+  #screenStream: MediaStream | null = null;
   #videoPublished = false;
   #muted = false;
   #cameraOn = true;
@@ -969,22 +994,146 @@ export class GroupMediaPlane {
    * Turns this seat's camera on or off, everywhere at once. A camera that was never published
    * (refused by the product limit, or an audio call) has no toggle to give — `null` says that, so
    * a screen never shows a button that does nothing.
+   *
+   * Off releases the capture device rather than only disabling the track, which is what puts the
+   * system's camera indicator out: a disabled track still holds the camera, so a seat that is
+   * publishing nothing would leave the light next to the user's lens claiming otherwise. On opens a
+   * camera again, which is the one part of this that can fail — another application may have taken
+   * it since — so the wish is stated now and corrected to the fact when the answer arrives, through
+   * the same projection the roster is built from. A caller that read the returned wish as a
+   * guarantee would be reading it as the intent, which is what the return value has always been.
    */
   toggleCamera(): boolean | null {
-    if (!this.#videoPublished || this.#localVideoTrack === null) {
+    if (!this.#videoPublished) {
       return null;
     }
     this.#cameraOn = !this.#cameraOn;
-    this.#localVideoTrack.enabled = this.#cameraOn;
+    if (this.#cameraOn) {
+      void this.#openCamera();
+    } else {
+      this.#releaseCamera();
+    }
     return this.#cameraOn;
   }
 
   /** Whether this seat's camera is on; `null` when no camera was published. */
   get cameraOn(): boolean | null {
-    if (!this.#videoPublished || this.#localVideoTrack === null) {
+    if (!this.#videoPublished) {
       return null;
     }
     return this.#cameraOn;
+  }
+
+  /**
+   * Starts sharing this seat's screen on every link the ladder still carries video to.
+   *
+   * A share is a second video source rather than a replacement for the camera, and which one is on
+   * the wire is decided per link: the screen wins while one is shared, and the camera comes back on
+   * it the moment the share stops. Both facts live in one sender, so nothing is renegotiated — the
+   * m-line a video call already negotiated is the line a share rides, exactly as it does in the
+   * one-to-one plane.
+   *
+   * A share needs the video m-line to exist at all, so a seat the product limit refused video gets
+   * `false` rather than a capture nobody can receive. The picker holds the tab for as long as the
+   * user takes to choose and the seat can leave under it, so the plane's own state is read again
+   * after the await and a capture that arrives into a stopped plane is stopped rather than kept.
+   *
+   * `false` also covers a dismissed picker, which is a choice rather than a failure: there is no
+   * error to state about something the user just decided not to do.
+   */
+  async startScreenShare(): Promise<boolean> {
+    if (!this.#videoPublished || this.#screenStream !== null || this.#stopped) {
+      return false;
+    }
+    let captured: MediaStream | null;
+    try {
+      captured = await this.#deps.acquireScreen();
+    } catch {
+      return false;
+    }
+    const track = captured?.getVideoTracks()[0] ?? null;
+    if (captured === null || track === null || this.#stopped || this.#screenStream !== null) {
+      for (const held of captured?.getTracks() ?? []) {
+        held.stop();
+      }
+      return false;
+    }
+    this.#screenStream = captured;
+    // The platform's own stop control ends the track rather than telling the page, so this is the
+    // only way the seat learns its share is over — without it the roster would keep showing a
+    // screen that is no longer being sent.
+    track.onended = (): void => {
+      this.stopScreenShare();
+    };
+    for (const link of this.#links.values()) {
+      // Every link made for a seat that publishes video already carries a video sender — the m-line
+      // is created when the link is, camera on it or not — so this is a guard rather than a path: a
+      // link that somehow had none would get a sender to attach to here, though only a fresh
+      // negotiation, which this plane does not perform, would let the other end hear it.
+      if (link.videoSender === null) {
+        link.videoSender = link.pc.addTransceiver('video', { direction: 'sendrecv' }).sender;
+      }
+      // The screenshot is handed to the sender explicitly rather than left to the shaping pass,
+      // because that pass knows only whether *a* video track is attached and not which one: a camera
+      // already on the wire would keep it, and the roster would announce a share no other seat could
+      // see. At the bottom rung the link has been grounded and the screen waits, captured but
+      // unsent, for the poll that climbs — which reads the track from here.
+      if (link.quality !== 'video-off') {
+        void link.videoSender.replaceTrack(track).catch(() => {});
+        link.sendingVideo = true;
+      }
+      this.#shapeVideo(link);
+    }
+    this.#emit();
+    return true;
+  }
+
+  /**
+   * Stops sharing this seat's screen, handing the capture back to the platform and returning every
+   * link that was carrying it to the camera.
+   *
+   * The track is stopped rather than only dropped, because a capture nobody holds is a screen the
+   * platform still considers shared — the same bargain the camera toggle makes, and the reason the
+   * browser's own stop control and this one end in the same place.
+   */
+  stopScreenShare(): void {
+    const screen = this.#screenStream;
+    if (screen === null) {
+      return;
+    }
+    this.#screenStream = null;
+    for (const track of screen.getTracks()) {
+      track.onended = null;
+      track.stop();
+    }
+    // Handing the wire back is this method's own business for the same reason taking it was: the
+    // shaping pass reads a boolean, and a camera it would leave attached is a camera that never
+    // returns to a link the share has just left. A camera this seat turned off comes back as
+    // nothing, which is what {@link videoTrackToSend} answers with a wish that is off.
+    const next = videoTrackToSend(null, this.#cameraOn ? this.#localStream : null);
+    for (const link of this.#links.values()) {
+      if (link.videoSender !== null && link.quality !== 'video-off') {
+        void link.videoSender.replaceTrack(next).catch(() => {});
+        link.sendingVideo = next !== null;
+      }
+      this.#shapeVideo(link);
+    }
+    this.#emit();
+  }
+
+  /** Whether this seat is sharing its screen. */
+  get screenSharing(): boolean {
+    return this.#screenStream !== null;
+  }
+
+  /**
+   * The captured screen while one is being shared, for the sharer's own preview.
+   *
+   * Exposed because the seat's self-view has to show what is going on the wire: a preview of the
+   * camera during a share is a picture of the one thing the other seats are *not* watching.
+   */
+  get screenStream(): MediaStream | null {
+    return this.#screenStream;
   }
 
   /** This seat's local stream, for the self-view; `null` before media exists. */
@@ -1040,6 +1189,13 @@ export class GroupMediaPlane {
     for (const track of this.#localStream?.getTracks() ?? []) {
       track.stop();
     }
+    // The screen is not in the local stream, so it is not stopped by the loop above and a share
+    // that outlived its call is a screen the platform still thinks this seat is showing.
+    for (const track of this.#screenStream?.getTracks() ?? []) {
+      track.onended = null;
+      track.stop();
+    }
+    this.#screenStream = null;
     this.#localStream = null;
     this.#localVideoTrack = null;
   }
@@ -1135,6 +1291,14 @@ export class GroupMediaPlane {
         link.sendingVideo = true;
       }
     }
+    // A seat whose camera is off has no camera track in its stream, and a link dialled in that state
+    // still has to carry the video m-line: without it the offer is audio-only, there is no sender to
+    // attach a camera to when the seat turns it back on, and the other seat's video has no line to
+    // arrive on either. An empty transceiver is a sender that sends nothing, which is exactly the
+    // state the seat is in, and it is the same m-line `addTrack` would have produced.
+    if (this.#videoPublished && link.videoSender === null) {
+      link.videoSender = pc.addTransceiver('video', { direction: 'sendrecv' }).sender;
+    }
     return link;
   }
 
@@ -1173,16 +1337,83 @@ export class GroupMediaPlane {
    */
   #shapeVideo(link: PeerLink): void {
     const sender = link.videoSender;
-    if (sender === null || this.#localVideoTrack === null) {
+    if (sender === null) {
       return;
     }
+    // Which of the two goes on the wire is {@link videoTrackToSend}'s answer, the same one the
+    // one-to-one plane sends by, so a share cannot mean one thing here and another there: the screen
+    // wins while one is shared, the camera otherwise, and neither means nothing is sent. The camera
+    // half is read through the wish as well, because a camera this seat released is a track the
+    // stream no longer holds and a link must not be handed one that is gone.
     link.sendingVideo = shapeVideoSender(
       sender,
-      this.#cameraOn ? this.#localVideoTrack : null,
+      videoTrackToSend(this.#screenStream, this.#cameraOn ? this.#localStream : null),
       link.quality,
       link.sentKbps,
       link.sendingVideo,
     );
+  }
+
+  /**
+   * Stops this seat's camera and tells every link to stop carrying it.
+   *
+   * The track leaves the local stream as well as the senders, because a stopped track still lingers
+   * in a stream's track list and the roster screen reads that list — what it must never show is a
+   * camera this seat is not publishing, which is the same reasoning the product limit's refusal
+   * runs on at start.
+   */
+  #releaseCamera(): void {
+    const track = this.#localVideoTrack;
+    this.#localVideoTrack = null;
+    if (track !== null) {
+      this.#localStream?.removeTrack(track);
+      track.stop();
+    }
+    for (const link of this.#links.values()) {
+      this.#shapeVideo(link);
+    }
+  }
+
+  /**
+   * Opens a camera again after the seat turned its own off, and publishes it to every link.
+   *
+   * Both facts are re-read after the await: the seat can turn the camera back off, or leave the
+   * call, while the platform is opening one — and a camera attached to either is a device held for
+   * a call that is not using it, which is the state releasing exists to end. A failure states
+   * itself by correcting the wish rather than by failing silently, because the roster renders the
+   * wish: a seat shown with a camera that never opened is a picture the other seats would wait for.
+   */
+  async #openCamera(): Promise<void> {
+    let track: MediaStreamTrack | null;
+    try {
+      track = await this.#deps.acquireCamera();
+    } catch {
+      track = null;
+    }
+    // The wish is read again here rather than trusted from the press: a camera attached to a seat
+    // that turned itself back off, or left, is a device held for a call that is not using it.
+    const stream = this.#localStream;
+    if (track !== null && (this.#stopped || !this.#cameraOn || stream === null)) {
+      track.stop();
+      return;
+    }
+    if (track === null || stream === null) {
+      // The camera this seat had before it turned video off is not the camera it gets back: another
+      // application may have taken it in the meantime. The wish is corrected to that fact rather
+      // than left standing, because the roster renders the wish and would otherwise show a seat
+      // whose picture the other seats wait for.
+      if (!this.#stopped) {
+        this.#cameraOn = false;
+        this.#emit();
+      }
+      return;
+    }
+    this.#localVideoTrack = track;
+    stream.addTrack(track);
+    for (const link of this.#links.values()) {
+      this.#shapeVideo(link);
+    }
+    this.#emit();
   }
 
   /** Closes one link's connection and disarms its timer. */

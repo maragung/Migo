@@ -656,29 +656,22 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   );
 
   /**
-   * Turns this side's camera on or off, for every link the ladder still carries video to.
+   * Stops and detaches this call's camera track, handing the capture device back to the platform.
    *
-   * The track is disabled rather than stopped, which is the group plane's own choice for the same
-   * toggle: the camera stays warm so turning it back on is instant and cannot fail on a device that
-   * another application has since taken, and the peer sees nothing either way because the sender
-   * stops carrying the track at all — a disabled track that is still attached would cost the
-   * encoder to send black frames.
+   * Releasing is the whole point: only a stopped track puts the system's camera indicator out, and
+   * a device held by a track nobody sends is a light next to the user's lens that says the opposite
+   * of what the call is doing. The sender is shaped afterwards rather than at the next ladder poll,
+   * so the link stops carrying a track that no longer exists on the same press.
    */
-  const toggleCamera = useCallback((): void => {
-    const track = localStreamRef.current?.getVideoTracks()[0] ?? null;
-    if (track === null) {
-      // A voice call, or a device with no camera. The control is not drawn for either, so this is
-      // only reachable from a stale screen; doing nothing is the honest answer.
-      return;
+  const releaseCamera = useCallback((): void => {
+    const stream = localStreamRef.current;
+    const track = stream?.getVideoTracks()[0] ?? null;
+    if (stream !== null && track !== null) {
+      stream.removeTrack(track);
+      track.stop();
     }
-    const next = !cameraOnRef.current;
-    cameraOnRef.current = next;
-    setCameraOn(next);
-    track.enabled = next;
     const sender = videoSenderRef.current;
     if (sender !== null) {
-      // Shaped now rather than at the next poll, so the button does what it says on the press: the
-      // same function the ladder uses, so the camera cannot come back on a link the ladder grounded.
       videoAttachedRef.current = shapeVideoSender(
         sender,
         wantedVideoTrack(),
@@ -688,6 +681,111 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       );
     }
   }, [wantedVideoTrack]);
+
+  /**
+   * Opens a camera and hands it to the call, replacing whatever video track the stream holds.
+   *
+   * The track is replaced rather than the stream re-acquired: the microphone must not blink, and
+   * re-running `getUserMedia` for the audio half would interrupt the person speaking every time the
+   * camera changes. The new track is acquired first and only then handed over, so a camera that
+   * cannot be opened — busy in another application, or unplugged since the list was read — leaves
+   * the call on the camera it already had rather than on none, and answers false to say so.
+   *
+   * One function for the two things that change which camera the call is on, because a switch and a
+   * camera turned back on are the same act from the stream's point of view — acquire, swap, stop the
+   * old track, shape the sender — and two copies would be two chances for one of them to forget that
+   * a camera acquired into a call whose video is off must not be held.
+   *
+   * The caller must have set the wish to on already: this function does not turn video on, it opens
+   * the camera that the wish, being on, needs.
+   */
+  const attachCamera = useCallback(
+    async (deviceId: string | null): Promise<boolean> => {
+      let acquired: MediaStream;
+      try {
+        acquired = await navigator.mediaDevices.getUserMedia({
+          video: callVideoConstraints(deviceId),
+        });
+      } catch {
+        return false;
+      }
+      const track = acquired.getVideoTracks()[0];
+      if (track === undefined) {
+        return false;
+      }
+      // Both facts are read after the await and not before: the call can end, and the wish can go
+      // back to off, while the camera is opening — the user pressed the button twice, or left. A
+      // camera acquired into either is a device held for nobody, which is exactly the indicator
+      // this whole path exists to put out, so it is released rather than attached.
+      const stream = localStreamRef.current;
+      if (stream === null || !cameraOnRef.current) {
+        track.stop();
+        return false;
+      }
+      const previous = stream.getVideoTracks()[0] ?? null;
+      if (previous !== null) {
+        stream.removeTrack(previous);
+        previous.stop();
+      }
+      stream.addTrack(track);
+      // The camera the platform actually opened, which is not necessarily the one asked for: the
+      // constraint is an ideal, so the wish is corrected to the fact before the next read of it.
+      cameraIdRef.current = track.getSettings().deviceId ?? deviceId;
+      setLocalStream(stream);
+      const sender = videoSenderRef.current;
+      if (sender !== null) {
+        videoAttachedRef.current = shapeVideoSender(
+          sender,
+          wantedVideoTrack(),
+          qualityRef.current,
+          lastMeasureRef.current?.stats.sentKbps ?? 0,
+          videoAttachedRef.current,
+        );
+      }
+      return true;
+    },
+    [wantedVideoTrack],
+  );
+
+  /**
+   * Turns this side's camera on or off, for every link the ladder still carries video to.
+   *
+   * Off means stopped, not disabled. A disabled track still holds the capture device, so the
+   * platform keeps its camera indicator lit for a camera that is publishing nothing — the user
+   * pressed the button to be rid of the camera and the light next to their lens says otherwise.
+   * Releasing it outright is the only way to give the device back.
+   *
+   * On means acquired again, and it can fail: another application may have taken the camera since,
+   * or it may have been unplugged. A failure puts the wish back to off rather than leaving a screen
+   * that claims a camera which is not there. The peer sees nothing either way, because the sender
+   * stops carrying the track at all — a disabled track left attached would cost the encoder to send
+   * black frames.
+   */
+  const toggleCamera = useCallback((): void => {
+    const call = activeRef.current;
+    if (call === null || call.mediaKind !== CallMediaKind.Video) {
+      // No call, or a voice call with no video m-line to carry a camera. The control is not drawn
+      // for either, so this is only reachable from a stale screen; doing nothing is the honest
+      // answer, and opening a camera the call cannot send would be the very defect this avoids.
+      return;
+    }
+    const next = !cameraOnRef.current;
+    cameraOnRef.current = next;
+    setCameraOn(next);
+    if (!next) {
+      releaseCamera();
+      return;
+    }
+    void attachCamera(cameraIdRef.current).then((opened) => {
+      if (!opened) {
+        // The wish goes back to off rather than standing on a camera that is not there: the button
+        // is the only place the failure can be said, and it says it by not claiming a picture the
+        // call is not sending.
+        cameraOnRef.current = false;
+        setCameraOn(false);
+      }
+    });
+  }, [attachCamera, releaseCamera]);
 
   /**
    * Re-reads the platform's device lists and folds them into state.
@@ -733,22 +831,24 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   /**
    * Switches the call's camera to the platform's next one.
    *
-   * The track is replaced rather than the stream re-acquired: the microphone must not blink, and
-   * re-running `getUserMedia` for the audio half would interrupt it on every switch. The new track
-   * is acquired first and only then handed over, so a switch that fails — the other camera is busy
-   * in another application — leaves the call on the camera it already had rather than on none.
+   * The whole switch is {@link attachCamera}'s: the other camera is acquired first and only then
+   * handed over, so a switch that fails — the other camera busy in another application, or unplugged
+   * since the list was read — leaves the call on the camera it already had rather than on none. The
+   * replacement goes through the same ladder shaping as everything else, so a camera switched on a
+   * link the ladder has grounded is acquired and held, not sent.
    *
-   * The replacement goes through the same ladder shaping as everything else, so a camera switched
-   * on a link the ladder has grounded is acquired and held, not sent.
+   * Video that is off has no capture to move. Opening the next camera anyway would hand back a live
+   * track for a call that is publishing none, which lights the system's camera indicator for a
+   * camera nobody asked to use — so the choice is recorded instead, and the camera it names is the
+   * one the next press of the camera button opens.
    */
   const switchCamera = useCallback(async (): Promise<void> => {
     const call = activeRef.current;
-    const stream = localStreamRef.current;
     const nextId = switchCameraId(camerasRef.current, cameraIdRef.current);
     if (
       call === null ||
       call.mediaKind !== CallMediaKind.Video ||
-      stream === null ||
+      localStreamRef.current === null ||
       nextId === null
     ) {
       // No call, a voice call, or a device with nothing to switch to. The control is drawn only
@@ -757,42 +857,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       // for and has no sender to carry.
       return;
     }
-    let acquired: MediaStream;
-    try {
-      acquired = await navigator.mediaDevices.getUserMedia({ video: callVideoConstraints(nextId) });
-    } catch {
-      // The camera could not be opened — taken by another application, or unplugged since the list
-      // was read. The call keeps the camera it has, which is the honest outcome.
+    if (!cameraOnRef.current) {
+      cameraIdRef.current = nextId;
       return;
     }
-    const track = acquired.getVideoTracks()[0];
-    if (track === undefined) {
-      return;
-    }
-    const previous = stream.getVideoTracks()[0] ?? null;
-    if (previous !== null) {
-      stream.removeTrack(previous);
-      previous.stop();
-    }
-    stream.addTrack(track);
-    // The camera the platform actually opened, which is not necessarily the one asked for: the
-    // constraint is an ideal, so the wish is corrected to the fact before the next switch reads it.
-    cameraIdRef.current = track.getSettings().deviceId ?? nextId;
-    // A camera acquired after the user turned video off stays off: the wish is about video, not
-    // about which device provides it.
-    track.enabled = cameraOnRef.current;
-    setLocalStream(stream);
-    const sender = videoSenderRef.current;
-    if (sender !== null) {
-      videoAttachedRef.current = shapeVideoSender(
-        sender,
-        wantedVideoTrack(),
-        qualityRef.current,
-        lastMeasureRef.current?.stats.sentKbps ?? 0,
-        videoAttachedRef.current,
-      );
-    }
-  }, [wantedVideoTrack]);
+    await attachCamera(nextId);
+  }, [attachCamera]);
 
   /**
    * Moves the call's microphone to another one the platform reports.
