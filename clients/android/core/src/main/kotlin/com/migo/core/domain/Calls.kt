@@ -5,6 +5,9 @@ import com.migo.core.protocol.CallAnswer
 import com.migo.core.protocol.CallCancel
 import com.migo.core.protocol.CallDecline
 import com.migo.core.protocol.CallEnd
+import com.migo.core.protocol.CallHistoryEntry
+import com.migo.core.protocol.CallHistoryQuery
+import com.migo.core.protocol.CallHistoryResult
 import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallInvite
 import com.migo.core.protocol.CallInviteEvent
@@ -49,6 +52,80 @@ enum class CallState(val wire: Long) {
     companion object {
         /** Narrows a wire state; an unknown value yields `null`, never a guess. */
         fun fromWire(wire: Long): CallState? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/**
+ * What kind of call a history row describes: the wire's two numbers, under the names a history
+ * screen draws them with.
+ *
+ * The same two numbers `CallListEntry` uses, because a client draws the same two rows whether the
+ * call is running or finished.
+ */
+enum class CallKind(val wire: Long) {
+    /** Two accounts; `CallHistoryEntry.mediaKind` says whether it carried video. */
+    Direct(0),
+
+    /** A roster, whose seats each negotiated their own media. */
+    Group(1),
+    ;
+
+    companion object {
+        /** Narrows a wire kind; an unknown value yields `null`, never a guess. */
+        fun fromWire(wire: Long): CallKind? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/**
+ * Which way a history row ran, read from the asking account's own side.
+ *
+ * A group call reads [Outgoing] for the account that founded it and [Incoming] for every other
+ * seat, because who started the call is the question this answers and a roster has no caller of its
+ * own.
+ */
+enum class CallDirection(val wire: Long) {
+    /** This account placed it. */
+    Outgoing(0),
+
+    /** This account was called. */
+    Incoming(1),
+    ;
+
+    companion object {
+        /** Narrows a wire direction; an unknown value yields `null`, never a guess. */
+        fun fromWire(wire: Long): CallDirection? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/**
+ * How a call ended, in the words a history screen has to print.
+ *
+ * Derived by the server from the answer it recorded itself, not from anything a party said
+ * afterwards, so [Missed] is a fact about the wire rather than a claim either side made.
+ */
+enum class CallOutcome(val wire: Long) {
+    /** It connected and then ended, however long it lasted. */
+    Answered(0),
+
+    /** It rang out; nobody picked up. */
+    Missed(1),
+
+    /** The callee refused it. */
+    Declined(2),
+
+    /** The callee's devices were occupied. */
+    Busy(3),
+
+    /** The caller withdrew it before anyone answered. */
+    Cancelled(4),
+
+    /** A device or the network gave up. */
+    Failed(5),
+    ;
+
+    companion object {
+        /** Narrows a wire outcome; an unknown value yields `null`, never a guess. */
+        fun fromWire(wire: Long): CallOutcome? = entries.firstOrNull { it.wire == wire }
     }
 }
 
@@ -286,6 +363,34 @@ class CallsDomain(
         val request = CallListQuery(conversationId)
         val response =
             rpc.call(Op.CALL_LIST, { w -> request.encode(w) }, { r -> CallListResult.decode(r) })
+        return response.calls
+    }
+
+    /**
+     * A page of the calls this account was party to that have already ended, newest first.
+     *
+     * The other half of [listCalls], and the reason it is a second read rather than a flag on the
+     * first: a listing is what is happening now and a history is what happened, and a screen that
+     * asked for the living calls must not be handed rows kept only to remember.
+     *
+     * [before] is the cursor: pass the `endedAt` of the oldest row already held and the next page
+     * begins where the last one stopped. It is *exclusive*, so the row whose time was passed is
+     * never returned again. [limit] is clamped by the server rather than refused, because asking
+     * for more than is kept is a question and not a mistake. A page shorter than [limit] — or an
+     * empty one — is how a client learns it reached the end; there is no total to count against.
+     */
+    suspend fun callHistory(
+        conversationId: Id? = null,
+        before: Long? = null,
+        limit: Long? = null,
+    ): List<CallHistoryEntry> {
+        val request = CallHistoryQuery(conversationId, before, limit)
+        val response =
+            rpc.call(
+                Op.CALL_HISTORY,
+                { w -> request.encode(w) },
+                { r -> CallHistoryResult.decode(r) },
+            )
         return response.calls
     }
 
