@@ -226,6 +226,16 @@ class CallManager(
     /** The callee's mirror of the same deadline, for a ring the server's `Ended` may never reap. */
     @Volatile private var incomingTimer: Job? = null
 
+    /** The timer that samples this call's own link for as long as it is connected. */
+    @Volatile private var qualityTimer: Job? = null
+    /** The last reading of that link; the stretch a report measures is between two of these. */
+    @Volatile private var linkCounters: LinkCounters? = null
+    /** The rung this side has classified its own link as, and when it moved there. */
+    @Volatile private var linkQuality = LinkQuality.Full
+    @Volatile private var linkQualityChangedAt = 0L
+    /** The last measurement this call produced, which is the one a call that is ending reports. */
+    @Volatile private var lastMeasurement: QualityAdvance? = null
+
     /** The sealing key of each call this session has seen, forgotten with its call. */
     private val callKeys = HashMap<Id, ByteArray>()
 
@@ -268,6 +278,14 @@ class CallManager(
          * rather than hanging it.
          */
         const val SHARE_SERVICE_WAIT_MS = 3000L
+
+        /**
+         * How long one sample of the call's own link waits for the connection's stats to come back.
+         * The platform answers a stats request off the signalling thread, so the wait is normally
+         * short; the ceiling is here for the case where it never answers at all, because a
+         * connection closed with a request outstanding leaves the request unanswered forever.
+         */
+        const val STATS_TIMEOUT_MS = 2000L
     }
 
     /**
@@ -1140,6 +1158,7 @@ class CallManager(
         // would be the platform telling the app about routes nobody can choose.
         startWatchingOutputs()
         refreshOutputs()
+        startMeasuring()
         val beganAt = setupStart
         if (beganAt != null) {
             setupStart = null
@@ -1149,6 +1168,85 @@ class CallManager(
                 } catch (_: Exception) {
                     // CALL_STATS is Droppable: a lost report costs nothing.
                 }
+            }
+        }
+    }
+
+    /**
+     * Samples this call's own link for as long as it is connected, and reports what it measures.
+     *
+     * The sample is this side's reading of its own transport -- loss, round-trip time, jitter, what
+     * it is sending, what the receiver dropped -- so it is a number a client can truly report, and
+     * the only one it can report about a leg whose far end it does not own. What leaves the device
+     * is bounded the way the web build bounds it: a reading goes out when the ladder moves this link
+     * to another rung, and one last reading goes out when the call ends. A call on a steady link
+     * therefore costs one report rather than one per sample, and CALL_STATS is Droppable, so a lost
+     * one costs nothing.
+     *
+     * The first sample establishes the baseline and reports nothing: a stretch needs two readings to
+     * measure, and the counters are cumulative, so loss and drop percentages are only honest as
+     * deltas between two of them.
+     */
+    private fun startMeasuring() {
+        qualityTimer?.cancel()
+        linkCounters = null
+        linkQuality = LinkQuality.Full
+        linkQualityChangedAt = now()
+        lastMeasurement = null
+        qualityTimer = scope.launch {
+            while (true) {
+                delay(QUALITY_POLL_MS)
+                val call = active ?: continue
+                if (call.state != CallState.Connected) {
+                    continue
+                }
+                val pc = peer ?: continue
+                // A connection closed with a stats request outstanding never answers it, so each
+                // sample is given a ceiling: the next one is two seconds away, and a call that ends
+                // mid-sample must not leave a coroutine waiting on a connection that is already gone.
+                val counters =
+                    withTimeoutOrNull(STATS_TIMEOUT_MS) { readLinkCounters(pc) } ?: continue
+                val previous = linkCounters
+                linkCounters = counters
+                val at = now()
+                val step = advanceMeasurement(
+                    current = linkQuality,
+                    previous = previous,
+                    counters = counters,
+                    changedAtMs = linkQualityChangedAt,
+                    nowMs = at,
+                ) ?: continue
+                lastMeasurement = step
+                if (!step.changed) {
+                    continue
+                }
+                linkQuality = step.quality
+                linkQualityChangedAt = at
+                reportQuality(call.callId, step)
+            }
+        }
+    }
+
+    /** Stops sampling the link; safe to call when nothing is armed. */
+    private fun stopMeasuring() {
+        qualityTimer?.cancel()
+        qualityTimer = null
+    }
+
+    /** Sends one measurement as a call-stats report; a dropped report costs nothing. */
+    private fun reportQuality(callId: Id, step: QualityAdvance) {
+        val report = qualityReport(step.stats, step.counters)
+        scope.launch {
+            try {
+                client.calls.reportStats(
+                    callId,
+                    rttMs = report.rttMs,
+                    packetLoss = report.packetLoss,
+                    jitterMs = report.jitterMs,
+                    usedTurn = report.usedTurn,
+                )
+            } catch (_: Exception) {
+                // CALL_STATS is Droppable: a lost report costs nothing.
             }
         }
     }
@@ -1174,6 +1272,15 @@ class CallManager(
                     // Same race as every best-effort end; the server's sweep bounds the loss.
                 }
             }
+        }
+        // The last reading of a call that measured anything goes out here rather than only where the
+        // rung moved: a call that ran its whole life on a steady link would otherwise report its
+        // setup time and nothing else, and the numbers a call ended on are the numbers it is
+        // remembered by. The report is queued before the media goes, because the stretch it
+        // describes is already measured.
+        val measured = lastMeasurement
+        if (measured != null) {
+            reportQuality(call.callId, measured)
         }
         teardownMedia()
         forgetCallKey(call.callId)
@@ -1221,6 +1328,7 @@ class CallManager(
         // one place every ending passes through -- a hang-up, a peer's end, a lost session, a
         // sign-out -- and a routing pin that outlived it would be a phone stuck on a speaker.
         stopWatchingOutputs()
+        stopMeasuring()
         iceTimer?.cancel()
         iceTimer = null
         reconnectTimer?.cancel()
