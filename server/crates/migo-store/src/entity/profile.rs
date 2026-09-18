@@ -46,6 +46,12 @@ pub struct Model {
     /// Patch::Clear unreachable from a client until the wire grows a way to ask.
     #[sea_orm(column_type = "Text")]
     pub custom_status: Option<String>,
+    /// Who may ring this account with an audio call. 0 nobody, 1 friends, 2 everyone.
+    pub who_can_call_voice: i16,
+    /// Who may ring this account with a video call. Separate from the column above
+    /// because refusing to be seen is not refusing to be spoken to, which is the one
+    /// control section 180 lists as mandatory in its own right.
+    pub who_can_call_video: i16,
 }
 
 /// Foreign keys leaving `profile`.

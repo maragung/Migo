@@ -139,15 +139,6 @@ pub struct SocialConfig {
     pub max_blocks: usize,
     /// Accounts one account may mute.
     pub max_mutes: usize,
-    /// The strictest default this deployment applies to calls.
-    ///
-    /// Brief section 180 says a call defaults to `Friends`, and there is no
-    /// `who_can_call` column for a user to widen it with — `docs/04-data-model.md`
-    /// gives a profile three visibility columns and this is not one of them. So the
-    /// call gate takes the stricter of this value and the account's message policy,
-    /// which honours the default without inventing a column and lets somebody who set
-    /// messages to `Nobody` refuse calls too.
-    pub call_default: Visibility,
 }
 
 impl Default for SocialConfig {
@@ -157,7 +148,6 @@ impl Default for SocialConfig {
             max_following: MAX_FOLLOWING,
             max_blocks: MAX_BLOCKS,
             max_mutes: MAX_MUTES,
-            call_default: Visibility::Friends,
         }
     }
 }
@@ -321,12 +311,33 @@ pub struct BlockOutcome {
 pub enum Interaction {
     /// Start or continue a conversation. Reads `who_can_message`.
     Message,
-    /// Place a voice or video call. See [`SocialConfig::call_default`].
-    Call,
+    /// Ring somebody. The kind decides which column answers: see [`CallKind`].
+    Call(CallKind),
     /// Send a friend request. Reads `who_can_add`.
     FriendRequest,
     /// Read the subject's last-seen time. Reads `show_last_seen`.
     LastSeen,
+}
+
+/// Which kind of call a policy question is about.
+///
+/// Brief section 180 asks for the two to be decided separately, and the profile carries
+/// a column for each, so the gate is asked with the kind rather than looking one up from
+/// the other: refusing to be seen is not refusing to be spoken to, and the account that
+/// wants video calls off while its voice line stays open is the account this split
+/// exists for.
+///
+/// There is no `Group` variant. A group call is joined rather than rung —
+/// `migo-calls` seats a participant through conversation membership alone — so a
+/// group-call policy would be a column nothing reads. See `docs` and section 180's
+/// status in migo.md: the missing variant is the honest record of a gate that has no
+/// ring to refuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// An audio call. Reads `who_can_call_voice`.
+    Voice,
+    /// A video call. Reads `who_can_call_video`.
+    Video,
 }
 
 /// An account a listing suggests.

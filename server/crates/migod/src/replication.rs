@@ -405,6 +405,8 @@ impl ReplicationRelay {
             show_last_seen: visibility_wire(profile.show_last_seen),
             who_can_message: visibility_wire(profile.who_can_message),
             who_can_add: visibility_wire(profile.who_can_add),
+            who_can_call_voice: Some(visibility_wire(profile.who_can_call_voice)),
+            who_can_call_video: Some(visibility_wire(profile.who_can_call_video)),
             searchable: profile.searchable,
             profile_updated_at: profile.updated_at,
             edges,
@@ -547,6 +549,18 @@ impl ReplicationRelay {
                 show_last_seen: visibility_of(rows.show_last_seen),
                 who_can_message: visibility_of(rows.who_can_message),
                 who_can_add: visibility_of(rows.who_can_add),
+                // Absent means the peer runs a build from before these columns existed,
+                // and the honest reading of that is the column default — Friends, which
+                // is what section 180 says a call policy starts as — rather than the
+                // permissive Everyone a bare unwrap_or_default would choose.
+                who_can_call_voice: rows
+                    .who_can_call_voice
+                    .map(visibility_of)
+                    .unwrap_or(Visibility::Friends),
+                who_can_call_video: rows
+                    .who_can_call_video
+                    .map(visibility_of)
+                    .unwrap_or(Visibility::Friends),
                 searchable: rows.searchable,
                 custom_status: rows.custom_status,
                 updated_at: rows.profile_updated_at,
@@ -1111,6 +1125,8 @@ mod tests {
                 show_last_seen: Visibility::Everyone,
                 who_can_message: Visibility::Friends,
                 who_can_add: Visibility::Everyone,
+                who_can_call_voice: Visibility::Friends,
+                who_can_call_video: Visibility::Friends,
                 searchable: true,
                 custom_status: None,
                 updated_at: Timestamp::from_millis(NOW + 1),
@@ -1191,6 +1207,12 @@ mod tests {
         assert_eq!(rows.username, "theowner");
         assert_eq!(rows.passphrase_hash, "argon2id-hash-of-the-passphrase");
         assert_eq!(rows.who_can_message, 1, "the Friends setting crosses as 1");
+        assert_eq!(
+            (rows.who_can_call_voice, rows.who_can_call_video),
+            (Some(1), Some(1)),
+            "both call policies cross, because a peer that rings on the replicated \
+             profile must apply the same policy the owning node would"
+        );
         assert_eq!(
             rows.gender,
             Some(3),

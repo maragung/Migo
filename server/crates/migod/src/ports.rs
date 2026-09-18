@@ -488,7 +488,7 @@ impl CallGate for StoreCallGate {
         self.store.is_blocked_either_way(a, b).await.unwrap_or(true)
     }
 
-    async fn can_call(&self, caller: &migo_calls::Caller, callee_id: Id) -> bool {
+    async fn can_call(&self, caller: &migo_calls::Caller, callee_id: Id, media_kind: u32) -> bool {
         // The social graph asks its questions of its own `Caller`, built here
         // from the one the call service already proved: the same account, the
         // same device, the same tier, and the same sampled `now`, so the
@@ -497,8 +497,18 @@ impl CallGate for StoreCallGate {
         // the gate has no frame of its own to correlate.
         let who =
             migo_social::Caller::new(caller.account_id, caller.device_id, caller.tier, caller.now);
+        // The invite's own numbering, mapped here rather than in either crate: the calls
+        // service validates the field (audio is zero, video is one, anything else is
+        // refused before the gate is asked) but does not know the graph's vocabulary,
+        // and the graph does not know the wire's. Video is the only value that is not
+        // audio, so the two agree by construction.
+        let kind = if media_kind == migo_calls::MEDIA_VIDEO {
+            migo_social::CallKind::Video
+        } else {
+            migo_social::CallKind::Voice
+        };
         self.social
-            .may_interact(&who, callee_id, migo_social::Interaction::Call)
+            .may_interact(&who, callee_id, migo_social::Interaction::Call(kind))
             .await
             .is_ok()
     }

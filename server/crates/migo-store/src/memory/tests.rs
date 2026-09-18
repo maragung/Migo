@@ -48,6 +48,8 @@ async fn seed_account(store: &MemoryStore, value: u128, username: &str) -> Id {
             show_last_seen: Visibility::Everyone,
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,
+            who_can_call_voice: Visibility::Friends,
+            who_can_call_video: Visibility::Friends,
             searchable: true,
             custom_status: None,
             updated_at: ts(1_000),

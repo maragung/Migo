@@ -41,7 +41,7 @@ const VISIBILITIES: ReadonlyArray<{ value: string; label: string }> = [
 ];
 
 interface PrivacyField {
-  key: 'showLastSeen' | 'whoCanMessage' | 'whoCanAdd';
+  key: 'showLastSeen' | 'whoCanMessage' | 'whoCanAdd' | 'whoCanCallVoice' | 'whoCanCallVideo';
   label: string;
   hint: string;
 }
@@ -61,6 +61,19 @@ const PRIVACY_FIELDS: ReadonlyArray<PrivacyField> = [
     key: 'whoCanAdd',
     label: 'Who can add me as a friend',
     hint: 'Who may send you a friend request.',
+  },
+  // Two call controls rather than one, because refusing to be seen is not refusing to be
+  // spoken to: video set to Nobody with voice left open is the combination section 180
+  // asks for, and a single control could not express it.
+  {
+    key: 'whoCanCallVoice',
+    label: 'Who can call me by voice',
+    hint: 'Who may ring you with an audio call. Blocked accounts cannot call either way.',
+  },
+  {
+    key: 'whoCanCallVideo',
+    label: 'Who can call me with video',
+    hint: 'Who may ring you with a video call. Nobody here still leaves voice calls ringing.',
   },
 ];
 
@@ -82,6 +95,11 @@ const PRIVACY_FIELDS: ReadonlyArray<PrivacyField> = [
  * not re-state a status. It is *not* published over the presence wire: presence refuses that field
  * with `FEATURE_DISABLED` by design, which is the mismatch this panel used to hit.
  *
+ * Calls get two audiences rather than one, because refusing to be seen is not refusing to be spoken
+ * to: video set to Nobody while voice stays open is a combination a single control cannot express,
+ * and section 180 asks for both. They are ordinary privacy selects — leave-as-is until chosen — and
+ * blocked accounts reach nobody either way, so neither select is a block list.
+ *
  * Standing — level, XP, badges — arrives from the economy domain and is view-only here; the Gifts
  * tab owns the interactive side of the same facts.
  */
@@ -99,6 +117,8 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     showLastSeen: UNCHANGED,
     whoCanMessage: UNCHANGED,
     whoCanAdd: UNCHANGED,
+    whoCanCallVoice: UNCHANGED,
+    whoCanCallVideo: UNCHANGED,
   });
   const [progression, setProgression] = useState<ProgressionWire | null>(null);
   const [badges, setBadges] = useState<BadgeWire[] | null>(null);
@@ -271,7 +291,9 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
       searchableTouched ||
       privacy.showLastSeen !== UNCHANGED ||
       privacy.whoCanMessage !== UNCHANGED ||
-      privacy.whoCanAdd !== UNCHANGED);
+      privacy.whoCanAdd !== UNCHANGED ||
+      privacy.whoCanCallVoice !== UNCHANGED ||
+      privacy.whoCanCallVideo !== UNCHANGED);
 
   if (profile === null && error === null) {
     return (
@@ -514,6 +536,12 @@ export function buildProfilePatch(
   }
   if (privacy.whoCanAdd !== UNCHANGED) {
     patch.whoCanAdd = Number(privacy.whoCanAdd);
+  }
+  if (privacy.whoCanCallVoice !== UNCHANGED) {
+    patch.whoCanCallVoice = Number(privacy.whoCanCallVoice);
+  }
+  if (privacy.whoCanCallVideo !== UNCHANGED) {
+    patch.whoCanCallVideo = Number(privacy.whoCanCallVideo);
   }
   if (extra !== undefined) {
     const currentYear = current.birthYear === undefined ? '' : String(current.birthYear);

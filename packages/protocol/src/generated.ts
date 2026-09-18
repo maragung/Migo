@@ -4531,6 +4531,8 @@ export interface FedAccountRows {
   /** The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for. */
   gender?: number;
   customStatus?: string;
+  whoCanCallVoice?: number;
+  whoCanCallVideo?: number;
 }
 
 export function encodeFedAccountRows(w: Writer, v: FedAccountRows): void {
@@ -4556,6 +4558,8 @@ export function encodeFedAccountRows(w: Writer, v: FedAccountRows): void {
   if (v.birthYear !== undefined) present++;
   if (v.gender !== undefined) present++;
   if (v.customStatus !== undefined) present++;
+  if (v.whoCanCallVoice !== undefined) present++;
+  if (v.whoCanCallVideo !== undefined) present++;
   w.u32(present);
   if (v.email !== undefined) { const value = v.email; w.optional(1, (w) => { w.str(value); }); }
   if (v.phone !== undefined) { const value = v.phone; w.optional(2, (w) => { w.str(value); }); }
@@ -4565,6 +4569,8 @@ export function encodeFedAccountRows(w: Writer, v: FedAccountRows): void {
   if (v.birthYear !== undefined) { const value = v.birthYear; w.optional(6, (w) => { w.u32(value); }); }
   if (v.gender !== undefined) { const value = v.gender; w.optional(7, (w) => { w.u32(value); }); }
   if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(8, (w) => { w.str(value); }); }
+  if (v.whoCanCallVoice !== undefined) { const value = v.whoCanCallVoice; w.optional(9, (w) => { w.u32(value); }); }
+  if (v.whoCanCallVideo !== undefined) { const value = v.whoCanCallVideo; w.optional(10, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -4595,6 +4601,8 @@ export function decodeFedAccountRows(r: Reader): FedAccountRows {
       case 6: out.birthYear = sub.u32(); break;
       case 7: out.gender = sub.u32(); break;
       case 8: out.customStatus = sub.str(); break;
+      case 9: out.whoCanCallVoice = sub.u32(); break;
+      case 10: out.whoCanCallVideo = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -4976,6 +4984,10 @@ export interface ProfileUpdate {
   searchable?: boolean;
   /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
   customStatus?: string;
+  /** New audio-call policy: the same 0 nobody, 1 friends, 2 everyone numbering the other visibility fields use. Absent means leave it, exactly as an absent who_can_message does, so saving a display name never re-states a call policy the user never saw. */
+  whoCanCallVoice?: number;
+  /** New video-call policy, separate from the audio one because refusing to be seen is not refusing to be spoken to: video set to 0 while audio stays at 1 is the control that turns off video calls and keeps voice calls ringing. */
+  whoCanCallVideo?: number;
 }
 
 export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
@@ -4990,6 +5002,8 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanAdd !== undefined) present++;
   if (v.searchable !== undefined) present++;
   if (v.customStatus !== undefined) present++;
+  if (v.whoCanCallVoice !== undefined) present++;
+  if (v.whoCanCallVideo !== undefined) present++;
   w.u32(present);
   if (v.displayName !== undefined) { const value = v.displayName; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -5000,6 +5014,8 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanAdd !== undefined) { const value = v.whoCanAdd; w.optional(7, (w) => { w.u32(value); }); }
   if (v.searchable !== undefined) { const value = v.searchable; w.optional(8, (w) => { w.bool(value); }); }
   if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
+  if (v.whoCanCallVoice !== undefined) { const value = v.whoCanCallVoice; w.optional(10, (w) => { w.u32(value); }); }
+  if (v.whoCanCallVideo !== undefined) { const value = v.whoCanCallVideo; w.optional(11, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -5019,6 +5035,8 @@ export function decodeProfileUpdate(r: Reader): ProfileUpdate {
       case 7: out.whoCanAdd = sub.u32(); break;
       case 8: out.searchable = sub.bool(); break;
       case 9: out.customStatus = sub.str(); break;
+      case 10: out.whoCanCallVoice = sub.u32(); break;
+      case 11: out.whoCanCallVideo = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }

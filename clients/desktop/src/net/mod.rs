@@ -4202,6 +4202,12 @@ impl Worker {
             show_last_seen: patch.show_last_seen,
             who_can_message: patch.who_can_message,
             who_can_add: patch.who_can_add,
+            // The two per-kind call policies section 180 asks for are carried by the wire
+            // and honoured by the server, and this client does not offer the controls yet:
+            // an absent field means "leave it alone", so the desktop's silence is the truth
+            // about it rather than a default it would be imposing on its user's account.
+            who_can_call_voice: None,
+            who_can_call_video: None,
             searchable: patch.searchable,
             custom_status: patch.custom_status,
         };
@@ -4344,6 +4350,8 @@ impl Worker {
             show_last_seen: None,
             who_can_message: None,
             who_can_add: None,
+            who_can_call_voice: None,
+            who_can_call_video: None,
             searchable: None,
             // Pointing the profile at the new avatar is all this patch means to say; the
             // status column is somebody else's business.

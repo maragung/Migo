@@ -79,6 +79,8 @@ async fn seed_account(store: &SharedStore, value: u128, username: &str) -> Id {
             show_last_seen: Visibility::Everyone,
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,
+            who_can_call_voice: Visibility::Friends,
+            who_can_call_video: Visibility::Friends,
             searchable: true,
             custom_status: None,
             updated_at: ts(1_000),
@@ -475,6 +477,45 @@ pub async fn a_patch_tells_keep_apart_from_clear(store: &SharedStore) {
         .await
         .unwrap();
     assert_eq!(cleared_status.custom_status, None);
+
+    // Both call policies are columns of their own, and they move independently: the pair
+    // below is the configuration section 180 asks for — voice open, video closed — which
+    // one column could not express at all.
+    let fresh = seed_account(store, 2, "budi").await;
+    let new_profile = store.profile(fresh).await.unwrap().expect("just created");
+    assert_eq!(new_profile.who_can_call_voice, Visibility::Friends);
+    assert_eq!(new_profile.who_can_call_video, Visibility::Friends);
+
+    let narrowed = store
+        .update_profile(
+            fresh,
+            ProfilePatch {
+                who_can_call_voice: Some(Visibility::Everyone),
+                who_can_call_video: Some(Visibility::Nobody),
+                ..Default::default()
+            },
+            ts(2_100),
+        )
+        .await
+        .unwrap();
+    assert_eq!(narrowed.who_can_call_voice, Visibility::Everyone);
+    assert_eq!(narrowed.who_can_call_video, Visibility::Nobody);
+
+    // And a patch that names neither leaves both where they are, which is what keeps
+    // saving a display name from silently re-opening a call line.
+    let kept_calls = store
+        .update_profile(
+            fresh,
+            ProfilePatch {
+                display_name: "budi santoso".to_string(),
+                ..Default::default()
+            },
+            ts(2_200),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept_calls.who_can_call_voice, Visibility::Everyone);
+    assert_eq!(kept_calls.who_can_call_video, Visibility::Nobody);
 }
 
 pub async fn search_obeys_privacy_before_relevance(store: &SharedStore) {

@@ -515,6 +515,12 @@ pub struct Profile {
     pub who_can_message: Visibility,
     /// Who may send a friend request.
     pub who_can_add: Visibility,
+    /// Who may ring this account with an audio call.
+    pub who_can_call_voice: Visibility,
+    /// Who may ring this account with a video call. A column of its own because
+    /// refusing to be seen is not refusing to be spoken to, which is why section
+    /// 180 lists the two as separate controls.
+    pub who_can_call_video: Visibility,
     /// Whether the account appears in search.
     pub searchable: bool,
     /// Free-text status the owner set, the RICH_PRESENCE bit's own field. `None` is
@@ -542,6 +548,10 @@ pub struct ProfilePatch {
     pub who_can_message: Option<Visibility>,
     /// New friend-request policy.
     pub who_can_add: Option<Visibility>,
+    /// New audio-call policy.
+    pub who_can_call_voice: Option<Visibility>,
+    /// New video-call policy.
+    pub who_can_call_video: Option<Visibility>,
     /// New search visibility.
     pub searchable: Option<bool>,
     /// New custom status, or cleared.

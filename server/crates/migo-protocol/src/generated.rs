@@ -7225,6 +7225,8 @@ pub struct FedAccountRows {
     /// The store's disclosure numbering (1 male, 2 female, 3 other); absent means not disclosed, which no numbered value may stand in for.
     pub gender: Option<u32>,
     pub custom_status: Option<String>,
+    pub who_can_call_voice: Option<u32>,
+    pub who_can_call_video: Option<u32>,
 }
 
 impl Encode for FedAccountRows {
@@ -7254,7 +7256,9 @@ impl Encode for FedAccountRows {
             + usize::from(self.avatar_media_id.is_some())
             + usize::from(self.birth_year.is_some())
             + usize::from(self.gender.is_some())
-            + usize::from(self.custom_status.is_some());
+            + usize::from(self.custom_status.is_some())
+            + usize::from(self.who_can_call_voice.is_some())
+            + usize::from(self.who_can_call_video.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.email {
             w.optional(1, |w| {
@@ -7304,6 +7308,18 @@ impl Encode for FedAccountRows {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.who_can_call_voice {
+            w.optional(9, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.who_can_call_video {
+            w.optional(10, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7345,6 +7361,8 @@ impl Decode for FedAccountRows {
                 6 => out.birth_year = Some(sub.read_u32()?),
                 7 => out.gender = Some(sub.read_u32()?),
                 8 => out.custom_status = Some(sub.read_string()?),
+                9 => out.who_can_call_voice = Some(sub.read_u32()?),
+                10 => out.who_can_call_video = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -7883,6 +7901,10 @@ pub struct ProfileUpdate {
     pub searchable: Option<bool>,
     /// New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit.
     pub custom_status: Option<String>,
+    /// New audio-call policy: the same 0 nobody, 1 friends, 2 everyone numbering the other visibility fields use. Absent means leave it, exactly as an absent who_can_message does, so saving a display name never re-states a call policy the user never saw.
+    pub who_can_call_voice: Option<u32>,
+    /// New video-call policy, separate from the audio one because refusing to be seen is not refusing to be spoken to: video set to 0 while audio stays at 1 is the control that turns off video calls and keeps voice calls ringing.
+    pub who_can_call_video: Option<u32>,
 }
 
 impl Encode for ProfileUpdate {
@@ -7896,7 +7918,9 @@ impl Encode for ProfileUpdate {
             + usize::from(self.who_can_message.is_some())
             + usize::from(self.who_can_add.is_some())
             + usize::from(self.searchable.is_some())
-            + usize::from(self.custom_status.is_some());
+            + usize::from(self.custom_status.is_some())
+            + usize::from(self.who_can_call_voice.is_some())
+            + usize::from(self.who_can_call_video.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.display_name {
             w.optional(1, |w| {
@@ -7952,6 +7976,18 @@ impl Encode for ProfileUpdate {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.who_can_call_voice {
+            w.optional(10, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.who_can_call_video {
+            w.optional(11, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7975,6 +8011,8 @@ impl Decode for ProfileUpdate {
                 7 => out.who_can_add = Some(sub.read_u32()?),
                 8 => out.searchable = Some(sub.read_bool()?),
                 9 => out.custom_status = Some(sub.read_string()?),
+                10 => out.who_can_call_voice = Some(sub.read_u32()?),
+                11 => out.who_can_call_video = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
