@@ -12,9 +12,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -244,6 +247,7 @@ private fun IncomingCallScreen(
 }
 
 /** The screen every state of a tracked call renders through. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ActiveCallScreen(
     state: CallUiState,
@@ -413,48 +417,20 @@ private fun ActiveCallScreen(
             )
         }
 
-        // The two quality controls, in a row of their own above the actions. The row below is
-        // already as wide as a phone is, and these are secondary to the controls a call is actually
-        // driven with; they also belong beside the tier they act on rather than among the buttons
-        // for the microphone and the camera. They are offered on a voice call too, because low
-        // bandwidth mode caps the audio where the ladder has no video to give up.
-        if (display == CallDisplayState.Connected || display == CallDisplayState.Degraded) {
-            val chooseQuality = onChooseQuality
-            val toggleLowBandwidth = onToggleLowBandwidth
-            if (chooseQuality != null && toggleLowBandwidth != null) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 148.dp),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
-                ) {
-                    QualityCeilingButton(
-                        ceiling = state.qualityCeiling,
-                        onChoose = chooseQuality,
-                    )
-                    // The glyph is the whole state of the control: a tortoise is on, a hare is off,
-                    // and the label says which way the tap goes, the way every other control here
-                    // does.
-                    CallActionButton(
-                        glyph = if (state.lowBandwidth) "🐢" else "🐇",
-                        label = if (state.lowBandwidth) {
-                            "Leave low bandwidth mode"
-                        } else {
-                            "Use low bandwidth mode"
-                        },
-                        background = MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                        onClick = { toggleLowBandwidth(!state.lowBandwidth) },
-                    )
-                }
-            }
-        }
-
-        Row(
+        // The controls wrap rather than clip, the same rule the group chat's header follows and
+        // for the same reason: the widest call carries nine of them -- share, camera, switch,
+        // minimise, audio route, quality, low bandwidth, mute and hang up -- and nine circles in
+        // one line is wider than any phone this draws on. A wrapped row is the whole row; a
+        // clipped one silently drops whichever control happened to be last, and which control that
+        // is depends on the device. Centring is what keeps a row that does fit reading exactly
+        // where it did before the wrapping arrived.
+        FlowRow(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp),
-            horizontalArrangement = Arrangement.spacedBy(32.dp),
+                .fillMaxWidth()
+                .padding(start = 24.dp, end = 24.dp, bottom = 40.dp),
+            horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             when (display) {
                 CallDisplayState.Ringing -> CallActionButton(
@@ -542,6 +518,29 @@ private fun ActiveCallScreen(
                             outputs = outputs,
                             chosenOutput = chosenOutput,
                             onChooseOutput = onChooseOutput,
+                        )
+                    }
+                    // The two quality controls sit beside the routing menu rather than among the
+                    // microphone and camera buttons, because they are the same kind of thing: a
+                    // property of the call the user may choose, offered on a voice call as well as
+                    // a video one. The ceiling is null for automatic, and the mode is offered even
+                    // where the ladder has nothing to give up, because on a voice call the audio
+                    // cap is the whole of what it can mean.
+                    if (onChooseQuality != null && onToggleLowBandwidth != null) {
+                        QualityCeilingButton(
+                            ceiling = state.qualityCeiling,
+                            onChoose = onChooseQuality,
+                        )
+                        CallActionButton(
+                            glyph = if (state.lowBandwidth) "🐢" else "🐇",
+                            label = if (state.lowBandwidth) {
+                                "Leave low bandwidth mode"
+                            } else {
+                                "Use low bandwidth mode"
+                            },
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            onClick = { onToggleLowBandwidth(!state.lowBandwidth) },
                         )
                     }
                     CallActionButton(
