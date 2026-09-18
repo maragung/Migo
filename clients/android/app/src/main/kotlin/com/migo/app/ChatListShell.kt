@@ -3,12 +3,13 @@ package com.migo.app
 import android.content.Intent
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -44,7 +44,6 @@ import com.migo.app.ui.ListRowLine
 import com.migo.app.ui.ListRowName
 import com.migo.app.ui.LoadingRow
 import com.migo.app.ui.LocalMigoExtra
-import com.migo.app.ui.MigoRadius
 import com.migo.app.ui.MigoType
 import com.migo.app.ui.MobileHome
 import com.migo.app.ui.PanelBar
@@ -277,12 +276,18 @@ private fun ChatListRow(row: ConversationRow, onOpen: () -> Unit) {
 }
 
 /**
- * The bottom bar: Main, Friends, Rooms, Feed — the strip's chip style turned upside down, the
- * selected tab the one solid white pill on the deep teal. Main is the first tab and the list's
- * own: it lands on the conversation list the shell is, so the home the person stands on is one
- * tap from anywhere the bar can take them, and stays put when it is pressed where it already is.
- * The list's unread stays in the rows' own pills rather than a badge on the tab, because the
- * conversations themselves — not the list — are what is unread.
+ * The bottom bar: Main, Friends, Rooms, Feed, in the shape a phone's messenger wears its home.
+ *
+ * The four are equal shares of the width, each an icon over its own name, the one in front the
+ * only one at full brightness — the arrangement WhatsApp settled on for a phone's thumb, and the
+ * one this bar is asked to keep. What it replaced was a row of pills: a pill is a tab, and a tab
+ * is something you close, whereas these four are the phone's home itself. The shape says so
+ * before anything is read.
+ *
+ * Main is the first tab and the list's own: it lands on the conversation list the shell is, so the
+ * home the person stands on is one tap from anywhere the bar can take them, and stays put when it
+ * is pressed where it already is. The list's unread stays in the rows' own pills rather than a
+ * badge on the tab, because the conversations themselves — not the list — are what is unread.
  */
 @Composable
 private fun ChatListBottomNav(
@@ -291,22 +296,27 @@ private fun ChatListBottomNav(
     modifier: Modifier = Modifier,
 ) {
     val extra = LocalMigoExtra.current
-    Surface(color = extra.nav, modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .heightIn(min = 52.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            for (tab in listNavOrder) {
-                ListNavItem(
-                    label = tab.first,
-                    glyph = tab.second,
-                    active = section == tab.second,
-                    onClick = { onSelect(tab.second) },
-                    modifier = Modifier.weight(1f),
-                )
+    Column(modifier = modifier.fillMaxWidth()) {
+        // The hairline is what separates the bar from the list it sits under on a bright screen;
+        // without it the two grounds meet with nothing between them.
+        HorizontalDivider(color = Color.Black.copy(alpha = 0.18f))
+        Surface(color = extra.nav, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .heightIn(min = 58.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                for (tab in listNavOrder) {
+                    ListNavItem(
+                        label = tab.first,
+                        glyph = tab.second,
+                        active = section == tab.second,
+                        onClick = { onSelect(tab.second) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
     }
@@ -321,7 +331,14 @@ private val listNavOrder = listOf(
     "Feed" to AppState.Section.FEED,
 )
 
-/** One tab of the bottom bar, centred in its share of the row. */
+/**
+ * One tab of the bottom bar: its glyph over its name, centred in its share of the width.
+ *
+ * The whole column is the target rather than the glyph alone, because on a phone the label is
+ * most of what a thumb aims at. The one in front carries the full white and the extra weight;
+ * the rest step back to a fraction of it, which is the same "where am I" the pill used to say
+ * without drawing a box around it.
+ */
 @Composable
 private fun ListNavItem(
     label: String,
@@ -330,37 +347,24 @@ private fun ListNavItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val extra = LocalMigoExtra.current
-    val activeInk = Color(0xFF0D6373)
-    val idleInk = Color.White.copy(alpha = 0.92f)
-    val ink = if (active) activeInk else idleInk
-    Box(
+    val ink = if (active) Color.White else Color.White.copy(alpha = 0.62f)
+    Column(
         modifier = modifier
-            .padding(top = 6.dp)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+            .fillMaxHeight()
+            .clickable(onClick = onClick)
+            .padding(vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .background(
-                    color = if (active) extra.navActive else Color.White.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(MigoRadius.md),
-                )
-                .padding(horizontal = 12.dp, vertical = 7.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TabGlyph(kind = glyphKind(glyph), tint = ink)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontSize = MigoType.body,
-                    fontWeight = FontWeight.SemiBold,
-                    color = ink,
-                    maxLines = 1,
-                )
-            }
-        }
+        TabGlyph(kind = glyphKind(glyph), tint = ink)
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = label,
+            fontSize = MigoType.meta,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+            color = ink,
+            maxLines = 1,
+        )
     }
 }
 
