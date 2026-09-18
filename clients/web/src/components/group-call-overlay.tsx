@@ -187,6 +187,15 @@ export function GroupCallScreen({
   const seated = live && call.phase === 'seated';
   const rosterEmpty = live && call.phase === 'joining';
   const cameraToggleable = call.videoPublished;
+  // What this seat shows itself: the screen while one is being shared, the camera while it is on,
+  // and nothing otherwise. The share comes first because it is what the other seats are watching —
+  // a self-view of the user's own face during a share is a preview of the one thing that is *not*
+  // on the wire, and the sharer is the only person who cannot see the wire to notice.
+  const preview = call.sharingScreen
+    ? call.screenStream
+    : call.cameraOn === false
+      ? null
+      : call.localStream;
 
   return (
     <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Group call">
@@ -208,9 +217,7 @@ export function GroupCallScreen({
         ) : null}
       </div>
 
-      {seated && call.localStream !== null && call.videoPublished && call.cameraOn !== false ? (
-        <SelfVideo stream={call.localStream} />
-      ) : null}
+      {seated && preview !== null && call.videoPublished ? <SelfVideo stream={preview} /> : null}
 
       <ul className="group-call-roster" aria-label="Participants">
         {call.seats.map((seat) => {

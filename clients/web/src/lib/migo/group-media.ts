@@ -1126,6 +1126,16 @@ export class GroupMediaPlane {
     return this.#screenStream !== null;
   }
 
+  /**
+   * The captured screen while one is being shared, for the sharer's own preview.
+   *
+   * Exposed because the seat's self-view has to show what is going on the wire: a preview of the
+   * camera during a share is a picture of the one thing the other seats are *not* watching.
+   */
+  get screenStream(): MediaStream | null {
+    return this.#screenStream;
+  }
+
   /** This seat's local stream, for the self-view; `null` before media exists. */
   get localStream(): MediaStream | null {
     return this.#localStream;

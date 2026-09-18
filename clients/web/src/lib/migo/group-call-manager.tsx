@@ -115,6 +115,14 @@ export interface ActiveGroupCall {
    * so a seat that stops sharing comes back to the camera it already had.
    */
   sharingScreen: boolean;
+  /**
+   * The captured screen while a share runs; `null` otherwise.
+   *
+   * The self-view shows this rather than the camera, for the same reason the one-to-one screen does:
+   * a preview of the user's own face during a share is a picture of the one thing the other seats
+   * are not watching, and the sharer is the only person who cannot see the wire to notice.
+   */
+  screenStream: MediaStream | null;
   /** A media failure stated as a fact (the microphone the plane could not acquire). */
   mediaError: string | null;
 }
@@ -305,6 +313,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
           muted: planeNow.muted,
           cameraOn: planeNow.cameraOn,
           sharingScreen: planeNow.screenSharing,
+          screenStream: planeNow.screenStream,
         });
       },
       onFailure: (what) => {
@@ -404,6 +413,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         muted: false,
         cameraOn: null,
         sharingScreen: false,
+        screenStream: null,
         mediaError: null,
       });
       // Seating in the tracked call makes the roster this conversation's call state; the
@@ -524,7 +534,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     const sharing = plane.screenSharing;
     const active = activeRef.current;
     if (active !== null) {
-      setActive({ ...active, sharingScreen: sharing });
+      setActive({ ...active, sharingScreen: sharing, screenStream: plane.screenStream });
     }
     return sharing;
   }, [setActive]);

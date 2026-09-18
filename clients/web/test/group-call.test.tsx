@@ -132,6 +132,8 @@ function activeCall(overrides: Partial<ActiveGroupCall> = {}): ActiveGroupCall {
     videoPublished: false,
     muted: false,
     cameraOn: null,
+    sharingScreen: false,
+    screenStream: null,
     mediaError: null,
     ...overrides,
   };
@@ -151,6 +153,7 @@ function screen(overrides: Partial<GroupCallScreenProps> = {}): string {
     onDismiss: () => {},
     onToggleMute: () => null,
     onToggleCamera: () => null,
+    onToggleScreenShare: () => Promise.resolve(false),
     ...overrides,
   };
   return renderToStaticMarkup(<GroupCallScreen {...props} />);
@@ -392,6 +395,50 @@ test('the screen renders the state words and the controls that exist, and only t
   assert.ok(
     !noMic.includes('in this call'),
     'the count yields to the failure, it does not hide it',
+  );
+});
+
+test('the self-view shows the screen while one is shared, and stays away when there is neither', () => {
+  const camera = { getVideoTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream;
+  const desktop = { getVideoTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream;
+  const video = { mediaKind: CallMediaKind.Video, videoPublished: true };
+
+  // A camera on its own is previewed, and a camera the seat turned off is not: the preview would be
+  // of a device this seat has already handed back.
+  assert.ok(
+    screen({ call: activeCall({ ...video, cameraOn: true, localStream: camera }) }).includes(
+      'group-call-self-video',
+    ),
+  );
+  assert.ok(
+    !screen({ call: activeCall({ ...video, cameraOn: false, localStream: camera }) }).includes(
+      'group-call-self-video',
+    ),
+  );
+  // A share is previewed even with the camera off — it is what the other seats are watching, and the
+  // sharer is the one person who cannot see the wire to check.
+  const sharing = screen({
+    call: activeCall({
+      ...video,
+      cameraOn: false,
+      localStream: null,
+      sharingScreen: true,
+      screenStream: desktop,
+    }),
+  });
+  assert.ok(sharing.includes('group-call-self-video'), 'the share is what the sharer previews');
+  assert.ok(sharing.includes('Sharing screen'));
+  // A share whose capture has already been handed back shows nothing rather than an empty frame.
+  assert.ok(
+    !screen({
+      call: activeCall({
+        ...video,
+        sharingScreen: true,
+        screenStream: null,
+        cameraOn: true,
+        localStream: camera,
+      }),
+    }).includes('group-call-self-video'),
   );
 });
 
