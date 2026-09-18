@@ -12,6 +12,7 @@ import com.migo.core.protocol.CallInviteResult
 import com.migo.core.protocol.CallListEntry
 import com.migo.core.protocol.CallListQuery
 import com.migo.core.protocol.CallListResult
+import com.migo.core.protocol.CallRating
 import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.CallStateEvent
 import com.migo.core.protocol.CallStats
@@ -294,6 +295,14 @@ class CallsDomain(
      * `CALL_STATS` is Droppable — a lost report costs nothing — and carries only aggregate numbers:
      * setup time, round-trip time, loss, jitter, whether TURN was used. Never any call content. The
      * fields are optional; send what this call measured and leave the rest unset.
+     *
+     * The same opcode carries the user's own post-call verdict, because it is the one frame already
+     * leaving the device at the moment a call ends and a second opcode would be a second mechanism
+     * for one question. `rating` is absent when the user did not answer — closing the question sends
+     * nothing rather than a neutral verdict, since an average nobody chose would be a lie the
+     * aggregate then averages in. `issues` is a bitmask of what went wrong, audio, video, connection
+     * or the call dropping, and it is independent of the verdict: a call can be rated excellent and
+     * still have dropped once.
      */
     suspend fun reportStats(
         callId: Id,
@@ -302,8 +311,10 @@ class CallsDomain(
         packetLoss: Long? = null,
         jitterMs: Long? = null,
         usedTurn: Boolean? = null,
+        rating: CallRating? = null,
+        issues: ULong? = null,
     ) {
-        val request = CallStats(callId, setupMs, rttMs, packetLoss, jitterMs, usedTurn)
+        val request = CallStats(callId, setupMs, rttMs, packetLoss, jitterMs, usedTurn, rating, issues)
         rpc.call(Op.CALL_STATS, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
     }
 }

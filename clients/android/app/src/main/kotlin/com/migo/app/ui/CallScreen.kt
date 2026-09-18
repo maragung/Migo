@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -46,6 +47,7 @@ import com.migo.core.domain.displayStateOf
 import com.migo.core.domain.endedReasonLine
 import com.migo.core.domain.formatCallDuration
 import com.migo.core.domain.mediaKindLabel
+import com.migo.core.protocol.CallRating
 import kotlinx.coroutines.delay
 import org.webrtc.EglBase
 import org.webrtc.RendererCommon
@@ -103,6 +105,7 @@ fun CallOverlay(
     onHangUp: () -> Unit,
     onToggleMute: () -> Unit,
     onDismiss: () -> Unit,
+    onRateCall: (CallRating, ULong) -> Unit,
     localVideo: VideoTrack?,
     remoteVideo: VideoTrack?,
     modifier: Modifier = Modifier,
@@ -147,6 +150,7 @@ fun CallOverlay(
                 onHangUp = onHangUp,
                 onToggleMute = onToggleMute,
                 onDismiss = onDismiss,
+                onRateCall = onRateCall,
             )
 
             else -> CallErrorCard(message = state.callError ?: "", onDismiss = onDismiss)
@@ -199,6 +203,7 @@ private fun ActiveCallScreen(
     onHangUp: () -> Unit,
     onToggleMute: () -> Unit,
     onDismiss: () -> Unit,
+    onRateCall: (CallRating, ULong) -> Unit,
 ) {
     // One tick per second while connected: the duration is the only number on screen that moves.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -297,6 +302,18 @@ private fun ActiveCallScreen(
         // a ringing callee hangs up, connecting and reconnecting hang up, connected offers the mute
         // beside the hang-up, and ended offers the way back. They ride the bottom of the screen
         // rather than the center column, so a video call's face is never covered by its buttons.
+        // The post-call question rides above the ended screen's own action, on the web overlay's
+        // rule: it is asked only of a call that connected, and it is the last thing this screen
+        // says before the user leaves it. A call that never connected asked nobody anything.
+        if (display == CallDisplayState.Ended && call.canRate) {
+            CallRatingQuestion(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 24.dp, end = 24.dp, bottom = 128.dp),
+                onRate = onRateCall,
+            )
+        }
+
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -491,5 +508,140 @@ private fun CallActionButton(
         contentAlignment = Alignment.Center,
     ) {
         Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
+    }
+}
+
+/**
+ * The four verdicts, in the order the wire numbers them, so the list a reader compares against
+ * `CallRating` is the list on screen. `Unknown` is deliberately absent: it is what a build that
+ * does not recognise a value decodes to, and a user cannot choose not to know.
+ */
+private val RATING_CHOICES: List<Pair<CallRating, String>> = listOf(
+    CallRating.Excellent to "Excellent",
+    CallRating.Good to "Good",
+    CallRating.Average to "Average",
+    CallRating.Poor to "Poor",
+)
+
+/**
+ * What went wrong, as the bitmask the wire carries: bit 0 audio, 1 video, 2 connection, 3 dropped.
+ * None of them is exclusive and none is required, because a call can be rated excellent and still
+ * have dropped once, and a user with nothing to report should be able to say so by saying nothing.
+ */
+private val RATING_ISSUES: List<Pair<ULong, String>> = listOf(
+    1uL to "Audio",
+    2uL to "Video",
+    4uL to "Connection",
+    8uL to "Dropped",
+)
+
+/**
+ * The post-call question: how was the call, and optionally what went wrong.
+ *
+ * Asked once the call has ended and only of a call that connected. Nothing is sent until the user
+ * taps send, so a user who swipes the screen away sends no verdict at all -- an absent verdict
+ * means "did not rate", which is a different fact from a neutral one and must stay that way in the
+ * aggregate. The issue row appears only after a verdict is picked, because a question about what
+ * went wrong is a strange thing to ask somebody who has not said anything did.
+ */
+@Composable
+private fun CallRatingQuestion(
+    modifier: Modifier = Modifier,
+    onRate: (CallRating, ULong) -> Unit,
+) {
+    var rating by remember { mutableStateOf<CallRating?>(null) }
+    var issues by remember { mutableStateOf(0uL) }
+    var sent by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(MigoRadius.md),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = if (sent) "Thanks. Your rating is on its way." else "How was this call?",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
+            )
+            if (!sent) {
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for ((choice, label) in RATING_CHOICES) {
+                        RatingChip(
+                            label = label,
+                            selected = rating == choice,
+                            onClick = { rating = choice },
+                        )
+                    }
+                }
+            }
+            val chosen = rating
+            if (!sent && chosen != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Anything go wrong? Optional.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for ((bit, label) in RATING_ISSUES) {
+                        RatingChip(
+                            label = label,
+                            selected = issues and bit != 0uL,
+                            onClick = { issues = issues xor bit },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = {
+                    sent = true
+                    onRate(chosen, issues)
+                }) {
+                    Text("Send rating")
+                }
+                Text(
+                    text = "Only these answers leave your device, never anything that was said.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+    }
+}
+
+/** One selectable answer: a label whose fill says whether it is on, in the privacy rows' own shape. */
+@Composable
+private fun RatingChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val fill = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val ink = if (selected) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(MigoRadius.md))
+            .background(fill)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = label, color = ink, style = MaterialTheme.typography.labelLarge)
     }
 }

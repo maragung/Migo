@@ -110,6 +110,7 @@ import com.migo.core.net.TrackOutcome
 import com.migo.core.net.TrackResult
 import com.migo.core.protocol.BotEvent
 import com.migo.core.protocol.BotView
+import com.migo.core.protocol.CallRating
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationMemberEvent
 import com.migo.core.protocol.ConversationRole
@@ -1183,6 +1184,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
     fun dismissCallScreen() {
         callManager?.dismissCall()
+    }
+
+    /**
+     * Sends the user's verdict on the call that just ended. The screen only offers this for a call
+     * that connected and has not been rated, and the manager checks the same thing again, because a
+     * tap can outlive the state it was drawn from.
+     */
+    fun rateCall(rating: CallRating, issues: ULong = 0uL) {
+        callManager?.rateCall(rating, issues)
     }
 
     // --- group calls ---

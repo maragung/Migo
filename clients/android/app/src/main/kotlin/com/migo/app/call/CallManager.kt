@@ -30,6 +30,7 @@ import com.migo.core.domain.ringTimeoutMs
 import com.migo.core.domain.sealCallSignal
 import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallInviteEvent
+import com.migo.core.protocol.CallRating
 import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.CallStateEvent
 import com.migo.core.wire.Id
@@ -667,6 +668,41 @@ class CallManager(
         muted = !muted
         audioTrack?.setEnabled(!muted)
         _state.update { it.copy(muted = muted) }
+    }
+
+    /**
+     * Sends the user's own verdict on the call that just ended.
+     *
+     * It rides the same `CALL_STATS` frame the setup time used, which is the one report already
+     * leaving the device around a call, and the same opcode is Droppable, so a lost verdict costs
+     * nothing beyond the question the user already answered. The flag is set before the send rather
+     * than after, because the send is fire-and-forget in a scope that outlives the screen: a second
+     * tap while the first is in flight would otherwise put the same verdict on the wire twice, and
+     * the aggregate would count one user's opinion as two.
+     *
+     * Ratings are asked only of a call that connected and are accepted only while that call is
+     * still the tracked one -- once the screen is dismissed there is no call to attach a verdict to.
+     * `issues` is a bitmask and zero means none: absent and zero would otherwise be two spellings
+     * of "nothing went wrong" on the wire.
+     */
+    fun rateCall(rating: CallRating, issues: ULong = 0uL) {
+        val call = active ?: return
+        if (!call.canRate) {
+            return
+        }
+        active = call.copy(ratingSent = true)
+        _state.update { it.copy(call = active) }
+        scope.launch {
+            try {
+                client.calls.reportStats(
+                    call.callId,
+                    rating = rating,
+                    issues = if (issues == 0uL) null else issues,
+                )
+            } catch (_: Exception) {
+                // CALL_STATS is Droppable: a lost verdict costs nothing.
+            }
+        }
     }
 
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
@@ -1416,7 +1452,21 @@ data class ActiveCall(
     val isCaller: Boolean,
     /** When media first connected, for the running duration and the ended screen's total. */
     val startedAt: Long? = null,
-)
+    /**
+     * Whether the user's post-call verdict has gone out. Its own flag rather than a second use of
+     * the setup-time report, because the two leave at opposite ends of the call: the setup time at
+     * the connect, the verdict after the end, and a call that never connected sends neither.
+     */
+    val ratingSent: Boolean = false,
+) {
+    /**
+     * Whether this ended call may still be rated. True only for a call that really connected and
+     * has not been rated yet, because a call nobody experienced is a call nobody can judge -- and a
+     * question asked about one would be answered by a guess about something that never happened.
+     */
+    val canRate: Boolean
+        get() = state == CallState.Ended && startedAt != null && !ratingSent
+}
 
 /** The slice of the call manager the screens read. */
 data class CallUiState(
