@@ -94,6 +94,15 @@ val LocalCallEglContext = staticCompositionLocalOf<EglBase.Context?> { null }
  * The back gesture is handled where it means something, the shell's own rule: back declines an
  * incoming ring, dismisses an ended screen or a failure card, and on a live call is consumed
  * without acting -- a pocket gesture must never hang up on anybody.
+ *
+ * # The small window
+ *
+ * A video call can be handed to the system's picture-in-picture window, which is the phone's own
+ * answer to leaving the app without leaving the call. In that window this screen drops everything
+ * drawn for a full one -- the identity, the status line, the controls -- and shows the picture,
+ * because a thumbnail has room for a picture and nothing else. The layout is chosen by the same
+ * `CallDisplayState` as everywhere below, so a call that ends while minimised says so in the
+ * window rather than going black.
  */
 @Composable
 fun CallOverlay(
@@ -108,6 +117,9 @@ fun CallOverlay(
     onRateCall: (CallRating, ULong) -> Unit,
     localVideo: VideoTrack?,
     remoteVideo: VideoTrack?,
+    onMinimize: (() -> Unit)? = null,
+    onSwitchCamera: (() -> Unit)? = null,
+    inPictureInPicture: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val incoming = state.incoming
@@ -151,6 +163,9 @@ fun CallOverlay(
                 onToggleMute = onToggleMute,
                 onDismiss = onDismiss,
                 onRateCall = onRateCall,
+                onMinimize = onMinimize,
+                onSwitchCamera = onSwitchCamera,
+                inPictureInPicture = inPictureInPicture,
             )
 
             else -> CallErrorCard(message = state.callError ?: "", onDismiss = onDismiss)
@@ -204,6 +219,9 @@ private fun ActiveCallScreen(
     onToggleMute: () -> Unit,
     onDismiss: () -> Unit,
     onRateCall: (CallRating, ULong) -> Unit,
+    onMinimize: (() -> Unit)?,
+    onSwitchCamera: (() -> Unit)?,
+    inPictureInPicture: Boolean,
 ) {
     // One tick per second while connected: the duration is the only number on screen that moves.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -232,6 +250,23 @@ private fun ActiveCallScreen(
     // the *peer's* track arrives (the answer path's audio-only fallback), and a voice call
     // never does, whatever the peer managed to send.
     val showVideos = call.mediaKind == CallMediaKind.Video && remoteVideo != null
+
+    // The picture-in-picture window is the size of a thumbnail, so it shows the picture and
+    // nothing else. The identity, the status line and every control were drawn for a full screen
+    // and would be unreadable here; the system's own window controls expand it or close it, and
+    // closing it leaves the call up for the notification and the lock screen to return to. A call
+    // in this window that is not sending video -- a voice call minimised by mistake, or a video
+    // call whose camera never opened -- falls back to the voice layout's own two facts, because a
+    // window that is entirely blank is worse than one that is merely small.
+    if (inPictureInPicture) {
+        val stage = remoteVideo
+        if (showVideos && stage != null) {
+            VideoStage(remoteVideo = stage, localVideo = localVideo, peerName = peerName)
+        } else {
+            CallStage(peerName = peerName, status = callStateLabel(display)) {}
+        }
+        return
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (showVideos) {
@@ -338,6 +373,30 @@ private fun ActiveCallScreen(
                 )
 
                 CallDisplayState.Connected, CallDisplayState.Degraded -> {
+                    // The camera switch is offered for a video call on a device that has somewhere
+                    // to switch to; a phone with one camera gets no control rather than one that
+                    // cannot move.
+                    if (onSwitchCamera != null && call.mediaKind == CallMediaKind.Video) {
+                        CallActionButton(
+                            glyph = "🔄",
+                            label = "Switch camera",
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            onClick = onSwitchCamera,
+                        )
+                    }
+                    // The minimise control is offered for a video call and only where the device
+                    // can actually draw the window it opens: a control that does nothing is worse
+                    // than no control. A voice call has no picture to carry into a thumbnail.
+                    if (onMinimize != null && call.mediaKind == CallMediaKind.Video) {
+                        CallActionButton(
+                            glyph = "▭",
+                            label = "Minimize call",
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            onClick = onMinimize,
+                        )
+                    }
                     CallActionButton(
                         glyph = if (state.muted) "🔇" else "🎙️",
                         label = if (state.muted) "Unmute microphone" else "Mute microphone",

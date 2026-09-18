@@ -1,7 +1,6 @@
 package com.migo.app
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -62,7 +61,7 @@ import com.migo.core.store.ThemeChoice
  * way, and never exits the app while a window or a panel is showing. The chat-list mode swaps the
  * strip for a bottom bar and Main's conversation list, in [ChatListShell].
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : CallHostActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // Android 15 draws behind the system bars whether an app asks or not, at this target level.
         // Calling it explicitly makes older versions behave the same, so the insets handled below are
