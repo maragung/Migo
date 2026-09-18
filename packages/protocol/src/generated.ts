@@ -6639,6 +6639,143 @@ export function decodeCallSfuParticipant(r: Reader): CallSfuParticipant {
   return out;
 }
 
+/** Asks for the calls this account was party to that have already ended, newest first. The answer is a page rather than the whole record: a client that scrolls asks again with the oldest row it holds as the cursor. The scope reaches no further than the asking account, because the rows are exactly the calls the server already keeps for it. */
+export interface CallHistoryQuery {
+  /** When set, only the ended calls belonging to this conversation are listed, which is the question a conversation's own screen asks. */
+  conversationId?: Id;
+  /** When set, only rows that ended strictly before this instant are listed. This is the paging cursor: pass the ended_at of the oldest row already held and the next page begins where the last one stopped. Absent asks for the newest page. */
+  before?: number;
+  /** The most rows to return. Absent means the server's own page size, and a value above the server's ceiling is clamped to it rather than refused, because a client asking for more than the server keeps is asking a question and not making a mistake. */
+  limit?: number;
+}
+
+export function encodeCallHistoryQuery(w: Writer, v: CallHistoryQuery): void {
+  w.enter();
+  let present = 0;
+  if (v.conversationId !== undefined) present++;
+  if (v.before !== undefined) present++;
+  if (v.limit !== undefined) present++;
+  w.u32(present);
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  if (v.before !== undefined) { const value = v.before; w.optional(2, (w) => { w.timestamp(value); }); }
+  if (v.limit !== undefined) { const value = v.limit; w.optional(3, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeCallHistoryQuery(r: Reader): CallHistoryQuery {
+  r.enter();
+  const out: CallHistoryQuery = {  } as CallHistoryQuery;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.conversationId = sub.id(); break;
+      case 2: out.before = sub.timestamp(); break;
+      case 3: out.limit = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One ended call, from the asking account's side. A row exists for every call that account was a party to and for no other call: a ring aimed at the account that was never answered is a row, because a missed call is the fact a history exists to show, and a call between two other people is not. A group call is a row for every account that held a seat on its roster, so a member who was in the call sees it and a member who only heard about it does not. */
+export interface CallHistoryEntry {
+  /** The call's id as it was minted. Stable across listings, and the same id every event of that call carried. */
+  callId: Id;
+  /** The conversation the call belonged to. */
+  conversationId: Id;
+  /** CallListEntry's numbering: 0=Direct, 1=Group. The same two numbers, because a client draws the same two rows. */
+  kind: number;
+  /** Direct: the other party's account, whether or not they ever answered. Group: the account that founded the call by joining first. */
+  peerId: Id;
+  /** 0=Outgoing, 1=Incoming, read from the asking account's side. A group call reads 0 when this account founded it and 1 otherwise, because who started the call is the question this field answers and a roster has no caller of its own. */
+  direction: number;
+  /** How it ended, in the vocabulary a history screen renders: 0=Answered (it connected and then ended, however long it lasted), 1=Missed (it rang out), 2=Declined, 3=Busy, 4=Cancelled (the caller withdrew it before anyone answered), 5=Failed (a device or the network gave up). Derived rather than relayed: the server reads its own ended row, which records whether the callee answered and the reason the row was closed, so a claim one party made about the other can never be the thing the other party's history repeats back to them. */
+  outcome: number;
+  /** When the call ended. Present on every row, because it is both the page order and the cursor a client pages with. */
+  endedAt: number;
+  /** Direct: 0=Audio, 1=Video. Absent for a group call for the same reason CallListEntry leaves it absent: a roster's seats each negotiate their own media, so the call has no single kind to name. */
+  mediaKind?: number;
+  /** A direct call the callee picked up: when they did. Absent whenever outcome is not 0, and absent for a group call, whose row keeps no answer time because its seats arrive one at a time. */
+  answeredAt?: number;
+  /** A group call: when its first seat was taken. Absent for a direct call, whose row has never kept a start, which is the same split CallListEntry's optional fields make. */
+  startedAt?: number;
+  /** A group call: how many seats the roster held when the call ended. Absent for a direct call, which is two by construction. */
+  participantCount?: number;
+}
+
+export function encodeCallHistoryEntry(w: Writer, v: CallHistoryEntry): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.conversationId);
+  w.u32(v.kind);
+  w.id(v.peerId);
+  w.u32(v.direction);
+  w.u32(v.outcome);
+  w.timestamp(v.endedAt);
+  let present = 0;
+  if (v.mediaKind !== undefined) present++;
+  if (v.answeredAt !== undefined) present++;
+  if (v.startedAt !== undefined) present++;
+  if (v.participantCount !== undefined) present++;
+  w.u32(present);
+  if (v.mediaKind !== undefined) { const value = v.mediaKind; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.answeredAt !== undefined) { const value = v.answeredAt; w.optional(2, (w) => { w.timestamp(value); }); }
+  if (v.startedAt !== undefined) { const value = v.startedAt; w.optional(3, (w) => { w.timestamp(value); }); }
+  if (v.participantCount !== undefined) { const value = v.participantCount; w.optional(4, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeCallHistoryEntry(r: Reader): CallHistoryEntry {
+  r.enter();
+  const callId = r.id();
+  const conversationId = r.id();
+  const kind = r.u32();
+  const peerId = r.id();
+  const direction = r.u32();
+  const outcome = r.u32();
+  const endedAt = r.timestamp();
+  const out: CallHistoryEntry = { callId, conversationId, kind, peerId, direction, outcome, endedAt } as CallHistoryEntry;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.mediaKind = sub.u32(); break;
+      case 2: out.answeredAt = sub.timestamp(); break;
+      case 3: out.startedAt = sub.timestamp(); break;
+      case 4: out.participantCount = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A page of ended calls, newest first: the row that ended latest at the top, and rows stamped in the same millisecond ordered by call id so that two listings of the same history do not disagree. A client takes the next page by passing the oldest row's ended_at as the next query's before. */
+export interface CallHistoryResult {
+  calls: CallHistoryEntry[];
+}
+
+export function encodeCallHistoryResult(w: Writer, v: CallHistoryResult): void {
+  w.enter();
+  { w.listLen(v.calls.length); for (const item of v.calls) { encodeCallHistoryEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallHistoryResult(r: Reader): CallHistoryResult {
+  r.enter();
+  const calls = ((): CallHistoryEntry[] => { const n = r.listLen(); const v: CallHistoryEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeCallHistoryEntry(r)); return v; })();
+  const out: CallHistoryResult = { calls } as CallHistoryResult;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 /** Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing. */
 export interface CallListQuery {
   /** When set, only the calls belonging to this conversation are listed. */
@@ -7939,6 +8076,8 @@ export const OP = {
   CALL_SFU_EVENT: 238,
   /** Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear. */
   CALL_LIST: 247,
+  /** The calls this account was party to that have already ended, newest first. CALL_LIST answers what is happening now and lets an ended call fall out of its answer, so a screen that shows missed and past calls has nothing to read: this is the same store asked the other question, and the row it answers with is the one the server already wrote when the call died. Paged by ended_at, scoped to one conversation when a conversation's own screen asks, and never a window onto anybody else's calls. */
+  CALL_HISTORY: 250,
   /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
   CONVERSATION_STATE_EVENT: 52,
   /** Buys a store item for the caller; the ledger and the entitlement are written together. */
@@ -8099,6 +8238,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse', paced: false, suppressOn: [] },
   238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id', paced: false, suppressOn: [] },
   247: { code: 247, name: 'CALL_LIST', cost: 2, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallListQuery', response: 'CallListResult', paced: false, suppressOn: [], feature: 'CALLS' },
+  250: { code: 250, name: 'CALL_HISTORY', cost: 2, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallHistoryQuery', response: 'CallHistoryResult', paced: false, suppressOn: [], feature: 'CALLS' },
   52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: [] },
   239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult', paced: false, suppressOn: [], feature: 'ECONOMY' },
   240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse', paced: false, suppressOn: [], feature: 'ECONOMY' },

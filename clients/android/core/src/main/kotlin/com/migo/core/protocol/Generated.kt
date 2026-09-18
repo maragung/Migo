@@ -8349,6 +8349,189 @@ data class CallSfuParticipant(
     }
 }
 
+/** Asks for the calls this account was party to that have already ended, newest first. The answer is a page rather than the whole record: a client that scrolls asks again with the oldest row it holds as the cursor. The scope reaches no further than the asking account, because the rows are exactly the calls the server already keeps for it. */
+data class CallHistoryQuery(
+    /** When set, only the ended calls belonging to this conversation are listed, which is the question a conversation's own screen asks. */
+    val conversationId: Id? = null,
+    /** When set, only rows that ended strictly before this instant are listed. This is the paging cursor: pass the ended_at of the oldest row already held and the next page begins where the last one stopped. Absent asks for the newest page. */
+    val before: Long? = null,
+    /** The most rows to return. Absent means the server's own page size, and a value above the server's ceiling is clamped to it rather than refused, because a client asking for more than the server keeps is asking a question and not making a mistake. */
+    val limit: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        var present = 0
+        if (conversationId != null) present++
+        if (before != null) present++
+        if (limit != null) present++
+        w.u32(present)
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        if (before != null) {
+            val value = before
+            w.optional(2) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (limit != null) {
+            val value = limit
+            w.optional(3) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallHistoryQuery {
+            r.enter()
+            var conversationId: Id? = null
+            var before: Long? = null
+            var limit: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> conversationId = sub.id()
+                    2L -> before = sub.timestamp()
+                    3L -> limit = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallHistoryQuery(conversationId, before, limit)
+        }
+    }
+}
+
+/** One ended call, from the asking account's side. A row exists for every call that account was a party to and for no other call: a ring aimed at the account that was never answered is a row, because a missed call is the fact a history exists to show, and a call between two other people is not. A group call is a row for every account that held a seat on its roster, so a member who was in the call sees it and a member who only heard about it does not. */
+data class CallHistoryEntry(
+    /** The call's id as it was minted. Stable across listings, and the same id every event of that call carried. */
+    val callId: Id,
+    /** The conversation the call belonged to. */
+    val conversationId: Id,
+    /** CallListEntry's numbering: 0=Direct, 1=Group. The same two numbers, because a client draws the same two rows. */
+    val kind: Long,
+    /** Direct: the other party's account, whether or not they ever answered. Group: the account that founded the call by joining first. */
+    val peerId: Id,
+    /** 0=Outgoing, 1=Incoming, read from the asking account's side. A group call reads 0 when this account founded it and 1 otherwise, because who started the call is the question this field answers and a roster has no caller of its own. */
+    val direction: Long,
+    /** How it ended, in the vocabulary a history screen renders: 0=Answered (it connected and then ended, however long it lasted), 1=Missed (it rang out), 2=Declined, 3=Busy, 4=Cancelled (the caller withdrew it before anyone answered), 5=Failed (a device or the network gave up). Derived rather than relayed: the server reads its own ended row, which records whether the callee answered and the reason the row was closed, so a claim one party made about the other can never be the thing the other party's history repeats back to them. */
+    val outcome: Long,
+    /** When the call ended. Present on every row, because it is both the page order and the cursor a client pages with. */
+    val endedAt: Long,
+    /** Direct: 0=Audio, 1=Video. Absent for a group call for the same reason CallListEntry leaves it absent: a roster's seats each negotiate their own media, so the call has no single kind to name. */
+    val mediaKind: Long? = null,
+    /** A direct call the callee picked up: when they did. Absent whenever outcome is not 0, and absent for a group call, whose row keeps no answer time because its seats arrive one at a time. */
+    val answeredAt: Long? = null,
+    /** A group call: when its first seat was taken. Absent for a direct call, whose row has never kept a start, which is the same split CallListEntry's optional fields make. */
+    val startedAt: Long? = null,
+    /** A group call: how many seats the roster held when the call ended. Absent for a direct call, which is two by construction. */
+    val participantCount: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(conversationId)
+        w.u32(kind)
+        w.id(peerId)
+        w.u32(direction)
+        w.u32(outcome)
+        w.timestamp(endedAt)
+        var present = 0
+        if (mediaKind != null) present++
+        if (answeredAt != null) present++
+        if (startedAt != null) present++
+        if (participantCount != null) present++
+        w.u32(present)
+        if (mediaKind != null) {
+            val value = mediaKind
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (answeredAt != null) {
+            val value = answeredAt
+            w.optional(2) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (startedAt != null) {
+            val value = startedAt
+            w.optional(3) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (participantCount != null) {
+            val value = participantCount
+            w.optional(4) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallHistoryEntry {
+            r.enter()
+            val callId = r.id()
+            val conversationId = r.id()
+            val kind = r.u32()
+            val peerId = r.id()
+            val direction = r.u32()
+            val outcome = r.u32()
+            val endedAt = r.timestamp()
+            var mediaKind: Long? = null
+            var answeredAt: Long? = null
+            var startedAt: Long? = null
+            var participantCount: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> mediaKind = sub.u32()
+                    2L -> answeredAt = sub.timestamp()
+                    3L -> startedAt = sub.timestamp()
+                    4L -> participantCount = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallHistoryEntry(callId, conversationId, kind, peerId, direction, outcome, endedAt, mediaKind, answeredAt, startedAt, participantCount)
+        }
+    }
+}
+
+/** A page of ended calls, newest first: the row that ended latest at the top, and rows stamped in the same millisecond ordered by call id so that two listings of the same history do not disagree. A client takes the next page by passing the oldest row's ended_at as the next query's before. */
+data class CallHistoryResult(
+    val calls: List<CallHistoryEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(calls.size)
+        for (item in calls) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallHistoryResult {
+            r.enter()
+            val calls = run { val n = r.listLen(); val acc = ArrayList<CallHistoryEntry>(n); for (i in 0 until n) acc.add(CallHistoryEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallHistoryResult(calls)
+        }
+    }
+}
+
 /** Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing. */
 data class CallListQuery(
     /** When set, only the calls belonging to this conversation are listed. */
@@ -9828,6 +10011,8 @@ object Op {
     const val CALL_SFU_EVENT: Long = 238L
     /** Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear. */
     const val CALL_LIST: Long = 247L
+    /** The calls this account was party to that have already ended, newest first. CALL_LIST answers what is happening now and lets an ended call fall out of its answer, so a screen that shows missed and past calls has nothing to read: this is the same store asked the other question, and the row it answers with is the one the server already wrote when the call died. Paged by ended_at, scoped to one conversation when a conversation's own screen asks, and never a window onto anybody else's calls. */
+    const val CALL_HISTORY: Long = 250L
     /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
     const val CONVERSATION_STATE_EVENT: Long = 52L
     /** Buys a store item for the caller; the ledger and the entitlement are written together. */
@@ -9988,6 +10173,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null, false, listOf(), null),
     238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id", false, listOf(), null),
     247L to OpcodeMeta(247L, "CALL_LIST", 2, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallListQuery", "CallListResult", null, false, listOf(), "CALLS"),
+    250L to OpcodeMeta(250L, "CALL_HISTORY", 2, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallHistoryQuery", "CallHistoryResult", null, false, listOf(), "CALLS"),
     52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id", false, listOf(), null),
     239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null, false, listOf(), "ECONOMY"),
     240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null, false, listOf(), "ECONOMY"),

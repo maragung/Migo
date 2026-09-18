@@ -10213,6 +10213,210 @@ impl Decode for CallSfuParticipant {
     }
 }
 
+/// Asks for the calls this account was party to that have already ended, newest first. The answer is a page rather than the whole record: a client that scrolls asks again with the oldest row it holds as the cursor. The scope reaches no further than the asking account, because the rows are exactly the calls the server already keeps for it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallHistoryQuery {
+    /// When set, only the ended calls belonging to this conversation are listed, which is the question a conversation's own screen asks.
+    pub conversation_id: Option<Id>,
+    /// When set, only rows that ended strictly before this instant are listed. This is the paging cursor: pass the ended_at of the oldest row already held and the next page begins where the last one stopped. Absent asks for the newest page.
+    pub before: Option<Timestamp>,
+    /// The most rows to return. Absent means the server's own page size, and a value above the server's ceiling is clamped to it rather than refused, because a client asking for more than the server keeps is asking a question and not making a mistake.
+    pub limit: Option<u32>,
+}
+
+impl Encode for CallHistoryQuery {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        let present = usize::from(self.conversation_id.is_some())
+            + usize::from(self.before.is_some())
+            + usize::from(self.limit.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.conversation_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.before {
+            w.optional(2, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.limit {
+            w.optional(3, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallHistoryQuery {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.conversation_id = Some(sub.read_id()?),
+                2 => out.before = Some(sub.read_timestamp()?),
+                3 => out.limit = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One ended call, from the asking account's side. A row exists for every call that account was a party to and for no other call: a ring aimed at the account that was never answered is a row, because a missed call is the fact a history exists to show, and a call between two other people is not. A group call is a row for every account that held a seat on its roster, so a member who was in the call sees it and a member who only heard about it does not.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallHistoryEntry {
+    /// The call's id as it was minted. Stable across listings, and the same id every event of that call carried.
+    pub call_id: Id,
+    /// The conversation the call belonged to.
+    pub conversation_id: Id,
+    /// CallListEntry's numbering: 0=Direct, 1=Group. The same two numbers, because a client draws the same two rows.
+    pub kind: u32,
+    /// Direct: the other party's account, whether or not they ever answered. Group: the account that founded the call by joining first.
+    pub peer_id: Id,
+    /// 0=Outgoing, 1=Incoming, read from the asking account's side. A group call reads 0 when this account founded it and 1 otherwise, because who started the call is the question this field answers and a roster has no caller of its own.
+    pub direction: u32,
+    /// How it ended, in the vocabulary a history screen renders: 0=Answered (it connected and then ended, however long it lasted), 1=Missed (it rang out), 2=Declined, 3=Busy, 4=Cancelled (the caller withdrew it before anyone answered), 5=Failed (a device or the network gave up). Derived rather than relayed: the server reads its own ended row, which records whether the callee answered and the reason the row was closed, so a claim one party made about the other can never be the thing the other party's history repeats back to them.
+    pub outcome: u32,
+    /// When the call ended. Present on every row, because it is both the page order and the cursor a client pages with.
+    pub ended_at: Timestamp,
+    /// Direct: 0=Audio, 1=Video. Absent for a group call for the same reason CallListEntry leaves it absent: a roster's seats each negotiate their own media, so the call has no single kind to name.
+    pub media_kind: Option<u32>,
+    /// A direct call the callee picked up: when they did. Absent whenever outcome is not 0, and absent for a group call, whose row keeps no answer time because its seats arrive one at a time.
+    pub answered_at: Option<Timestamp>,
+    /// A group call: when its first seat was taken. Absent for a direct call, whose row has never kept a start, which is the same split CallListEntry's optional fields make.
+    pub started_at: Option<Timestamp>,
+    /// A group call: how many seats the roster held when the call ended. Absent for a direct call, which is two by construction.
+    pub participant_count: Option<u32>,
+}
+
+impl Encode for CallHistoryEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.conversation_id);
+        w.write_u32(self.kind);
+        w.write_id(&self.peer_id);
+        w.write_u32(self.direction);
+        w.write_u32(self.outcome);
+        w.write_timestamp(self.ended_at);
+        let present = usize::from(self.media_kind.is_some())
+            + usize::from(self.answered_at.is_some())
+            + usize::from(self.started_at.is_some())
+            + usize::from(self.participant_count.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.media_kind {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.answered_at {
+            w.optional(2, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.started_at {
+            w.optional(3, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.participant_count {
+            w.optional(4, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallHistoryEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.kind = r.read_u32()?;
+        out.peer_id = r.read_id()?;
+        out.direction = r.read_u32()?;
+        out.outcome = r.read_u32()?;
+        out.ended_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.media_kind = Some(sub.read_u32()?),
+                2 => out.answered_at = Some(sub.read_timestamp()?),
+                3 => out.started_at = Some(sub.read_timestamp()?),
+                4 => out.participant_count = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A page of ended calls, newest first: the row that ended latest at the top, and rows stamped in the same millisecond ordered by call id so that two listings of the same history do not disagree. A client takes the next page by passing the oldest row's ended_at as the next query's before.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallHistoryResult {
+    pub calls: Vec<CallHistoryEntry>,
+}
+
+impl Encode for CallHistoryResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.calls.len())?;
+            for item in self.calls.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallHistoryResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.calls = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(CallHistoryEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Asks what calls this account can see. The optional scope narrows the answer to one conversation, which is the question a conversation's own screen asks; without it the answer is every call the account is party to or is being rung into, which is the question a client asks when it has just reconnected and holds nothing.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallListQuery {
@@ -11949,6 +12153,8 @@ pub enum Opcode {
     CallSfuEvent = 238,
     /// Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear.
     CallList = 247,
+    /// The calls this account was party to that have already ended, newest first. CALL_LIST answers what is happening now and lets an ended call fall out of its answer, so a screen that shows missed and past calls has nothing to read: this is the same store asked the other question, and the row it answers with is the one the server already wrote when the call died. Paged by ended_at, scoped to one conversation when a conversation's own screen asks, and never a window onto anybody else's calls.
+    CallHistory = 250,
     /// Group metadata moved: a rename. Deltas only, coalesced per conversation.
     ConversationStateEvent = 52,
     /// Buys a store item for the caller; the ledger and the entitlement are written together.
@@ -12101,6 +12307,7 @@ impl Opcode {
             237 => Self::CallSfuJoin,
             238 => Self::CallSfuEvent,
             247 => Self::CallList,
+            250 => Self::CallHistory,
             52 => Self::ConversationStateEvent,
             239 => Self::StorePurchase,
             240 => Self::Entitlements,
@@ -12245,6 +12452,7 @@ impl Opcode {
             Self::CallSfuJoin => "CALL_SFU_JOIN",
             Self::CallSfuEvent => "CALL_SFU_EVENT",
             Self::CallList => "CALL_LIST",
+            Self::CallHistory => "CALL_HISTORY",
             Self::ConversationStateEvent => "CONVERSATION_STATE_EVENT",
             Self::StorePurchase => "STORE_PURCHASE",
             Self::Entitlements => "ENTITLEMENTS",
@@ -12389,6 +12597,7 @@ impl Opcode {
             Self::CallSfuJoin => 20,
             Self::CallSfuEvent => 0,
             Self::CallList => 2,
+            Self::CallHistory => 2,
             Self::ConversationStateEvent => 0,
             Self::StorePurchase => 5,
             Self::Entitlements => 1,
@@ -12532,6 +12741,7 @@ impl Opcode {
             Self::CallSfuJoin => DeliveryClass::Critical,
             Self::CallSfuEvent => DeliveryClass::Coalescable,
             Self::CallList => DeliveryClass::Droppable,
+            Self::CallHistory => DeliveryClass::Droppable,
             Self::ConversationStateEvent => DeliveryClass::Coalescable,
             Self::StorePurchase => DeliveryClass::Critical,
             Self::Entitlements => DeliveryClass::Droppable,
@@ -12679,6 +12889,7 @@ impl Opcode {
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
             Self::CallList => false,
+            Self::CallHistory => false,
             Self::ConversationStateEvent => false,
             Self::StorePurchase => false,
             Self::Entitlements => false,
@@ -12830,6 +13041,7 @@ impl Opcode {
             Self::CallSfuJoin => AuthLevel::User,
             Self::CallSfuEvent => AuthLevel::User,
             Self::CallList => AuthLevel::User,
+            Self::CallHistory => AuthLevel::User,
             Self::ConversationStateEvent => AuthLevel::User,
             Self::StorePurchase => AuthLevel::User,
             Self::Entitlements => AuthLevel::User,
@@ -12921,6 +13133,7 @@ impl Opcode {
             Self::CallStats => Some(features::CALLS),
             Self::CallTurnFetch => Some(features::CALLS),
             Self::CallList => Some(features::CALLS),
+            Self::CallHistory => Some(features::CALLS),
             Self::StorePurchase => Some(features::ECONOMY),
             Self::Entitlements => Some(features::ECONOMY),
             Self::KickPointsBuy => Some(features::ECONOMY),
@@ -13064,6 +13277,7 @@ impl Opcode {
             Self::CallSfuJoin => Direction::ClientToServer,
             Self::CallSfuEvent => Direction::ServerToClient,
             Self::CallList => Direction::ClientToServer,
+            Self::CallHistory => Direction::ClientToServer,
             Self::ConversationStateEvent => Direction::ServerToClient,
             Self::StorePurchase => Direction::ClientToServer,
             Self::Entitlements => Direction::ClientToServer,
@@ -13208,6 +13422,7 @@ impl Opcode {
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
             Self::CallList => false,
+            Self::CallHistory => false,
             Self::ConversationStateEvent => false,
             Self::StorePurchase => false,
             Self::Entitlements => false,
@@ -13359,6 +13574,7 @@ impl Opcode {
         Self::CallSfuJoin,
         Self::CallSfuEvent,
         Self::CallList,
+        Self::CallHistory,
         Self::ConversationStateEvent,
         Self::StorePurchase,
         Self::Entitlements,
