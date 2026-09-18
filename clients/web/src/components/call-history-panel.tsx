@@ -7,6 +7,7 @@ import { CallKind, CallDirection, CallOutcome, CallMediaKind } from '@migo/sdk';
 import type { CallHistoryEntry, Id } from '@migo/sdk';
 
 import { formatDayLabel, formatClock } from '@/lib/format.js';
+import { callDirectionOf, callKindOf, callOutcomeOf } from '@/lib/migo/call-signal.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
@@ -170,7 +171,7 @@ export function CallHistoryPanel({
  * was unanswered by the other party, and a screen that printed the same word for both would be
  * telling the user they missed a call they placed.
  */
-function outcomeSentence(outcome: number, outgoing: boolean): string {
+function outcomeSentence(outcome: CallOutcome | undefined, outgoing: boolean): string {
   switch (outcome) {
     case CallOutcome.Answered:
       return outgoing ? 'Outgoing' : 'Incoming';
@@ -197,7 +198,7 @@ function outcomeSentence(outcome: number, outgoing: boolean): string {
  * an arrow out that was answered are the same direction, and a screen that drew them differently
  * would be asking the icon to say two things at once. */
 function directionIcon(row: CallHistoryEntry): 'arrow-up' | 'arrow-down' {
-  return row.direction === CallDirection.Outgoing ? 'arrow-up' : 'arrow-down';
+  return callDirectionOf(row.direction) === CallDirection.Outgoing ? 'arrow-up' : 'arrow-down';
 }
 
 /** Milliseconds an answered call lasted, or null when it never connected. */
@@ -239,10 +240,14 @@ export function CallHistoryRow({
   onCallPeer?: (peerId: Id, video: boolean) => void;
   onOpenConversation?: (conversationId: Id) => void;
 }): ReactNode {
-  const outgoing = row.direction === CallDirection.Outgoing;
-  const answered = row.outcome === CallOutcome.Answered;
+  // Narrowed at the boundary, once each: the wire sends these as bare numbers, and the rest of
+  // this component reasons about the enums rather than about integers that happen to line up.
+  const direction = callDirectionOf(row.direction);
+  const outcome = callOutcomeOf(row.outcome);
+  const outgoing = direction === CallDirection.Outgoing;
+  const answered = outcome === CallOutcome.Answered;
   const duration = durationMs(row);
-  const group = row.kind === CallKind.Group;
+  const group = callKindOf(row.kind) === CallKind.Group;
   const video = row.mediaKind === CallMediaKind.Video;
   const name =
     peerName !== null && peerName.length > 0 ? peerName : group ? 'Group call' : 'Unknown';
@@ -272,7 +277,7 @@ export function CallHistoryRow({
         <div className="call-history-name">{name}</div>
         <div className="call-history-meta">
           <Icon name={directionIcon(row)} size={12} />
-          <span>{outcomeSentence(row.outcome, outgoing)}</span>
+          <span>{outcomeSentence(outcome, outgoing)}</span>
           <span className="call-history-time">
             {formatDayLabel(row.endedAt)} {formatClock(row.endedAt)}
           </span>

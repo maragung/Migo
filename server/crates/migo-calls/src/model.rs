@@ -346,6 +346,10 @@ pub mod call_direction {
 /// however it ended, because "you talked for two minutes" is the fact, and
 /// `ByCallee` is not something a history should shout about.
 pub mod call_outcome {
+    use migo_core::Timestamp;
+
+    use super::EndReason;
+
     /// The call connected and then ended.
     pub const ANSWERED: u32 = 0;
     /// The ring ran out with nobody answering.

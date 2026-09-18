@@ -45,7 +45,16 @@
  * this side should keep producing.
  */
 
-import { CallEndReason, CallMediaKind, CallState, aead, wire } from '@migo/sdk';
+import {
+  CallDirection,
+  CallEndReason,
+  CallKind,
+  CallMediaKind,
+  CallOutcome,
+  CallState,
+  aead,
+  wire,
+} from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, CallStateEvent, Id } from '@migo/sdk';
 
 /** The envelope version this build writes: real per-call encryption under the house AEAD. */
@@ -552,4 +561,44 @@ const WIRE_CALL_MEDIA_KINDS: Readonly<Record<number, CallMediaKind>> = {
  */
 export function callMediaKindOf(mediaKind: number): CallMediaKind {
   return WIRE_CALL_MEDIA_KINDS[mediaKind] ?? CallMediaKind.Audio;
+}
+
+const WIRE_CALL_KINDS: Readonly<Record<number, CallKind>> = {
+  [CallKind.Direct]: CallKind.Direct,
+  [CallKind.Group]: CallKind.Group,
+};
+
+/** Narrows a wire `CallHistoryEntry.kind`; a kind this build does not know yields `undefined`. */
+export function callKindOf(kind: number): CallKind | undefined {
+  return WIRE_CALL_KINDS[kind];
+}
+
+const WIRE_CALL_DIRECTIONS: Readonly<Record<number, CallDirection>> = {
+  [CallDirection.Outgoing]: CallDirection.Outgoing,
+  [CallDirection.Incoming]: CallDirection.Incoming,
+};
+
+/**
+ * Narrows a wire `CallHistoryEntry.direction`; a direction this build does not know yields
+ * `undefined`.
+ *
+ * Unlike the media kind there is no honest lesser value to degrade to: an arrow that guessed would
+ * point the wrong way down a row whose whole meaning is which way it went.
+ */
+export function callDirectionOf(direction: number): CallDirection | undefined {
+  return WIRE_CALL_DIRECTIONS[direction];
+}
+
+const WIRE_CALL_OUTCOMES: Readonly<Record<number, CallOutcome>> = {
+  [CallOutcome.Answered]: CallOutcome.Answered,
+  [CallOutcome.Missed]: CallOutcome.Missed,
+  [CallOutcome.Declined]: CallOutcome.Declined,
+  [CallOutcome.Busy]: CallOutcome.Busy,
+  [CallOutcome.Cancelled]: CallOutcome.Cancelled,
+  [CallOutcome.Failed]: CallOutcome.Failed,
+};
+
+/** Narrows a wire `CallHistoryEntry.outcome`; an outcome this build does not know yields `undefined`. */
+export function callOutcomeOf(outcome: number): CallOutcome | undefined {
+  return WIRE_CALL_OUTCOMES[outcome];
 }
