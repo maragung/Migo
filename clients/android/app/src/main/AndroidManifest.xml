@@ -31,6 +31,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <!-- The call's own foreground service. Its type is the microphone, because a call is the
+         microphone running, and the platform only lets a service of that type start while the app
+         is in front of the user, which a call always is when it begins, since a call is placed or
+         answered on a screen. The notification it must show is also where a call's mute and end
+         controls live once the call screen is not the one being looked at, so the app also asks
+         for the notification permission at the call button, beside the microphone and the camera:
+         without it the service still runs and the call still survives, but the controls are never
+         seen, and a control nobody can see is not a control. XML comments cannot contain a double
+         hyphen, so this comment uses parentheses where prose would reach for one. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".MigoApplication"
         android:allowBackup="false"
@@ -88,6 +100,18 @@
             android:name=".call.ScreenShareService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- The call's service, which is what keeps a conversation alive once the app is no longer
+             the screen in front of the user: without it the call lives only as long as nothing
+             reclaims the process, and a microphone that stops because the system wanted memory is a
+             call that dropped for no reason the person on it can see. Its notification carries the
+             mute and end controls, which is how a call is still endable from the lock screen. Not
+             exported: nothing outside this app starts it. XML comments cannot contain a double
+             hyphen, so this comment uses parentheses where prose would reach for one. -->
+        <service
+            android:name=".call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- The camera shot's door: TakePicture hands the camera app a content uri rather than a
              file path, because the camera is another app and must not see this app's private

@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.migo.app.call.CallManager
+import com.migo.app.call.CallService
 import com.migo.app.call.CallUiState
 import com.migo.app.call.GroupCallManager
 import com.migo.app.call.GroupCallUiState
@@ -84,6 +85,7 @@ import com.migo.core.account.parseAddress
 import com.migo.core.account.sealContainer
 import com.migo.core.crypto.Content
 import com.migo.core.domain.CallMediaKind
+import com.migo.core.domain.CallState
 import com.migo.core.domain.ChatLogLine
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
@@ -5295,13 +5297,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // A call is the loudest interruption a recording can meet: brief 179 answers it
                 // with a pause, never a cancellation, and the resume is as automatic as the pause
                 // — the call ending is the interruption passing.
-                val wasCalling = _callState.value.call != null || _callState.value.incoming != null
+                val previous = _callState.value
+                val wasCalling = previous.call != null || previous.incoming != null
                 _callState.value = state
                 val calling = state.call != null || state.incoming != null
                 if (calling && !wasCalling) {
                     pauseNote(byInterruption = true)
                 } else if (!calling && wasCalling) {
                     resumeNote(afterInterruption = true)
+                }
+                // The call's foreground service follows exactly one thing: a call that is still
+                // running. It is started here rather than on the call screen because the screen is
+                // what the service exists to outlive -- a call that ended because its screen went
+                // away is the case this is for -- and started where the app is in front of the
+                // user, which placing or answering a call always is, because the platform refuses
+                // a background start and that refusal is swallowed rather than earned.
+                //
+                // A tracked call that has ended is not a live one: this flow keeps an ended call
+                // until its screen is dismissed, so reading the tracked call alone would leave the
+                // service believing in a call that is over -- and would keep it from ever starting
+                // again for the next call placed while that ended screen is still up.
+                val wasLive = previous.call?.state?.let { it != CallState.Ended } == true
+                val live = state.call?.state?.let { it != CallState.Ended } == true
+                when {
+                    live && !wasLive -> CallService.start(getApplication())
+                    !live && wasLive -> CallService.stop(getApplication())
                 }
             }
         }
@@ -5395,6 +5415,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // scope -- the one still alive when the view model is being cleared.
         callManager?.close()
         callManager = null
+        // And the call's notification goes with it, on every path that reaches here rather than
+        // only on the one where the collector saw the call end: this is where a session is being
+        // closed, a sign-out included, and a notification offering to end a call that this app no
+        // longer has is a notification about nothing. Stopping a service that was never started is
+        // not an error, so no flag is kept to say whether one is up.
+        CallService.stop(getApplication())
         // The group-call manager's close fires the session's last best-effort leave on the same
         // outliving scope, for the same reason.
         groupCallManager?.close()
