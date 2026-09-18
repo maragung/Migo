@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -335,13 +336,38 @@ internal fun rememberCallControls(model: AppViewModel): CallControls {
             context,
             Manifest.permission.CAMERA,
         ) != PackageManager.PERMISSION_GRANTED
+        // The notification permission rides along with the call's own dialog, and only on the
+        // platforms that have it to ask for: a call's notification is where the call's mute and end
+        // controls live once the call screen is not the one being looked at, so a call that never
+        // asked would be a call whose controls exist only in a shade the user may never see. It
+        // rides along rather than standing on its own because one tap should not become two
+        // questions, and it never delays the call: the call is placed the moment its microphone is
+        // permitted, and a notification permission is not a reason to hold up a conversation.
+        val notifyNeeded = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        val notify = if (notifyNeeded) {
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            emptyArray<String>()
+        }
         when {
-            !microphoneNeeded && !cameraNeeded ->
+            !microphoneNeeded && !cameraNeeded -> {
                 if (video) {
                     model.startVideoCall(conversationId, peerId)
                 } else {
                     model.startVoiceCall(conversationId, peerId)
                 }
+                // The call is already going out, so this asks about the notification and nothing
+                // else -- and its answer is not read, because there is nothing it could decide:
+                // the call is placed either way, and what a refusal costs is the controls, never
+                // the conversation.
+                if (notify.isNotEmpty()) {
+                    callPermissions.launch(notify)
+                }
+            }
 
             video -> {
                 // One dialog, both permissions: a camera without a microphone is a silent
@@ -351,13 +377,13 @@ internal fun rememberCallControls(model: AppViewModel): CallControls {
                 // keys, which is what the model's answer path reads.
                 model.stageVideoCall(conversationId, peerId)
                 callPermissions.launch(
-                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
+                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA) + notify,
                 )
             }
 
             else -> {
                 model.stageVoiceCall(conversationId, peerId)
-                microphone.launch(Manifest.permission.RECORD_AUDIO)
+                callPermissions.launch(arrayOf(Manifest.permission.RECORD_AUDIO) + notify)
             }
         }
     }

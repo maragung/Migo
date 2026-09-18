@@ -34,6 +34,15 @@ a runner:
 
 5. Trailing whitespace, because it is free to check.
 
+6. A double hyphen inside an XML comment, and an XML comment that never closes. The
+   module's manifest and resources are parsed by the platform, not by this script, and
+   its parser rejects a `--` inside a comment by refusing the whole file -- which fails
+   the build in the manifest merger, before Kotlin is even reached. The manifest's own
+   comments warn about the rule, and the comment that broke a build warned about it in
+   the same breath as it broke it: the shape is one prose reaches for constantly, so it
+   is checked here rather than trusted to a habit. Checked on the raw text, since an XML
+   comment has no string literals and no nesting to hide behind.
+
 Every check except the comment one runs against a copy of the file with comment and
 string-literal *content* blanked out and newlines kept, so line numbers still line up.
 That is not a nicety: the first version of check 2 flagged the KDoc sentence explaining
@@ -93,6 +102,56 @@ def kotlin_files(roots):
             for name in sorted(files):
                 if name.endswith(".kt") or name.endswith(".kts"):
                     yield os.path.join(dirpath, name)
+
+
+def xml_files(roots):
+    """The module's XML -- the manifest, the resources -- which the platform parses.
+
+    A separate walk from `kotlin_files` because the two trees are read by different
+    parsers and every check here applies to one of them rather than to both.
+    """
+    for root in roots:
+        if os.path.isfile(root):
+            if root.endswith(".xml"):
+                yield root
+            continue
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+            for name in sorted(files):
+                if name.endswith(".xml"):
+                    yield os.path.join(dirpath, name)
+
+
+def check_xml_comments(path, src, report):
+    """A double hyphen inside an XML comment, and a comment that never closes.
+
+    XML forbids `--` anywhere inside a comment, and the platform's parser enforces it by
+    rejecting the whole file -- the build then fails in the manifest merger, before a line
+    of Kotlin is compiled, with "The string -- is not permitted within comments" and a line
+    number. Prose reaches for a dash constantly, which is why this is a check and not a
+    habit: the manifest's own comments warn about the rule, and the comment that broke this
+    build warned about it in the same breath as it broke it.
+    """
+    index = 0
+    while True:
+        start = src.find("<!--", index)
+        if start < 0:
+            return
+        line = src.count("\n", 0, start) + 1
+        end = src.find("-->", start + 4)
+        if end < 0:
+            report(path, line, "XML comment is never closed")
+            return
+        body = src[start + 4 : end]
+        found = body.find("--")
+        if found >= 0:
+            report(
+                path,
+                line + body.count("\n", 0, found),
+                "double hyphen inside an XML comment, which XML forbids and the platform's "
+                "parser rejects the whole file for; use parentheses or a single hyphen",
+            )
+        index = end + 3
 
 
 def scan(src):
@@ -340,14 +399,44 @@ SELFTEST_CASES = (
     ),
 )
 
+# The XML cases, the same shape as the ones above and written with their own extension so the
+# scan dispatches on it. The harmless shapes matter here too: a dash outside a comment is not a
+# comment problem, and a single hyphen inside one is ordinary prose.
+SELFTEST_XML_CASES = (
+    (
+        "double hyphen inside an XML comment",
+        '<manifest>\n    <!-- a note -- with a dash -->\n</manifest>\n',
+        "double hyphen inside an XML comment",
+    ),
+    (
+        "single hyphens inside an XML comment are inert",
+        '<manifest>\n    <!-- a note (with - single - hyphens) -->\n</manifest>\n',
+        None,
+    ),
+    (
+        "an XML comment that never closes",
+        '<manifest>\n    <!-- never closed\n</manifest>\n',
+        "XML comment is never closed",
+    ),
+    (
+        "a dash outside an XML comment is not a comment problem",
+        '<manifest>\n    <item name="a--b" />\n</manifest>\n',
+        None,
+    ),
+)
+
 
 def selftest():
     """Writes each case to a temp file and checks that the report matches expectation."""
     failures = []
     workspace = tempfile.mkdtemp(prefix="kotlin-lint-selftest-")
+    cases = [("Case%d.kt" % i, name, source, expected)
+             for i, (name, source, expected) in enumerate(SELFTEST_CASES)]
+    cases += [("Case%d.xml" % i, name, source, expected)
+              for i, (name, source, expected) in enumerate(SELFTEST_XML_CASES)]
     try:
-        for index, (name, source, expected) in enumerate(SELFTEST_CASES):
-            path = os.path.join(workspace, "Case%d.kt" % index)
+        for name_in_file, name, source, expected in cases:
+            path = os.path.join(workspace, name_in_file)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(source)
             reported = []
@@ -365,7 +454,7 @@ def selftest():
     for failure in failures:
         print("selftest FAIL  " + failure)
     print("kotlin-lint selftest: %d case(s), %d failure(s)"
-          % (len(SELFTEST_CASES), len(failures)))
+          % (len(cases), len(failures)))
     return 1 if failures else 0
 
 
@@ -394,6 +483,12 @@ def _run(argv, emit):
         check_varargs(path, code.splitlines(keepends=True), inline_classes, report)
         if path.endswith(".kt"):
             check_imports(path, src.splitlines(keepends=True), code, comments, report)
+
+    # The XML is walked on its own: the checks above are about Kotlin's grammar, and this one
+    # is about a parser that reads a different language in the same tree.
+    for path in xml_files(roots):
+        with open(path, encoding="utf-8") as handle:
+            check_xml_comments(path, handle.read(), report)
 
     for problem in problems:
         emit(problem)
