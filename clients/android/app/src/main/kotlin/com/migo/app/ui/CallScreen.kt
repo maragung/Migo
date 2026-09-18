@@ -49,6 +49,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.migo.app.call.ActiveCall
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallUiState
+import com.migo.app.call.LinkQuality
+import com.migo.app.call.QUALITY_CEILINGS
 import com.migo.app.call.qualityTierLabel
 import com.migo.core.domain.CallDisplayState
 import com.migo.core.domain.CallMediaKind
@@ -136,6 +138,8 @@ fun CallOverlay(
     onChooseOutput: ((Int) -> Unit)? = null,
     onStartScreenShare: ((Intent) -> Unit)? = null,
     onStopScreenShare: (() -> Unit)? = null,
+    onChooseQuality: ((LinkQuality?) -> Unit)? = null,
+    onToggleLowBandwidth: ((Boolean) -> Unit)? = null,
     inPictureInPicture: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -196,6 +200,8 @@ fun CallOverlay(
                 onChooseOutput = onChooseOutput,
                 onStartScreenShare = onStartScreenShare,
                 onStopScreenShare = onStopScreenShare,
+                onChooseQuality = onChooseQuality,
+                onToggleLowBandwidth = onToggleLowBandwidth,
                 inPictureInPicture = inPictureInPicture,
             )
 
@@ -258,6 +264,8 @@ private fun ActiveCallScreen(
     onChooseOutput: ((Int) -> Unit)?,
     onStartScreenShare: ((Intent) -> Unit)?,
     onStopScreenShare: (() -> Unit)?,
+    onChooseQuality: ((LinkQuality?) -> Unit)?,
+    onToggleLowBandwidth: ((Boolean) -> Unit)?,
     inPictureInPicture: Boolean,
 ) {
     // Read into a name of its own because the control row asks the question twice -- whether a
@@ -403,6 +411,43 @@ private fun ActiveCallScreen(
                     .padding(start = 24.dp, end = 24.dp, bottom = 128.dp),
                 onRate = onRateCall,
             )
+        }
+
+        // The two quality controls, in a row of their own above the actions. The row below is
+        // already as wide as a phone is, and these are secondary to the controls a call is actually
+        // driven with; they also belong beside the tier they act on rather than among the buttons
+        // for the microphone and the camera. They are offered on a voice call too, because low
+        // bandwidth mode caps the audio where the ladder has no video to give up.
+        if (display == CallDisplayState.Connected || display == CallDisplayState.Degraded) {
+            val chooseQuality = onChooseQuality
+            val toggleLowBandwidth = onToggleLowBandwidth
+            if (chooseQuality != null && toggleLowBandwidth != null) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 148.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                ) {
+                    QualityCeilingButton(
+                        ceiling = state.qualityCeiling,
+                        onChoose = chooseQuality,
+                    )
+                    // The glyph is the whole state of the control: a tortoise is on, a hare is off,
+                    // and the label says which way the tap goes, the way every other control here
+                    // does.
+                    CallActionButton(
+                        glyph = if (state.lowBandwidth) "🐢" else "🐇",
+                        label = if (state.lowBandwidth) {
+                            "Leave low bandwidth mode"
+                        } else {
+                            "Use low bandwidth mode"
+                        },
+                        background = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        onClick = { toggleLowBandwidth(!state.lowBandwidth) },
+                    )
+                }
+            }
         }
 
         Row(
@@ -703,6 +748,56 @@ private fun AudioRouteButton(
                     text = { Text(marked) },
                     onClick = {
                         onChooseOutput(output.id)
+                        open = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The rung the user pins the call to, as a menu of the tiers it may be held at.
+ *
+ * A ceiling and never a floor, so a call pinned high still descends if its link does; what the pin
+ * buys is that it never rises above the chosen rung, which is what somebody on a metered or thin
+ * link is asking for. Automatic is the absence of a pin rather than a rung of its own, which is why
+ * it is its own row and not the top tier: a call with nothing pinned sits wherever the ladder
+ * measures, and that is not always the top.
+ *
+ * The bottom rung is deliberately not offered. A user who wants no video has the camera button,
+ * which says so plainly; a ceiling of "video off" would instead put the call into Degraded, a state
+ * that means video paused because the quality dropped -- and a sacrifice the user chose is not a
+ * drop, so offering it here would make the screen say something untrue about why the camera is off.
+ */
+@Composable
+private fun QualityCeilingButton(
+    ceiling: LinkQuality?,
+    onChoose: (LinkQuality?) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(contentAlignment = Alignment.Center) {
+        CallActionButton(
+            glyph = "📶",
+            label = "Call quality",
+            background = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            onClick = { open = true },
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text(if (ceiling == null) "✓ Automatic" else "Automatic") },
+                onClick = {
+                    onChoose(null)
+                    open = false
+                },
+            )
+            QUALITY_CEILINGS.forEach { rung ->
+                val label = qualityTierLabel(rung)
+                DropdownMenuItem(
+                    text = { Text(if (rung == ceiling) "✓ $label" else label) },
+                    onClick = {
+                        onChoose(rung)
                         open = false
                     },
                 )

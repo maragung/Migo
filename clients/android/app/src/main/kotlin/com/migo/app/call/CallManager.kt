@@ -309,6 +309,22 @@ class CallManager(
     @Volatile private var videoTrack: VideoTrack? = null
     /** The sender carrying [videoTrack], which is what the ladder's caps are written on. */
     @Volatile private var videoSender: RtpSender? = null
+    /**
+     * The sender carrying the microphone, which low bandwidth mode caps directly.
+     *
+     * Audio is never a rung of the ladder -- the bottom of the ladder is "video off, audio
+     * alive" -- so on a voice call this is the only place the mode can mean anything.
+     */
+    @Volatile private var audioSender: RtpSender? = null
+    /**
+     * The rung the user pinned this call to, or null for automatic.
+     *
+     * Per call and not a standing preference: a ceiling pinned for one call would silently cap
+     * the next one, which the user never asked for. Cleared with the media it applied to.
+     */
+    @Volatile private var qualityCeiling: LinkQuality? = null
+    /** Whether low bandwidth mode is on for this call. Per call, for the same reason. */
+    @Volatile private var lowBandwidthOn = false
 
     /**
      * The capturer sending this device's screen, while one is. A field of its own rather than a
@@ -1251,7 +1267,11 @@ class CallManager(
      * again -- and a call that cannot be shaped keeps sending what it was sending rather than losing
      * video over a refused parameter.
      */
-    private fun applyQuality(rung: LinkQuality, measuredKbps: Long) {
+    private fun applyQuality(measured: LinkQuality, measuredKbps: Long) {
+        // What the ladder measured, lowered by whatever the user pinned. A ceiling and never a
+        // floor, so the ladder may still descend below either control: no control makes a link carry
+        // more than it can, and a screen that claimed otherwise would show a tier the call is not on.
+        val rung = cappedQuality(measured, qualityCeiling, lowBandwidthOn)
         val isVideo = active?.mediaKind == CallMediaKind.Video
         val caps = videoCaps(rung, measuredKbps)
         val sender = videoSender
@@ -1267,6 +1287,57 @@ class CallManager(
             }
         }
         _state.update { it.copy(quality = rung, degraded = degradedAt(rung, isVideo)) }
+    }
+
+    /**
+     * Pins this call to a rung, or returns it to automatic with null.
+     *
+     * A ceiling and not a floor, so the call still descends if its link does; what the pin buys is
+     * that it never rises above the chosen rung, which is what a user on a metered or thin link is
+     * asking for. The rung is re-applied at once rather than at the next sample, because a control
+     * that appears to do nothing for two seconds reads as broken.
+     */
+    fun setQualityCeiling(ceiling: LinkQuality?) {
+        qualityCeiling = ceiling
+        _state.update { it.copy(qualityCeiling = ceiling) }
+        reapplyQuality()
+    }
+
+    /**
+     * Turns low bandwidth mode on or off for this call.
+     *
+     * On a video call the ladder is capped at its lowest rung that still carries video; on a voice
+     * call there is no video to give up and the mode caps the audio bitrate instead, because a mode
+     * that did nothing on the call the user is actually on would be a lie. Both are written now,
+     * since which kind of call this is is already known.
+     */
+    fun setLowBandwidth(on: Boolean) {
+        lowBandwidthOn = on
+        _state.update { it.copy(lowBandwidth = on) }
+        capAudioSender()
+        reapplyQuality()
+    }
+
+    /** Re-shapes the senders at the rung the call is on now, without waiting for the next sample. */
+    private fun reapplyQuality() {
+        applyQuality(linkQuality, lastMeasurement?.stats?.sentKbps ?: 0L)
+    }
+
+    /**
+     * Writes the mode's audio cap onto the microphone's sender, or lifts it.
+     *
+     * Written in both directions rather than deleted when the mode goes off: a member left out of a
+     * sender's parameters is a member the receiver keeps, so clearing it by omission would leave the
+     * call in narrowband for the rest of its life.
+     */
+    private fun capAudioSender() {
+        val sender = audioSender ?: return
+        val params = sender.parameters
+        val encoding = params?.encodings?.firstOrNull()
+        if (params != null && encoding != null) {
+            encoding.maxBitrateBps = audioCaps(lowBandwidthOn)
+            runCatching { sender.setParameters(params) }
+        }
     }
 
     /** Stops sampling the link; safe to call when nothing is armed. */
@@ -1370,6 +1441,13 @@ class CallManager(
         // one place every ending passes through -- a hang-up, a peer's end, a lost session, a
         // sign-out -- and a routing pin that outlived it would be a phone stuck on a speaker.
         stopWatchingOutputs()
+        // The two quality controls go with the call they capped. A ceiling pinned for one call
+        // is not a standing preference -- the next call starts on the best rung its own link can
+        // carry and re-measures from there -- and a mode carried over would silently cap a call
+        // nobody asked to cap.
+        qualityCeiling = null
+        lowBandwidthOn = false
+        _state.update { it.copy(qualityCeiling = null, lowBandwidth = false) }
         stopMeasuring()
         iceTimer?.cancel()
         iceTimer = null
@@ -1388,6 +1466,10 @@ class CallManager(
         peer = null
         pc?.close()
 
+        // The senders go with the tracks they were carrying; a shape written onto a released
+        // sender is a parameter change against a connection that is already gone.
+        audioSender = null
+        videoSender = null
         audioTrack?.dispose()
         audioTrack = null
         audioSource?.dispose()
@@ -1415,9 +1497,6 @@ class CallManager(
         videoCapturer = null
         videoHelper?.dispose()
         videoHelper = null
-        // The sender goes with the track it was carrying; a shape written onto a released sender
-        // is a parameter change against a connection that is already gone.
-        videoSender = null
         videoTrack?.dispose()
         videoTrack = null
         videoSource?.dispose()
@@ -1567,7 +1646,7 @@ class CallManager(
     private fun attachMedia(pc: PeerConnection, camera: CameraVideoCapturer?) {
         val source = factory.createAudioSource(MediaConstraints())
         val track = factory.createAudioTrack("migo-voice", source)
-        pc.addTrack(track, listOf("migo"))
+        audioSender = pc.addTrack(track, listOf("migo"))
         audioSource = source
         audioTrack = track
         if (camera == null) {
@@ -2052,12 +2131,19 @@ data class CallUiState(
      */
     val screenSharing: Boolean? = null,
     /**
-     * The rung the call's own link was last classified as, for the quality indicator. Null until the
-     * ladder has moved this call at all, which is why a call that never left the top rung shows
-     * nothing: the tier is a measurement, and a screen that named one before measuring anything would
-     * be inventing it.
+     * The rung the call's own link is on, for the quality indicator: what the ladder measured,
+     * lowered by whatever the user pinned. Null until one of the two has said something, which is why
+     * a call nothing has classified and no control has touched shows nothing rather than the top
+     * rung: a tier nobody measured and nobody chose is not a tier.
      */
     val quality: LinkQuality? = null,
+    /**
+     * The rung the user pinned this call to, or null for automatic. What the quality control reads
+     * its tick from, and what the call's caps are lowered to.
+     */
+    val qualityCeiling: LinkQuality? = null,
+    /** Whether low bandwidth mode is on for this call, for the control that toggles it. */
+    val lowBandwidth: Boolean = false,
     /**
      * Whether the call is degraded in section 180's sense: connected, with video paused because the
      * quality dropped. Never true for a voice call, which has no video to pause.
