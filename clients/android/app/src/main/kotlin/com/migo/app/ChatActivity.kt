@@ -2,7 +2,6 @@ package com.migo.app
 
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -66,7 +65,7 @@ import kotlinx.coroutines.flow.firstOrNull
  *   main activity observes it; both observers feed the same idempotent model calls, so a
  *   transition that both see pauses and resumes a note once, not twice.
  */
-class ChatActivity : ComponentActivity() {
+class ChatActivity : CallHostActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // The same edge-to-edge posture the main activity sets, so the chat draws at the same
         // insets in either shell and the composer's own padding is the only bottom handling.
@@ -239,6 +238,11 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
     val callPeerId = callState.incoming?.callerId
         ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
     val remoteVideo by model.remoteVideo.collectAsState()
+    // The activity drawing this overlay, when it is one that can hold a call: it is the host that
+    // knows whether the system is currently showing this screen small, and the only thing that can
+    // ask for it. Read from the context rather than passed down, because this layer sits above two
+    // shells and the host is whichever activity those shells were composed into.
+    val host = LocalContext.current as? CallHostActivity
     CompositionLocalProvider(LocalCallEglContext provides model.callEglContext) {
         CallOverlay(
             state = callState,
@@ -252,6 +256,21 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             onRateCall = model::rateCall,
             localVideo = model.localVideo,
             remoteVideo = remoteVideo,
+            // Null where the window cannot be drawn at all, so the control is absent rather than
+            // present and inert.
+            onMinimize = if (host != null && host.canPictureInPicture()) {
+                { host.enterCallPip() }
+            } else {
+                null
+            },
+            inPictureInPicture = host?.inPictureInPicture?.value == true,
+            // Null on a device with one camera, for the same reason: the control is absent rather
+            // than present and unable to move.
+            onSwitchCamera = if (model.callCanSwitchCamera) {
+                { model.switchCallCamera() }
+            } else {
+                null
+            },
         )
     }
 

@@ -663,9 +663,37 @@ class CallManager(
         }
     }
 
+    /**
+     * Whether this device has a camera other than the front one.
+     *
+     * A device fact, asked once when the manager is built rather than per call, because the answer
+     * cannot change while the app is running and a control that comes and goes between calls is a
+     * control nobody learns. The front camera is the one a call opens on, so the question the call
+     * screen needs answered is whether there is anywhere to switch to.
+     */
+    val canSwitchCamera: Boolean = runCatching {
+        val enumerator = Camera2Enumerator(context)
+        enumerator.deviceNames.any { !enumerator.isFrontFacing(it) }
+    }.getOrDefault(false)
+
+    /**
+     * Flips the live call between the front camera and the back one.
+     *
+     * The switch happens inside the capturer, on the track that is already carrying frames, so
+     * nothing about the peer connection changes: no renegotiation, no new track, no frame the
+     * other side can see a seam in. That is the reason this is a control rather than a second
+     * capture path -- replacing a track mid-call would cost a renegotiation and a visible gap for
+     * a change of direction.
+     *
+     * A no-op when no camera is open, which is the honest answer for a voice call: there is
+     * nothing to point.
+     */
+    fun switchCamera() {
+        videoCapturer?.switchCamera(null)
+    }
+
     /** Mutes or unmutes this side's microphone. */
-    fun toggleMute() {
-        muted = !muted
+    fun toggleMute() {        muted = !muted
         audioTrack?.setEnabled(!muted)
         _state.update { it.copy(muted = muted) }
     }

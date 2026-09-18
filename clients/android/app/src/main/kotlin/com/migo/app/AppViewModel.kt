@@ -1181,6 +1181,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callManager?.toggleMute()
     }
 
+    /**
+     * Whether this device has a second camera for the call screen to switch to. A device fact the
+     * manager settled when it was built, read through rather than copied, so the two cannot
+     * disagree about it.
+     */
+    val callCanSwitchCamera: Boolean
+        get() = callManager?.canSwitchCamera == true
+
+    /** Flips the live video call between the front camera and the back one. */
+    fun switchCallCamera() {
+        callManager?.switchCamera()
+    }
+
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
     fun dismissCallScreen() {
         callManager?.dismissCall()
