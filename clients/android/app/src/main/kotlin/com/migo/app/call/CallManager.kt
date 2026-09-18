@@ -260,6 +260,15 @@ class CallManager(
     @Volatile private var videoTrack: VideoTrack? = null
 
     /**
+     * Whether this side wants its camera open. Its own flag rather than a read of the capturer,
+     * because the two disagree for as long as a failing re-open takes: the wish is what the button
+     * shows and what the screen has to agree with, and a capturer that could not be restarted is a
+     * wish corrected back to off rather than a button that keeps claiming a camera which is not
+     * there. Reset with the rest of the per-call state.
+     */
+    @Volatile private var cameraWanted: Boolean = true
+
+    /**
      * The shared OpenGL context every video surface in this app renders through. One per manager
      * (and so per session), created lazily on first use and released with the factory: the native
      * resources an `EglBase` pins must not leak per call, and the surfaces the UI attaches
@@ -699,6 +708,44 @@ class CallManager(
     }
 
     /**
+     * Turns this side's camera off or back on.
+     *
+     * Off means the capture is stopped, which is what hands the camera back to the platform: a
+     * capturer that is still running is a camera the system considers in use, so its indicator goes
+     * on burning beside a lens whose frames are being dropped on the floor. The sender and the
+     * m-line are deliberately left alone -- with no capture there are no frames to encode, so
+     * nothing is on the wire either way, and keeping the negotiated video line is what makes turning
+     * the camera back on a restart rather than a renegotiation the other side can see.
+     *
+     * On is a restart of the same capturer and it can fail, because another application may have
+     * taken the camera while it was released; a failure puts the wish back to off, since a button
+     * that keeps claiming a picture the call is not sending is the one answer worse than no picture.
+     *
+     * A no-op on a voice call, and on a video call whose camera never opened: there is no capture to
+     * stop and nothing that could be opened.
+     */
+    fun toggleCamera() {
+        val call = active ?: return
+        if (call.mediaKind != CallMediaKind.Video || videoCapturer == null) {
+            return
+        }
+        if (cameraWanted) {
+            cameraWanted = false
+            runCatching { videoCapturer?.stopCapture() }
+            _state.update { it.copy(cameraOn = false) }
+            return
+        }
+        cameraWanted = true
+        val restarted = runCatching {
+            videoCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+        }.isSuccess
+        if (!restarted) {
+            cameraWanted = false
+        }
+        _state.update { it.copy(cameraOn = cameraWanted) }
+    }
+
+    /**
      * Sends the user's own verdict on the call that just ended.
      *
      * It rides the same `CALL_STATS` frame the setup time used, which is the one report already
@@ -902,7 +949,10 @@ class CallManager(
         videoSource = null
         _remoteVideo.value = null
         muted = false
-        _state.update { it.copy(muted = false) }
+        // A camera that was off when the call ended is a camera this device does not want opened
+        // for the next one, so the wish goes back to its starting state with the rest of the call's.
+        cameraWanted = true
+        _state.update { it.copy(muted = false, cameraOn = null) }
     }
 
     // --- the call key: adopt, forget, wait ---
@@ -1060,6 +1110,10 @@ class CallManager(
         videoHelper = helper
         videoSource = surface
         videoTrack = video
+        // The button exists from the moment the call has a camera to give back, and the wish starts
+        // on because a video call opens its camera rather than waiting to be asked.
+        cameraWanted = true
+        _state.update { it.copy(cameraOn = true) }
     }
 
     /**
@@ -1504,6 +1558,12 @@ data class CallUiState(
     val incoming: CallInviteEvent? = null,
     /** Whether this side's microphone is muted. */
     val muted: Boolean = false,
+    /**
+     * Whether this side's camera is open, for the call screen's camera button. Null when there is no
+     * camera to toggle at all -- a voice call, or a video call whose camera could not be opened --
+     * because a button that cannot change anything is a control that lies about what it does.
+     */
+    val cameraOn: Boolean? = null,
     /** When the current (or just-ended) call ended, for the ended screen's duration. */
     val endedAt: Long? = null,
     /** Why a call could not even be placed, when nothing else is showing. */

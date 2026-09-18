@@ -252,6 +252,7 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             onCancel = model::cancelCall,
             onHangUp = model::hangUpCall,
             onToggleMute = model::toggleCallMute,
+            onToggleCamera = model::toggleCallCamera,
             onDismiss = model::dismissCallScreen,
             onRateCall = model::rateCall,
             localVideo = model.localVideo,

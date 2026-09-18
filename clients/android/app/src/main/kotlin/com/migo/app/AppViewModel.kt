@@ -1182,6 +1182,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Turns this side's camera off or back on. The screen draws the button only where the call has a
+     * camera to give back, and the manager checks the same thing again, because a tap can outlive
+     * the state it was drawn from.
+     */
+    fun toggleCallCamera() {
+        callManager?.toggleCamera()
+    }
+
+    /**
      * Whether this device has a second camera for the call screen to switch to. A device fact the
      * manager settled when it was built, read through rather than copied, so the two cannot
      * disagree about it.
