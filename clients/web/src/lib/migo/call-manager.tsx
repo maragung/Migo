@@ -68,6 +68,7 @@ import {
   CallDeclineReason,
   CallEndReason,
   CallMediaKind,
+  CallRating,
   CallState,
   ContentType,
   newId,
@@ -130,6 +131,8 @@ import {
   videoTrackToSend,
 } from './group-media.js';
 import type { LinkQuality, LinkStats, RawLinkCounters } from './group-media.js';
+import { callRatingReport } from './call-rating.js';
+import type { CallIssueKind } from './call-rating.js';
 import { useMigo } from './use-migo.js';
 
 /** How long gathered ICE candidates linger before one relay carries them (section 165: batch, briefly). */
@@ -349,6 +352,18 @@ export interface CallManagerValue {
   toggleScreenShare: () => Promise<void>;
   /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
   dismissCall: () => void;
+  /**
+   * Reports the user's post-call rating for the call that just ended, with whatever problems they
+   * ticked. Section 180's last call requirement, and the only one that is about a call which is
+   * already over.
+   *
+   * It rides {@link reportStats} rather than an opcode of its own: it is the same kind of statement
+   * as the setup time and loss numbers already reported that way — a client's own claim about its
+   * own call, on a Droppable frame — and the call row outlives the call, so the frame still finds
+   * the call it names. A null verdict sends nothing: a user who dismissed the prompt has said
+   * nothing, and a rating of Unknown would be putting words in their mouth.
+   */
+  rateCall: (rating: CallRating, issues: readonly CallIssueKind[]) => void;
 }
 
 const CallManagerContext = createContext<CallManagerValue | null>(null);
@@ -1807,6 +1822,30 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     setCallError(null);
   }, [setActive]);
 
+  /**
+   * Sends the user's post-call rating for the call that just ended.
+   *
+   * Refused unless a call is tracked and that call has ended, which is the same guard `dismissCall`
+   * makes and for the same reason: the rating is about a call that is over, and a verdict sent
+   * against a call still in progress would be a verdict about a call the user has not finished
+   * having. Refused silently rather than by throwing, because the caller is a press on a screen
+   * that may already have been dismissed by the server's own end event arriving first.
+   */
+  const rateCall = useCallback((rating: CallRating, issues: readonly CallIssueKind[]): void => {
+    const call = activeRef.current;
+    if (call === null || call.state !== CallState.Ended) {
+      return;
+    }
+    const report = callRatingReport(rating, issues);
+    if (report === null) {
+      return;
+    }
+    clientRef.current?.calls.reportStats(call.callId, report).catch(() => {
+      // Droppable, like every other stats frame: the user said what they wanted to say, and a
+      // report lost in flight costs a data point rather than the call.
+    });
+  }, []);
+
   // --- the four SDK streams, registered once per session ---
 
   /**
@@ -2156,6 +2195,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     setLowBandwidth,
     toggleScreenShare,
     dismissCall,
+    rateCall,
   };
 
   return <CallManagerContext.Provider value={value}>{children}</CallManagerContext.Provider>;

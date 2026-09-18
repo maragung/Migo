@@ -29,7 +29,7 @@ use migo_crypto::aead::{self, SymmetricKey, NONCE_LEN};
 use migo_crypto::kdf;
 use migo_protocol::{
     to_frame, Ack, Acknowledged, Authenticate, Authenticated, CallAnswer, CallIce, CallInvite,
-    CallInviteResult, CallStateEvent, CallStats, ClientInfo, ConversationKind,
+    CallInviteResult, CallRating, CallStateEvent, CallStats, ClientInfo, ConversationKind,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EncryptionMode,
     FedAccountEdge, FedAccountQuery, FedAccountRows, FedAck, FedConversationEvent,
     FedConversationQuery, FedConversationRouting, FedConversationRows, FedForward, FedUserEvent,
@@ -690,6 +690,8 @@ fn call_signaling_fits_8kb_and_batches_fit_1kb() {
             packet_loss: Some(120), // per-mille
             jitter_ms: Some(12),
             used_turn: Some(false),
+            rating: None,
+            issues: None,
         },
     );
     assert!(
@@ -697,9 +699,33 @@ fn call_signaling_fits_8kb_and_batches_fit_1kb() {
         "CALL_STATS is {stats} bytes, budget 128 (section 171)"
     );
 
+    // The same frame carrying the post-call rating, which is the fullest one
+    // this opcode can be: every number, a verdict, and all four problems
+    // ticked. It rides the same 128-byte budget because it rides the same
+    // frame — a rating that needed its own opcode would have needed its own
+    // line in section 171, and this is the assertion that it did not.
+    let rated = frame_size(
+        Opcode::CallStats,
+        5,
+        &CallStats {
+            call_id,
+            setup_ms: Some(150),
+            rtt_ms: Some(45),
+            packet_loss: Some(120),
+            jitter_ms: Some(12),
+            used_turn: Some(true),
+            rating: Some(CallRating::Poor),
+            issues: Some(0b1111),
+        },
+    );
+    assert!(
+        rated <= 128,
+        "CALL_STATS with a rating is {rated} bytes, budget 128 (section 171)"
+    );
+
     println!(
         "call: invite {invite} + result {invite_result} + answer {answer} + {both_directions} ice \
-         batches {ice} each + connected {connected} = {total}; stats {stats}"
+         batches {ice} each + connected {connected} = {total}; stats {stats}, rated {rated}"
     );
 }
 

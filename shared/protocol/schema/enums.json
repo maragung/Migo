@@ -541,6 +541,32 @@
    ]
   },
   {
+   "name": "CallRating",
+   "doc": "A user's verdict on a call it has just left (section 180). Unknown is what a build that does not know the value decodes to, and is never sent.",
+   "variants": [
+    {
+     "name": "Unknown",
+     "value": 0
+    },
+    {
+     "name": "Excellent",
+     "value": 1
+    },
+    {
+     "name": "Good",
+     "value": 2
+    },
+    {
+     "name": "Average",
+     "value": 3
+    },
+    {
+     "name": "Poor",
+     "value": 4
+    }
+   ]
+  },
+  {
    "name": "ConversationRole",
    "doc": "Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008.",
    "variants": [

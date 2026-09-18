@@ -34,6 +34,7 @@ import {
   CallDeclineReason,
   CallEndReason,
   CallMediaKind,
+  CallRating,
   CallState,
 } from '../src/index.js';
 import { OP } from '@migo/protocol';
@@ -285,6 +286,20 @@ test('calls: reportStats sends the call id plus only the fields it measured', as
     { callId: CALL },
     'a report with nothing measured carries only the call id',
   );
+
+  // The post-call rating rides the same frame, and it is the same kind of statement: a client's own
+  // claim about its own call, on a frame that is Droppable because a lost one costs a data point and
+  // never the call. Section 180 asks for the verdict and for the note, and the note is a mask
+  // because a call can have had two things wrong with it at once.
+  await calls.reportStats(CALL, { rating: CallRating.Poor, issues: 5n });
+  const rated = decodeBody(decodeCallStats, sentAt(transport, 2).body);
+  assert.equal(rated.rating, CallRating.Poor);
+  assert.equal(rated.issues, 5n, 'the mask survives the varint round trip, bits and all');
+  // Unrated and un-noted are absent rather than zero, exactly as the quality numbers are: a zero
+  // here would be a verdict of Unknown and a claim that the user named no problems, and a user who
+  // said nothing has said neither.
+  assert.equal(rated.setupMs, undefined);
+  assert.equal(rated.usedTurn, undefined);
 });
 
 test('calls: the four listeners deliver decoded events once started, and stop cleanly', () => {

@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use migo_core::metrics::{Counter, Histogram, Registry};
+use migo_protocol::generated::CallRating;
 
 use crate::model::EndReason;
 
@@ -206,6 +207,80 @@ impl GroupJoinKind {
     }
 }
 
+/// A user's verdict on a call it has just left, as section 180 asks for it.
+///
+/// The vocabulary is the requirement's own four words, plus `Unknown` so that
+/// a build whose protocol enum has grown a variant this server does not know
+/// still lands on a series rather than being silently dropped: a rating this
+/// node cannot name is still a rating a user gave, and counting it as anything
+/// else would be a lie about what the users said.
+///
+/// The order is discriminant order, which is the order the vector is registered
+/// in, so a verdict's own counter is found at its wire value.
+const RATING_KINDS: [CallRating; 5] = [
+    CallRating::Unknown,
+    CallRating::Excellent,
+    CallRating::Good,
+    CallRating::Average,
+    CallRating::Poor,
+];
+
+/// The label one verdict is counted under.
+///
+/// Lower case and one word per verdict, because these are label values rather
+/// than prose: a dashboard groups by them and an alert matches on them.
+const fn rating_label(rating: CallRating) -> &'static str {
+    match rating {
+        CallRating::Unknown => "unknown",
+        CallRating::Excellent => "excellent",
+        CallRating::Good => "good",
+        CallRating::Average => "average",
+        CallRating::Poor => "poor",
+    }
+}
+
+/// The optional details a user can attach to a rating, one bit each.
+///
+/// A mask rather than a list because the four are not exclusive — a call can
+/// have had bad audio and a bad connection at once — and because a client that
+/// knows a fifth reason must not be able to make this build's decoder fail.
+/// Bits this build does not name are ignored rather than counted: an unnamed
+/// bit is a statement about a future build, not a category the operator has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallIssue {
+    Audio,
+    Video,
+    Connection,
+    Dropped,
+}
+
+impl CallIssue {
+    const ALL: [Self; 4] = [Self::Audio, Self::Video, Self::Connection, Self::Dropped];
+
+    /// The bit this issue occupies in the `issues` mask.
+    const fn bit(self) -> u64 {
+        match self {
+            Self::Audio => 1,
+            Self::Video => 1 << 1,
+            Self::Connection => 1 << 2,
+            Self::Dropped => 1 << 3,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Connection => "connection",
+            Self::Dropped => "dropped",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// The series, resolved once at construction.
 pub(crate) struct Meters {
     invite: Vec<Arc<Counter>>,
@@ -216,6 +291,8 @@ pub(crate) struct Meters {
     expired: Arc<Counter>,
     setup_seconds: Arc<Histogram>,
     turn_fallback: Arc<Counter>,
+    rating: Vec<Arc<Counter>>,
+    issue: Vec<Arc<Counter>>,
     group_join: Vec<Arc<Counter>>,
     group_left: Arc<Counter>,
     group_relayed: Arc<Counter>,
@@ -301,6 +378,33 @@ impl Meters {
                  claim from CALL_STATS.",
                 &[],
             ),
+            rating: RATING_KINDS
+                .iter()
+                .map(|rating| {
+                    registry.counter(
+                        "migo_call_rating_total",
+                        "Ratings users gave calls they had just left, by verdict. The \
+                         post-call quality rating section 180 asks for: a user's own \
+                         summary of a call this node could not hear, so it is reported \
+                         as given and never inferred.",
+                        &[("rating", rating_label(*rating))],
+                    )
+                })
+                .collect(),
+            issue: CallIssue::ALL
+                .iter()
+                .map(|issue| {
+                    registry.counter(
+                        "migo_call_issue_total",
+                        "Problems users attached to a call rating, by kind. One rating \
+                         can carry several, which is why these are separate counters \
+                         rather than one series over a mask. Only the four kinds this \
+                         build names are exported; a client's other bits are dropped \
+                         rather than guessed at.",
+                        &[("issue", issue.label())],
+                    )
+                })
+                .collect(),
             group_join: GroupJoinKind::ALL
                 .iter()
                 .map(|outcome| {
@@ -381,6 +485,34 @@ impl Meters {
     /// Counts one client-reported TURN fallback: media that left P2P for a relay.
     pub(crate) fn turn_fallback(&self) {
         self.turn_fallback.inc();
+    }
+
+    /// Counts one post-call rating, on the series for the verdict given.
+    ///
+    /// The index is the wire discriminant and the vector is registered in that
+    /// same order, so the lookup is the verdict itself rather than a second
+    /// mapping that could drift from the protocol enum.
+    pub(crate) fn rated(&self, rating: CallRating) {
+        if let Some(counter) = self.rating.get(rating.to_wire() as usize) {
+            counter.inc();
+        }
+    }
+
+    /// Counts each problem a rating named, one increment per bit set.
+    ///
+    /// A rating that named two problems is two increments, because these series
+    /// answer how often each problem was reported and not how many ratings
+    /// mentioned at least one. Bits this build does not name are dropped: the
+    /// mask is a client's, and a truth about it that this build cannot state is
+    /// better left unsaid than folded into a category it is not.
+    pub(crate) fn issues(&self, mask: u64) {
+        for issue in CallIssue::ALL {
+            if mask & issue.bit() != 0 {
+                if let Some(counter) = self.issue.get(issue.index()) {
+                    counter.inc();
+                }
+            }
+        }
     }
 
     pub(crate) fn group_join(&self, outcome: GroupJoinKind) {

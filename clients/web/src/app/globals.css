@@ -3395,6 +3395,90 @@ main {
   background: currentColor;
 }
 
+/*
+ * The post-call rating. It is the only part of the call screen that is about a call already over,
+ * so it is a card rather than another line of identity: four verdicts and, once one is picked, the
+ * optional note of what was wrong. Laid out in a column and capped in width because the ended
+ * screen has no media competing for the eye and the prompt is the only thing left to act on.
+ */
+.call-rating {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  max-width: 320px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.call-rating-ask {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.call-rating-choices {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.call-rating-choice {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.call-rating-choice.on {
+  border-color: var(--accent-border);
+  background: var(--accent-soft-strong);
+  color: var(--accent);
+  font-weight: 600;
+}
+.call-rating-issues {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+}
+.call-rating-issue {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.call-rating-issue.on {
+  border-style: solid;
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.call-rating-send {
+  font-size: 13px;
+}
+/* The acknowledgement replaces the prompt rather than sitting beside it: there is nothing left to
+   change once it has been sent, and a screen still offering the four verdicts would invite a second
+   press that goes nowhere. */
+.call-rating.done {
+  font-size: 13px;
+  color: var(--text-dim);
+  border-style: dashed;
+}
+/* The copy says what leaves the device, because a user being asked how a call went is entitled to
+   know that it is four words and some tick boxes and never anything that was said or shown. */
+.call-rating-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  text-align: center;
+}
+
 /* The video stage fills the overlay; the identity and actions ride above it. */
 .call-video-stage {
   position: absolute;

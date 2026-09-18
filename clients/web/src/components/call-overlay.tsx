@@ -38,7 +38,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
-import { CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
+import { CallEndReason, CallMediaKind, CallRating, CallState } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, Id } from '@migo/sdk';
 
 import { applyOutputDevice } from '@/lib/migo/call-devices.js';
@@ -61,6 +61,13 @@ import {
   mediaKindLabel,
 } from '@/lib/migo/call-signal.js';
 import { QUALITY_CEILINGS, qualityTierLabel } from '@/lib/migo/call-quality.js';
+import {
+  CALL_ISSUE_KINDS,
+  CALL_RATING_CHOICES,
+  callIssueLabel,
+  callRatingLabel,
+} from '@/lib/migo/call-rating.js';
+import type { CallIssueKind } from '@/lib/migo/call-rating.js';
 import type { LinkQuality } from '@/lib/migo/group-media.js';
 import { useCall } from '@/lib/migo/call-manager.js';
 import { MISSED_CALL_MESSAGE } from '@/lib/migo/call-manager.js';
@@ -175,6 +182,15 @@ export interface CallScreenProps {
   onSelectInput: (deviceId: string | null) => void;
   onSelectQuality: (ceiling: LinkQuality | null) => void;
   onToggleLowBandwidth: (on: boolean) => void;
+  /**
+   * What the user has said about a call that has just ended, and the three ways they say it.
+   * Optional so a screen with no rating state — every state but Ended — needs nothing passed;
+   * the default is the prompt's opening state, which is also the state of an unrated call.
+   */
+  rating?: CallRatingState;
+  onPickRating?: (rating: CallRating) => void;
+  onToggleRatingIssue?: (issue: CallIssueKind) => void;
+  onSubmitRating?: () => void;
   onDismiss: () => void;
 }
 
@@ -220,6 +236,10 @@ export function CallScreen({
   onSelectQuality,
   onToggleLowBandwidth,
   onTogglePip,
+  rating = EMPTY_CALL_RATING,
+  onPickRating,
+  onToggleRatingIssue,
+  onSubmitRating,
   onDismiss,
 }: CallScreenProps): ReactNode {
   // The output is applied to the media element rather than carried on the stream: the sink belongs
@@ -344,6 +364,18 @@ export function CallScreen({
         ) : null}
         {display === 'ended' && durationMs !== null ? (
           <div className="call-timer">{formatCallDuration(durationMs)}</div>
+        ) : null}
+        {display === 'ended' && durationMs !== null ? (
+          // The post-call rating, and the reason it is drawn from the duration rather than from the
+          // state alone: a call that rang out, was declined, or was cancelled before it connected is
+          // one nobody experienced, and asking how it went would collect opinions about a telephone
+          // not being answered. A connected call has a duration, and that is the whole test.
+          <CallRatingPrompt
+            rating={rating}
+            onPick={onPickRating ?? ((): void => {})}
+            onToggleIssue={onToggleRatingIssue ?? ((): void => {})}
+            onSubmit={onSubmitRating ?? ((): void => {})}
+          />
         ) : null}
         {quality !== null &&
         (display === 'connected' || display === 'degraded' || display === 'reconnecting') ? (
@@ -550,6 +582,112 @@ export function CallScreen({
             Back to chats
           </button>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What the user has said about the call so far, held by the overlay and rendered by the screen.
+ *
+ * The state lives outside {@link CallScreen} for the same reason every other piece of call state
+ * does: the screen is the pure half, so a test can pin what a half-answered prompt looks like
+ * without a call and without a server.
+ */
+export interface CallRatingState {
+  /** The verdict picked, or null while the user has picked none. */
+  choice: CallRating | null;
+  /** The problems ticked. Optional, and a set rather than a choice — a call can have had two. */
+  issues: readonly CallIssueKind[];
+  /** Whether it has gone to the server, which turns the prompt into its acknowledgement. */
+  sent: boolean;
+}
+
+/** The prompt in its opening state, which is also the state a call that was never rated is in. */
+export const EMPTY_CALL_RATING: CallRatingState = { choice: null, issues: [], sent: false };
+
+export interface CallRatingPromptProps {
+  /** What the user has said so far. */
+  rating: CallRatingState;
+  /** Picks a verdict, or clears it when given the one already picked. */
+  onPick: (rating: CallRating) => void;
+  /** Ticks or unticks one problem. */
+  onToggleIssue: (issue: CallIssueKind) => void;
+  /** Sends the verdict and whatever problems are ticked with it. */
+  onSubmit: () => void;
+}
+
+/**
+ * The post-call rating: section 180's four verdicts, and the optional note of what was wrong.
+ *
+ * It is a separate component because it has a life of its own after the call is over — the screen
+ * around it has stopped showing media and stopped ticking — and because the two halves of it are
+ * two different kinds of question. The verdict is a choice and exactly one of four, which is what
+ * `radiogroup` means and why it is not four toggle buttons; the note is a set, optional, and
+ * none-of-the-above is a real answer, which is why it is four toggle buttons and not a second
+ * radiogroup.
+ *
+ * The note is drawn only once a verdict is picked, because the verdict is the thing being asked
+ * for and the note is a detail about it: a screen that opened on eight controls would be asking a
+ * user who wants to say "good" to first decide whether anything was wrong. Sending needs no note —
+ * a verdict on its own is a complete answer, and the commonest one.
+ *
+ * What it asks for is never call content. Four words and four tick boxes is the whole of what
+ * leaves the device, and the copy says so, because a user being asked how a call went is entitled
+ * to know what of it is being sent.
+ */
+export function CallRatingPrompt({
+  rating,
+  onPick,
+  onToggleIssue,
+  onSubmit,
+}: CallRatingPromptProps): ReactNode {
+  if (rating.sent) {
+    return (
+      <div className="call-rating done" role="status">
+        Thanks — your rating was sent.
+      </div>
+    );
+  }
+  return (
+    <div className="call-rating" aria-label="Rate this call">
+      <div className="call-rating-ask">How was the call?</div>
+      <div className="call-rating-choices" role="radiogroup" aria-label="Call quality">
+        {CALL_RATING_CHOICES.map((choice) => (
+          <button
+            key={choice}
+            type="button"
+            role="radio"
+            aria-checked={rating.choice === choice}
+            className={`call-rating-choice${rating.choice === choice ? ' on' : ''}`}
+            onClick={() => onPick(choice)}
+          >
+            {callRatingLabel(choice)}
+          </button>
+        ))}
+      </div>
+      {rating.choice !== null ? (
+        <>
+          <div className="call-rating-issues" role="group" aria-label="What went wrong">
+            {CALL_ISSUE_KINDS.map((issue) => (
+              <button
+                key={issue}
+                type="button"
+                aria-pressed={rating.issues.includes(issue)}
+                className={`call-rating-issue${rating.issues.includes(issue) ? ' on' : ''}`}
+                onClick={() => onToggleIssue(issue)}
+              >
+                {callIssueLabel(issue)}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="btn btn-primary call-rating-send" onClick={onSubmit}>
+            Send rating
+          </button>
+        </>
+      ) : null}
+      <div className="call-rating-note">
+        Only your rating and what you tick is sent. Never what was said or shown.
       </div>
     </div>
   );
@@ -810,6 +948,7 @@ export function CallOverlay(): ReactNode {
     setLowBandwidth,
     toggleScreenShare,
     dismissCall,
+    rateCall,
   } = useCall();
 
   const peerId: Id | null = incomingCall
@@ -845,10 +984,53 @@ export function CallOverlay(): ReactNode {
   // output list is: this shell is exported as static HTML, and a control that exists on the client
   // and not in the server's markup is a hydration mismatch rather than a feature.
   const [pipAvailable, setPipAvailable] = useState<boolean>(false);
+  const [rating, setRating] = useState<CallRatingState>(EMPTY_CALL_RATING);
 
   useEffect(() => {
     setPipAvailable(pipMode() !== 'none');
   }, []);
+
+  useEffect(() => {
+    // A rating belongs to the call it was given for. A second call must open on its own blank
+    // prompt rather than on the previous call's verdict, and because the frame names the call it is
+    // about, a choice carried over would be a rating of the wrong call — sent, and wrong.
+    setRating(EMPTY_CALL_RATING);
+  }, [activeCall?.callId]);
+
+  /**
+   * Picks a verdict, or clears the one already picked.
+   *
+   * Clearing matters for the same reason the prompt can be dismissed: a user who picked Poor by
+   * mistake and then decides the call was fine must be able to say so, and a set of radio buttons
+   * that could only be changed to a different verdict would make the first press a commitment.
+   */
+  const pickRating = useCallback((choice: CallRating): void => {
+    setRating((current) =>
+      current.choice === choice ? { ...current, choice: null, issues: [] } : { ...current, choice },
+    );
+  }, []);
+
+  const toggleRatingIssue = useCallback((issue: CallIssueKind): void => {
+    setRating((current) => ({
+      ...current,
+      issues: current.issues.includes(issue)
+        ? current.issues.filter((held) => held !== issue)
+        : [...current.issues, issue],
+    }));
+  }, []);
+
+  const submitRating = useCallback((): void => {
+    if (rating.choice === null) {
+      return;
+    }
+    // The send is outside the state updater deliberately: React may run an updater more than once,
+    // and a frame sent from inside one would be sent twice for a single press.
+    rateCall(rating.choice, rating.issues);
+    // Marked sent before the frame lands, because CALL_STATS is Droppable and has no acknowledgement
+    // to wait for: what the screen acknowledges is the user's own act of saying it, and a pending
+    // state that could only clear on a frame nobody confirms would be a state that never clears.
+    setRating((current) => ({ ...current, sent: true }));
+  }, [rateCall, rating]);
 
   useEffect(() => {
     if (pipWindow === null) {
@@ -946,6 +1128,10 @@ export function CallOverlay(): ReactNode {
           onSelectQuality={setQualityCeiling}
           onToggleLowBandwidth={setLowBandwidth}
           onTogglePip={(video) => void togglePip(video)}
+          rating={rating}
+          onPickRating={pickRating}
+          onToggleRatingIssue={toggleRatingIssue}
+          onSubmitRating={submitRating}
           onDismiss={dismissCall}
         />
         {pipWindow !== null && floatingCall !== null

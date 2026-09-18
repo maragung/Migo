@@ -482,6 +482,15 @@ export enum MlDsaPurpose {
   Rotate = 3,
 }
 
+/** A user's verdict on a call it has just left (section 180). Unknown is what a build that does not know the value decodes to, and is never sent. */
+export enum CallRating {
+  Unknown = 0,
+  Excellent = 1,
+  Good = 2,
+  Average = 3,
+  Poor = 4,
+}
+
 /** Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008. */
 export enum ConversationRole {
   Unknown = 0,
@@ -6811,6 +6820,10 @@ export interface CallStats {
   packetLoss?: number;
   jitterMs?: number;
   usedTurn?: boolean;
+  /** The user's verdict on a call that has just ended. Absent when the user did not rate. */
+  rating?: CallRating;
+  /** Bit 0 audio, 1 video, 2 connection, 3 dropped. Never call content. */
+  issues?: bigint;
 }
 
 export function encodeCallStats(w: Writer, v: CallStats): void {
@@ -6822,12 +6835,16 @@ export function encodeCallStats(w: Writer, v: CallStats): void {
   if (v.packetLoss !== undefined) present++;
   if (v.jitterMs !== undefined) present++;
   if (v.usedTurn !== undefined) present++;
+  if (v.rating !== undefined) present++;
+  if (v.issues !== undefined) present++;
   w.u32(present);
   if (v.setupMs !== undefined) { const value = v.setupMs; w.optional(1, (w) => { w.u32(value); }); }
   if (v.rttMs !== undefined) { const value = v.rttMs; w.optional(2, (w) => { w.u32(value); }); }
   if (v.packetLoss !== undefined) { const value = v.packetLoss; w.optional(3, (w) => { w.u32(value); }); }
   if (v.jitterMs !== undefined) { const value = v.jitterMs; w.optional(4, (w) => { w.u32(value); }); }
   if (v.usedTurn !== undefined) { const value = v.usedTurn; w.optional(5, (w) => { w.bool(value); }); }
+  if (v.rating !== undefined) { const value = v.rating; w.optional(6, (w) => { w.u32(value); }); }
+  if (v.issues !== undefined) { const value = v.issues; w.optional(7, (w) => { w.u64big(value); }); }
   w.leave();
 }
 
@@ -6844,6 +6861,8 @@ export function decodeCallStats(r: Reader): CallStats {
       case 3: out.packetLoss = sub.u32(); break;
       case 4: out.jitterMs = sub.u32(); break;
       case 5: out.usedTurn = sub.bool(); break;
+      case 6: out.rating = sub.u32() as CallRating; break;
+      case 7: out.issues = sub.u64big(); break;
       default: break; // unknown optional field: skipped by length
     }
   }

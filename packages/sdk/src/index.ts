@@ -259,6 +259,7 @@ export { EnvelopeWriter, EnvelopeReader } from './envelope-buffer.js';
 // `protocol` namespace for anything not re-exported here.
 export {
   BandwidthMode,
+  CallRating,
   ConversationKind,
   ConversationRole,
   EncryptionMode,

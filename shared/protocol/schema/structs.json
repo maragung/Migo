@@ -4061,6 +4061,20 @@
           "type": "bool",
           "optional": true,
           "id": 5
+        },
+        {
+          "name": "rating",
+          "type": "CallRating",
+          "optional": true,
+          "id": 6,
+          "doc": "The user's verdict on a call that has just ended. Absent when the user did not rate."
+        },
+        {
+          "name": "issues",
+          "type": "bitmask64",
+          "optional": true,
+          "id": 7,
+          "doc": "Bit 0 audio, 1 video, 2 connection, 3 dropped. Never call content."
         }
       ]
     },

@@ -38,7 +38,7 @@ use migo_calls::{Calls, GroupCallStore, MemoryGroupCallStore, SharedGroupCallSto
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Timestamp};
-use migo_protocol::{codes, CallStats, Opcode, TurnServer};
+use migo_protocol::{codes, CallRating, CallStats, Opcode, TurnServer};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 
 const SECOND: i64 = 1_000;
@@ -1150,6 +1150,63 @@ async fn stats_from_a_party_count_and_stats_from_a_stranger_do_not() {
         1
     );
 
+    // The same party's post-call rating, with two problems ticked. Section 180
+    // asks for both halves, and they land on separate series: one verdict, and
+    // one increment per problem named, because a rating that named two of them
+    // is two facts about the call rather than one.
+    harness
+        .calls
+        .stats(
+            &alice(NOW),
+            CallStats {
+                call_id: id(CALL),
+                rating: Some(CallRating::Poor),
+                issues: Some(0b0101),
+                ..CallStats::default()
+            },
+        )
+        .await
+        .expect("a party may rate its own call");
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_rating_total", "", &[("rating", "poor")])
+            .get(),
+        1
+    );
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_issue_total", "", &[("issue", "audio")])
+            .get(),
+        1,
+        "bit 0 is the audio problem"
+    );
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_issue_total", "", &[("issue", "connection")])
+            .get(),
+        1,
+        "bit 2 is the connection problem"
+    );
+    // The bit nobody set, and the verdict nobody gave: both are registered at
+    // zero, which is what lets an alert be written before the first one lands.
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_issue_total", "", &[("issue", "dropped")])
+            .get(),
+        0
+    );
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_rating_total", "", &[("rating", "excellent")])
+            .get(),
+        0
+    );
+
     // A stranger naming the same id: answered silence, and no series moves —
     // a metrics frame must not become a probe for which calls exist.
     harness
@@ -1160,6 +1217,8 @@ async fn stats_from_a_party_count_and_stats_from_a_stranger_do_not() {
                 call_id: id(CALL),
                 setup_ms: Some(9_999),
                 used_turn: Some(true),
+                rating: Some(CallRating::Excellent),
+                issues: Some(0b1111),
                 ..CallStats::default()
             },
         )
@@ -1172,6 +1231,21 @@ async fn stats_from_a_party_count_and_stats_from_a_stranger_do_not() {
             .counter("migo_call_turn_fallback_total", "", &[])
             .get(),
         1
+    );
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_rating_total", "", &[("rating", "excellent")])
+            .get(),
+        0,
+        "a stranger's verdict about a call it is not on is not counted"
+    );
+    assert_eq!(
+        harness
+            .registry
+            .counter("migo_call_issue_total", "", &[("issue", "video")])
+            .get(),
+        0
     );
 
     // A nil id is a shape error, the same as every other method here.
