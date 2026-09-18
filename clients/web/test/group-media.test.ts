@@ -1139,7 +1139,7 @@ test('a shared screen takes the wire from the camera, and giving it back returns
   assert.ok(camera !== undefined, 'the seat has a camera to begin with');
 
   assert.equal(await a.plane.startScreenShare(), true);
-  const screen = a.screens[0]?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  const screen = a.screens[0]?.getVideoTracks()[0];
   assert.ok(screen !== undefined, 'the picker handed over a screen');
   assert.equal(a.plane.screenSharing, true);
   assert.equal(sender.track, screen, 'the screen wins the wire while it is shared');
@@ -1173,7 +1173,7 @@ test('the platform stop control ends the share, a dismissed picker starts none, 
   assert.ok(sender !== undefined);
 
   assert.equal(await a.plane.startScreenShare(), true);
-  const screen = a.screens[0]?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  const screen = a.screens[0]?.getVideoTracks()[0];
   assert.ok(screen !== undefined);
   // The browser's own "Stop sharing" ends the track rather than telling the page, so the plane has to
   // learn it from the track: without that the roster would keep claiming a share that is over.

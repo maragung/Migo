@@ -154,7 +154,7 @@ function screen(overrides: Partial<GroupCallScreenProps> = {}): string {
     onDismiss: () => {},
     onToggleMute: () => null,
     onToggleCamera: () => null,
-    onToggleScreenShare: () => Promise.resolve(false),
+    onToggleScreenShare: () => {},
     pipAvailable: false,
     pipActive: false,
     onTogglePip: () => {},

@@ -163,8 +163,14 @@ export interface GroupCallScreenProps {
   onToggleMute: () => boolean | null;
   /** Turns this seat's camera on or off; the manager's, already bound. */
   onToggleCamera: () => boolean | null;
-  /** Starts or stops this seat's screen share; the manager's, already bound. */
-  onToggleScreenShare: () => Promise<boolean>;
+  /**
+   * Starts or stops this seat's screen share; the manager's, already bound.
+   *
+   * Void rather than the promise the manager's own helper returns: this is an attribute, and a
+   * handler that returns a promise is one the browser is handed and cannot await. The manager
+   * answers whether a share started for the code that asks; the button only presses it.
+   */
+  onToggleScreenShare: () => void;
   /**
    * Whether this browser can float the call at all.
    *
@@ -591,7 +597,7 @@ export function GroupCallOverlay(): ReactNode {
         onDismiss={dismissGroupCall}
         onToggleMute={() => toggleGroupMute()}
         onToggleCamera={() => toggleGroupCamera()}
-        onToggleScreenShare={toggleGroupScreenShare}
+        onToggleScreenShare={() => void toggleGroupScreenShare()}
         pipAvailable={pipAvailable && activeGroupCall.note === null}
         pipActive={pipWindow !== null}
         onTogglePip={() => void togglePip()}
