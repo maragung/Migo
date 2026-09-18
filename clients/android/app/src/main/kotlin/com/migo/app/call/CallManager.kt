@@ -1,6 +1,7 @@
 package com.migo.app.call
 
 import android.content.Context
+import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
@@ -749,7 +750,7 @@ class CallManager(
      * goes, so a menu that read the list once would offer a device the phone no longer has --
      * which is why the list is re-read from the phone's report rather than from the clock.
      */
-    private val outputWatcher = object : AudioManager.AudioDeviceCallback() {
+    private val outputWatcher = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
             refreshOutputs()
         }
