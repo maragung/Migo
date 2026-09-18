@@ -18,6 +18,7 @@ pub mod alerts;
 pub mod auth;
 pub mod bots;
 pub mod call;
+pub mod calls;
 pub mod captcha;
 pub mod chat;
 pub mod chat_list;
@@ -89,6 +90,10 @@ pub enum Place {
     Feed,
     /// The durable notification inbox.
     Alerts,
+    /// The calls this account was party to that have already ended. A read of the past rather
+    /// than of what is running, which is why it is a place of its own and not a filter on the
+    /// call overlay: the listing the call plane serves has no ended state to name.
+    Calls,
     /// One box, everything it can honestly find.
     Search,
     /// The $MIG balance, the gift shop, the statement, progression, badges, leaderboard. $MIG
@@ -123,6 +128,7 @@ impl Place {
             Self::Bots => "Bots",
             Self::Feed => "Feed",
             Self::Alerts => "Alerts",
+            Self::Calls => "Calls",
             Self::Search => "Search",
             Self::Wallet => "Wallet",
             Self::Profile => "Profile",

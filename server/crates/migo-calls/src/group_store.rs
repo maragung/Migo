@@ -112,6 +112,59 @@ pub trait GroupCallStore: Send + Sync {
     /// in-memory backend's clone of a handful of live calls is the behaviour
     /// to beat.
     async fn all(&self) -> Result<Vec<GroupCall>>;
+
+    /// The ended group calls `account_id` held a seat in, newest first.
+    ///
+    /// The group half of the call history, and the reason it lives here rather
+    /// than beside the 1:1 store's: a group call leaves [`GroupCallStore::all`]
+    /// at the exact moment it becomes worth remembering, because the last
+    /// leave retires the row. What is kept is therefore a second map, written
+    /// by the retirements and read by this method, and what it keeps is not
+    /// just the row — an emptied roster names nobody, so the accounts it
+    /// seated travel with it, or the visibility question this method exists to
+    /// answer would have no answer at all.
+    ///
+    /// `before` is the paging cursor, exclusive, and `conversation_id` scopes
+    /// the read in the store for the reason the 1:1 store's twin gives: a
+    /// filter applied after a limit hands a conversation-scoped screen a short
+    /// page and a cursor that skips what it never saw.
+    async fn history_for(
+        &self,
+        account_id: Id,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: usize,
+    ) -> Result<Vec<GroupCallHistory>>;
+
+    /// Drops ended rosters past their retention, returning how many it
+    /// dropped.
+    ///
+    /// The same two limits the 1:1 store is pruned by, for the same reason:
+    /// `retention_ms` bounds a quiet account by age, `keep_per_account` bounds
+    /// a busy one by count, and a row over either party's budget goes for both
+    /// parties at once.
+    async fn prune_history(
+        &self,
+        now: Timestamp,
+        retention_ms: i64,
+        keep_per_account: usize,
+    ) -> Result<usize>;
+}
+
+/// A group call whose roster emptied, kept because it is history.
+///
+/// The row alone is not enough and that is the whole shape of this type: by
+/// the time a group call can be remembered, its roster holds nobody, so the
+/// row cannot say who was in it — neither to an account asking for its own
+/// history nor to the count a history line renders. The accounts are therefore
+/// kept beside the row, in the order they first joined.
+#[derive(Debug, Clone)]
+pub struct GroupCallHistory {
+    /// The row as the last leave left it: `ended_at` stamped, roster empty.
+    pub call: GroupCall,
+    /// The distinct accounts the roster seated over its life, in first-join
+    /// order.
+    pub seated: Vec<Id>,
 }
 
 /// A shared, fully erased group-call store.
@@ -130,7 +183,8 @@ pub struct MemoryGroupCallStore {
     rows: Mutex<GroupCallRows>,
 }
 
-/// What the lock guards: the live rosters, and the seats the sweep retired.
+/// What the lock guards: the live rosters, the seats the sweep retired, and
+/// the rosters that have ended.
 #[derive(Debug, Default)]
 struct GroupCallRows {
     calls: HashMap<Id, GroupCall>,
@@ -147,6 +201,74 @@ struct GroupCallRows {
     /// the life of the process, the same bounded growth the presence
     /// relay's per-subject table accepts.
     retired: HashMap<Id, HashMap<Id, Timestamp>>,
+    /// The accounts each live roster has seated, accumulated across writes.
+    ///
+    /// Accumulated rather than read off the row, because the roster is exactly
+    /// the thing that is gone by the time anyone asks: the service's last
+    /// leave writes the roster with the leaver already removed, so the final
+    /// seat is one no write ever shows as seated. This is the map that
+    /// remembers it, and it is dropped into the history entry at retirement
+    /// rather than kept for the life of the process.
+    seated: HashMap<Id, Vec<Id>>,
+    /// The calls whose roster emptied, which is every group call the history
+    /// can answer about.
+    history: HashMap<Id, GroupCallHistory>,
+}
+
+impl GroupCallRows {
+    /// Moves a call out of the live map and into the history.
+    ///
+    /// The one place a group call stops being current and starts being past,
+    /// called by both retirements so neither can forget: the row is dropped
+    /// from `calls` in every case — that is what the callers asked for — and
+    /// kept only if it carries an `ended_at`, because an order and a cursor
+    /// built on when a call ended have no place for a row that never recorded
+    /// one.
+    fn retire(&mut self, call_id: Id) -> Option<GroupCall> {
+        let call = self.calls.remove(&call_id)?;
+        let seated = self.seated.remove(&call_id).unwrap_or_default();
+        if call.ended_at.is_some() {
+            self.history.insert(
+                call_id,
+                GroupCallHistory {
+                    call: call.clone(),
+                    seated,
+                },
+            );
+        }
+        Some(call)
+    }
+
+    /// The ended calls `account_id` was seated in, newest first.
+    fn history_of(
+        &self,
+        account_id: Id,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: usize,
+    ) -> Vec<GroupCallHistory> {
+        let mut ended: Vec<GroupCallHistory> = self
+            .history
+            .values()
+            .filter(|entry| {
+                let Some(ended_at) = entry.call.ended_at else {
+                    return false;
+                };
+                entry.seated.contains(&account_id)
+                    && conversation_id.is_none_or(|id| entry.call.conversation_id == id)
+                    && before.is_none_or(|cursor| !ended_at.is_at_or_after(cursor))
+            })
+            .cloned()
+            .collect();
+        ended.sort_by(|a, b| {
+            b.call
+                .ended_at
+                .cmp(&a.call.ended_at)
+                .then_with(|| b.call.call_id.cmp(&a.call.call_id))
+        });
+        ended.truncate(limit);
+        ended
+    }
 }
 
 impl MemoryGroupCallStore {
@@ -177,9 +299,28 @@ impl GroupCallStore for MemoryGroupCallStore {
         if seated.participants.is_empty() {
             // An empty roster is an over call, whether the leaver emptied it
             // or the guard just did: the id is released for a fresh join, the
-            // same release `retire_if_empty` performs.
-            rows.calls.remove(&call.call_id);
+            // same release `retire_if_empty` performs. The moment the call
+            // ended arrives on the caller's own copy and not on the stored
+            // one, which still reads as live, so it is carried across before
+            // the retirement reads the row it is about to keep: a store that
+            // let the stored copy win would drop every group call that ended
+            // when its last seat left, and a history missing exactly the
+            // calls that used the ordinary way out is worse than no history.
+            if let Some(stored) = rows.calls.get_mut(&call.call_id) {
+                stored.ended_at = stored.ended_at.or(call.ended_at);
+            }
+            rows.retire(call.call_id);
         } else {
+            // Recorded before the insert, and deduplicated, because the roster
+            // that ends holds nobody and this is the only copy of who it held:
+            // a device that leaves and re-joins is one account here, and the
+            // joining order is the order the rows first arrived in.
+            let accounts = rows.seated.entry(call.call_id).or_default();
+            for seat in &seated.participants {
+                if !accounts.contains(&seat.account_id) {
+                    accounts.push(seat.account_id);
+                }
+            }
             rows.calls.insert(call.call_id, seated);
         }
         Ok(())
@@ -191,10 +332,11 @@ impl GroupCallStore for MemoryGroupCallStore {
 
     async fn retire_if_empty(&self, call_id: Id) -> Result<Option<GroupCall>> {
         let mut rows = self.rows.lock();
-        match rows.calls.get(&call_id) {
-            Some(call) if call.participants.is_empty() => Ok(rows.calls.remove(&call_id)),
-            _ => Ok(None),
-        }
+        let empty = rows
+            .calls
+            .get(&call_id)
+            .is_some_and(|call| call.participants.is_empty());
+        Ok(if empty { rows.retire(call_id) } else { None })
     }
 
     async fn retire_gone(
@@ -251,13 +393,72 @@ impl GroupCallStore for MemoryGroupCallStore {
             // The tombstones stay: a stale clone is just as happy to
             // re-create a removed row as to write into a live one, and the
             // guard owes the seat its finality either way.
-            rows.calls.remove(&call_id);
+            rows.retire(call_id);
         }
         Ok(retired)
     }
 
     async fn all(&self) -> Result<Vec<GroupCall>> {
         Ok(self.rows.lock().calls.values().cloned().collect())
+    }
+
+    async fn history_for(
+        &self,
+        account_id: Id,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: usize,
+    ) -> Result<Vec<GroupCallHistory>> {
+        Ok(self
+            .rows
+            .lock()
+            .history_of(account_id, conversation_id, before, limit))
+    }
+
+    async fn prune_history(
+        &self,
+        now: Timestamp,
+        retention_ms: i64,
+        keep_per_account: usize,
+    ) -> Result<usize> {
+        let horizon = now.saturating_add_millis(-retention_ms);
+        let mut rows = self.rows.lock();
+        let before = rows.history.len();
+        rows.history.retain(|_, entry| {
+            entry
+                .call
+                .ended_at
+                .is_some_and(|ended_at| ended_at.is_at_or_after(horizon))
+        });
+        let mut dropped = before - rows.history.len();
+
+        if keep_per_account > 0 {
+            let mut kept: HashMap<Id, usize> = HashMap::new();
+            let mut ended: Vec<(Id, Timestamp)> = rows
+                .history
+                .iter()
+                .filter_map(|(id, entry)| entry.call.ended_at.map(|at| (*id, at)))
+                .collect();
+            ended.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+            for (call_id, _) in ended {
+                let Some(seated) = rows.history.get(&call_id).map(|e| e.seated.clone()) else {
+                    continue;
+                };
+                let over = seated
+                    .iter()
+                    .any(|party| kept.get(party).copied().unwrap_or(0) >= keep_per_account);
+                if over {
+                    rows.history.remove(&call_id);
+                    dropped += 1;
+                } else {
+                    for party in seated {
+                        *kept.entry(party).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(dropped)
     }
 }
 

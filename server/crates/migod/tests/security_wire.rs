@@ -211,7 +211,7 @@ async fn assert_error_then_close(
     error
 }
 
-/// Every opcode in the never-allocated span 250-255 is refused with the public
+/// Every opcode in the never-allocated span 251-255 is refused with the public
 /// hint "reserved opcode" and closes the connection. The whole span, not a
 /// sample: a regression that frees one number at the tail is exactly as wrong
 /// as one at the head.
@@ -219,7 +219,7 @@ async fn assert_error_then_close(
 async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_connection() {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    for raw in 250u32..=255 {
+    for raw in 251u32..=255 {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
         send_frame(&mut stream, &frame).await;
@@ -233,20 +233,22 @@ async fn every_opcode_in_the_never_allocated_span_is_refused_and_closes_the_conn
     }
 }
 
-/// The two numbers at the allocated head of the reserved range — 240
-/// (`ENTITLEMENTS`) and 247 (`CALL_LIST`) — are each allocated, so neither is
+/// The numbers at the allocated head of the reserved range — 240
+/// (`ENTITLEMENTS`), 247 (`CALL_LIST`), and 250 (`CALL_HISTORY`) — are each
+/// allocated, so none is
 /// the range gate's to refuse: from an unauthenticated session it is the phase
 /// gate that answers, with `UNEXPECTED_OPCODE` and no message at all — whether
 /// this build knows the opcode is opt-in disclosure, and a stranger gets
-/// neither the fact nor the reason. Both are walked, because the head moving is
-/// exactly what a new allocation does here, and a test that pinned only the old
-/// head would keep passing while the gate quietly swallowed the new one.
+/// neither the fact nor the reason. All three are walked, because the head
+/// moving is exactly what a new allocation does here, and a test that pinned
+/// only the old head would keep passing while the gate quietly swallowed the
+/// new one.
 #[tokio::test]
 async fn the_allocated_head_of_the_reserved_range_is_refused_by_the_phase_gate_without_disclosure()
 {
     let app = build_app().await;
     let addr = app.tcp_bind.expect("the listener is bound");
-    for raw in [240u32, 247] {
+    for raw in [240u32, 247, 250] {
         let (mut stream, _welcome) = handshake(addr).await;
         let frame = Frame::new(migo_wire::FrameHeader::new(raw, 7), Bytes::from_static(&[]));
         send_frame(&mut stream, &frame).await;

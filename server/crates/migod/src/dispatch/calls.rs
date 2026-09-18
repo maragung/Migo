@@ -1,6 +1,6 @@
 //! The CALLS application opcodes: the ring lifecycle and the sealed relay.
 //!
-//! Thirteen opcodes, each one a thin translation from a wire frame onto one
+//! Fourteen opcodes, each one a thin translation from a wire frame onto one
 //! [`Callkeeper`](migo_calls::Callkeeper) method. The service owns every rule
 //! — the idempotent invite, the state machine, the relay's device checks, the
 //! expiry sweep — so these handlers only build the
@@ -25,6 +25,8 @@
 //! | `CALL_KEY_UPDATE`  | `CallKeyUpdate`    | `group_key_audience` / `call` | `Acknowledged`  | key update → other party, or the whole roster |
 //! | `CALL_STATS`       | `CallStats`        | `stats`                   | `Acknowledged`      | —                        |
 //! | `CALL_TURN_FETCH`  | `CallTurnFetch`    | `turn_servers`            | `CallTurnResponse`  | —                        |
+//! | `CALL_LIST`        | `CallListQuery`    | `list`                    | `CallListResult`    | —                        |
+//! | `CALL_HISTORY`     | `CallHistoryQuery` | `history`                 | `CallHistoryResult` | —                        |
 //! | `CALL_SFU_JOIN`    | `CallInvite`       | `group_join`              | `CallTurnResponse`  | roster → joiner; join → conversation |
 //!
 //! `CALL_INVITE_EVENT`, `CALL_STATE_EVENT`, and `CALL_SFU_EVENT` are
@@ -108,10 +110,10 @@ use migo_core::{Error, Timestamp};
 use migo_gateway::ClientContext;
 use migo_notify::{Event as NotificationEvent, SharedNotifier};
 use migo_protocol::{
-    fault, from_frame, Acknowledged, CallAnswer, CallCancel, CallDecline, CallEnd, CallIce,
-    CallInvite, CallInviteResult, CallKeyUpdate, CallListQuery, CallListResult, CallRenegotiate,
-    CallSdp, CallStats, CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic,
-    TopicKind,
+    fault, from_frame, Acknowledged, CallAnswer, CallCancel, CallDecline, CallEnd,
+    CallHistoryQuery, CallHistoryResult, CallIce, CallInvite, CallInviteResult, CallKeyUpdate,
+    CallListQuery, CallListResult, CallRenegotiate, CallSdp, CallStats, CallTurnFetch,
+    CallTurnResponse, Frame, NotificationKind, Opcode, Topic, TopicKind,
 };
 
 use crate::conversation_relay::ConversationRelay;
@@ -662,6 +664,32 @@ pub(crate) async fn handle_list(
     let request: CallListQuery = from_frame(frame).map_err(fault::from_wire)?;
     let calls = svc.list(&caller_of(ctx), request.conversation_id).await?;
     ctx.reply(&CallListResult { calls })
+}
+
+/// Answers what calls the caller was party to that have already ended.
+///
+/// The listing's twin, and it publishes nothing for the same reason: the
+/// history moves nothing, so it answers on the connection it arrived on. What
+/// it adds that the listing cannot answer is the row the store keeps after a
+/// call dies — and because that row is kept per call rather than per caller,
+/// the account is named to the service rather than fished out of the frame:
+/// the scope is a conversation the caller narrows to, never an account, so no
+/// request can ask for anybody else's calls.
+pub(crate) async fn handle_history(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedCallkeeper,
+) -> Result<(), Error> {
+    let request: CallHistoryQuery = from_frame(frame).map_err(fault::from_wire)?;
+    let calls = svc
+        .history(
+            &caller_of(ctx),
+            request.conversation_id,
+            request.before,
+            request.limit,
+        )
+        .await?;
+    ctx.reply(&CallHistoryResult { calls })
 }
 
 /// Answers a TURN fetch with the configured relays.

@@ -21,9 +21,10 @@
  *
  * It holds no call state. Which calls are ringing, connected, or ended is a *product* projection the
  * application keeps ({@link ActiveCall} is its shape); the server pushes the authoritative
- * transitions through {@link onCallState}. {@link listCalls} is the one read that exists so that
- * projection can be rebuilt rather than only maintained: every other fact here arrives as an event,
- * and a client that was offline when the call started has no event to have missed. It also never
+ * transitions through {@link onCallState}. {@link listCalls} and {@link callHistory} are the two
+ * reads that exist so a projection can be rebuilt rather than only maintained: every other fact here
+ * arrives as an event, and a client that was offline when the call started has no event to have
+ * missed — while a call that ended before it reconnected has no event it could still act on at all. It also never
  * opens or seals anything: the bytes handed
  * to {@link invite}, {@link answer}, {@link sendSdp}, {@link renegotiate}, and {@link sendIce} are
  * already sealed by the
@@ -50,6 +51,8 @@ import {
   decodeCallTurnResponse,
   encodeCallListQuery,
   decodeCallListResult,
+  encodeCallHistoryQuery,
+  decodeCallHistoryResult,
   decodeCallInviteEvent,
   decodeCallStateEvent,
   decodeCallSdp,
@@ -66,6 +69,8 @@ import type {
   TurnServer,
   CallListEntry,
   CallListQuery,
+  CallHistoryEntry,
+  CallHistoryQuery,
 } from '@migo/protocol';
 
 import { newId } from '../ids.js';
@@ -118,6 +123,55 @@ export enum CallEndReason {
   Network = 5,
   /** The callee's devices were occupied — a decline reason, not a hang-up. */
   Busy = 6,
+}
+
+/**
+ * The two kinds of call a history line can be. The same two numbers `CallListEntry` uses, because
+ * a client draws the same two rows.
+ */
+export enum CallKind {
+  /** A 1:1 call, the two named parties a call row holds. */
+  Direct = 0,
+  /** A group call, the roster a group row holds. */
+  Group = 1,
+}
+
+/**
+ * Which way a history row's call went, read from the asking account's side.
+ *
+ * The only side a history screen has: the same row is outgoing for the caller and incoming for the
+ * callee, and a client that had to work that out from the peer id would have to know who it is
+ * before it could draw an arrow.
+ */
+export enum CallDirection {
+  /** This account placed the call. */
+  Outgoing = 0,
+  /** This account was called. */
+  Incoming = 1,
+}
+
+/**
+ * What a history row should say, which is not the same question {@link CallEndReason} answers.
+ *
+ * That one is the relay's "why did this row close"; this is the screen's "what happened". They
+ * differ in the one place that matters — a call that connected and then ended is `Answered`
+ * however it ended, because "you talked for two minutes" is the fact, and the reason it stopped is
+ * not. A group row is always `Answered`: its row is written when its first seat is taken, so there
+ * is no ring to have missed.
+ */
+export enum CallOutcome {
+  /** It connected and then ended, however long it lasted. */
+  Answered = 0,
+  /** It rang out. */
+  Missed = 1,
+  /** The callee declined it. */
+  Declined = 2,
+  /** The callee's devices were occupied. */
+  Busy = 3,
+  /** The caller withdrew it before anyone answered. */
+  Cancelled = 4,
+  /** A device or the network gave up. */
+  Failed = 5,
 }
 
 /** Why a callee declined. `Busy` answers faster than a ring that can never be picked up. */
@@ -432,6 +486,34 @@ export class CallsDomain {
       encodeCallListQuery,
       decodeCallListResult,
       query,
+    );
+    return response.calls;
+  }
+
+  /**
+   * A page of the calls this account was party to that have already ended, newest first.
+   *
+   * The other half of {@link listCalls}: that one answers what is happening now, and this answers
+   * what happened. A listing drops a call the moment it ends — the server keeps the row, but its
+   * listing is a filter on calls that are alive — so a screen that shows missed and past calls has
+   * nothing to read without this read.
+   *
+   * `before` is the paging cursor and is the whole of the paging protocol: pass the `endedAt` of the
+   * oldest row already held and the next page begins strictly after it. `limit` is optional and the
+   * server clamps it rather than refusing it, so a client may ask for its own page size and take
+   * what comes back.
+   *
+   * Read `outcome` rather than reconstructing it: the server derives it from its own record of
+   * whether the call was answered, so a missed call cannot be turned into a conversation by anything
+   * either party said afterwards. `direction` is likewise read from this account's side, so a screen
+   * never has to work out whether it is the caller before it can draw the row.
+   */
+  async callHistory(options: CallHistoryQuery = {}): Promise<CallHistoryEntry[]> {
+    const response = await this.#rpc.call(
+      OP.CALL_HISTORY,
+      encodeCallHistoryQuery,
+      decodeCallHistoryResult,
+      options,
     );
     return response.calls;
   }

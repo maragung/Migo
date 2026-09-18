@@ -689,6 +689,8 @@ impl App {
                         region: server.region.clone(),
                     })
                     .collect(),
+                history_retention_ms: config.calls.history_retention_ms,
+                history_max_per_account: config.calls.history_max_per_account,
             },
         );
 

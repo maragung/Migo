@@ -1542,6 +1542,18 @@
    "doc": "Every call this account can see right now: the rings it is being offered, the direct calls it is a party to, and the group calls running in conversations it belongs to. This is how a member who was offline through a whole call learns one is running, and how a client that just reconnected rebuilds its call state without waiting for an announcement it was never there to hear."
   },
   {
+   "name": "CALL_HISTORY",
+   "code": 250,
+   "direction": "client_to_server",
+   "payload": "CallHistoryQuery",
+   "response": "CallHistoryResult",
+   "auth": "User",
+   "feature": "CALLS",
+   "cost": 2,
+   "class": "Droppable",
+   "doc": "The calls this account was party to that have already ended, newest first. CALL_LIST answers what is happening now and lets an ended call fall out of its answer, so a screen that shows missed and past calls has nothing to read: this is the same store asked the other question, and the row it answers with is the one the server already wrote when the call died. Paged by ended_at, scoped to one conversation when a conversation's own screen asks, and never a window onto anybody else's calls."
+  },
+  {
    "name": "CONVERSATION_STATE_EVENT",
    "code": 52,
    "direction": "server_to_client",

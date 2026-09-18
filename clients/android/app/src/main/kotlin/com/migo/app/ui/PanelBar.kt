@@ -90,6 +90,7 @@ fun PanelBar(
 /** The panels' names, as the bar's title spells them — the web client's right pane uses the same. */
 fun panelTitle(section: AppState.Section): String = when (section) {
     AppState.Section.ALERTS -> "Alerts"
+    AppState.Section.CALLS -> "Calls"
     AppState.Section.SEARCH -> "Search"
     AppState.Section.WALLET -> "Wallet"
     AppState.Section.PROFILE -> "Profile"

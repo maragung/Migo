@@ -26,6 +26,7 @@ import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.BotsScreen
+import com.migo.app.ui.CallsScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
@@ -313,6 +314,13 @@ internal fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifi
             onSaveScopes = model::setBotScopes,
             onDismissReveal = model::dismissBotReveal,
             onRefresh = model::loadBots,
+            modifier = modifier,
+        )
+
+        AppState.Section.CALLS -> CallsScreen(
+            state = state,
+            onRefresh = model::loadCalls,
+            onLoadOlder = model::loadOlderCalls,
             modifier = modifier,
         )
 

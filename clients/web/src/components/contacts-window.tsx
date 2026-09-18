@@ -402,6 +402,14 @@ export function ContactsWindow({
         >
           <Icon name="bell" size={17} />
         </button>
+        <button
+          type="button"
+          className="tbtn"
+          onClick={() => onOpenWindow('calls')}
+          title="Call history"
+        >
+          <Icon name="phone" size={17} />
+        </button>
         <button type="button" className="tbtn" onClick={() => onOpenWindow('games')} title="Games">
           <Icon name="game" size={17} />
         </button>

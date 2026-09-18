@@ -29,8 +29,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use migo_cache::MemoryCache;
 use migo_calls::model::{
-    invite_status, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig,
-    EndReason, GroupJoinOutcome, MAX_GROUP_PARTICIPANTS, RING_TTL_MS,
+    call_direction, call_outcome, invite_status, CallIceWire, CallInviteWire, CallSdpWire,
+    CallState, Caller, CallsConfig, EndReason, GroupJoinOutcome, HISTORY_RETENTION_MS,
+    MAX_GROUP_PARTICIPANTS, RING_TTL_MS,
 };
 use migo_calls::store::{CallStore, MemoryCallStore};
 use migo_calls::traits::{CallGate, Callkeeper};
@@ -2565,4 +2566,539 @@ async fn a_listing_shows_the_account_the_ring_it_placed() {
         "the ring is offered to the callee, not in them"
     );
     assert_eq!(for_bob[0].peer_id, id(ALICE));
+}
+
+// --- the call history ------------------------------------------------------
+//
+// The listing's other half. Every test above ends a call and stops; these read
+// what the stores kept after the call died, which is the one question the three
+// live scans cannot answer.
+
+#[tokio::test]
+async fn a_declined_call_is_history_for_both_parties_one_row_each() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .decline(&bob(NOW + SECOND), id(CALL), 1)
+        .await
+        .unwrap();
+
+    // The caller's side: she placed it, and it was refused.
+    let hers = harness
+        .calls
+        .history(&alice(NOW + 2 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hers.len(), 1);
+    assert_eq!(hers[0].call_id, id(CALL));
+    assert_eq!(hers[0].kind, 0, "a direct call");
+    assert_eq!(hers[0].peer_id, id(BOB), "the other party, from her side");
+    assert_eq!(hers[0].direction, call_direction::OUTGOING);
+    assert_eq!(hers[0].outcome, call_outcome::DECLINED);
+    assert_eq!(hers[0].ended_at, ts(NOW + SECOND));
+    assert_eq!(hers[0].media_kind, Some(0));
+    assert!(
+        hers[0].answered_at.is_none(),
+        "nobody picked up, so there is no answer time to print"
+    );
+    assert!(
+        hers[0].started_at.is_none(),
+        "a direct row has never kept a start"
+    );
+
+    // The callee's side: the same call, the other arrow.
+    let his = harness
+        .calls
+        .history(&bob(NOW + 2 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(his.len(), 1);
+    assert_eq!(his[0].call_id, id(CALL));
+    assert_eq!(his[0].peer_id, id(ALICE));
+    assert_eq!(his[0].direction, call_direction::INCOMING);
+    assert_eq!(his[0].outcome, call_outcome::DECLINED);
+}
+
+#[tokio::test]
+async fn an_answered_call_is_history_with_its_answer_time() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .answer(&bob(NOW + SECOND), id(CALL), id(BOB_PHONE))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .end(&bob(NOW + 31 * SECOND), id(CALL), 1)
+        .await
+        .unwrap();
+
+    let hers = harness
+        .calls
+        .history(&alice(NOW + 32 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hers.len(), 1);
+    assert_eq!(
+        hers[0].outcome,
+        call_outcome::ANSWERED,
+        "a call that connected is answered however it ended"
+    );
+    assert_eq!(hers[0].answered_at, Some(ts(NOW + SECOND)));
+    assert_eq!(hers[0].ended_at, ts(NOW + 31 * SECOND));
+}
+
+#[tokio::test]
+async fn a_ring_nobody_answered_is_missed_for_both_parties() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    // The sweep is what writes NoAnswer; nothing else ends an ignored ring.
+    let retired = harness
+        .calls
+        .sweep(ts(NOW + RING_TTL_MS + 1))
+        .await
+        .unwrap();
+    assert_eq!(retired.len(), 1);
+
+    let hers = harness
+        .calls
+        .history(&alice(NOW + RING_TTL_MS + 2), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hers[0].outcome, call_outcome::MISSED);
+    assert_eq!(hers[0].direction, call_direction::OUTGOING);
+
+    let his = harness
+        .calls
+        .history(&bob(NOW + RING_TTL_MS + 2), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(his[0].outcome, call_outcome::MISSED);
+    assert_eq!(his[0].direction, call_direction::INCOMING);
+}
+
+#[tokio::test]
+async fn a_stranger_holds_no_row_in_this_history() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .cancel(&alice(NOW + SECOND), id(CALL))
+        .await
+        .unwrap();
+
+    // Carol was not a party to it; both accounts that were each hold it.
+    let hers = harness
+        .calls
+        .history(&alice(NOW + 2 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hers.len(), 1);
+    assert_eq!(hers[0].outcome, call_outcome::CANCELLED);
+
+    let carol = harness
+        .calls
+        .history(
+            &caller(CAROL, CAROL_PHONE, NOW + 2 * SECOND),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(carol.is_empty());
+}
+
+#[tokio::test]
+async fn the_history_pages_backwards_from_a_cursor_and_scopes_to_a_conversation() {
+    let harness = Harness::new();
+    // Three calls, ended a second apart, so the cursor has something to cut.
+    for (index, call_id) in [CALL, CALL + 1, CALL + 2].into_iter().enumerate() {
+        let at = NOW + (index as i64) * SECOND;
+        harness
+            .calls
+            .invite(&alice(at), invite(call_id, BOB))
+            .await
+            .unwrap();
+        harness
+            .calls
+            .cancel(&alice(at + SECOND / 2), id(call_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            harness
+                .calls
+                .history(&alice(at + SECOND), Some(id(CONVERSATION)), None, None)
+                .await
+                .unwrap()
+                .len(),
+            index + 1,
+            "every call above belongs to the scoped conversation"
+        );
+    }
+
+    // The newest page, one row at a time, then the page behind the oldest row
+    // held: the cursor is exclusive, so the row it names never comes back.
+    let first = harness
+        .calls
+        .history(&alice(NOW + 5 * SECOND), None, None, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].call_id, id(CALL + 2));
+
+    let second = harness
+        .calls
+        .history(
+            &alice(NOW + 5 * SECOND),
+            None,
+            Some(first[0].ended_at),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].call_id, id(CALL + 1));
+
+    let third = harness
+        .calls
+        .history(
+            &alice(NOW + 5 * SECOND),
+            None,
+            Some(second[0].ended_at),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].call_id, id(CALL));
+
+    // Past the oldest row there is nothing, which is how a client learns it
+    // reached the end rather than by counting.
+    let past = harness
+        .calls
+        .history(
+            &alice(NOW + 5 * SECOND),
+            None,
+            Some(third[0].ended_at),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert!(past.is_empty());
+
+    // A conversation nothing happened in is an empty page, not an error.
+    let elsewhere = harness
+        .calls
+        .history(
+            &alice(NOW + 5 * SECOND),
+            Some(id(CONVERSATION + 1)),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(elsewhere.is_empty());
+}
+
+#[tokio::test]
+async fn a_group_call_is_history_for_every_account_that_held_a_seat() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_join(
+            &bob(NOW + SECOND),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"bob-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_leave(&bob(NOW + 2 * SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_leave(&alice(NOW + 3 * SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+
+    // Alice founded it, so her side reads outgoing; Bob's reads incoming.
+    let hers = harness
+        .calls
+        .history(&alice(NOW + 4 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hers.len(), 1);
+    assert_eq!(hers[0].kind, 1, "a group call");
+    assert_eq!(hers[0].peer_id, id(ALICE), "the founder");
+    assert_eq!(hers[0].direction, call_direction::OUTGOING);
+    assert_eq!(hers[0].outcome, call_outcome::ANSWERED);
+    assert_eq!(hers[0].started_at, Some(ts(NOW)));
+    assert_eq!(hers[0].ended_at, ts(NOW + 3 * SECOND));
+    assert_eq!(
+        hers[0].participant_count,
+        Some(2),
+        "both accounts that held a seat, counted once each"
+    );
+    assert!(
+        hers[0].answered_at.is_none(),
+        "a roster keeps no answer time"
+    );
+    assert!(hers[0].media_kind.is_none(), "a roster has no single kind");
+
+    let his = harness
+        .calls
+        .history(&bob(NOW + 4 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(his.len(), 1);
+    assert_eq!(his[0].direction, call_direction::INCOMING);
+    assert_eq!(his[0].peer_id, id(ALICE));
+
+    // Carol never joined, so the call is not hers to remember.
+    let carol = harness
+        .calls
+        .history(
+            &caller(CAROL, CAROL_PHONE, NOW + 4 * SECOND),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(carol.is_empty());
+}
+
+#[tokio::test]
+async fn a_group_call_that_never_emptied_is_not_history_yet() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    // The roster still holds a seat: the call is live, so the listing has it
+    // and the history does not. The two reads must not both answer.
+    let listed = harness
+        .calls
+        .list(&alice(NOW + SECOND), None)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    let history = harness
+        .calls
+        .history(&alice(NOW + SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert!(history.is_empty());
+}
+
+#[tokio::test]
+async fn both_halves_of_a_history_are_on_one_page_in_one_order() {
+    let harness = Harness::new();
+    // A group call that ends first, and a direct call that ends second: the
+    // page order is when each ended, not which store answered it.
+    harness
+        .calls
+        .group_join(
+            &alice(NOW),
+            id(GROUP_CALL),
+            id(CONVERSATION),
+            0,
+            b"alice-sealed".to_vec(),
+        )
+        .await
+        .unwrap();
+    harness
+        .calls
+        .group_leave(&alice(NOW + SECOND), id(GROUP_CALL))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .invite(&alice(NOW + 2 * SECOND), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .cancel(&alice(NOW + 3 * SECOND), id(CALL))
+        .await
+        .unwrap();
+
+    let page = harness
+        .calls
+        .history(&alice(NOW + 4 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].call_id, id(CALL), "the direct call ended last");
+    assert_eq!(page[1].call_id, id(GROUP_CALL));
+}
+
+#[tokio::test]
+async fn the_prune_drops_what_aged_out_for_both_parties_at_once() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .cancel(&alice(NOW + SECOND), id(CALL))
+        .await
+        .unwrap();
+
+    // Nothing is old enough yet.
+    let kept = harness
+        .calls
+        .prune_history(ts(NOW + 2 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(kept, 0);
+
+    // Past the retention the row goes, and it goes for both parties: it is one
+    // row, and half-deleting it would show one side a call the other never had.
+    let dropped = harness
+        .calls
+        .prune_history(ts(NOW + HISTORY_RETENTION_MS + 3 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(dropped, 1);
+    let after = NOW + HISTORY_RETENTION_MS + 4 * SECOND;
+    assert!(harness
+        .calls
+        .history(&alice(after), None, None, None)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(harness
+        .calls
+        .history(&bob(after), None, None, None)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn the_prune_caps_one_accounts_history_by_count() {
+    // A store that keeps two ended calls per account, so the third evicts the
+    // oldest rather than the map growing without end.
+    let harness = Harness::gated_with_config(
+        TestGate::open(),
+        CallsConfig {
+            history_max_per_account: 2,
+            ..CallsConfig::default()
+        },
+    );
+    for (index, call_id) in [CALL, CALL + 1, CALL + 2].into_iter().enumerate() {
+        let at = NOW + (index as i64) * SECOND;
+        harness
+            .calls
+            .invite(&alice(at), invite(call_id, BOB))
+            .await
+            .unwrap();
+        harness
+            .calls
+            .cancel(&alice(at + SECOND / 2), id(call_id))
+            .await
+            .unwrap();
+    }
+
+    let dropped = harness
+        .calls
+        .prune_history(ts(NOW + 4 * SECOND))
+        .await
+        .unwrap();
+    assert_eq!(dropped, 1, "one row over the cap of two");
+    let page = harness
+        .calls
+        .history(&alice(NOW + 4 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].call_id, id(CALL + 2), "the newest is kept");
+    assert_eq!(page[1].call_id, id(CALL + 1));
+
+    // Bob was a party to all three, so his own cap is over by the same row: the
+    // eviction is the row's, not one side's.
+    let his = harness
+        .calls
+        .history(&bob(NOW + 4 * SECOND), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(his.len(), 2);
+}
+
+#[tokio::test]
+async fn a_page_is_clamped_rather_than_refused() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .cancel(&alice(NOW + SECOND), id(CALL))
+        .await
+        .unwrap();
+
+    // Asking for more than exists is a question, not a mistake: the answer is
+    // what there is.
+    let page = harness
+        .calls
+        .history(&alice(NOW + 2 * SECOND), None, None, Some(u32::MAX))
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+
+    // Zero is a page size no client means, and it is clamped up rather than
+    // answered with an empty page a UI would render as "no calls".
+    let none = harness
+        .calls
+        .history(&alice(NOW + 2 * SECOND), None, None, Some(0))
+        .await
+        .unwrap();
+    assert_eq!(none.len(), 1);
 }

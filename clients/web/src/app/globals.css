@@ -7203,3 +7203,61 @@ button.activity-row-btn:focus-visible {
 [data-theme='dark'] .retro-menu-danger {
   color: #ffb9a8;
 }
+
+/* --- call history --- */
+
+/* The action row a panel ends with when it has one: the same footer shape the lists use, for a
+   panel that is not a list. */
+.panel-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+/* A history row is a notification row with a longer body: the name, then the line of facts under
+   it. The list keeps the notification list's own gap and border, because the two render side by
+   side in the same window and two spacings would read as two screens. */
+.call-history-row {
+  align-items: flex-start;
+}
+.call-history-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.call-history-name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.call-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+  flex-wrap: wrap;
+}
+/* A row nothing answered is dimmed rather than recoloured: the theme owns the accent, and a red
+   that had to be defined per theme would be one more colour to keep in step. */
+.call-history-missed .call-history-name {
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.call-history-time,
+.call-history-duration,
+.call-history-count {
+  white-space: nowrap;
+}
+/* The duration and the seat count are the two facts a missed call does not have, so they carry the
+   separator that says they are additions to the sentence rather than more of it. */
+.call-history-duration::before,
+.call-history-count::before {
+  content: '·';
+  margin-right: 6px;
+}

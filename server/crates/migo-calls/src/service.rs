@@ -73,18 +73,21 @@ use async_trait::async_trait;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
-    codes, fault, CallInviteEvent, CallListEntry, CallStateEvent, CallStats, Opcode,
+    codes, fault, CallHistoryEntry, CallInviteEvent, CallListEntry, CallStateEvent, CallStats,
+    Opcode,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 
 use crate::group_store::{
-    group_join_event, group_leave_event, MemoryGroupCallStore, SharedGroupCallStore,
+    group_join_event, group_leave_event, GroupCallHistory, MemoryGroupCallStore,
+    SharedGroupCallStore,
 };
 use crate::metrics::{AnswerOutcome, GroupJoinKind, InviteOutcome, Meters, RelayKind};
 use crate::model::{
-    call_kind, Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig,
-    EndReason, GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome as WireOutcome,
-    TurnServerWire, MAX_GROUP_PARTICIPANTS, MAX_SEALED_LEN, MEDIA_VIDEO,
+    call_direction, call_kind, call_outcome, Call, CallIceWire, CallInviteWire, CallSdpWire,
+    CallState, Caller, CallsConfig, EndReason, GroupCall, GroupJoinOutcome, GroupParticipant,
+    InviteOutcome as WireOutcome, TurnServerWire, HISTORY_MAX_PAGE, HISTORY_PAGE_SIZE,
+    MAX_GROUP_PARTICIPANTS, MAX_SEALED_LEN, MEDIA_VIDEO,
 };
 use crate::store::{CallStore, SharedCallStore};
 use crate::traits::{CallGate, Callkeeper, SharedCallGate, SharedCallkeeper};
@@ -830,6 +833,20 @@ where
         Ok(retired)
     }
 
+    async fn prune_history(&self, now: Timestamp) -> Result<usize> {
+        let retention = self.config.history_retention_ms;
+        let keep = self.config.history_max_per_account;
+        // Both stores, because an ended direct call and an ended group call
+        // are the same row to the screen that lists them and a prune that
+        // reached only one would bound half a history.
+        let dropped = self.store.prune_history(now, retention, keep).await?
+            + self.groups.prune_history(now, retention, keep).await?;
+        if dropped > 0 {
+            self.meters.history_pruned(dropped);
+        }
+        Ok(dropped)
+    }
+
     async fn call(&self, caller: &Caller, call_id: Id) -> Result<Call> {
         let call = self.load(call_id).await?;
         if call.other_party(caller.account_id).is_none() {
@@ -1224,6 +1241,50 @@ where
         entries.sort_by(listing_order);
         Ok(entries)
     }
+
+    async fn history(
+        &self,
+        caller: &Caller,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: Option<u32>,
+    ) -> Result<Vec<CallHistoryEntry>> {
+        self.charge(caller, Opcode::CallHistory).await?;
+        // Clamped rather than refused: a client that asks for more than the
+        // ceiling gets the ceiling, the same bargain the messaging history
+        // makes, because a page size is a rendering preference and a fault
+        // for one would be the server arguing with a screen about how many
+        // rows fit on it.
+        let page = limit
+            .map_or(HISTORY_PAGE_SIZE, |asked| asked as usize)
+            .clamp(1, HISTORY_MAX_PAGE);
+        let me = caller.account_id;
+
+        // One page from each store, then the merged page cut to `page`. The
+        // alternative — asking each store for a page and concatenating —
+        // hands the client a page whose size depends on how the calls
+        // happened to be split between direct and group, and a cursor taken
+        // from the end of it would skip whatever the shorter half never got
+        // to show.
+        let mut direct = self
+            .store
+            .history_for(me, conversation_id, before, page)
+            .await?;
+        let mut groups = self
+            .groups
+            .history_for(me, conversation_id, before, page)
+            .await?;
+        let mut entries: Vec<CallHistoryEntry> = Vec::with_capacity(direct.len() + groups.len());
+        entries.extend(direct.drain(..).map(|call| direct_history_entry(&call, me)));
+        entries.extend(
+            groups
+                .drain(..)
+                .map(|entry| group_history_entry(&entry, me)),
+        );
+        entries.sort_by(history_order);
+        entries.truncate(page);
+        Ok(entries)
+    }
 }
 
 impl<S, L> Calls<S, L>
@@ -1358,6 +1419,100 @@ fn listing_order(a: &CallListEntry, b: &CallListEntry) -> std::cmp::Ordering {
         )
     };
     key(a).cmp(&key(b)).then_with(|| a.call_id.cmp(&b.call_id))
+}
+
+/// One ended direct call as a history line.
+///
+/// Read from the asking account's side, which is the only side a history
+/// screen has: the same row is outgoing for the caller and incoming for the
+/// callee, and a client that had to work that out from the peer id would have
+/// to know who it is before it could draw an arrow.
+///
+/// The outcome is derived here and nowhere else, from the two facts the row
+/// owns: whether an answer was ever recorded, and why the row was closed. A
+/// call that connected and then ended is `Answered` however it ended, because
+/// the duration the screen prints is the fact and the reason it stopped is
+/// not — `answered_at` is absent for a group call for the same reason it is
+/// absent on this row when nobody picked up.
+fn direct_history_entry(call: &Call, me: Id) -> CallHistoryEntry {
+    let outgoing = call.caller_id == me;
+    // The row is only in the store's history once its ending was stamped, so
+    // the fallback is unreachable; the deadline is the honest stand-in rather
+    // than a second `now`, which would reorder a page depending on when it
+    // was read.
+    let ended_at = call.ended_at.unwrap_or(call.expires_at);
+    migo_protocol::CallHistoryEntry {
+        call_id: call.call_id,
+        conversation_id: call.conversation_id,
+        kind: call_kind::DIRECT,
+        peer_id: call.peer_of(me),
+        direction: if outgoing {
+            call_direction::OUTGOING
+        } else {
+            call_direction::INCOMING
+        },
+        outcome: call_outcome::of(call.answered_at, call.end_reason),
+        ended_at,
+        media_kind: Some(call.media_kind),
+        answered_at: call.answered_at,
+        // A direct call's row has never kept a start: it knows when it began
+        // ringing (the deadline, which is the ring's end) and when it was
+        // answered, and the ring's own length is the client's to know. This
+        // is the same split `CallListEntry` makes, kept here so the two
+        // listings cannot disagree about which facts a direct call has.
+        started_at: None,
+        participant_count: None,
+    }
+}
+
+/// One ended group call as a history line.
+///
+/// The peer is the founder, the direction is whether this account was that
+/// founder, and the count is what the roster seated — the three questions a
+/// group row has to answer from facts it kept, because an emptied roster
+/// names nobody and the account asking has to be told where it stood in a
+/// call it can no longer look at.
+fn group_history_entry(entry: &GroupCallHistory, me: Id) -> CallHistoryEntry {
+    let call = &entry.call;
+    migo_protocol::CallHistoryEntry {
+        call_id: call.call_id,
+        conversation_id: call.conversation_id,
+        kind: call_kind::GROUP,
+        peer_id: call.founder_id,
+        direction: if call.founder_id == me {
+            call_direction::OUTGOING
+        } else {
+            call_direction::INCOMING
+        },
+        // Always answered: a group call's row is written when its first seat
+        // is taken, so there is no ring to have missed and no caller to have
+        // withdrawn it — a roster that exists was a call people were in.
+        outcome: call_outcome::ANSWERED,
+        // Only in the store's history once stamped, as above.
+        ended_at: call.ended_at.unwrap_or(call.started_at),
+        // A group call has no single media kind: each seat negotiates its
+        // own, and the roster keeps none to report.
+        media_kind: None,
+        // A roster's seats arrive one at a time and the row keeps no answer
+        // time to point at, which is the same reason `CallListEntry` leaves
+        // it absent for a group call.
+        answered_at: None,
+        started_at: Some(call.started_at),
+        participant_count: Some(entry.seated.len() as u32),
+    }
+}
+
+/// The history's total order: when the call ended, newest first, then the id.
+///
+/// The id breaks the tie rather than the kind or the peer, because two calls
+/// can end in the same millisecond and a page boundary that fell between them
+/// must not order them one way on this page and the other way on the next —
+/// the client pages with the timestamp of the oldest row it holds, so an
+/// order that is not total is an order that can repeat or skip a row.
+fn history_order(a: &CallHistoryEntry, b: &CallHistoryEntry) -> std::cmp::Ordering {
+    b.ended_at
+        .cmp(&a.ended_at)
+        .then_with(|| b.call_id.cmp(&a.call_id))
 }
 
 /// The name of the sealed payload field `opcode`'s frame carries.

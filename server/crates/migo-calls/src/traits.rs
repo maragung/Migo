@@ -271,6 +271,22 @@ pub trait Callkeeper: Send + Sync {
     /// docs), which keeps a quiet node's rows honest between timer ticks.
     async fn sweep(&self, now: Timestamp) -> Result<Vec<Call>>;
 
+    /// Drops ended calls past their retention, returning how many went.
+    ///
+    /// The bound on a store that had none: an ended row is the history, and
+    /// the history is worth keeping, but keeping every row of a node's whole
+    /// life is a map that grows with traffic rather than with anything a
+    /// screen shows. Both stores are pruned with the configured age and
+    /// per-account cap in one call, because the two halves of a history that
+    /// are bounded differently are two halves that disagree about how far
+    /// back a screen can scroll.
+    ///
+    /// Separate from [`Callkeeper::sweep`] because it is a different
+    /// question on a different clock: the ring sweep is the correctness of
+    /// every live call and runs every second, while this is housekeeping and
+    /// can run far less often for the same result.
+    async fn prune_history(&self, now: Timestamp) -> Result<usize>;
+
     /// One call, for a participant.
     ///
     /// The routing read: the dispatcher asks this to learn which account
@@ -457,6 +473,35 @@ pub trait Callkeeper: Send + Sync {
         caller: &Caller,
         conversation_id: Option<Id>,
     ) -> Result<Vec<migo_protocol::CallListEntry>>;
+
+    /// A page of the calls `caller` was party to that have already ended,
+    /// newest first.
+    ///
+    /// The other half of [`Callkeeper::list`], and the reason it is a second
+    /// method rather than a flag on the first: a listing is what is happening
+    /// now and a history is what happened, the two are read by different
+    /// screens at different moments, and a reader that asked for the living
+    /// calls must not be handed rows the store keeps only to remember. The
+    /// scope narrows both halves to one conversation for the same reason.
+    ///
+    /// `before` is the cursor a client pages with — the `ended_at` of the
+    /// oldest row it already holds — and `limit` is clamped to
+    /// [`HISTORY_MAX_PAGE`](crate::model::HISTORY_MAX_PAGE), defaulting to
+    /// [`HISTORY_PAGE_SIZE`](crate::model::HISTORY_PAGE_SIZE) when the client
+    /// names none. The page is charged, because an endpoint a client pages
+    /// through is one that needs a bucket.
+    ///
+    /// Both stores are asked and the answers are merged, in the same shape
+    /// the listing merges them: a direct call and a group call are one row
+    /// each to the screen that draws them, and the merge is what keeps a
+    /// conversation's calls in one order rather than two.
+    async fn history(
+        &self,
+        caller: &Caller,
+        conversation_id: Option<Id>,
+        before: Option<Timestamp>,
+        limit: Option<u32>,
+    ) -> Result<Vec<migo_protocol::CallHistoryEntry>>;
 }
 
 /// The call service, shared.

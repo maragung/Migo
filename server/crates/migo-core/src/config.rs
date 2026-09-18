@@ -748,6 +748,19 @@ pub struct CallsConfig {
     pub seat_grace_ms: i64,
     /// TURN relay servers. Each entry has url, username, credential, ttl_seconds, region.
     pub turn_servers: Vec<TurnServerConfig>,
+    /// How long an ended call stays readable in the call history, in milliseconds.
+    ///
+    /// The history is the calls an account was party to that have already ended, and this is
+    /// how far back it reaches: the retention prune drops an ended row once this much time has
+    /// passed since it ended, so the store is bounded by a window rather than by a node's
+    /// uptime.
+    pub history_retention_ms: i64,
+    /// How many ended calls one account's history keeps.
+    ///
+    /// The second bound the prune applies, and the one that keeps a burst from growing the
+    /// store past what age alone would allow. Zero disables it and leaves retention as the
+    /// only limit.
+    pub history_max_per_account: usize,
 }
 
 /// One configured TURN relay, handed to clients verbatim by the call service.
@@ -772,6 +785,8 @@ impl Default for CallsConfig {
             ring_ttl_ms: 30_000,
             seat_grace_ms: 30_000,
             turn_servers: Vec::new(),
+            history_retention_ms: 90 * 24 * 60 * 60 * 1_000,
+            history_max_per_account: 500,
         }
     }
 }

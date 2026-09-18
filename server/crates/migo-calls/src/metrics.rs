@@ -297,6 +297,7 @@ pub(crate) struct Meters {
     group_left: Arc<Counter>,
     group_relayed: Arc<Counter>,
     group_rekeyed: Arc<Counter>,
+    history_pruned: Arc<Counter>,
 }
 
 impl Meters {
@@ -430,6 +431,15 @@ impl Meters {
                 "Group-call frame-key rotations this node distributed to a roster.",
                 &[],
             ),
+            history_pruned: registry.counter(
+                "migo_calls_history_pruned_total",
+                "Ended calls dropped from the call history by the retention prune, because \
+                 they aged past the retention window or because one of their parties was \
+                 already over the per-account cap. A node whose rate here tracks its call \
+                 traffic is a node whose store is bounded by retention rather than by the \
+                 cap, which is the shape the default expects.",
+                &[],
+            ),
         }
     }
 
@@ -531,6 +541,11 @@ impl Meters {
 
     pub(crate) fn group_rekeyed(&self) {
         self.group_rekeyed.inc();
+    }
+
+    /// Counts ended calls dropped by the retention prune.
+    pub(crate) fn history_pruned(&self, count: usize) {
+        self.history_pruned.add(count as u64);
     }
 }
 
