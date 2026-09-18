@@ -627,6 +627,14 @@ export interface GroupMediaPlaneDeps {
    * than holding a device it cannot use.
    */
   acquireCamera: () => Promise<MediaStreamTrack | null>;
+  /**
+   * Opens a screen to share, through whatever picker the platform has.
+   *
+   * The whole stream rather than one track, because the picker decides what is being shared and a
+   * capture this plane stops holding is a capture it has to stop: the answer is null when the user
+   * dismissed the picker, which is a choice rather than a failure to state.
+   */
+  acquireScreen: () => Promise<MediaStream | null>;
   /** Sends one sealed SDP description to a roster device (`CALL_SDP`). */
   sendSdp: (toDevice: Id, sealed: Uint8Array) => Promise<void>;
   /** Sends one sealed ICE batch to a roster device (`CALL_ICE`). */
@@ -701,6 +709,13 @@ export class GroupMediaPlane {
   #links = new Map<Id, PeerLink>();
   #localStream: MediaStream | null = null;
   #localVideoTrack: MediaStreamTrack | null = null;
+  /**
+   * The seat's screen while one is being shared, kept apart from the local stream on purpose: the
+   * self-view and the roster read that stream as "this seat's camera", and a share is not a camera —
+   * the seat still has both, and which one goes on the wire is decided per link by
+   * {@link videoTrackToSend}.
+   */
+  #screenStream: MediaStream | null = null;
   #videoPublished = false;
   #muted = false;
   #cameraOn = true;
@@ -1009,6 +1024,108 @@ export class GroupMediaPlane {
     return this.#cameraOn;
   }
 
+  /**
+   * Starts sharing this seat's screen on every link the ladder still carries video to.
+   *
+   * A share is a second video source rather than a replacement for the camera, and which one is on
+   * the wire is decided per link: the screen wins while one is shared, and the camera comes back on
+   * it the moment the share stops. Both facts live in one sender, so nothing is renegotiated — the
+   * m-line a video call already negotiated is the line a share rides, exactly as it does in the
+   * one-to-one plane.
+   *
+   * A share needs the video m-line to exist at all, so a seat the product limit refused video gets
+   * `false` rather than a capture nobody can receive. The picker holds the tab for as long as the
+   * user takes to choose and the seat can leave under it, so the plane's own state is read again
+   * after the await and a capture that arrives into a stopped plane is stopped rather than kept.
+   *
+   * `false` also covers a dismissed picker, which is a choice rather than a failure: there is no
+   * error to state about something the user just decided not to do.
+   */
+  async startScreenShare(): Promise<boolean> {
+    if (!this.#videoPublished || this.#screenStream !== null || this.#stopped) {
+      return false;
+    }
+    let captured: MediaStream | null;
+    try {
+      captured = await this.#deps.acquireScreen();
+    } catch {
+      return false;
+    }
+    const track = captured?.getVideoTracks()[0] ?? null;
+    if (captured === null || track === null || this.#stopped || this.#screenStream !== null) {
+      for (const held of captured?.getTracks() ?? []) {
+        held.stop();
+      }
+      return false;
+    }
+    this.#screenStream = captured;
+    // The platform's own stop control ends the track rather than telling the page, so this is the
+    // only way the seat learns its share is over — without it the roster would keep showing a
+    // screen that is no longer being sent.
+    track.onended = (): void => {
+      this.stopScreenShare();
+    };
+    for (const link of this.#links.values()) {
+      // Every link made for a seat that publishes video already carries a video sender — the m-line
+      // is created when the link is, camera on it or not — so this is a guard rather than a path: a
+      // link that somehow had none would get a sender to attach to here, though only a fresh
+      // negotiation, which this plane does not perform, would let the other end hear it.
+      if (link.videoSender === null) {
+        link.videoSender = link.pc.addTransceiver('video', { direction: 'sendrecv' }).sender;
+      }
+      // The screenshot is handed to the sender explicitly rather than left to the shaping pass,
+      // because that pass knows only whether *a* video track is attached and not which one: a camera
+      // already on the wire would keep it, and the roster would announce a share no other seat could
+      // see. At the bottom rung the link has been grounded and the screen waits, captured but
+      // unsent, for the poll that climbs — which reads the track from here.
+      if (link.quality !== 'video-off') {
+        void link.videoSender.replaceTrack(track).catch(() => {});
+        link.sendingVideo = true;
+      }
+      this.#shapeVideo(link);
+    }
+    this.#emit();
+    return true;
+  }
+
+  /**
+   * Stops sharing this seat's screen, handing the capture back to the platform and returning every
+   * link that was carrying it to the camera.
+   *
+   * The track is stopped rather than only dropped, because a capture nobody holds is a screen the
+   * platform still considers shared — the same bargain the camera toggle makes, and the reason the
+   * browser's own stop control and this one end in the same place.
+   */
+  stopScreenShare(): void {
+    const screen = this.#screenStream;
+    if (screen === null) {
+      return;
+    }
+    this.#screenStream = null;
+    for (const track of screen.getTracks()) {
+      track.onended = null;
+      track.stop();
+    }
+    // Handing the wire back is this method's own business for the same reason taking it was: the
+    // shaping pass reads a boolean, and a camera it would leave attached is a camera that never
+    // returns to a link the share has just left. A camera this seat turned off comes back as
+    // nothing, which is what {@link videoTrackToSend} answers with a wish that is off.
+    const next = videoTrackToSend(null, this.#cameraOn ? this.#localStream : null);
+    for (const link of this.#links.values()) {
+      if (link.videoSender !== null && link.quality !== 'video-off') {
+        void link.videoSender.replaceTrack(next).catch(() => {});
+        link.sendingVideo = next !== null;
+      }
+      this.#shapeVideo(link);
+    }
+    this.#emit();
+  }
+
+  /** Whether this seat is sharing its screen. */
+  get screenSharing(): boolean {
+    return this.#screenStream !== null;
+  }
+
   /** This seat's local stream, for the self-view; `null` before media exists. */
   get localStream(): MediaStream | null {
     return this.#localStream;
@@ -1062,6 +1179,13 @@ export class GroupMediaPlane {
     for (const track of this.#localStream?.getTracks() ?? []) {
       track.stop();
     }
+    // The screen is not in the local stream, so it is not stopped by the loop above and a share
+    // that outlived its call is a screen the platform still thinks this seat is showing.
+    for (const track of this.#screenStream?.getTracks() ?? []) {
+      track.onended = null;
+      track.stop();
+    }
+    this.#screenStream = null;
     this.#localStream = null;
     this.#localVideoTrack = null;
   }
@@ -1206,12 +1330,14 @@ export class GroupMediaPlane {
     if (sender === null) {
       return;
     }
-    // A null track is the bottom rung's answer and this seat's camera-off answer both: `replaceTrack`
-    // with nothing is how a sender stops carrying video, so there is no early return for a seat with
-    // no camera track — that is precisely the state every link has to be told about.
+    // Which of the two goes on the wire is {@link videoTrackToSend}'s answer, the same one the
+    // one-to-one plane sends by, so a share cannot mean one thing here and another there: the screen
+    // wins while one is shared, the camera otherwise, and neither means nothing is sent. The camera
+    // half is read through the wish as well, because a camera this seat released is a track the
+    // stream no longer holds and a link must not be handed one that is gone.
     link.sendingVideo = shapeVideoSender(
       sender,
-      this.#cameraOn ? this.#localVideoTrack : null,
+      videoTrackToSend(this.#screenStream, this.#cameraOn ? this.#localStream : null),
       link.quality,
       link.sentKbps,
       link.sendingVideo,

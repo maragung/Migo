@@ -92,6 +92,11 @@ export function groupSeatState(
  * from the call's own media state.
  */
 export function ownSeatState(call: ActiveGroupCall): string | null {
+  // The share is stated first because it is the fact that changes what the other seats see: a
+  // muted microphone and a share are both true at once, and the roster has one line to say them in.
+  if (call.sharingScreen) {
+    return 'Sharing screen';
+  }
   if (call.muted) {
     return 'Muted';
   }
@@ -156,6 +161,8 @@ export interface GroupCallScreenProps {
   onToggleMute: () => boolean | null;
   /** Turns this seat's camera on or off; the manager's, already bound. */
   onToggleCamera: () => boolean | null;
+  /** Starts or stops this seat's screen share; the manager's, already bound. */
+  onToggleScreenShare: () => Promise<boolean>;
 }
 
 /**
@@ -174,6 +181,7 @@ export function GroupCallScreen({
   onDismiss,
   onToggleMute,
   onToggleCamera,
+  onToggleScreenShare,
 }: GroupCallScreenProps): ReactNode {
   const live = call.note === null;
   const seated = live && call.phase === 'seated';
@@ -249,6 +257,17 @@ export function GroupCallScreen({
                 {call.cameraOn === false ? '📷' : '🎥'}
               </button>
             ) : null}
+            {seated && cameraToggleable ? (
+              <button
+                type="button"
+                className={`icon-btn call-action mute${call.sharingScreen ? ' muted' : ''}`}
+                aria-label={call.sharingScreen ? 'Stop sharing your screen' : 'Share your screen'}
+                title={call.sharingScreen ? 'Stop sharing your screen' : 'Share your screen'}
+                onClick={onToggleScreenShare}
+              >
+                {call.sharingScreen ? '🛑' : '🖥️'}
+              </button>
+            ) : null}
             <button
               type="button"
               className="call-action hang-up"
@@ -280,6 +299,7 @@ export function GroupCallOverlay(): ReactNode {
     dismissGroupCall,
     toggleGroupMute,
     toggleGroupCamera,
+    toggleGroupScreenShare,
     groupRemoteStream,
   } = useGroupCall();
   const { accountId } = useMigo();
@@ -340,6 +360,7 @@ export function GroupCallOverlay(): ReactNode {
       onDismiss={dismissGroupCall}
       onToggleMute={() => toggleGroupMute()}
       onToggleCamera={() => toggleGroupCamera()}
+      onToggleScreenShare={toggleGroupScreenShare}
     />
   );
 }

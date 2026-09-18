@@ -109,6 +109,12 @@ export interface ActiveGroupCall {
   muted: boolean;
   /** Whether this seat's camera is on; `null` when no camera was published. */
   cameraOn: boolean | null;
+  /**
+   * Whether this seat is sharing its screen. The camera keeps its own state beside it, because the
+   * two are separate facts: a share replaces the camera on the wire and not in this device's hands,
+   * so a seat that stops sharing comes back to the camera it already had.
+   */
+  sharingScreen: boolean;
   /** A media failure stated as a fact (the microphone the plane could not acquire). */
   mediaError: string | null;
 }
@@ -144,6 +150,12 @@ export interface GroupCallManagerValue {
    * when no camera was published (an audio seat, or video the product limit refused).
    */
   toggleGroupCamera: () => boolean | null;
+  /**
+   * Starts or stops sharing this seat's screen. Returns the state the plane settled on, which is
+   * `false` for a dismissed picker, for a seat the product limit refused video, and for a share that
+   * the platform's own stop control already ended — none of which is an error to state.
+   */
+  toggleGroupScreenShare: () => Promise<boolean>;
   /**
    * The remote stream of one roster device, once its link's tracks have arrived — the audio
    * element's source. Read during a render that follows a link change, so a stream that just
@@ -265,6 +277,16 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
           return null;
         }
       },
+      // The platform's own picker, which is where the three scopes section 180 asks for come from:
+      // a whole screen, one application window, or one browser tab, with no menu of this build's own
+      // that would promise a choice it cannot enforce. A dismissed picker answers null.
+      acquireScreen: async () => {
+        try {
+          return await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        } catch {
+          return null;
+        }
+      },
       sendSdp: (toDevice, sealed) => current.calls.sendSdp(callId, toDevice, sealed),
       sendIce: (toDevice, sealed) => current.calls.sendIce(callId, toDevice, sealed),
       seal: (frame) => current.callKeys.sealFrame(callId, frame),
@@ -282,6 +304,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
           videoPublished: planeNow.videoPublished,
           muted: planeNow.muted,
           cameraOn: planeNow.cameraOn,
+          sharingScreen: planeNow.screenSharing,
         });
       },
       onFailure: (what) => {
@@ -380,6 +403,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
         videoPublished: false,
         muted: false,
         cameraOn: null,
+        sharingScreen: false,
         mediaError: null,
       });
       // Seating in the tracked call makes the roster this conversation's call state; the
@@ -477,6 +501,32 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
       setActive({ ...active, cameraOn });
     }
     return cameraOn;
+  }, [setActive]);
+
+  /**
+   * Starts or stops the seated call's screen share.
+   *
+   * The plane is the one that decides, because it is the only thing that can: whether the seat has a
+   * video line to share on, whether the picker answered, and whether the platform's own stop control
+   * ended the share while this awaited it. The state written here is the one the plane settled on
+   * rather than the wish it was asked for, so a screen cannot show a share that is not happening.
+   */
+  const toggleGroupScreenShare = useCallback(async (): Promise<boolean> => {
+    const plane = planeRef.current;
+    if (plane === null) {
+      return false;
+    }
+    if (plane.screenSharing) {
+      plane.stopScreenShare();
+    } else {
+      await plane.startScreenShare();
+    }
+    const sharing = plane.screenSharing;
+    const active = activeRef.current;
+    if (active !== null) {
+      setActive({ ...active, sharingScreen: sharing });
+    }
+    return sharing;
   }, [setActive]);
 
   // --- the SDK streams, registered once per session ---
@@ -683,6 +733,7 @@ export function GroupCallManagerProvider({ children }: { children: ReactNode }):
     dismissGroupCall,
     toggleGroupMute,
     toggleGroupCamera,
+    toggleGroupScreenShare,
     groupRemoteStream,
   };
 

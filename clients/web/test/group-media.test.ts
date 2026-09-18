@@ -388,6 +388,12 @@ test('the ICE servers are the join reply’s TURN relays, then the public STUN f
 class FakeTrack {
   enabled = true;
   stopped = false;
+  /**
+   * The platform's own stop control: the browser's "Stop sharing" ends the track and fires this
+   * rather than telling the page, so a test drives it by hand. `stop()` deliberately does not fire
+   * it, exactly as the specification says.
+   */
+  onended: (() => void) | null = null;
   constructor(readonly kind: 'audio' | 'video') {}
   stop(): void {
     this.stopped = true;
@@ -742,12 +748,21 @@ function makeParticipant(
     keys?: CallKeyState;
     /** Scripts the camera that is opened after the seat turned its own off as unavailable. */
     cameraFails?: boolean;
+    /** The picker was dismissed, so there is no screen to share. */
+    screenFails?: boolean;
   } = {},
-): { plane: GroupMediaPlane; keys: CallKeyState; links: GroupMediaLink[] } {
+): {
+  plane: GroupMediaPlane;
+  keys: CallKeyState;
+  links: GroupMediaLink[];
+  /** Every screen this seat's picker handed over, in order; empty when none was opened. */
+  screens: FakeStream[];
+} {
   const keys = opts.keys ?? mesh.keys.get(device) ?? CallKeyState.create(CALL);
   mesh.keys.set(device, keys);
   const mediaKind = opts.mediaKind ?? CallMediaKind.Audio;
   const seen: GroupMediaLink[] = [];
+  const screens: FakeStream[] = [];
   const script = opts.counterScript ?? [];
   const deps: GroupMediaPlaneDeps = {
     callId: CALL,
@@ -769,6 +784,17 @@ function makeParticipant(
     acquireCamera: opts.cameraFails
       ? () => Promise.resolve(null)
       : () => Promise.resolve(new FakeTrack('video') as unknown as MediaStreamTrack),
+    // `screenFails` covers the other answer a picker has: a dismissal, which is a choice rather than
+    // a failure. The screen arrives as its own stream, the way the platform hands it over, so a
+    // share can be stopped without touching the camera beside it.
+    acquireScreen: () => {
+      if (opts.screenFails === true) {
+        return Promise.resolve(null);
+      }
+      const screen = new FakeStream(['video']);
+      screens.push(screen);
+      return Promise.resolve(screen as unknown as MediaStream);
+    },
     sendSdp: (to, sealed) => mesh.sendSdp(device, to, sealed),
     sendIce: (to, sealed) => mesh.sendIce(device, to, sealed),
     seal: (frame) => keys.sealFrame(frame),
@@ -781,7 +807,7 @@ function makeParticipant(
   };
   const plane = new GroupMediaPlane(deps);
   mesh.planes.set(device, plane);
-  return { plane, keys, links: seen };
+  return { plane, keys, links: seen, screens };
 }
 
 /** The last scripted reading repeats, so a tick past the script's end is a tick of the same link. */
@@ -803,7 +829,7 @@ async function settle(ms = 25): Promise<void> {
 }
 
 /** Two participants, both holding the same frame key, connected end to end. */
-async function twoParties(opts: { syncIce?: boolean } = {}): Promise<{
+async function twoParties(opts: { syncIce?: boolean; mediaKind?: CallMediaKind } = {}): Promise<{
   mesh: VirtualMesh;
   a: ReturnType<typeof makeParticipant>;
   b: ReturnType<typeof makeParticipant>;
@@ -819,8 +845,14 @@ async function twoParties(opts: { syncIce?: boolean } = {}): Promise<{
     CALL,
     aKeys.sealedJoinDistribution(sessionSecret),
   );
-  const a = makeParticipant(mesh, DEV_A, ACC_A, { keys: aKeys });
-  const b = makeParticipant(mesh, DEV_B, ACC_B, { keys: bKeys });
+  const a = makeParticipant(mesh, DEV_A, ACC_A, {
+    keys: aKeys,
+    ...(opts.mediaKind === undefined ? {} : { mediaKind: opts.mediaKind }),
+  });
+  const b = makeParticipant(mesh, DEV_B, ACC_B, {
+    keys: bKeys,
+    ...(opts.mediaKind === undefined ? {} : { mediaKind: opts.mediaKind }),
+  });
   await a.plane.begin([SEAT_A]);
   a.plane.seatsChanged([SEAT_A, SEAT_B]);
   await b.plane.begin([SEAT_A, SEAT_B]);
@@ -989,6 +1021,7 @@ test('a microphone that cannot be acquired is stated as a failure, not faked', a
     createPeer: (iceServers) => mesh.newPeer(DEV_A, iceServers),
     acquire: () => Promise.reject(new Error('no microphone')),
     acquireCamera: () => Promise.resolve(null),
+    acquireScreen: () => Promise.resolve(null),
     sendSdp: () => Promise.resolve(),
     sendIce: () => Promise.resolve(),
     seal: (frame) => mesh.keys.get(DEV_A)!.sealFrame(frame),
@@ -1094,6 +1127,82 @@ test('a camera that will not open puts the seat camera back off', async () => {
   assert.equal(a.plane.toggleCamera(), true, 'the press states the wish at once');
   await settle();
   assert.equal(a.plane.cameraOn, false, 'and the wish is corrected to the fact');
+});
+
+test('a shared screen takes the wire from the camera, and giving it back returns the camera', async () => {
+  const { mesh, a } = await twoParties({ mediaKind: CallMediaKind.Video });
+  const sender = (mesh.pcs.get(DEV_A) ?? [])[0]?.added.find(
+    (added) => added.track.kind === 'video',
+  )?.sender;
+  assert.ok(sender !== undefined, 'the connected link has a video sender');
+  const camera = a.plane.localStream?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(camera !== undefined, 'the seat has a camera to begin with');
+
+  assert.equal(await a.plane.startScreenShare(), true);
+  const screen = a.screens[0]?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(screen !== undefined, 'the picker handed over a screen');
+  assert.equal(a.plane.screenSharing, true);
+  assert.equal(sender.track, screen, 'the screen wins the wire while it is shared');
+  assert.equal(camera.stopped, false, 'and the camera is untouched, not released');
+
+  // The camera can still be turned off under a share: it is this device's own capture, and the share
+  // is what the other seats are watching.
+  assert.equal(a.plane.toggleCamera(), false);
+  assert.equal(sender.track, screen, 'the share survives the camera going off');
+
+  assert.equal(a.plane.toggleCamera(), true);
+  await settle();
+  assert.equal(sender.track, screen, 'and survives it coming back on');
+
+  // Stopping the share hands the screen back to the platform and returns the wire to the camera.
+  a.plane.stopScreenShare();
+  assert.equal(a.plane.screenSharing, false);
+  assert.equal(screen.stopped, true, 'the capture is given back rather than merely dropped');
+  assert.equal(
+    sender.track,
+    a.plane.localStream?.getVideoTracks()[0],
+    'and the camera has the wire again',
+  );
+});
+
+test('the platform stop control ends the share, a dismissed picker starts none, and audio has no line', async () => {
+  const { mesh, a } = await twoParties({ mediaKind: CallMediaKind.Video });
+  const sender = (mesh.pcs.get(DEV_A) ?? [])[0]?.added.find(
+    (added) => added.track.kind === 'video',
+  )?.sender;
+  assert.ok(sender !== undefined);
+
+  assert.equal(await a.plane.startScreenShare(), true);
+  const screen = a.screens[0]?.getVideoTracks()[0] as unknown as FakeTrack | undefined;
+  assert.ok(screen !== undefined);
+  // The browser's own "Stop sharing" ends the track rather than telling the page, so the plane has to
+  // learn it from the track: without that the roster would keep claiming a share that is over.
+  screen.onended?.();
+  assert.equal(a.plane.screenSharing, false, 'the share is over');
+  assert.equal(sender.track?.kind, 'video', 'and the wire is on a video track the seat really has');
+
+  // A dismissed picker is a choice rather than a failure: the seat shares nothing and nothing breaks.
+  const meshDismissed = new VirtualMesh();
+  meshDismissed.keys.set(DEV_A, CallKeyState.create(CALL));
+  const dismissed = makeParticipant(meshDismissed, DEV_A, ACC_A, {
+    mediaKind: CallMediaKind.Video,
+    screenFails: true,
+  });
+  await dismissed.plane.begin([SEAT_A]);
+  assert.equal(
+    await dismissed.plane.startScreenShare(),
+    false,
+    'a dismissed picker shares nothing',
+  );
+  assert.equal(dismissed.plane.screenSharing, false);
+
+  // An audio seat has no video line for a share to ride, so the picker is never opened at all.
+  const meshAudio = new VirtualMesh();
+  meshAudio.keys.set(DEV_A, CallKeyState.create(CALL));
+  const quiet = makeParticipant(meshAudio, DEV_A, ACC_A);
+  await quiet.plane.begin([SEAT_A]);
+  assert.equal(await quiet.plane.startScreenShare(), false, 'an audio seat cannot share');
+  assert.equal(quiet.screens.length, 0, 'and is never asked to choose a screen');
 });
 
 test('leave closes every link and stops every local track; a departure closes exactly its own', async () => {
