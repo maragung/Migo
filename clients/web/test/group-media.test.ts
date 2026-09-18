@@ -918,12 +918,17 @@ test('mute touches the microphone everywhere; the camera toggle exists only wher
   assert.equal(a.plane.toggleMute(), false);
   assert.equal(localAtA.getAudioTracks()[0]?.enabled, true);
 
-  // The camera toggles off without touching the mic, and back on.
+  // The camera toggles off by releasing the device rather than by disabling the track in place,
+  // which is what hands the camera back and puts the system's indicator out; neither press touches
+  // the microphone.
   assert.equal(a.plane.toggleCamera(), false);
-  assert.equal(localAtA.getVideoTracks()[0]?.enabled, false);
+  assert.deepEqual(localAtA.getVideoTracks(), [], 'the camera leaves the stream when released');
+  assert.equal(localAtA.getAudioTracks()[0]?.enabled, true, 'and the microphone is untouched');
   assert.equal(a.plane.cameraOn, false);
   assert.equal(a.plane.toggleCamera(), true);
-  assert.equal(localAtA.getVideoTracks()[0]?.enabled, true);
+  await settle();
+  assert.equal(localAtA.getVideoTracks().length, 1, 'a camera is open again');
+  assert.equal(a.plane.cameraOn, true);
 
   // An audio seat has no camera toggle to give: null, not a button that does nothing.
   const meshAudio = new VirtualMesh();
