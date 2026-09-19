@@ -15,6 +15,8 @@
  * `beforeExit` hook.
  */
 
+import type { EventErrorHandler } from '@migo/sdk';
+
 import type { Config } from './config.js';
 import type { Logger } from './logger.js';
 import { runPool } from './pool.js';
@@ -23,7 +25,7 @@ import { RunContext, sleep } from './run-context.js';
 import { PhaseTracker } from './phase.js';
 import { getScenario } from './scenarios.js';
 import type { Workload } from './scenarios.js';
-import { classifyError, describeError, Metrics } from './stats.js';
+import { classifyError, describeError, eventErrorRecorder, Metrics } from './stats.js';
 import { VirtualUser } from './virtual-user.js';
 import { summarizeWireBytes } from './wire-bytes.js';
 
@@ -57,8 +59,10 @@ export async function run(
   const metrics = new Metrics();
   const passphrase = buildPassphrase(config, server.passphraseMinLength);
   const runTag = makeRunTag();
-  const onEventError = (error: unknown): void =>
-    metrics.recordError('event', classifyError(error), describeError(error));
+  // Typed as the SDK's own handler, not as a loose arrow: the boundary at which a wrong arity
+  // stops being a compile error is exactly where this tool mis-classified 255 real failures by
+  // their opcode. See `eventErrorRecorder`.
+  const onEventError: EventErrorHandler = eventErrorRecorder(metrics);
 
   tracker.set('building');
   log.info(`building ${config.vus} virtual users for scenario "${scenario.name}"`);

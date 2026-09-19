@@ -15,8 +15,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { RemoteError, SdkError, TimeoutError, TransportError } from '@migo/sdk';
+import type { EventErrorHandler } from '@migo/sdk';
 
-import { classifyError, describeError, LatencyDigest, Metrics } from '../stats.js';
+import {
+  classifyError,
+  describeError,
+  eventErrorRecorder,
+  LatencyDigest,
+  Metrics,
+} from '../stats.js';
 
 function digestOf(samples: readonly number[]): ReturnType<LatencyDigest['snapshot']> {
   const digest = new LatencyDigest();
@@ -221,6 +228,34 @@ test('describeError caps, redacts, and stays undefined when there is nothing to 
   );
   assert.equal(describeError(new Error('')), undefined);
   assert.equal(describeError(42), undefined);
+});
+
+test('the SDK-boundary sink classifies the cause, not the opcode it arrives beside', () => {
+  // The defect this pins, and the reason the annotation is part of the test rather than a detail:
+  // `EventErrorHandler` is `(opcode: number, cause: unknown) => void`, so a one-parameter arrow is
+  // assignable to it and silently receives the opcode. `classifyError(53)` is 'unknown' for every
+  // real cause and `describeError(53)` is undefined, so the 256-member fan-out's 255 failures
+  // reached the report as an anonymous count with an empty sample map. Both halves are asserted
+  // here — the class taken from the cause, and the opcode still present, because once the cause is
+  // named the opcode is what makes the entry greppable (`53` is `GROUP_KEY_DISTRIBUTE` in
+  // `@migo/protocol`'s generated table).
+  const metrics = new Metrics();
+  const handler: EventErrorHandler = eventErrorRecorder(metrics);
+  handler(53, new TransportError('socket hang up'));
+  const event = metrics.operation('event');
+  assert.deepEqual(event.errorsByClass, [['transport', 1]]);
+  assert.deepEqual(event.errorSamples, [['transport', 'op 53: socket hang up']]);
+});
+
+test('a cause that is not an error at all still leaves the opcode in the sample', () => {
+  // The case `describeError` cannot describe: its contract is tested above and stays undefined here,
+  // so the sample is the only field with anything in it. It must not be empty — an error the report
+  // cannot classify is one the verdict gate now refuses, and the sample is all the operator gets.
+  const metrics = new Metrics();
+  eventErrorRecorder(metrics)(53, 'not an error at all');
+  const event = metrics.operation('event');
+  assert.deepEqual(event.errorsByClass, [['unknown', 1]]);
+  assert.deepEqual(event.errorSamples, [['unknown', 'op 53']]);
 });
 
 test('Metrics.latency memoizes one digest per label', () => {

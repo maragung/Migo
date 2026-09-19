@@ -202,6 +202,27 @@ export function judgeReport(
     };
   }
 
+  // Placed after the measurement rule and before the budget one: a run that measured nothing is
+  // diagnosed as that first, and a report carrying causes nobody can identify is a stronger
+  // statement about the harness than any rate is — the rate is only ever computed from these same
+  // tallies, so an error the tool could not classify is one the rate cannot weigh either.
+  const unclassifiable = unclassifiableErrors(operations as unknown[]);
+  if (unclassifiable.length > 0) {
+    const where = unclassifiable.map(([label, count]) => `'${label}' ${count}`).join(', ');
+    const total = unclassifiable.reduce((sum, [, count]) => sum + count, 0);
+    return {
+      ok: false,
+      reason: 'unclassifiable-error',
+      detail:
+        `step '${step}': ${total} error(s) are classed 'unknown' (${where}) — classifyError answers ` +
+        "'unknown' only for a value that is none of the SDK's error types, so the client threw " +
+        'something that is not an error, or the harness handed the wrong value to the classifier; ' +
+        'either way this is a defect on this side of the wire, not a server refusal, which would ' +
+        'have arrived classed remote:<SYMBOL> with the field it blamed. Nothing else in this ' +
+        'report can be read until it is fixed',
+    };
+  }
+
   const errorRate = numberAt(document, 'errorRate') ?? 1;
   if (errorRate > maxErrorRate) {
     return {
@@ -220,4 +241,37 @@ export function judgeReport(
       `step '${step}': ${connected} session(s), ${(durationMs / 1000).toFixed(1)}s held, ` +
       `${ok} operation(s) measured, error rate ${(errorRate * 100).toFixed(2)}%`,
   };
+}
+
+/**
+ * Every operation whose errors the tool could not classify, as `[label, count]`.
+ *
+ * `unknown` is not a class like the others — it is `classifyError`'s answer for a thrown value that
+ * is not an `Error` at all, and this tool's only throws come from the SDK it is driving. So a
+ * non-zero `unknown` count is a defect in the client's throw path or in the harness's error
+ * plumbing, never a measurement of the server. It is also the one class that arrives with no
+ * sample: `describeError` has nothing to render for a value that is not an error, so the count is
+ * all a reader gets.
+ *
+ * This exists because that combination hid 255 real failures. The 256-member fan-out reported
+ * `'event' ok 0, errors 255, classed unknown 255, samples {}` and still passed: the scenario's own
+ * work measured fine, and 255 errors pooled against 54,226 operations is 0.47%, far under every
+ * threshold. The label was error-only by construction, so its zero successes said nothing, and the
+ * one artifact that would have named the cause was empty by construction too.
+ */
+function unclassifiableErrors(
+  operations: readonly unknown[],
+): ReadonlyArray<readonly [string, number]> {
+  const found: Array<readonly [string, number]> = [];
+  for (const entry of operations) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    const byClass = record['errorsByClass'];
+    if (typeof byClass !== 'object' || byClass === null) continue;
+    const count = (byClass as Record<string, unknown>)['unknown'];
+    if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) continue;
+    const label = record['label'];
+    found.push([typeof label === 'string' ? label : '(unlabelled)', count]);
+  }
+  return found;
 }

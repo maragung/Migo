@@ -122,6 +122,69 @@ test('the connect scenario is measured by connecting, and nothing else is', () =
   assert.match(verdict.detail, /10000 success\(es\) in lifecycle phases and 0 at the work/);
 });
 
+test('a report full of errors the tool could not classify is not a pass', () => {
+  // The exact shape the honest full-scale run produced for its 256-member fan-out: the scenario's
+  // own work measured cleanly, and the only failing operation was one whose causes nobody could
+  // identify — 255 of them, one per receiving device, classed 'unknown' with an empty sample map.
+  // It passed, because 255 errors pooled against 54,226 operations is 0.47% and the label that
+  // failed is error-only by construction, so its zero successes said nothing either. The class is
+  // the tell: 'unknown' is what classifyError answers for a value that is not an Error, and a run
+  // driving the real SDK throws nothing else, so it is a defect on this side of the wire — never a
+  // quiet server, which would have arrived classed remote:<SYMBOL>.
+  const verdict = judgeReport(
+    report({
+      scenario: 'fanout',
+      requestedVus: 256,
+      connectedCount: 256,
+      durationMs: 90_310,
+      targetDurationMs: 90_000,
+      errorRate: 0.00468053082726088,
+      operations: [
+        { label: 'connect', ok: 256, errors: 0, errorsByClass: {}, errorSamples: {} },
+        { label: 'send', ok: 210, errors: 0, errorsByClass: {}, errorSamples: {} },
+        { label: 'fanout-deliver', ok: 53_550, errors: 0, errorsByClass: {}, errorSamples: {} },
+        { label: 'event', ok: 0, errors: 255, errorsByClass: { unknown: 255 }, errorSamples: {} },
+      ],
+    }),
+    { step: 'fanout-256', minConnected: 256, maxErrorRate: 0.05 },
+  );
+  assert.equal(verdict.ok, false, 'a wall of unclassifiable errors is not a pass');
+  assert.equal(verdict.reason, 'unclassifiable-error');
+  assert.match(verdict.detail, /255 error\(s\) are classed 'unknown'/);
+  assert.match(verdict.detail, /'event' 255/);
+});
+
+test('the unclassifiable rule is narrow: a classified failure is left to the budget', () => {
+  // The half that keeps the rule above usable. A server pushing back is a finding about the server
+  // and the error budget is where it is weighed; only a class the tool cannot name fails a step.
+  const verdict = judgeReport(
+    report({
+      errorRate: 0.0047,
+      operations: [
+        { label: 'connect', ok: 256, errors: 0 },
+        { label: 'send', ok: 6000, errors: 0 },
+        { label: 'deliver', ok: 5900, errors: 100, errorsByClass: { 'remote:RATE_LIMITED': 100 } },
+      ],
+    }),
+    { step: 'msg-rate' },
+  );
+  assert.equal(verdict.ok, true, verdict.detail);
+  assert.equal(verdict.reason, 'measured');
+});
+
+test('a zero unknown count is not a wall of them', () => {
+  const verdict = judgeReport(
+    report({
+      operations: [
+        { label: 'connect', ok: 40, errors: 0 },
+        { label: 'send', ok: 6000, errors: 0, errorsByClass: { unknown: 0 } },
+      ],
+    }),
+    { step: 'msg-rate' },
+  );
+  assert.equal(verdict.ok, true, verdict.detail);
+});
+
 test('an interrupted run is never a verdict on the window it was asked for', () => {
   const verdict = judgeReport(report({ interrupted: true }), { step: 'calls' });
   assert.equal(verdict.ok, false);
