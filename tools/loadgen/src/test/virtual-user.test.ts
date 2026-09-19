@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BandwidthMode, MigoClient, Platform } from '@migo/sdk';
+import type { EventErrorHandler } from '@migo/sdk';
 
 import { clientEndpoint } from '../config.js';
 import type { Config } from '../config.js';
@@ -43,6 +44,7 @@ function buildWithStubbedClient(
   index: number,
   config: Config,
   client: Record<string, unknown> = {},
+  onEventError: EventErrorHandler = () => {},
 ): { vu: VirtualUser; created: Record<string, unknown>; client: Record<string, unknown> } {
   // Bound so the restored factory keeps its class as `this`, exactly as the original did.
   const original = MigoClient.create.bind(MigoClient);
@@ -58,7 +60,7 @@ function buildWithStubbedClient(
       config,
       passphrase: 'pw',
       runTag: 'tag42',
-      onEventError: () => {},
+      onEventError,
       onStateChange: STATE_PROBE,
     });
     return { vu, created, client };
@@ -66,6 +68,17 @@ function buildWithStubbedClient(
     (MigoClient as unknown as { create: unknown }).create = original;
   }
 }
+
+test('the event-error sink reaches the client by identity, not through a wrapper', () => {
+  // The runner hands each VU the SDK-typed recorder that keeps the opcode in the sample, and a
+  // wrapper here — `(error) => sink(error)` — is precisely how the arity was lost the first time:
+  // the sink takes `(opcode, cause)`, so a one-argument pass-through hands every real cause's
+  // place to an opcode. The annotation makes that a build error; identity is the runtime half,
+  // and it is what says the deps field is a pass-through rather than a re-shaping.
+  const handler: EventErrorHandler = (_opcode, _cause) => {};
+  const { created } = buildWithStubbedClient(1, CONFIG, {}, handler);
+  assert.equal(created['onEventError'], handler);
+});
 
 test('the transport-state probe is handed to the SDK client, not swallowed', () => {
   const { created } = buildWithStubbedClient(1, CONFIG);

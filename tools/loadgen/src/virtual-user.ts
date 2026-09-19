@@ -9,7 +9,7 @@
  */
 
 import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
-import type { ConnectionState, Id, WireBytes } from '@migo/sdk';
+import type { ConnectionState, EventErrorHandler, Id, WireBytes } from '@migo/sdk';
 
 import { clientEndpoint } from './config.js';
 import type { Config } from './config.js';
@@ -19,8 +19,18 @@ export interface VirtualUserDeps {
   readonly passphrase: string;
   /** Per-run tag mixed into usernames so repeated runs never collide on a taken username. */
   readonly runTag: string;
-  /** Sink for inbound event-handling errors, surfaced by the client off the request path. */
-  readonly onEventError: (error: unknown) => void;
+  /**
+   * Sink for inbound event-handling errors, surfaced by the client off the request path.
+   *
+   * Typed as the SDK's own handler rather than as a one-parameter arrow. The loose annotation is
+   * what let the arity slip once already: `EventErrorHandler` is
+   * `(opcode: number, cause: unknown) => void`, so a `(error: unknown) => void` here says the SDK
+   * may call this sink with one argument — which a two-parameter recorder cannot honour, and the
+   * build is where that has to be discovered. Under the loose type it compiled, the opcode
+   * arrived in place of the cause, and 255 real fan-out failures reached the report as
+   * `unknown`. See `eventErrorRecorder`.
+   */
+  readonly onEventError: EventErrorHandler;
   /**
    * Sink for the SDK transport's connection-state transitions, passed straight through to
    * {@link MigoClient}. Loadgen reads it only to say where a stalled run had got to: a run that
