@@ -108,8 +108,17 @@ test('every paired VU is opened to messages from strangers before the first conv
     'privacy:2',
     'privacy:3',
   ]);
+  // By prefix, not by exact match: every entry carries an index (`privacy:0`, `start:2`), so
+  // `indexOf('privacy:')` finds nothing and compares -1 against -1 — an assertion that can only
+  // fail, which is how CI read it. A failing assertion is the cheap half of that mistake; the
+  // expensive half would have been a passing one.
+  const firstStart = timeline.findIndex((event) => event.startsWith('start:'));
+  const lastOpening = timeline.reduce(
+    (last, event, index) => (event.startsWith('privacy:') ? index : last),
+    -1,
+  );
   assert.ok(
-    timeline.lastIndexOf('privacy:') < timeline.indexOf('start:'),
+    firstStart !== -1 && lastOpening < firstStart,
     `a conversation was attempted before the opening was written: ${timeline.join(', ')}`,
   );
   // One field, on the documented patch surface: the value is "everyone", and nothing else about

@@ -155,6 +155,14 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
     get connectionState(): string {
       return hooks.connectionState ?? 'ready';
     },
+    // The pair setup opens every paired VU's `who_can_message` before it opens a conversation, so a
+    // double standing in for a VirtualUser has to answer that call. The behaviour — who is written,
+    // in what order, and what a refusal counts as — is asserted in pairs.test.ts; here it only has
+    // to resolve, because a double that throws on it turns one refusal into three errors and hides
+    // the error this file's setup test is actually counting.
+    profile: {
+      updateProfile: (): Promise<unknown> => Promise.resolve({}),
+    },
     startConversation: (kind: ConversationKind, members: readonly unknown[]) => {
       hooks.onStart?.(kind, members);
       return hooks.startFails
