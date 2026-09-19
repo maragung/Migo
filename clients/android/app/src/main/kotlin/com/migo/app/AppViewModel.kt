@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.migo.app.call.AudioOutput
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallService
 import com.migo.app.call.CallUiState
@@ -1247,7 +1248,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * phone whose platform has no honest way to route a call, and the screen draws no control for
      * either of those -- nor for a phone with only one route, which has nothing to choose.
      */
-    val callOutputs: StateFlow<List<CallManager.AudioOutput>>
+    val callOutputs: StateFlow<List<AudioOutput>>
         get() = callManager?.outputs ?: EMPTY_CALL_OUTPUTS
 
     /** The route the call is playing through, or null while the phone is choosing for itself. */
@@ -1314,6 +1315,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         groupCallManager?.switchGroupCamera()
     }
 
+    /**
+     * Plays the group call through one of the routes the phone listed.
+     *
+     * A refusal is the phone's own word -- a Bluetooth route that dropped between the menu being
+     * drawn and the tap landing -- and the menu re-reads rather than ticking a route the call is
+     * not on.
+     */
+    fun chooseGroupCallOutput(deviceId: Int) {
+        groupCallManager?.chooseOutput(deviceId)
+    }
+
     /** This side's camera track on the live call, for the call screen's self-view. Null off one. */
     val localVideo: VideoTrack?
         get() = callManager?.localVideo
@@ -1325,6 +1337,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** This device's own camera track on a group call, for the self-view tile. */
     val groupCallLocalVideo: StateFlow<VideoTrack?>
         get() = groupCallManager?.localVideo ?: MutableStateFlow(null)
+
+    /**
+     * The routes this phone offers the group call right now, for the overlay's routing menu.
+     *
+     * The layer is the one-to-one call's own, shared: a route is a property of the phone carrying a
+     * call and not of a plane, so both screens read the same kind of answer from the same kind of
+     * object. Empty off a session, and empty below Android 12 -- which is the honest answer there
+     * rather than a short list, and is why both screens draw the control only above one entry.
+     */
+    val groupCallOutputs: StateFlow<List<AudioOutput>>
+        get() = groupCallManager?.outputs ?: EMPTY_CALL_OUTPUTS
+
+    /** The route the group call is playing through, or null while the phone is choosing. */
+    val groupCallOutput: StateFlow<Int?>
+        get() = groupCallManager?.chosenOutputId ?: NO_CALL_OUTPUT
 
     /** The peer's camera track once it arrives, for the call screen's main view. */
     val remoteVideo: StateFlow<VideoTrack?>
@@ -6998,7 +7025,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
          * rather than a fresh flow per read, because the screen collects this one and a new
          * instance on every recomposition would restart the collection it is watching.
          */
-        val EMPTY_CALL_OUTPUTS: StateFlow<List<CallManager.AudioOutput>> =
+        val EMPTY_CALL_OUTPUTS: StateFlow<List<AudioOutput>> =
             MutableStateFlow(emptyList())
 
         /** What the routing menu reads when there is no session: no route chosen. */

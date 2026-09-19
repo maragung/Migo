@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,11 +19,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.migo.app.call.AudioOutput
 import com.migo.core.ConnectionState
 import com.migo.core.protocol.RoomSummary
 import java.time.Instant
@@ -621,6 +629,85 @@ private fun DrawScope.drawGlyph(kind: TabGlyph, color: Color, stroke: Float) {
             drawLine(color, p(0.4f, 0.2f), p(0.55f, 0.85f), stroke, cap)
             drawLine(color, p(0.55f, 0.85f), p(0.65f, 0.55f), stroke, cap)
             drawLine(color, p(0.65f, 0.55f), p(0.95f, 0.55f), stroke, cap)
+        }
+    }
+}
+
+/**
+ * One circular action button: a glyph on a colored disc.
+ *
+ * The glyphs are emoji characters, not an icon font -- the app's own rule, and the web overlay's --
+ * so neither call screen ships an asset of its own. The [label] never shows on screen; it is what a
+ * screen reader says.
+ *
+ * Two sizes are in use and the difference is deliberate: the one-to-one call's control row is the
+ * only row on its screen and takes the larger disc, while the group overlay holds a roster, a
+ * column of tiles and a row of controls at once, and the denser disc is what keeps that row from
+ * crowding the tiles above it.
+ */
+@Composable
+internal fun ActionDisc(
+    glyph: String,
+    label: String,
+    background: Color,
+    contentColor: Color,
+    onClick: () -> Unit,
+    size: Dp = 72.dp,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(background)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
+    }
+}
+
+/**
+ * Where a call is played, as a menu of the routes the phone listed.
+ *
+ * Drawn in the same circle as the neighbouring controls rather than as a text button, because the
+ * row is a row of round controls and a labelled button beside them would read as belonging to a
+ * different bar. The tick marks the route the call is on, and no tick is a real state rather than a
+ * missing one: the app has not routed the call anywhere itself, so the phone is choosing, and
+ * ticking a device on a guess would tell the user their sound is somewhere it may not be.
+ *
+ * Shared by both call surfaces because there is one list to share: the routes a phone offers a call
+ * are the phone's own -- [com.migo.app.call.CallAudioRoute] is where that fact lives -- and the two
+ * screens differ only in the size of the disc the menu hangs off.
+ */
+@Composable
+internal fun AudioRouteButton(
+    outputs: List<AudioOutput>,
+    chosenOutput: Int?,
+    onChooseOutput: (Int) -> Unit,
+    size: Dp = 72.dp,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(contentAlignment = Alignment.Center) {
+        ActionDisc(
+            glyph = "🔊",
+            label = "Call audio",
+            background = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            onClick = { open = true },
+            size = size,
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            outputs.forEach { output ->
+                val marked = if (output.id == chosenOutput) "✓ ${output.label}" else output.label
+                DropdownMenuItem(
+                    text = { Text(marked) },
+                    onClick = {
+                        onChooseOutput(output.id)
+                        open = false
+                    },
+                )
+            }
         }
     }
 }

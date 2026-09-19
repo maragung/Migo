@@ -2,13 +2,7 @@ package com.migo.app.call
 
 import android.content.Context
 import android.content.Intent
-import android.media.AudioDeviceCallback
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
 import android.media.projection.MediaProjection
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.crypto.Content
@@ -906,136 +900,32 @@ class CallManager(
     }
 
     /**
-     * One route this phone can play a call through, named the way the phone names it.
+     * Where this call is played, as the phone's own routing layer.
      *
-     * The id is the platform's own device id and not an index into the list: the list is re-read
-     * whenever the phone reports a change, and an index would move under the user's finger when a
-     * headset is unplugged mid-call.
+     * The layer itself is [CallAudioRoute]'s rather than this class's, because a group call needs
+     * the same one and two copies of one question drift apart. What stays here is this call's part
+     * in it: the watch starts where a call connects and stops with its media, because a routing
+     * menu only exists while there is a call to move.
      */
-    data class AudioOutput(val id: Int, val label: String)
+    private val audioRoute = CallAudioRoute(context)
 
-    private val audioManager =
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    /** The routes this phone offers this call right now, in the order the platform lists them. */
+    val outputs: StateFlow<List<AudioOutput>> = audioRoute.outputs
 
-    private val _outputs = MutableStateFlow<List<AudioOutput>>(emptyList())
+    /** The route this call is playing through, or null while the phone is choosing for itself. */
+    val chosenOutputId: StateFlow<Int?> = audioRoute.chosenOutputId
 
     /**
-     * The routes this phone offers the call right now, in the order the platform lists them.
+     * Plays the call through one of the routes the phone listed; false means the phone refused.
      *
-     * Empty on a phone older than Android 12, and empty is the honest answer there rather than a
-     * short list: the API that predates it can only toggle the speaker, which is one route and not
-     * the phone's list, so those devices get no menu at all instead of a menu that cannot move the
-     * call. The call screen draws the control only when there is more than one entry, the same rule
-     * the web build keeps for a platform that reports a single microphone.
+     * The refusal is returned rather than swallowed so the caller can re-read the list instead of
+     * leaving the menu showing a choice the call is not on.
      */
-    val outputs: StateFlow<List<AudioOutput>> = _outputs.asStateFlow()
-
-    private val _chosenOutputId = MutableStateFlow<Int?>(null)
-
-    /**
-     * The route this call is playing through, or null while the phone is choosing for itself.
-     *
-     * Null is a real answer and not a missing one: a call the app has never routed anywhere is a
-     * call the platform is routing, and the menu shows no tick rather than ticking a device it
-     * merely guessed at.
-     */
-    val chosenOutputId: StateFlow<Int?> = _chosenOutputId.asStateFlow()
-
-    /**
-     * The platform's own word on the routes.
-     *
-     * A headset plugged in mid-call is a route that appears and one unplugged is a route that
-     * goes, so a menu that read the list once would offer a device the phone no longer has --
-     * which is why the list is re-read from the phone's report rather than from the clock.
-     */
-    private val outputWatcher = object : AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
-            refreshOutputs()
-        }
-
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
-            refreshOutputs()
-        }
-    }
-
-    /**
-     * Re-reads the routes the phone is offering and the one it says the call is on.
-     *
-     * Every failure here is a phone that will not say, and a phone that will not say leaves the
-     * list empty and the menu undrawn rather than a control built on a guess.
-     */
-    private fun refreshOutputs() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return
-        }
-        val devices = runCatching {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isCallRoute() }
-        }.getOrDefault(emptyList())
-        _outputs.value = devices.map { AudioOutput(it.id, it.callRouteLabel()) }
-        _chosenOutputId.value = runCatching { audioManager.communicationDevice?.id }.getOrNull()
-    }
-
-    /** Whether the platform is currently reporting route changes to [outputWatcher]. */
-    private var watchingOutputs = false
-
-    /**
-     * Asks the phone to report route changes for as long as the call lasts.
-     *
-     * Guarded rather than merely registered, because the same callback instance registered twice
-     * is a report delivered twice, and this is reached from every path that marks a call connected.
-     */
-    private fun startWatchingOutputs() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || watchingOutputs) {
-            return
-        }
-        audioManager.registerAudioDeviceCallback(outputWatcher, Handler(Looper.getMainLooper()))
-        watchingOutputs = true
-    }
-
-    /**
-     * Gives the route back to the phone.
-     *
-     * A phone left pinned to a speaker by a call that ended is a phone whose next notification is
-     * loud in a room where nobody asked for it, so the pin is cleared with the call rather than
-     * carried into the next one -- and the list is emptied with it, so a menu drawn from the state
-     * of a call that is over cannot offer a route that call was using.
-     */
-    private fun stopWatchingOutputs() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && watchingOutputs) {
-            audioManager.unregisterAudioDeviceCallback(outputWatcher)
-            runCatching { audioManager.clearCommunicationDevice() }
-        }
-        watchingOutputs = false
-        _outputs.value = emptyList()
-        _chosenOutputId.value = null
-    }
-
-    /**
-     * Plays the call through one of the routes the phone listed.
-     *
-     * False means the phone refused, which is what happens when a Bluetooth route drops between
-     * the menu being drawn and the tap landing: the refusal is returned rather than swallowed so
-     * the caller can re-read the list instead of leaving the menu showing a choice the call is
-     * not on. The route is a property of the call the phone is carrying and not of this manager,
-     * so the choice does not survive the call -- a later call starts on whatever the phone picks,
-     * which is the behaviour a person expects from hanging up and calling back.
-     */
-    fun chooseOutput(deviceId: Int): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return false
-        }
-        val device = runCatching {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                .firstOrNull { it.id == deviceId }
-        }.getOrNull() ?: return false
-        val routed = runCatching { audioManager.setCommunicationDevice(device) }
-            .getOrDefault(false)
-        refreshOutputs()
-        return routed
-    }
+    fun chooseOutput(deviceId: Int): Boolean = audioRoute.choose(deviceId)
 
     /** Mutes or unmutes this side's microphone. */
-    fun toggleMute() {        muted = !muted
+    fun toggleMute() {
+        muted = !muted
         audioTrack?.setEnabled(!muted)
         _state.update { it.copy(muted = muted) }
     }
@@ -1175,8 +1065,7 @@ class CallManager(
         // starts here rather than with the manager because the list belongs to the call: a menu
         // only exists while one is up, and a callback registered for a call that has not started
         // would be the platform telling the app about routes nobody can choose.
-        startWatchingOutputs()
-        refreshOutputs()
+        audioRoute.start()
         startMeasuring()
         val beganAt = setupStart
         if (beganAt != null) {
@@ -1440,7 +1329,7 @@ class CallManager(
         // The call's media is going, so the route it was played through goes with it: this is the
         // one place every ending passes through -- a hang-up, a peer's end, a lost session, a
         // sign-out -- and a routing pin that outlived it would be a phone stuck on a speaker.
-        stopWatchingOutputs()
+        audioRoute.stop()
         // The two quality controls go with the call they capped. A ceiling pinned for one call
         // is not a standing preference -- the next call starts on the best rung its own link can
         // carry and re-measures from there -- and a mode carried over would silently cap a call
@@ -2181,53 +2070,3 @@ private fun answerDescription(answer: SessionDescription): SdpDescription =
         type = SessionDescription.Type.ANSWER.canonicalForm(),
         sdp = answer.description,
     )
-
-/**
- * Whether this device is one a call can be played through.
- *
- * The list the platform hands back is every output the phone has, including the ones that carry
- * media and not calls, and offering those in a call's routing menu would be offering a tap that
- * moves nothing. What is left is the routes a call genuinely uses: the earpiece, the speaker,
- * wired headsets, USB and Bluetooth headsets, and the routes that only appear once the phone is
- * in communication mode.
- */
-private fun AudioDeviceInfo.isCallRoute(): Boolean = when (type) {
-    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE,
-    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
-    AudioDeviceInfo.TYPE_WIRED_HEADSET,
-    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-    AudioDeviceInfo.TYPE_USB_HEADSET,
-    AudioDeviceInfo.TYPE_USB_DEVICE,
-    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-    AudioDeviceInfo.TYPE_BLE_HEADSET,
-    AudioDeviceInfo.TYPE_BLE_SPEAKER,
-    AudioDeviceInfo.TYPE_HEARING_AID,
-    -> true
-
-    else -> false
-}
-
-/**
- * What the menu calls a route.
- *
- * The product name first, because that is the name the user sees in the phone's own settings and
- * the one that tells two headsets apart; the type's word only when the phone left the name blank,
- * which is common for the built-in routes. A route with neither is still listed, under a word that
- * says what it is rather than as an empty row.
- */
-private fun AudioDeviceInfo.callRouteLabel(): String {
-    val named = runCatching { productName?.toString().orEmpty() }.getOrDefault("")
-    if (named.isNotBlank()) {
-        return named
-    }
-    return when (type) {
-        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Phone"
-        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
-        AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Headset"
-        AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> "USB audio"
-        AudioDeviceInfo.TYPE_BLUETOOTH_SCO, AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth"
-        AudioDeviceInfo.TYPE_BLE_SPEAKER -> "Bluetooth speaker"
-        AudioDeviceInfo.TYPE_HEARING_AID -> "Hearing aid"
-        else -> "Audio device"
-    }
-}

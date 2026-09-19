@@ -123,6 +123,44 @@ class GroupCallManager(
     val eglContext: EglBase.Context?
         get() = media.eglContext
 
+    /**
+     * Where this call is played, as the phone's own routing layer.
+     *
+     * The one-to-one call holds one of these too and neither reaches into the other's: a route is a
+     * property of *the phone carrying a call*, so what the two calls share is the behaviour rather
+     * than the object, and the behaviour lives in [CallAudioRoute]. This class's part in it is the
+     * *when* -- the watch starts where the seat goes live and stops beside `media.stop()`, in
+     * [setActive], which is the one place every ending passes through.
+     */
+    private val audioRoute = CallAudioRoute(context)
+
+    /**
+     * The routes this phone offers this group call right now, in the order the platform lists them.
+     *
+     * Empty on a phone older than Android 12, and empty is the honest answer there rather than a
+     * short list -- the layer's own doc has the whole argument. The screen draws the control only
+     * when there is more than one entry, exactly as the one-to-one call screen does.
+     */
+    val outputs: StateFlow<List<AudioOutput>> = audioRoute.outputs
+
+    /**
+     * The route this call is playing through, or null while the phone is choosing for itself.
+     *
+     * Null is a real answer and not a missing one: a call the app has never routed anywhere is a
+     * call the platform is routing, and the menu shows no tick rather than ticking a device it
+     * merely guessed at.
+     */
+    val chosenOutputId: StateFlow<Int?> = audioRoute.chosenOutputId
+
+    /**
+     * Plays this call through one of the routes the phone listed; false means the phone refused.
+     *
+     * A refusal is not swallowed: it is what a Bluetooth route dropping between the menu being
+     * drawn and the tap landing looks like, and the caller re-reads the list rather than leaving
+     * the menu showing a choice the call is not on.
+     */
+    fun chooseOutput(deviceId: Int): Boolean = audioRoute.choose(deviceId)
+
     /** The TURN relays the join reply carried, kept for every link built afterwards. */
     @Volatile private var joinRelays: List<TurnServer> = emptyList()
 
@@ -170,8 +208,20 @@ class GroupCallManager(
         if (next == null || next.note != null) {
             if (previous != null) {
                 media.stop()
+                // The route goes with the media, at the same moment and for the same reason: a
+                // phone left pinned to a speaker by a call that ended is loud in a room where
+                // nobody asked for it, and a menu still listing that call's routes would be
+                // offering a tap that moves a call nobody is on. The one-to-one call clears this
+                // in `teardownMedia`; this is that place for a group call.
+                audioRoute.stop()
             }
             _state.update { it.copy(muted = false, cameraOn = false, cameraAvailable = false) }
+        } else {
+            // The seat is live, so the phone is carrying a call and the routes it can carry it
+            // over exist to be chosen. Guarded inside the route rather than here, because this
+            // runs on every roster update and a group call's roster moves constantly: a
+            // registration per update would be a report per update.
+            audioRoute.start()
         }
         active = next
         _state.update { it.copy(call = next, error = if (next == null) null else it.error) }
