@@ -39,6 +39,7 @@
 
 use std::fmt;
 use std::sync::mpsc as std_mpsc;
+use std::sync::Mutex;
 
 /// The wire's audio rate: 8000Hz, the rate µ-law is defined at.
 pub const CALL_SAMPLE_RATE: u32 = 8_000;
@@ -227,6 +228,68 @@ enum MicrophoneGuard {
     Cpal(cpal::Stream),
 }
 
+/// Which microphone and which speaker this app's calls open.
+///
+/// A cell rather than a parameter because the choice belongs to the machine and the session,
+/// not to any one call: it is read where audio is opened — five call sites deep in the net
+/// layer, none of which has a settings record or any business holding one — and written by the
+/// shell where the settings record is read and saved. Holding it here is what keeps a
+/// preferences struct out of five signatures that would carry one only to pass it straight on.
+///
+/// The lock is never held across an open: the value is copied out and the guard dropped before
+/// a device is touched, so a slow or wedged device cannot block the settings pane's own write.
+static CHOSEN_MICROPHONE: Mutex<Option<String>> = Mutex::new(None);
+static CHOSEN_SPEAKER: Mutex<Option<String>> = Mutex::new(None);
+
+/// The ALSA PCM name that means "whichever device the system itself would pick": the `default`
+/// plug, which is the card the desktop's own mixer points at.
+#[cfg(target_os = "linux")]
+const DEFAULT_PCM: &str = "default";
+
+/// Borrows a cell for as long as the caller needs it, treating a poisoned lock as a value rather
+/// than a panic: what these cells hold is a device name, and a thread that panicked while naming
+/// a headset is no reason to refuse every later call the name it left behind.
+fn lock(cell: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+    cell.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Remembers which microphone and speaker every call opened after this should use, as the
+/// settings record spells them — an ALSA PCM name on Linux, a cpal device name on Windows and
+/// macOS. `None` means the system's own pick.
+///
+/// Called by the shell where the settings record is read and again after every write, so the two
+/// cannot disagree about what a call will open.
+pub fn set_chosen_devices(microphone: Option<String>, speaker: Option<String>) {
+    *lock(&CHOSEN_MICROPHONE) = microphone;
+    *lock(&CHOSEN_SPEAKER) = speaker;
+}
+
+/// The microphone a call would open, or `None` for the system's own pick.
+#[must_use]
+pub fn chosen_microphone() -> Option<String> {
+    lock(&CHOSEN_MICROPHONE).clone()
+}
+
+/// The speaker a call would open, or `None` for the system's own pick.
+#[must_use]
+pub fn chosen_speaker() -> Option<String> {
+    lock(&CHOSEN_SPEAKER).clone()
+}
+
+/// Both backends' opens under one name, so which library a call reaches is decided by the target
+/// alone and the choosing below is written once rather than once per `#[cfg]` arm — two arms that
+/// would otherwise have to be read side by side to be sure they agree, which is exactly how a
+/// fallback in one drifts away from the fallback in the other.
+///
+/// The two are not interchangeable libraries — ALSA is dlopened by hand, cpal is linked — but
+/// they answer the same two questions in the same shape: open this named device, or open
+/// whichever device the system itself would pick.
+#[cfg(target_os = "linux")]
+use self::alsa as platform;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use self::cpal_backend as platform;
+
 /// An open microphone: mono `i16` chunks at [`Microphone::rate`], stopped when
 /// dropped. A microphone that dies mid-call simply goes quiet — the capture
 /// thread exits, the channel closes, and the call goes on one-sided rather than
@@ -277,20 +340,35 @@ enum SpeakerGuard {
     Cpal(cpal::Stream),
 }
 
-/// Opens the default microphone.
+/// Opens the microphone a call should record from: the chosen one, or the system's own default.
+///
+/// A chosen device that cannot be opened — unplugged, renumbered by the kernel, a name carried
+/// over from another machine's settings file — falls back to the default rather than failing the
+/// call. A person who unplugged a headset wants a call, not an error about a device they can see
+/// is gone, and the settings pane draws the same comparison against the same list, so the
+/// fallback a call takes and the fallback the pane reports are one decision read twice rather
+/// than two decisions that could drift apart.
 pub fn open_microphone() -> Result<Microphone, CallAudioError> {
-    #[cfg(target_os = "linux")]
-    return alsa::open_microphone();
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    return cpal_backend::open_microphone();
+    match chosen_microphone().as_deref() {
+        // The second open passes no name at all, which is how both backends say "whichever device
+        // the system itself would pick" — the one spelling that means the same thing either side
+        // of the `#[cfg]`, and the reason the fallback needs no arm of its own.
+        Some(device) => {
+            platform::open_microphone(Some(device)).or_else(|_| platform::open_microphone(None))
+        }
+        None => platform::open_microphone(None),
+    }
 }
 
-/// Opens the default speaker.
+/// Opens the speaker a call should play through: the chosen one, or the system's own default,
+/// with the same fallback [`open_microphone`] takes and for the same reason.
 pub fn open_speaker() -> Result<Speaker, CallAudioError> {
-    #[cfg(target_os = "linux")]
-    return alsa::open_speaker();
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    return cpal_backend::open_speaker();
+    match chosen_speaker().as_deref() {
+        Some(device) => {
+            platform::open_speaker(Some(device)).or_else(|_| platform::open_speaker(None))
+        }
+        None => platform::open_speaker(None),
+    }
 }
 
 // --- the ALSA backend, dlopened at runtime ---
@@ -384,18 +462,24 @@ mod alsa {
             }
         }
 
-        /// Opens the `default` (plug) device for one direction and configures it
-        /// as 8kHz mono S16LE. `snd_pcm_set_params` either installs exactly that
-        /// — converting through the plug layer where the hardware needs it — or
+        /// Opens one named PCM device for one direction and configures it as 8kHz
+        /// mono S16LE. `snd_pcm_set_params` either installs exactly that —
+        /// converting through the plug layer where the hardware needs it — or
         /// fails; there is no second-guessing a half-configured stream.
-        fn open_stream(&self, stream: c_int) -> Result<Pcm, CallAudioError> {
-            let name = CString::new("default").expect("a constant without interior NULs");
-            let mut pcm: Pcm = std::ptr::null_mut();
+        ///
+        /// The name is the `default` plug for a call that follows the system, or a
+        /// `plughw:` name [`crate::net::call_devices`] enumerated for one that
+        /// follows the user; both carry the plug layer, so both accept the rate a
+        /// call runs at. It is checked for an interior NUL here rather than
+        /// assumed to be a constant, because it now comes from a settings file.
+        fn open_stream(&self, stream: c_int, device: &str) -> Result<Pcm, CallAudioError> {
             let what = if stream == STREAM_CAPTURE {
                 "Microphone"
             } else {
                 "Speaker"
             };
+            let name = CString::new(device).map_err(|error| unavailable(what, error))?;
+            let mut pcm: Pcm = std::ptr::null_mut();
             let code = unsafe { (self.open)(&mut pcm, name.as_ptr(), stream, 0) };
             if code < 0 {
                 return Err(unavailable(what, code));
@@ -421,14 +505,16 @@ mod alsa {
         }
     }
 
-    /// Opens the default microphone and reads it on a dedicated thread.
+    /// Opens one named microphone — or, for `None`, whichever the system itself would pick —
+    /// and reads it on a dedicated thread.
     ///
     /// ALSA's `readi` blocks, and blocking the async runtime's thread is not
     /// ALSA's to do — so the blocking lives on this thread and the runtime sees
     /// only the channel.
-    pub fn open_microphone() -> Result<Microphone, CallAudioError> {
+    pub fn open_microphone(device: Option<&str>) -> Result<Microphone, CallAudioError> {
+        let device = device.unwrap_or(super::DEFAULT_PCM);
         let alsa = Arc::new(Alsa::load()?);
-        let pcm = OwnedPcm(alsa.open_stream(STREAM_CAPTURE)?);
+        let pcm = OwnedPcm(alsa.open_stream(STREAM_CAPTURE, device)?);
         let (sender, receiver) = std_mpsc::channel::<Vec<i16>>();
         let reader = alsa.clone();
         let thread = std::thread::Builder::new()
@@ -464,10 +550,12 @@ mod alsa {
         })
     }
 
-    /// Opens the default speaker on a dedicated writer thread.
-    pub fn open_speaker() -> Result<Speaker, CallAudioError> {
+    /// Opens one named speaker — or the system's own pick, for `None` — on a dedicated writer
+    /// thread.
+    pub fn open_speaker(device: Option<&str>) -> Result<Speaker, CallAudioError> {
+        let device = device.unwrap_or(super::DEFAULT_PCM);
         let alsa = Arc::new(Alsa::load()?);
-        let pcm = OwnedPcm(alsa.open_stream(STREAM_PLAYBACK)?);
+        let pcm = OwnedPcm(alsa.open_stream(STREAM_PLAYBACK, device)?);
         let (sender, receiver) = std_mpsc::channel::<Vec<i16>>();
         let writer = alsa.clone();
         let thread = std::thread::Builder::new()
@@ -523,17 +611,51 @@ mod cpal_backend {
     use std::sync::mpsc as std_mpsc;
     use std::sync::{Arc, Mutex};
 
-    /// Opens the default microphone on its native configuration.
+    /// The device a call should record from: the one named, or the host's own default.
+    ///
+    /// A name that matches nothing is an error here rather than a quiet fallback, because this
+    /// layer cannot tell a choice gone stale from a machine that never had the device: the
+    /// caller owns the fallback, and [`super::open_microphone`] is where it happens.
+    fn input_device(name: Option<&str>) -> Result<cpal::Device, CallAudioError> {
+        let host = cpal::default_host();
+        let Some(name) = name else {
+            return host
+                .default_input_device()
+                .ok_or_else(|| unavailable("Microphone", "no input device"));
+        };
+        let mut devices = host
+            .input_devices()
+            .map_err(|error| unavailable("Microphone", error))?;
+        devices
+            .find(|device| device.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| unavailable("Microphone", format!("no input device named {name}")))
+    }
+
+    /// The speaker twin of [`input_device`].
+    fn output_device(name: Option<&str>) -> Result<cpal::Device, CallAudioError> {
+        let host = cpal::default_host();
+        let Some(name) = name else {
+            return host
+                .default_output_device()
+                .ok_or_else(|| unavailable("Speaker", "no output device"));
+        };
+        let mut devices = host
+            .output_devices()
+            .map_err(|error| unavailable("Speaker", error))?;
+        devices
+            .find(|device| device.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| unavailable("Speaker", format!("no output device named {name}")))
+    }
+
+    /// Opens one named microphone on its native configuration, or the host's default when no
+    /// name is given.
     ///
     /// WASAPI and CoreAudio refuse to build a stream at 8000Hz, so the stream
     /// runs at whatever the device actually does; the reported [`Microphone::rate`]
     /// is what the pump resamples from. Every callback mixes the device's
     /// channels down to mono — a call is mono, and the codec is defined on mono.
-    pub fn open_microphone() -> Result<Microphone, CallAudioError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| unavailable("Microphone", "no input device"))?;
+    pub fn open_microphone(name: Option<&str>) -> Result<Microphone, CallAudioError> {
+        let device = input_device(name)?;
         let supported = device
             .default_input_config()
             .map_err(|error| unavailable("Microphone", error))?;
@@ -590,16 +712,14 @@ mod cpal_backend {
         })
     }
 
-    /// Opens the default speaker on its native configuration.
+    /// Opens one named speaker on its native configuration, or the host's default when no name
+    /// is given.
     ///
     /// The device's callback pulls from a queue the pump keeps fed; an empty
     /// queue plays silence, because a moment of nothing is what a speaker does
     /// when its writer is late — not an error, and not a reason to stop.
-    pub fn open_speaker() -> Result<Speaker, CallAudioError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| unavailable("Speaker", "no output device"))?;
+    pub fn open_speaker(name: Option<&str>) -> Result<Speaker, CallAudioError> {
+        let device = output_device(name)?;
         let supported = device
             .default_output_config()
             .map_err(|error| unavailable("Speaker", error))?;
@@ -864,5 +984,30 @@ mod tests {
             vec![100, 150, 200, 250, 300, 350],
             "the state survived the silence"
         );
+    }
+
+    /// The chosen devices are one pair, set together and read together: the settings record holds
+    /// them in two fields, but a call opens both in the same breath, and a shell that wrote one
+    /// without the other would have the microphone and the speaker of two different choices.
+    /// Clearing them is the zero state — follow the system — not an absence, which is what the
+    /// opens above read it as.
+    #[test]
+    fn the_chosen_devices_are_set_and_cleared_as_one_pair() {
+        set_chosen_devices(Some("plughw:CARD=PCH,DEV=0".to_owned()), None);
+        assert_eq!(
+            chosen_microphone().as_deref(),
+            Some("plughw:CARD=PCH,DEV=0")
+        );
+        assert_eq!(chosen_speaker(), None);
+
+        set_chosen_devices(None, Some("HDA Intel PCH".to_owned()));
+        assert_eq!(chosen_microphone(), None);
+        assert_eq!(chosen_speaker().as_deref(), Some("HDA Intel PCH"));
+
+        // Left as it was found: the cells are process-global, and a test that walked away with a
+        // device chosen would change what every later test — and every later call — opens.
+        set_chosen_devices(None, None);
+        assert_eq!(chosen_microphone(), None);
+        assert_eq!(chosen_speaker(), None);
     }
 }
