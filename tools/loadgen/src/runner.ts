@@ -132,17 +132,20 @@ export async function run(
     tracker.set('disconnecting');
     log.info('disconnecting...');
     // Captured before teardown flips `connected`: these are the VUs whose sessions the byte
-    // summary speaks for. A VU that never connected has no transport and nothing to report.
+    // summary speaks for, and a VU that never connected has no transport and nothing to report.
     const sessionVus = vus.filter((vu) => vu.connected);
+    // Read in the same breath, before the close, because the counters belong to the transport and
+    // closing the session discards it: `MigoClient.wireBytes` answers from the connected context
+    // and answers zero once there is none, which its own doc states. A reading taken after
+    // `teardown` is therefore zero by construction rather than by measurement — and that is
+    // exactly what the first honest full-scale run printed for every step, `wire bytes: 0 sent, 0
+    // received` next to 53,550 measured deliveries over 256 sessions. The close's own bytes are
+    // the price of reading a live session honestly; the numbers, not two frames, are the point.
+    const sessionBytes = sessionVus.map((vu) => vu.wireBytes());
     await teardown(vus, config);
-    // Read after teardown so the session close itself is paid for in the counters — those bytes
-    // crossed the wire too. Normalized over the steady-state window, the same window the
-    // throughput figures use, so the per-minute byte rate and the per-second op rate describe
-    // the same run.
-    const wireBytes = summarizeWireBytes(
-      sessionVus.map((vu) => vu.wireBytes()),
-      durationMsActual,
-    );
+    // Normalized over the steady-state window, the same window the throughput figures use, so the
+    // per-minute byte rate and the per-second op rate describe the same run.
+    const wireBytes = summarizeWireBytes(sessionBytes, durationMsActual);
     log.info(
       `wire bytes: ${wireBytes.sentBytes} sent, ${wireBytes.receivedBytes} received` +
         ` (${Math.round(wireBytes.bytesPerUserPerMinute)} B/user/min across ${wireBytes.users} users)`,

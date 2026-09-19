@@ -103,7 +103,10 @@ export class VirtualUser {
    * HELLO and ACK included) and every byte read off the socket at the incoming record's outer
    * envelope size. They survive a reconnect and count the reconnect's own handshake, because
    * those bytes are a real cost the client paid; a VU builds exactly one transport per run, so
-   * the reading taken after teardown is the whole session. The REST bootstrap (register, key
+   * the reading is the whole session's — *while the session is open*. Callers must take the
+   * reading before {@link stop}: the counters live on the SDK transport, and the SDK answers zero
+   * for both directions once no session is established, so a snapshot taken after teardown
+   * reports nothing no matter how much crossed the wire. The REST bootstrap (register, key
    * publication) rides HTTP and is not part of these counters.
    */
   wireBytes(): WireBytes {
