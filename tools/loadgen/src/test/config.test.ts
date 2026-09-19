@@ -10,7 +10,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { ConfigError, parseArgs } from '../config.js';
+import { gatewayUrl } from '@migo/sdk';
+
+import { ConfigError, clientEndpoint, parseArgs } from '../config.js';
 import type { Config } from '../config.js';
 
 /** Parse and assert a non-help result, returning the config. */
@@ -142,4 +144,131 @@ test('malformed argument lists are rejected', () => {
   assert.throws(() => cfg(['positional']), /unexpected argument: positional/);
   assert.throws(() => cfg(['--vus']), /missing value for --vus/);
   assert.throws(() => cfg(['--vus', '--scenario', 'presence']), /missing value for --vus/);
+});
+
+test('the endpoint dials the port the node listens on, not the next one up', () => {
+  // The regression this function exists for. `--api-url http://localhost:18090` is a plain origin on
+  // a loopback host, and the SDK's own derivation reads that as the split-port *dev pair* — REST on
+  // 18090, gateway on 18091. Both load harnesses start the opposite shape: one migod bound to
+  // 127.0.0.1:18090 that serves `/ws` on that same listener. So the derivation put every virtual
+  // user's WebSocket on a port nothing was listening on, the handshake was refused, and the run
+  // reported a node it never reached with every counter at zero.
+  const endpoint = clientEndpoint(cfg(['--api-url', 'http://localhost:18090']));
+  assert.equal(endpoint.port, 18090);
+  assert.equal(endpoint.gatewayPort, 18090);
+  // Named explicitly so the failure message says which port was dialled rather than only that two
+  // numbers differ.
+  assert.notEqual(endpoint.gatewayPort, 18091);
+  // 127.0.0.1 and ::1 take the same path: the derivation's loopback set is what it is, and the
+  // harness defaults are written with `localhost`.
+  assert.equal(clientEndpoint(cfg(['--api-url', 'http://127.0.0.1:18200'])).gatewayPort, 18200);
+});
+
+test('the gateway URL the report prints is the gateway URL the sockets dial', () => {
+  // The strongest form of the claim, because it is the one a reader of the report relies on: take
+  // the endpoint the client is built from, render it with the SDK's own URL builder, and compare it
+  // to the line the report prints. Compared after URL normalisation — `wss://host:443/ws` and
+  // `wss://host/ws` are one endpoint written two ways, and the default-port spelling is not what is
+  // under test here.
+  const cases = [
+    ['http://localhost:18090', undefined],
+    ['http://localhost:8080', undefined],
+    ['https://api.example.com', undefined],
+    ['http://152.53.102.150:8080', undefined],
+    ['http://localhost:18090', 'ws://localhost:18091/ws'],
+    ['https://api.example.com', 'wss://api.example.com/ws'],
+  ] as const;
+  for (const [apiUrl, gatewayOverride] of cases) {
+    const argv = ['--api-url', apiUrl];
+    if (gatewayOverride !== undefined) argv.push('--gateway-url', gatewayOverride);
+    const config = cfg(argv);
+    const dialled = new URL(gatewayUrl(clientEndpoint(config)));
+    const printed = new URL(config.gatewayUrl);
+    assert.equal(
+      dialled.href,
+      printed.href,
+      `${apiUrl}${gatewayOverride === undefined ? '' : ` + ${gatewayOverride}`}: the report says ` +
+        `${printed.href} and the run dialled ${dialled.href}`,
+    );
+  }
+});
+
+test('an explicit --gateway-url governs the run, and carries its TLS posture with it', () => {
+  // A developer running the real split-port pair can still say so, and now it takes effect: before
+  // this, the flag reached the report and nothing else, so the one flag that could have pointed the
+  // run at the second listener changed only the sentence describing the run.
+  const split = clientEndpoint(
+    cfg(['--api-url', 'http://localhost:18090', '--gateway-url', 'ws://localhost:18091/ws']),
+  );
+  assert.equal(split.port, 18090);
+  assert.equal(split.gatewayPort, 18091);
+  assert.equal(split.scheme, 'Ws');
+
+  // The scheme comes from the gateway URL, the REST posture from the API URL — the two flags are
+  // independent fields of one endpoint, and a run may be plain on one side and TLS on the other.
+  const tls = clientEndpoint(
+    cfg(['--api-url', 'https://api.example.com', '--gateway-url', 'wss://api.example.com/ws']),
+  );
+  assert.equal(tls.scheme, 'Wss');
+  assert.equal(tls.restScheme, 'Https');
+  assert.equal(tls.gatewayPort, 443);
+
+  // The same endpoint written with an explicit port is the same endpoint.
+  assert.equal(
+    clientEndpoint(
+      cfg([
+        '--api-url',
+        'https://api.example.com',
+        '--gateway-url',
+        'wss://api.example.com:443/ws',
+      ]),
+    ).gatewayPort,
+    443,
+  );
+});
+
+test('the REST side of the endpoint still comes from --api-url', () => {
+  const plain = clientEndpoint(cfg(['--api-url', 'http://152.53.102.150:8080']));
+  assert.equal(plain.restScheme, 'Http');
+  assert.equal(plain.port, 8080);
+  assert.equal(plain.transport, 'WebSocket');
+  // The VPS shape is the one the derivation already got right, and it must keep working: a plain
+  // origin on a non-loopback host serves `/ws` on its own port.
+  assert.equal(plain.gatewayPort, 8080);
+
+  const tls = clientEndpoint(cfg(['--api-url', 'https://Node.Example.com']));
+  assert.equal(tls.restScheme, 'Https');
+  assert.equal(tls.port, 443);
+  assert.equal(tls.host, 'node.example.com');
+});
+
+test('a gateway URL the endpoint shape cannot express is refused, naming the reason', () => {
+  // One host per endpoint, and the SDK dials `/ws` on it: each of these asks for something this
+  // shape cannot say, and silently dialling the API host instead would put the report and the run
+  // back into disagreement — the defect this function exists to close.
+  assert.throws(
+    () =>
+      clientEndpoint(
+        cfg(['--api-url', 'http://localhost:18090', '--gateway-url', 'ws://other:18090/ws']),
+      ),
+    /names host "other" while --api-url names "localhost"/,
+  );
+  assert.throws(
+    () =>
+      clientEndpoint(
+        cfg(['--api-url', 'http://localhost:18090', '--gateway-url', 'quic://localhost:18090/ws']),
+      ),
+    /must be a ws:\/\/ or wss:\/\/ URL/,
+  );
+  assert.throws(
+    () =>
+      clientEndpoint(cfg(['--api-url', 'http://host/migo', '--gateway-url', 'ws://host/migo/ws'])),
+    /the SDK dials the gateway at "\/ws"/,
+  );
+  // A bare origin is the same request as `/ws`, not a different one.
+  assert.doesNotThrow(() =>
+    clientEndpoint(
+      cfg(['--api-url', 'http://localhost:18090', '--gateway-url', 'ws://localhost:18090']),
+    ),
+  );
 });

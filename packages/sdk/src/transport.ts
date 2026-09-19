@@ -153,7 +153,17 @@ export interface TransportOptions {
   webSocketFactory?: WebSocketFactory;
   /** Milliseconds between heartbeats; defaults to the server's negotiated `heartbeatMs`. */
   heartbeatMs?: number;
-  /** Milliseconds to wait for a reply before a {@link TimeoutError}; default 30000. */
+  /**
+   * Milliseconds to wait for a reply before a {@link TimeoutError}; default 30000.
+   *
+   * It bounds the handshake as well, because a handshake is the same kind of wait: one request
+   * sent, one answer owed, nothing else to do until it arrives. Reusing this budget rather than
+   * adding a second knob is deliberate — a caller that has said how long a silent socket may sit
+   * has already answered the question, and `connect()` rejecting late is worth less than a
+   * separate option threaded through three clients. A hex value here is a hex value everywhere,
+   * so a client that sets a short request timeout gets a short handshake timeout, which is the
+   * honest reading of "how long may this socket stay silent before I treat it as gone".
+   */
   requestTimeoutMs?: number;
   /** The ceiling for reconnect backoff; default 30000. */
   maxReconnectDelayMs?: number;
@@ -287,6 +297,16 @@ export class GatewayTransport {
 
   /** The in-flight handshake's settlers, or null when not handshaking. */
   #handshake: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  /**
+   * The deadline on the handshake in flight, re-armed for each socket attempt.
+   *
+   * Without it `connect()` inherits whatever the platform does with a socket that never answers,
+   * and "the platform always tells us" is the assumption that produced a week of load runs which
+   * exited zero having measured nothing. `#clearTimers` clears it too: a timer left armed is a
+   * handle that keeps a Node process alive — or parks a hidden browser tab awake — after the
+   * caller has walked away.
+   */
+  #handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   /** True between sending HELLO and consuming WELCOME. */
   #awaitingWelcome = false;
 
@@ -528,12 +548,65 @@ export class GatewayTransport {
     ws.onmessage = (event: MessageEvent) => {
       this.#onMessage(event.data);
     };
-    ws.onerror = () => {
-      // `onclose` always follows and carries the actionable outcome; nothing to do here.
+    ws.onerror = (event: Event) => {
+      // A socket that failed before the handshake completed has no session to recover, and the
+      // caller waiting on `connect()` has to hear about it. This handler used to do nothing, on
+      // the strength of "onclose always follows and carries the actionable outcome" — which is
+      // true of the browsers, and is not true of every platform this SDK runs on. Node's
+      // WebSocket refuses a connection to a closed port by dispatching `error` alone; no `close`
+      // follows, so `#onClose` never runs, `#failHandshake` is never reached, and the handshake
+      // promise is left pending with no handle holding the event loop open. Node then drains and
+      // exits zero having done nothing, which is precisely the shape a week of nightly load runs
+      // left behind — the harness dialling a port nothing listened on, reporting a clean exit
+      // over an empty report. Guarded on a handshake still being in flight: once it has settled,
+      // a socket error is a post-handshake transport failure and belongs to the reconnect path,
+      // exactly as a close does.
+      if (this.#handshake === null) {
+        return;
+      }
+      this.#failHandshake(
+        new TransportError(`socket error before the handshake completed${errorEventDetail(event)}`),
+      );
     };
     ws.onclose = (event: CloseEvent) => {
       this.#onClose(event.code, event.reason);
     };
+    // Armed per socket, not per handshake: a failover opens the next candidate under the same
+    // promise, and each candidate is owed the same window to answer rather than sharing one.
+    this.#armHandshakeDeadline();
+  }
+
+  /**
+   * Bounds the handshake in flight so `connect()` cannot outlive the socket it is waiting on.
+   *
+   * The error and close handlers already fail a refused socket, and between them they cover every
+   * platform the SDK has met — but "every platform it has met" is a claim about the past, and this
+   * deadline is what makes the contract unconditional rather than a second assumption of the same
+   * kind as the one it replaces: whatever a platform dispatches on a socket that dies silently,
+   * the caller is told. A silent gateway is the case both handlers miss by construction — a node
+   * that accepts the TCP connection, holds it, and never answers HELLO — and it is a real one for
+   * a node behind a load balancer that has not noticed the backend is gone.
+   */
+  #armHandshakeDeadline(): void {
+    this.#clearHandshakeDeadline();
+    const limit = this.#requestTimeoutMs;
+    this.#handshakeTimer = setTimeout(() => {
+      this.#handshakeTimer = null;
+      if (this.#handshake === null) {
+        return;
+      }
+      this.#failHandshake(
+        new TimeoutError(`the gateway sent no WELCOME within ${limit} ms of the socket opening`),
+      );
+    }, limit);
+  }
+
+  /** Cancels the handshake deadline, if one is armed. */
+  #clearHandshakeDeadline(): void {
+    if (this.#handshakeTimer !== null) {
+      clearTimeout(this.#handshakeTimer);
+      this.#handshakeTimer = null;
+    }
   }
 
   /** Builds and sends the HELLO frame, with a resume request when reconnecting. */
@@ -707,6 +780,7 @@ export class GatewayTransport {
     this.#startHeartbeat();
     const settle = this.#handshake;
     this.#handshake = null;
+    this.#clearHandshakeDeadline();
     settle?.resolve();
     // The reset notice rides Ready, not the WELCOME that caused it, so a handler reading this
     // transport finds a session it can immediately send on (see #onWelcome).
@@ -738,6 +812,10 @@ export class GatewayTransport {
       return;
     }
     this.#handshake = null;
+    // Disarmed on the way out, or a terminal failure leaves a 30-second timer behind it: the
+    // callback would find no handshake and do nothing, but until then it is a live handle holding
+    // a Node process open after the caller has already been told the connect failed.
+    this.#clearHandshakeDeadline();
     // A link failure during a *reconnect* is another backoff round, not a shutdown: the retry
     // loop that scheduled this attempt owns the recovery, and its catch reschedules exactly once
     // while #shouldReconnect holds. Clearing the flag here — the old behaviour — made that catch
@@ -1085,6 +1163,7 @@ export class GatewayTransport {
   /** Clears every timer the transport owns. */
   #clearTimers(): void {
     this.#stopHeartbeat();
+    this.#clearHandshakeDeadline();
     if (this.#reconnectTimer !== null) {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = null;
@@ -1103,6 +1182,21 @@ export class GatewayTransport {
     this.#state = state;
     this.#options.onStateChange?.(state);
   }
+}
+
+/**
+ * The `message` an error event may carry, as a detail clause, or an empty string.
+ *
+ * `Event` does not promise one — the DOM's `ErrorEvent` has it and undici's plain `Event` does
+ * not — so it is read through an `in` check rather than asserted, and an event without one
+ * produces a message with no trailing clause instead of the word "undefined" in a log line.
+ */
+function errorEventDetail(event: Event): string {
+  if (!('message' in event)) {
+    return '';
+  }
+  const { message } = event;
+  return typeof message === 'string' && message !== '' ? `: ${message}` : '';
 }
 
 /** Returns a factory over the global `WebSocket`, or throws if none exists. */

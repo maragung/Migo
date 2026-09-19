@@ -8,9 +8,10 @@
  * cryptographically independent, just as separate devices are.
  */
 
-import { MigoClient, Platform, BandwidthMode, serverEndpointFromUrl } from '@migo/sdk';
-import type { Id, WireBytes } from '@migo/sdk';
+import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import type { ConnectionState, Id, WireBytes } from '@migo/sdk';
 
+import { clientEndpoint } from './config.js';
 import type { Config } from './config.js';
 
 export interface VirtualUserDeps {
@@ -20,6 +21,13 @@ export interface VirtualUserDeps {
   readonly runTag: string;
   /** Sink for inbound event-handling errors, surfaced by the client off the request path. */
   readonly onEventError: (error: unknown) => void;
+  /**
+   * Sink for the SDK transport's connection-state transitions, passed straight through to
+   * {@link MigoClient}. Loadgen reads it only to say where a stalled run had got to: a run that
+   * drains mid-connect fails identically whether it never opened a socket or opened one and never
+   * finished the handshake, and those are different bugs.
+   */
+  readonly onStateChange: (state: ConnectionState) => void;
 }
 
 export class VirtualUser {
@@ -49,7 +57,10 @@ export class VirtualUser {
     this.#config = deps.config;
     this.#passphrase = deps.passphrase;
     this.client = MigoClient.create({
-      server: serverEndpointFromUrl(deps.config.apiUrl),
+      // Built from both URLs rather than from `apiUrl` alone: see `clientEndpoint`. The SDK's
+      // own derivation reads a loopback `http://` origin as the split-port dev pair, which is
+      // not the single-port node these harnesses start.
+      server: clientEndpoint(deps.config),
       deviceDisplayName: `loadgen/${deps.runTag}/${index}`,
       requestTimeoutMs: deps.config.requestTimeoutMs,
       hello: {
@@ -59,6 +70,7 @@ export class VirtualUser {
         bandwidthMode: BandwidthMode.Normal,
       },
       onEventError: deps.onEventError,
+      onStateChange: deps.onStateChange,
     });
   }
 

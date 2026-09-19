@@ -18,6 +18,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 import { GatewayTransport, DEFAULT_CLIENT_FEATURES, encodeBody, decodeBody } from '../src/index.js';
@@ -762,4 +763,142 @@ test('a transport that has never connected reads as zero wire bytes', () => {
 
   assert.deepEqual(transport.wireBytes, { sent: 0, received: 0 });
   transport.close();
+});
+
+/**
+ * An ephemeral port with nothing listening on it: bound, its number read, then closed.
+ *
+ * The refusal a client gets here is the one a load harness produces by pointing a client at the
+ * wrong port, and it is the only way to ask a real socket what a refused connection actually does —
+ * a fake socket can only replay what this test's author already believed.
+ */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
+  return port;
+}
+
+test('a gateway nothing is listening on fails the connect instead of leaving the caller waiting', async (t) => {
+  // The question this test was written to ask has now been answered, and the answer was the bad
+  // one. Both load harnesses spent at least a week pointed one port past the node they had started,
+  // so every virtual user's socket was refused — and what the run recorded was never `connected
+  // 0/N`. It was a process that drained its event loop mid-connect: exit 0, no report, and no line
+  // after `connecting ...`. Reading `#onClose` said a refusal could not do that — the close reaches
+  // `#failHandshake`, the candidate list is exhausted, the promise rejects — and the one link in
+  // that chain nothing asserted was `ws.onerror`'s comment, "onclose always follows". Against a
+  // real socket on a real closed port, on the Node the load gate runs, this assertion failed:
+  // `still pending after 3000 ms`. The platform sends `error` and no `close`, so the handshake
+  // promise was left pending with nothing holding the event loop open, and Node drained and exited
+  // zero. The handler no longer trusts the comment, and the deadline behind it no longer trusts any
+  // event at all; this stays as the regression test for the refusal itself, bounded so a hang is
+  // reported as a failure rather than hanging the job.
+  const port = await closedPort();
+  const transport = new GatewayTransport({
+    server: {
+      host: '127.0.0.1',
+      port,
+      gatewayPort: port,
+      transport: 'WebSocket',
+      scheme: 'Ws',
+      restScheme: 'Http',
+    },
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+  });
+  // Bounded well below the handshake deadline on purpose. A refusal is an immediate ECONNREFUSED,
+  // so a client that reports it three hundred milliseconds in is working and one that reports it
+  // thirty seconds in is sitting out a deadline meant for a node that accepted the connection and
+  // went quiet — a different bug wearing the same green tick. Two seconds is a thousand times the
+  // round trip and a fifteenth of the deadline, so the gap the assertion measures is unambiguous
+  // even on a loaded runner.
+  const outcome = await Promise.race([
+    transport.connect().then(
+      () => 'resolved',
+      (error: unknown) => `rejected: ${String(error)}`,
+    ),
+    new Promise<string>((resolve) => {
+      setTimeout(() => resolve('still pending after 2000 ms'), 2_000);
+    }),
+  ]);
+  transport.close();
+  // Printed whether the test passes or fails: which mechanism ended the wait is the answer to
+  // "which platform assumption was wrong", and a green tick that hides it would leave the next
+  // reader to re-derive it. The error handler's message names itself; a TimeoutError means the
+  // platform dispatched neither `error` nor `close` and the deadline is what carried it.
+  t.diagnostic(`the refusal was reported as: ${outcome}`);
+  assert.match(
+    outcome,
+    /^rejected:/,
+    `connect() to a closed port ${outcome}. A client whose handshake never settles is a client that ` +
+      'cannot report the failure either — which is how a load run against the wrong port came to ' +
+      'exit zero with an empty report.',
+  );
+});
+
+test('a gateway that holds the socket open and never answers fails the connect on the deadline', async () => {
+  // The case neither the error handler nor the close handler can ever see: a socket that opens,
+  // stays open, and is never written to. A node behind a load balancer that has not noticed its
+  // backend is gone behaves exactly like this, and a transport that waits for a platform event to
+  // tell it so waits forever — which is the failure this whole branch is about, one layer up. The
+  // deadline is what makes the contract unconditional rather than a second assumption of the same
+  // kind as the comment it replaces: whatever the socket does or does not dispatch, `connect()`
+  // resolves or rejects. The fake socket is quiet by construction — it has no `open`, `error` or
+  // `close` to fire — so nothing but the deadline can settle this promise, and the request budget
+  // is the window the deadline reads, set short here so the test costs 300 ms instead of 30 s.
+  const transport = new GatewayTransport({
+    server: {
+      host: 'node.example',
+      port: 8080,
+      gatewayPort: 8080,
+      transport: 'WebSocket',
+      scheme: 'Ws',
+      restScheme: 'Http',
+    },
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(12),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    requestTimeoutMs: 300,
+    webSocketFactory: () => new FakeSocket('ws://node.example:8080/ws') as unknown as WebSocket,
+  });
+  const outcome = await Promise.race([
+    transport.connect().then(
+      () => 'resolved',
+      (error: unknown) => `rejected: ${String(error)}`,
+    ),
+    new Promise<string>((resolve) => {
+      setTimeout(() => resolve('still pending after 2000 ms'), 2_000);
+    }),
+  ]);
+  transport.close();
+  assert.match(
+    outcome,
+    /rejected: TimeoutError: the gateway sent no WELCOME within 300 ms/,
+    `connect() to a silent gateway ${outcome}. A handshake with no deadline is a connect() that ` +
+      'never returns whenever the platform is quiet, and a caller that cannot be told it failed ' +
+      'cannot report it either.',
+  );
 });

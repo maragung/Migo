@@ -19,8 +19,15 @@
 #                                         exactly once and every session resumed)
 #
 # Every step is deterministic pass/fail through loadgen's own exit codes (3 = error
-# budget exceeded, 4 = wire-byte budget exceeded) and bounded in wall-clock by its
-# --duration. Latency percentiles (p50/p95/p99) and bytes per user per minute are in
+# budget exceeded, 4 = wire-byte budget exceeded, 5 = the run never finished) and
+# bounded in wall-clock by its --duration. The exit code alone is not the verdict,
+# though, and this script used to treat it as one: a run whose event loop drains
+# mid-flight writes no report and still exits 0, and a run that opens no session at
+# all exits 0 because an error rate of zero over a denominator of zero is not an
+# error. So every step's report is handed to `loadgen/dist/judge.js`, which holds it
+# to what the step claims about itself — sessions opened, window held, operations
+# measured — and a step whose report does not support a pass fails with exit 6
+# whatever loadgen returned. Latency percentiles (p50/p95/p99) and bytes per user per minute are in
 # each step's JSON report; the server-side families a client cannot measure — live
 # sessions, dropped frames, reconnect outcomes, media bytes, and memory per session
 # (VmRSS / sessions) — are read from the node's /metrics and /proc and printed per
@@ -92,8 +99,9 @@ if [ ! -x "$MIGOD_BIN" ]; then
 fi
 
 LOADGEN="$REPO_ROOT/tools/loadgen/dist/main.js"
-if [ ! -f "$LOADGEN" ]; then
-  echo "loadgen not built at $LOADGEN; build it with:" >&2
+JUDGE="$REPO_ROOT/tools/loadgen/dist/judge.js"
+if [ ! -f "$LOADGEN" ] || [ ! -f "$JUDGE" ]; then
+  echo "loadgen not built ($LOADGEN, $JUDGE); build it with:" >&2
   echo "  (cd $REPO_ROOT && make build-ts)" >&2
   exit 1
 fi
@@ -206,13 +214,28 @@ print_metrics() {
   grep -E '^migo_(reconnect_total|media_)' "$metrics_file" || true
 }
 
-# Memory per session (the brief's per-session metric): sample the node's VmRSS while
-# the idle pool is up, then divide the peak by the sessions the node reports live.
+# Memory per session (the brief's per-session metric): sample the node's VmRSS *and*
+# the sessions it reports live, at the same moment, while the idle pool is up.
+#
+# Both columns come from the same sample because the figure is a ratio and the two halves
+# have to describe the same instant: reading VmRSS during the run and sessions_live after
+# it — which is what this did — divides a peak by a pool that loadgen has already torn
+# down, so the live count was always 0 and the divisor was always missing. The line it
+# printed instead ("could not read VmRSS or sessions_live") blamed the node for a number
+# this script never asked for at a time when it existed. Sampling both here also gives the
+# idle step the one reading no client-side report can carry: the server's own count of the
+# sessions it was holding, taken while it held them.
 start_rss_monitor() {
   (
     while true; do
       if [ -n "$NODE_PID" ] && kill -0 "$NODE_PID" 2>/dev/null; then
-        awk '/^VmRSS/{print $2}' "/proc/$NODE_PID/status" 2>/dev/null || true
+        local rss live
+        rss="$(awk '/^VmRSS/{print $2}' "/proc/$NODE_PID/status" 2>/dev/null || true)"
+        live="$(curl -fsS "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
+          | awk '/^migo_gateway_sessions_live/{print $2; exit}')"
+        if [ -n "$rss" ]; then
+          echo "${rss} ${live:-0}"
+        fi
       fi
       sleep 5
     done
@@ -229,22 +252,41 @@ stop_rss_monitor() {
 }
 
 report_memory_per_session() {
-  local live
-  live="$(curl -fsS "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
-    | awk '/^migo_gateway_sessions_live/{print $2; exit}')" || live=""
-  local peak
-  peak="$(sort -n "$RSS_LOG" 2>/dev/null | tail -n 1 || true)"
-  if [ -n "$live" ] && [ -n "$peak" ] && [ "$live" -gt 0 ] 2>/dev/null; then
+  local peak peak_live samples
+  peak="$(sort -n "$RSS_LOG" 2>/dev/null | tail -n 1 | awk '{print $1}' || true)"
+  peak_live="$(awk '{if ($2+0 > m) m = $2+0} END{print m+0}' "$RSS_LOG" 2>/dev/null || echo 0)"
+  samples="$(wc -l <"$RSS_LOG" 2>/dev/null || echo 0)"
+  if [ -n "$peak" ] && [ "$peak_live" -gt 0 ] 2>/dev/null; then
     echo "--- memory per session ---"
-    echo "  node VmRSS peak ${peak} kB over ${live} live sessions" \
-      "= $((peak / live)) kB per session"
+    echo "  node VmRSS peak ${peak} kB while it reported a peak of ${peak_live} live" \
+      "sessions = $((peak / peak_live)) kB per session (${samples} samples)"
   else
-    echo "  (could not read VmRSS or sessions_live; rss log: $(wc -l <"$RSS_LOG" 2>/dev/null || echo 0) samples)" >&2
+    # Not a footnote: this reading is the step's server-side evidence, and a step that
+    # cannot produce it did not hold a pool to measure.
+    echo "  (no sample saw both VmRSS and a live session; rss log: ${samples} samples)" >&2
+    FAILED_STEPS="$FAILED_STEPS memory-per-session"
+    if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=6; fi
   fi
 }
 
 FAILED_STEPS=""
 FIRST_FAILURE=0
+
+# The step's report, held to the step's own claim. Zero means the report supports it.
+#
+# This is the half of the verdict the exit code cannot give. `node main.js` answers "did the run
+# exceed a budget?", and both ways a step can lie — a process that drained its event loop and wrote
+# nothing, and a run that connected to nothing and therefore exceeded nothing — exit 0. The judge
+# reads the report instead, so an empty file, a run with no session in it, a run that ended a fifth
+# of the way into its window, and a run that measured nothing all fail the step they belong to.
+judge_report() {
+  local step="$1" min_connected="$2" report="$3"
+  node "$JUDGE" \
+    --step "$step" \
+    --min-connected "$min_connected" \
+    --max-error-rate "$ERROR_BUDGET" \
+    "$report"
+}
 
 # Runs one loadgen step, prints its report and the node metrics, records the verdict.
 run_step() {
@@ -254,6 +296,12 @@ run_step() {
   echo "==> step: $step"
   echo "    $*"
   local report="$WORK_DIR/reports/$step.json"
+  # How many sessions the step claims. idle-10k is the one whose *name* is a count — ten thousand
+  # idle sessions — so it holds its report to all of them; the rest are throughput steps, where the
+  # error budget is what governs how many VUs may fail, and one session is the floor beneath which
+  # the scenario did not run at all.
+  local min_connected=1
+  if [ "$step" = "idle-10k" ]; then min_connected="$IDLE_VUS"; fi
   local status
   set +e
   node "$LOADGEN" \
@@ -266,12 +314,25 @@ run_step() {
   set -e
   cat "$report"
   print_metrics "$step"
+  local verdict=0
+  set +e
+  judge_report "$step" "$min_connected" "$report"
+  verdict=$?
+  set -e
   if [ "$status" -ne 0 ]; then
     echo "==> step '$step' FAILED (loadgen exit $status)" >&2
     echo "==> tail of the node's log ($NODE_LOG):" >&2
     tail -n 60 "$NODE_LOG" >&2
     FAILED_STEPS="$FAILED_STEPS $step"
     if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=$status; fi
+  elif [ "$verdict" -ne 0 ]; then
+    # Loadgen exited zero, but its report does not describe the step it was asked to run. The
+    # node's log goes out with it because the interesting question is what the server saw.
+    echo "==> step '$step' FAILED (report does not support a pass; judge exit $verdict)" >&2
+    echo "==> tail of the node's log ($NODE_LOG):" >&2
+    tail -n 60 "$NODE_LOG" >&2
+    FAILED_STEPS="$FAILED_STEPS $step"
+    if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=6; fi
   else
     echo "==> step '$step' passed"
   fi
@@ -355,10 +416,26 @@ for _ in $(seq 1 600); do
   sleep 0.5
 done
 if [ "$MARKER_SEEN" -ne 1 ]; then
-  echo "==> outage step never reached steady state; tail of loadgen stderr:" >&2
+  # Two different failures wear this message, and the exit status is what tells them apart: a
+  # loadgen still running is hung, while one that is already gone never reached its workloads at
+  # all — which is what actually happens here. It exits 0, because a process whose event loop has
+  # drained is a process Node believes finished, so "the run never reached steady state" has been
+  # printed over a clean exit for as long as this step has existed. Say which it is.
+  OUTAGE_ALIVE=0
+  if kill -0 "$LOADGEN_PID" 2>/dev/null; then OUTAGE_ALIVE=1; fi
+  echo "==> outage step never reached steady state" >&2
+  if [ "$OUTAGE_ALIVE" -eq 1 ]; then
+    echo "==> loadgen (pid $LOADGEN_PID) is still running; it never reached its workloads" >&2
+    kill "$LOADGEN_PID" 2>/dev/null || true
+  fi
+  set +e
+  wait "$LOADGEN_PID"
+  OUTAGE_EARLY_STATUS=$?
+  set -e
+  echo "==> loadgen exit status $OUTAGE_EARLY_STATUS (before any workload ran)" >&2
+  echo "==> report it left behind: $(wc -c <"$OUTAGE_REPORT" 2>/dev/null || echo 0) bytes" >&2
+  echo "==> tail of loadgen stderr:" >&2
   tail -n 40 "$OUTAGE_ERR" >&2
-  kill "$LOADGEN_PID" 2>/dev/null || true
-  wait "$LOADGEN_PID" 2>/dev/null || true
   LOADGEN_PID=""
   FAILED_STEPS="$FAILED_STEPS outage"
   if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=1; fi
@@ -378,6 +455,14 @@ else
   cat "$OUTAGE_REPORT"
   tail -n 5 "$OUTAGE_ERR" || true
   print_metrics outage
+  set +e
+  judge_report outage 1 "$OUTAGE_REPORT"
+  OUTAGE_VERDICT=$?
+  set -e
+  if [ "$OUTAGE_STATUS" -eq 0 ] && [ "$OUTAGE_VERDICT" -ne 0 ]; then
+    echo "==> step 'outage' FAILED (report does not support a pass; judge exit $OUTAGE_VERDICT)" >&2
+    OUTAGE_STATUS=6
+  fi
   if [ "$OUTAGE_STATUS" -ne 0 ]; then
     echo "==> step 'outage' FAILED (loadgen exit $OUTAGE_STATUS)" >&2
     echo "==> tail of the node's log ($NODE_LOG):" >&2

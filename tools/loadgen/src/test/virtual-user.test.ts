@@ -12,6 +12,7 @@ import test from 'node:test';
 
 import { BandwidthMode, MigoClient, Platform } from '@migo/sdk';
 
+import { clientEndpoint } from '../config.js';
 import type { Config } from '../config.js';
 import { VirtualUser } from '../virtual-user.js';
 
@@ -34,6 +35,9 @@ const CONFIG: Config = {
   logLevel: 'normal',
 };
 
+/** The stand-in the helper hands the VU as its transport-state sink, so tests can assert on it. */
+const STATE_PROBE = (): void => {};
+
 /** Construct a VirtualUser with the SDK factory stubbed, returning the VU and the captured options. */
 function buildWithStubbedClient(
   index: number,
@@ -55,12 +59,18 @@ function buildWithStubbedClient(
       passphrase: 'pw',
       runTag: 'tag42',
       onEventError: () => {},
+      onStateChange: STATE_PROBE,
     });
     return { vu, created, client };
   } finally {
     (MigoClient as unknown as { create: unknown }).create = original;
   }
 }
+
+test('the transport-state probe is handed to the SDK client, not swallowed', () => {
+  const { created } = buildWithStubbedClient(1, CONFIG);
+  assert.equal(created['onStateChange'], STATE_PROBE);
+});
 
 test('the throwaway username is prefix_runTag_index and server-legal', () => {
   assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen_tag42_3');
@@ -98,7 +108,14 @@ test('the MigoClient is created with the run endpoint, timeout, and identifiable
   const server = created['server'] as Record<string, unknown>;
   assert.equal(server['host'], 'localhost');
   assert.equal(server['port'], 8080);
-  assert.equal(server['gatewayPort'], 8081);
+  // The gateway port is the one the run's own URLs name, never the SDK's loopback split-port
+  // guess: both load harnesses start a single migod listening on one port with the gateway role,
+  // so a virtual user dialling `rest + 1` knocks on a closed port, fails to connect, and leaves a
+  // run that measures nothing while exiting zero. The literal is asserted because that is the
+  // regression, and the equality with `clientEndpoint` because a literal alone would let the
+  // derivation and the wiring drift apart again exactly as they did.
+  assert.equal(server['gatewayPort'], 8080);
+  assert.equal(server['gatewayPort'], clientEndpoint(CONFIG).gatewayPort);
   assert.equal(server['transport'], 'WebSocket');
   assert.equal(server['scheme'], 'Ws');
   assert.equal(server['restScheme'], 'Http');
