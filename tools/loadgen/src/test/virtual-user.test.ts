@@ -12,6 +12,7 @@ import test from 'node:test';
 
 import { BandwidthMode, MigoClient, Platform } from '@migo/sdk';
 
+import { clientEndpoint } from '../config.js';
 import type { Config } from '../config.js';
 import { VirtualUser } from '../virtual-user.js';
 
@@ -107,7 +108,14 @@ test('the MigoClient is created with the run endpoint, timeout, and identifiable
   const server = created['server'] as Record<string, unknown>;
   assert.equal(server['host'], 'localhost');
   assert.equal(server['port'], 8080);
-  assert.equal(server['gatewayPort'], 8081);
+  // The gateway port is the one the run's own URLs name, never the SDK's loopback split-port
+  // guess: both load harnesses start a single migod listening on one port with the gateway role,
+  // so a virtual user dialling `rest + 1` knocks on a closed port, fails to connect, and leaves a
+  // run that measures nothing while exiting zero. The literal is asserted because that is the
+  // regression, and the equality with `clientEndpoint` because a literal alone would let the
+  // derivation and the wiring drift apart again exactly as they did.
+  assert.equal(server['gatewayPort'], 8080);
+  assert.equal(server['gatewayPort'], clientEndpoint(CONFIG).gatewayPort);
   assert.equal(server['transport'], 'WebSocket');
   assert.equal(server['scheme'], 'Ws');
   assert.equal(server['restScheme'], 'Http');
