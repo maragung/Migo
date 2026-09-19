@@ -2,7 +2,9 @@ package com.migo.core.domain
 
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.CallEnd
+import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallInvite
+import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.CallSfuParticipant
 import com.migo.core.protocol.CallStateEvent
 import com.migo.core.protocol.CallTurnResponse
@@ -216,6 +218,31 @@ class GroupCallsDomain(
         val response =
             rpc.call(Op.CALL_SFU_JOIN, { w -> request.encode(w) }, { r -> CallTurnResponse.decode(r) })
         return GroupCallJoinResult(callId = callId, servers = response.servers)
+    }
+
+    /**
+     * Relays this device's sealed media description to one other seat.
+     *
+     * The mesh has no server-side routing to lean on: every seat's description is addressed to one
+     * peer device by name, exactly as the 1:1 relay is. The bytes are sealed under the call's own
+     * frame key (never the pairwise session key, which exists only for the key exchange), so the
+     * server relays an opaque blob it cannot read even though it can see the roster.
+     */
+    suspend fun sendSdp(callId: Id, toDevice: Id, sealedSdp: ByteArray) {
+        val request = CallSdp(callId, deviceId, toDevice, sealedSdp)
+        rpc.call(Op.CALL_SDP, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
+    }
+
+    /**
+     * Relays one gathering run's worth of sealed ICE candidates to one other seat.
+     *
+     * A batch per call rather than a frame per candidate: candidates arrive in bursts from one
+     * gathering, and one relay per burst keeps the wire's frame count proportional to the number of
+     * links rather than to the number of interfaces a device happens to have.
+     */
+    suspend fun sendIce(callId: Id, toDevice: Id, sealedCandidates: ByteArray) {
+        val request = CallIce(callId, deviceId, toDevice, sealedCandidates)
+        rpc.call(Op.CALL_ICE, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
     }
 
     /**

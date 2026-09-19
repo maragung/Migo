@@ -584,12 +584,14 @@ private fun VideoStage(
     Box(modifier = Modifier.fillMaxSize()) {
         VideoSurface(
             track = remoteVideo,
+            glContext = LocalCallEglContext.current,
             modifier = Modifier.fillMaxSize(),
             contentDescription = "$peerName's video",
         )
         if (localVideo != null) {
             VideoSurface(
                 track = localVideo,
+                glContext = LocalCallEglContext.current,
                 // The web overlay's own corner: small, portrait, and above the actions' row.
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -602,16 +604,21 @@ private fun VideoStage(
     }
 }
 
-/** One renderer bound to one track, released when either leaves the composition. */
+/**
+ * One renderer bound to one track, released when either leaves the composition.
+ *
+ * The GL context is a parameter rather than read from [LocalCallEglContext] here, because a group
+ * call's media is a second engine with an EGL context of its own: a renderer initialized against
+ * the one-to-one plane's context would be drawing through a context its own tracks were never
+ * minted on.
+ */
 @Composable
-private fun VideoSurface(
+internal fun VideoSurface(
     track: VideoTrack,
+    glContext: EglBase.Context?,
     modifier: Modifier = Modifier,
     contentDescription: String,
 ) {
-    // The GL context the renderer initializes with, handed down from the call manager's own
-    // session-scoped one so every video surface in the app shares it.
-    val glContext = LocalCallEglContext.current
     // Keyed on the track: a new call's track gets a fresh surface rather than a renderer still
     // bound to the old one.
     key(track) {

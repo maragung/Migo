@@ -17,6 +17,7 @@ import com.migo.app.call.CallService
 import com.migo.app.call.CallUiState
 import com.migo.app.call.GroupCallManager
 import com.migo.app.call.GroupCallUiState
+import com.migo.app.call.GroupLinkState
 import com.migo.app.call.LinkQuality
 import com.migo.app.call.MICROPHONE_UNAVAILABLE
 import com.migo.app.media.MEDIA_SEAL_DOMAIN
@@ -1298,9 +1299,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         groupCallManager?.dismissGroupCall()
     }
 
+    /** Mutes or unmutes this device on the group call, on every link at once. */
+    fun toggleGroupCallMute() {
+        groupCallManager?.toggleGroupMute()
+    }
+
+    /** Turns this device's camera on or off on the group call. */
+    fun toggleGroupCallCamera() {
+        groupCallManager?.toggleGroupCamera()
+    }
+
+    /** Flips to the other camera on the group call. */
+    fun switchGroupCallCamera() {
+        groupCallManager?.switchGroupCamera()
+    }
+
     /** This side's camera track on the live call, for the call screen's self-view. Null off one. */
     val localVideo: VideoTrack?
         get() = callManager?.localVideo
+
+    /** One entry per other seat of the group call, as the media plane has them. */
+    val groupCallLinks: StateFlow<List<GroupLinkState>>
+        get() = groupCallManager?.mediaLinks ?: MutableStateFlow(emptyList())
+
+    /** This device's own camera track on a group call, for the self-view tile. */
+    val groupCallLocalVideo: StateFlow<VideoTrack?>
+        get() = groupCallManager?.localVideo ?: MutableStateFlow(null)
 
     /** The peer's camera track once it arrives, for the call screen's main view. */
     val remoteVideo: StateFlow<VideoTrack?>
@@ -1312,6 +1336,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     val callEglContext: EglBase.Context?
         get() = callManager?.eglContext
+
+    /**
+     * The group call's own video GL context. A group call is a second WebRTC engine with an EGL
+     * context of its own, so its renderers cannot share the one-to-one plane's; null off a session,
+     * or before the first link has been built, which is also when no group tile exists to draw.
+     */
+    val groupCallEglContext: EglBase.Context?
+        get() = groupCallManager?.eglContext
 
     /**
      * The display name a call screen shows for an account: the profile name the session has
@@ -5350,6 +5382,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // stable flow for the same reason the call's is. The device id is the manager's own half
         // of the moved-to-another-device test, taken from the session it will observe.
         val groups = GroupCallManager(
+            context = getApplication(),
             client = opened.client,
             accountId = opened.client.accountId,
             ownDeviceId = opened.client.deviceId,

@@ -142,6 +142,15 @@ class CallKeyStore {
     /** Whether this device holds a frame key for the call — the "am I a potential holder" test. */
     fun holdsKey(callId: Id): Boolean = lock.withLock { calls[callId] != null }
 
+    /**
+     * The epoch of a call's current frame key, or null when this device holds no key for it.
+     *
+     * The media plane is the caller: every link it builds is stamped with the epoch it was sealed
+     * under, and a link that has not finished negotiating is rebuilt when that stamp stops matching
+     * -- which is the whole of what a rotation means to a mesh whose links have not connected yet.
+     */
+    fun epochOf(callId: Id): Long? = lock.withLock { calls[callId]?.state?.epoch() }
+
     /** The conversation a call belongs to, from whichever half this device holds. */
     fun conversationOf(callId: Id): Id? = lock.withLock {
         calls[callId]?.conversationId ?: asks[callId]?.conversationId
@@ -245,6 +254,41 @@ class CallKeyStore {
         val sealedUpdate = entry.state.rotate()
         val sealedJoin = entry.state.sealedJoinDistribution(joinSecret)
         JoinAnswer(entry.state.epoch(), sealedUpdate, sealedJoin)
+    }
+
+    /**
+     * Seals one media frame under a call's current frame key, or null when this device holds no key
+     * for the call.
+     *
+     * The key is never handed out: sealing happens here so a caller with a frame to send cannot keep
+     * the key material, and so every frame a device sends is bound to the epoch it was actually
+     * sealed under (the binding is inside [CallKeyState.sealFrame], which the state applies).
+     */
+    fun sealFrame(callId: Id, frame: ByteArray): ByteArray? = lock.withLock {
+        calls[callId]?.state?.sealFrame(frame)
+    }
+
+    /**
+     * Opens one media frame sealed under a call's current frame key, or null when it does not open.
+     *
+     * Null is the honest answer for every reason a frame is not ours to read -- this device holds no
+     * key for the call, the frame is sealed under another call, or it carries an epoch this device
+     * has not adopted (the frame crossed a rotation in flight, and a frame bound to a key the device
+     * no longer holds is exactly what the epoch binding is for). A caller that must tell "not mine"
+     * from "corrupt" cannot from this method: the crypto layer does not distinguish, and an
+     * authenticated refusal is the only fact the bytes support.
+     *
+     * The one thing this must *not* do is throw: it is the discrimination test a media plane runs
+     * against every relay it receives, most of which belong to the key exchange rather than to
+     * media, so a refusal is the common case and takes the null path.
+     */
+    fun openFrame(callId: Id, sealed: ByteArray): ByteArray? = lock.withLock {
+        val state = calls[callId]?.state ?: return@withLock null
+        try {
+            state.openFrame(sealed)
+        } catch (_: CryptoError) {
+            null
+        }
     }
 
     /** Drops a call's state: the seat is gone, and so is everything the key was for. */
@@ -400,6 +444,29 @@ class GroupCallKeysDomain(
      * seated among them and rotates; a device holding none is the mid-call joiner and asks.
      */
     fun holdsKey(callId: Id): Boolean = store.holdsKey(callId)
+
+    /** The epoch of a call's current frame key, or null when this device holds no key for it. */
+    fun epochOf(callId: Id): Long? = store.epochOf(callId)
+
+    /**
+     * Seals one media frame under a call's current frame key, or null when this device holds no key
+     * for it.
+     *
+     * The media plane reaches the frame key through the key domain rather than the store, so the
+     * store stays private to the domain that keeps its rotation discipline -- a caller holding the
+     * store directly could seal under a state the domain is midway through advancing.
+     */
+    fun sealFrame(callId: Id, frame: ByteArray): ByteArray? = store.sealFrame(callId, frame)
+
+    /**
+     * Opens one media frame under a call's current frame key, or null when it does not open.
+     *
+     * This is also the group media plane's discrimination test: `CALL_SDP` carries both the key
+     * exchange and the media descriptions, and the two are told apart by which key opens the blob --
+     * the media plane tries this, the key domain tries its own session-crypto open, and AEAD
+     * guarantees at most one of them succeeds.
+     */
+    fun openFrame(callId: Id, sealed: ByteArray): ByteArray? = store.openFrame(callId, sealed)
 
     /**
      * Adopts a distributed rotation update.
