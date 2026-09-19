@@ -18,6 +18,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 import { GatewayTransport, DEFAULT_CLIENT_FEATURES, encodeBody, decodeBody } from '../src/index.js';
@@ -762,4 +763,77 @@ test('a transport that has never connected reads as zero wire bytes', () => {
 
   assert.deepEqual(transport.wireBytes, { sent: 0, received: 0 });
   transport.close();
+});
+
+/**
+ * An ephemeral port with nothing listening on it: bound, its number read, then closed.
+ *
+ * The refusal a client gets here is the one a load harness produces by pointing a client at the
+ * wrong port, and it is the only way to ask a real socket what a refused connection actually does —
+ * a fake socket can only replay what this test's author already believed.
+ */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
+  return port;
+}
+
+test('a gateway nothing is listening on fails the connect instead of leaving the caller waiting', async () => {
+  // Why this test exists: both load harnesses spent at least a week pointed one port past the node
+  // they had started, so every virtual user's socket was refused — and what the run recorded was
+  // never `connected 0/N`. It was a process that drained its event loop mid-connect: exit 0, no
+  // report, and no line after `connecting ...`. Reading `#onClose` says a refusal cannot do that:
+  // the close reaches `#failHandshake`, the candidate list is exhausted, and the promise rejects.
+  // The one link in that chain nothing asserts is `ws.onerror`'s comment — "onclose always follows"
+  // — so this test refuses to take it on faith. A real socket against a real closed port, on the
+  // Node the load gate runs, bounded so that a hang is reported as a failure instead of hanging the
+  // job: if the transport is relying on an event the platform does not always send, the assertion
+  // below names it, and if it is not, the refusal is a regression test the SDK was missing.
+  const port = await closedPort();
+  const transport = new GatewayTransport({
+    server: {
+      host: '127.0.0.1',
+      port,
+      gatewayPort: port,
+      transport: 'WebSocket',
+      scheme: 'Ws',
+      restScheme: 'Http',
+    },
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+  });
+  const outcome = await Promise.race([
+    transport.connect().then(
+      () => 'resolved',
+      (error: unknown) => `rejected: ${String(error)}`,
+    ),
+    new Promise<string>((resolve) => {
+      setTimeout(() => resolve('still pending after 3000 ms'), 3_000);
+    }),
+  ]);
+  transport.close();
+  assert.match(
+    outcome,
+    /^rejected:/,
+    `connect() to a closed port ${outcome}. A client whose handshake never settles is a client that ` +
+      'cannot report the failure either — which is how a load run against the wrong port came to ' +
+      'exit zero with an empty report.',
+  );
 });
