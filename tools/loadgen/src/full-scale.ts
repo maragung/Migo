@@ -52,7 +52,7 @@ import {
 } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
-import { openDirectConversations, pairUp } from './pairs.js';
+import { openCallsToStrangers, openDirectConversations, pairUp } from './pairs.js';
 import { runPool } from './pool.js';
 import type { RunContext } from './run-context.js';
 import { sleep } from './run-context.js';
@@ -270,6 +270,30 @@ const CALL_HOLD_MS = 5_000;
 const CALL_SETUP_TIMEOUT_MS = 15_000;
 
 /**
+ * The status `CallInviteResult` carries when an invite is genuinely ringing — 0 ringing, 1
+ * declined, 2 expired, 3 blocked, 4 busy, the vocabulary `packages/protocol` documents on the
+ * field itself. The SDK does not export it as a constant and `clients/web` spells its own copy for
+ * the same reason (`call-signal.ts`'s `INVITE_RINGING`); a shared export is what should replace
+ * these copies, and until one exists the copies are the thing that has to agree.
+ */
+const INVITE_RINGING = 0;
+
+/**
+ * An invite the server answered without ringing anyone, as a named error rather than a bare one.
+ *
+ * `classifyError` reads a plain `Error`'s own `name` into its class (`local:<name>`), so the name
+ * is what makes the wall legible in the report: `local:InviteRefused` says what happened, and the
+ * message carries the status that says which refusal it was.
+ */
+function inviteRefusedError(status: number): Error {
+  const error = new Error(
+    `the server answered invite status ${status} without ringing the callee (0 ringing, 1 declined, 2 expired, 3 blocked, 4 busy)`,
+  );
+  error.name = 'InviteRefused';
+  return error;
+}
+
+/**
  * Deterministic placeholder bytes of `len`, standing in for the sealed offer, answer, or
  * candidate batch. Stable across runs by construction: byte i is a fixed function of i.
  */
@@ -323,6 +347,9 @@ const calls: Scenario = {
     if (vus.filter((vu) => vu.connected).length % 2 === 1) {
       ctx.log.warn('an odd number of VUs connected; one has no partner and will stay idle');
     }
+    // Before the conversations exist, and for the reason the message opening gives: the gate is
+    // read when the invite arrives, and a callee whose policy refuses the caller is never rung.
+    await openCallsToStrangers(pairs, ctx);
     await openDirectConversations(pairs, ctx);
 
     const formed: CallPair[] = [];
@@ -398,15 +425,26 @@ const calls: Scenario = {
               },
             });
             void ctx
-              .measure('call-invite', () =>
-                pair.sender.client.calls.invite(
+              .measure('call-invite', async () => {
+                const invited = await pair.sender.client.calls.invite(
                   pair.conversationId,
                   pair.receiver.client.accountId,
                   CallMediaKind.Audio,
                   PLACEHOLDER_OFFER,
                   callId,
-                ),
-              )
+                );
+                // A resolved invite is not a ring, and the difference is the whole measurement.
+                // The server answers a policy refusal with `BLOCKED` in an ordinary reply — brief
+                // section 180 makes a refusal and a block the same answer on the caller's screen —
+                // so counting the resolution alone reported 4,000 placed calls on a step where no
+                // callee was ever rung: `call-answer` is absent from that step's report entirely,
+                // and all 4,000 `call-setup` waits timed out. A refusal has to fail here, as a
+                // refusal, or the step's own tally argues that work happened.
+                if (invited.status !== INVITE_RINGING) {
+                  throw inviteRefusedError(invited.status);
+                }
+                return invited;
+              })
               .then((invited) => {
                 if (invited) return;
                 inviteFailed = true;

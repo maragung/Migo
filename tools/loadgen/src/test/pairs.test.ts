@@ -1,5 +1,5 @@
 /**
- * The two doors every direct-pair scenario goes through, in the order they are knocked on.
+ * The three doors every direct-pair scenario goes through, in the order they are knocked on.
  *
  * The first is privacy. A freshly registered account answers `who_can_message = friends`, and the
  * messaging service enforces that setting at the conversation's door and again on every send, so
@@ -14,6 +14,13 @@
  * The second door is the conversation itself, and the rule asserted here is the one that keeps a
  * half-formed pair measurable: a refusal is counted as a `setup` error and the other pairs still
  * form, rather than the whole scenario losing its run to one account's bad luck.
+ *
+ * The third is the call policy, and it is a separate door rather than a second reading of the
+ * first: `who_can_message` gates a message and `who_can_call_voice` gates a ring, the call columns
+ * are the user's own to set, and the server answers a refusal with `BLOCKED` in an ordinary reply
+ * instead of an error — which is how a calls step came to report four thousand placed calls on a
+ * run where no callee was ever rung. It is opened for both call kinds before any call is placed,
+ * and it is asserted here because nothing else in the harness would notice it going missing.
  */
 
 import assert from 'node:assert/strict';
@@ -22,7 +29,7 @@ import test from 'node:test';
 import { ConversationKind, TransportError } from '@migo/sdk';
 
 import { Logger } from '../logger.js';
-import { openDirectConversations, openPrivacyToStrangers } from '../pairs.js';
+import { openCallsToStrangers, openDirectConversations, openPrivacyToStrangers } from '../pairs.js';
 import type { VuPair } from '../pairs.js';
 import { RunContext } from '../run-context.js';
 import { Metrics } from '../stats.js';
@@ -37,8 +44,8 @@ const EVERYONE = 2;
 interface VuHooks {
   connected?: boolean;
   /** Every `updateProfile` patch this VU was handed, in order. */
-  onPrivacy?: (patch: Record<string, unknown>) => void;
-  privacyFails?: boolean;
+  onProfile?: (patch: Record<string, unknown>) => void;
+  profileFails?: boolean;
   startFails?: boolean;
   /** Called when this VU starts a conversation, with the members it addressed. */
   onStart?: (members: readonly unknown[]) => void;
@@ -48,7 +55,7 @@ interface VuHooks {
  * A VirtualUser whose client records only what the pair setup asks of it.
  *
  * The `timeline` array is shared by every double in a test and is what makes the ordering
- * assertion possible: both the privacy writes and the conversation creations append to it, so the
+ * assertion possible: both the profile writes and the conversation creations append to it, so the
  * test can see that no conversation was attempted before every opening was written.
  */
 function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): VirtualUser {
@@ -56,9 +63,9 @@ function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): Virtual
     accountId: `acct-${index}`,
     profile: {
       updateProfile: (patch: Record<string, unknown>): Promise<unknown> => {
-        timeline.push(`privacy:${index}`);
-        hooks.onPrivacy?.(patch);
-        return hooks.privacyFails
+        timeline.push(`profile:${index}`);
+        hooks.onProfile?.(patch);
+        return hooks.profileFails
           ? Promise.reject(new TransportError('profile update refused'))
           : Promise.resolve({ userId: `acct-${index}` });
       },
@@ -87,7 +94,7 @@ function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): Virtual
 test('every paired VU is opened to messages from strangers before the first conversation exists', async () => {
   const timeline: string[] = [];
   const patches: Record<string, unknown>[] = [];
-  const a = makeVu(0, timeline, { onPrivacy: (patch) => patches.push(patch) });
+  const a = makeVu(0, timeline, { onProfile: (patch) => patches.push(patch) });
   const b = makeVu(1, timeline);
   const c = makeVu(2, timeline);
   const d = makeVu(3, timeline);
@@ -102,19 +109,19 @@ test('every paired VU is opened to messages from strangers before the first conv
 
   // The gate is the recipient's setting and the send path re-asks it, so both roles are written —
   // a scenario that later sends the other way must not discover the door by walking into it.
-  assert.deepEqual(timeline.filter((event) => event.startsWith('privacy:')).sort(), [
-    'privacy:0',
-    'privacy:1',
-    'privacy:2',
-    'privacy:3',
+  assert.deepEqual(timeline.filter((event) => event.startsWith('profile:')).sort(), [
+    'profile:0',
+    'profile:1',
+    'profile:2',
+    'profile:3',
   ]);
-  // By prefix, not by exact match: every entry carries an index (`privacy:0`, `start:2`), so
-  // `indexOf('privacy:')` finds nothing and compares -1 against -1 — an assertion that can only
+  // By prefix, not by exact match: every entry carries an index (`profile:0`, `start:2`), so
+  // `indexOf('profile:')` finds nothing and compares -1 against -1 — an assertion that can only
   // fail, which is how CI read it. A failing assertion is the cheap half of that mistake; the
   // expensive half would have been a passing one.
   const firstStart = timeline.findIndex((event) => event.startsWith('start:'));
   const lastOpening = timeline.reduce(
-    (last, event, index) => (event.startsWith('privacy:') ? index : last),
+    (last, event, index) => (event.startsWith('profile:') ? index : last),
     -1,
   );
   assert.ok(
@@ -122,7 +129,7 @@ test('every paired VU is opened to messages from strangers before the first conv
     `a conversation was attempted before the opening was written: ${timeline.join(', ')}`,
   );
   // One entry, not one per pair: `patches` collects VU 0's writes alone, because VU 0 is the only
-  // double this test hands an `onPrivacy` hook. The two-roles-per-pair claim is the timeline above,
+  // double this test hands an `onProfile` hook. The two-roles-per-pair claim is the timeline above,
   // which names all four VUs; what this line pins is the patch itself: one field, on the documented
   // surface, the value "everyone", and nothing else about the account re-stated (an absent field is
   // left untouched, so a wider patch would be the harness volunteering opinions nobody asked it
@@ -154,12 +161,12 @@ test('a VU that two pairs share is opened once, and a VU in no pair never at all
   // The idle VU is a live, connected session that no pair names — the shape every VU has in the
   // connect scenario — and it is absent from the timeline for that reason alone.
   assert.equal(idle.connected, true, 'the idle VU is connected; being unnamed is what spares it');
-  assert.deepEqual(timeline, ['privacy:0', 'privacy:1', 'privacy:2']);
+  assert.deepEqual(timeline, ['profile:0', 'profile:1', 'profile:2']);
 });
 
 test('a refused opening is counted as a setup error and its pair is still attempted', async () => {
   const timeline: string[] = [];
-  const a = makeVu(0, timeline, { privacyFails: true });
+  const a = makeVu(0, timeline, { profileFails: true });
   const b = makeVu(1, timeline);
   const metrics = new Metrics();
   const ctx = new RunContext(metrics, QUIET, 0, future());
@@ -173,4 +180,40 @@ test('a refused opening is counted as a setup error and its pair is still attemp
     timeline.includes('start:0'),
     'the pair is attempted anyway, and fails on its own terms',
   );
+});
+
+test('the call policy is opened as well, on both roles, before any call is placed', async () => {
+  // The third door, and the one that was missing: `who_can_message` does not gate a call. A fresh
+  // account's `who_can_call_voice` is `Friends`, the callee's own policy is what refuses an invite,
+  // and the refusal comes back as `BLOCKED` in an ordinary reply rather than as an error — so a
+  // calls step whose pairs are strangers reported 4,000 resolved invites and rang nobody, with
+  // `call-answer` absent from its report altogether. Both columns are asserted, not just the audio
+  // one the scenario currently drives, because the video column gates the same way.
+  const timeline: string[] = [];
+  const patches: Record<string, unknown>[] = [];
+  const a = makeVu(0, timeline, { onProfile: (patch) => patches.push(patch) });
+  const b = makeVu(1, timeline);
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, future());
+
+  await openCallsToStrangers([{ sender: a, receiver: b }], ctx);
+
+  assert.deepEqual(patches, [{ whoCanCallVoice: EVERYONE, whoCanCallVideo: EVERYONE }]);
+  // Both roles, for the reason the message opening writes both: which VU is the caller is a
+  // scenario's business, and the gate is read on the callee.
+  assert.deepEqual(timeline, ['profile:0', 'profile:1']);
+  assert.equal(metrics.operation('setup').errors, 0);
+});
+
+test('a VU whose call policy cannot be written is counted, not thrown', async () => {
+  const timeline: string[] = [];
+  const a = makeVu(0, timeline, { profileFails: true });
+  const b = makeVu(1, timeline);
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, future());
+
+  await assert.doesNotReject(() => openCallsToStrangers([{ sender: a, receiver: b }], ctx));
+
+  assert.equal(metrics.operation('setup').errors, 1);
+  assert.deepEqual(metrics.operation('setup').errorsByClass, [['transport', 1]]);
 });

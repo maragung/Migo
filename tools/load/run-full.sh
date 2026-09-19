@@ -274,14 +274,33 @@ start_rss_monitor() {
         # node busy enough to be worth sampling is a node whose metrics scrape can take
         # seconds. Without a deadline one slow response stalls the loop and the samples
         # either side of it are simply missing, which is indistinguishable in the log
-        # from a step that held no pool.
-        live="$(curl -fsS --max-time 5 "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
-          | awk '/^migo_gateway_sessions_live/{print $2; exit}')"
+        # from a step that held no pool. The deadline is 10 s rather than 5 because the
+        # loop sleeps 5 s between samples: at 10 s the worst case is still one sample per
+        # 15 s, and a scrape that legitimately needs 6 s of a node holding ten thousand
+        # sessions is a reading worth having, not a stall.
+        #
+        # `|| true` is the load-bearing half, and it is not decoration. This script runs
+        # under `set -euo pipefail`, so before it existed a scrape that hit the deadline
+        # ended the sampler: curl exits 28, pipefail makes that the pipeline's status, and
+        # the assignment's non-zero status terminated the subshell. The first scrape slow
+        # enough to time out is the scrape taken while the pool is largest, so the
+        # instrument died at exactly the moment it existed to measure. That is what the
+        # idle step's own evidence shows -- the series runs at a clean 5 s cadence from
+        # 20:56:14 and stops dead at 21:00:40, two minutes before the pool finished
+        # connecting and three minutes before the hold began, having seen 1,138 live
+        # sessions at its last sample. The peak it then reported was the ramp.
+        #
+        # A scrape that does not answer is recorded as `-`, never as 0. Zero is a claim
+        # about the node -- ten thousand sessions and the node holds none -- and it is the
+        # false reading this whole block exists to avoid; a dash is a claim about the
+        # scrape, which is the true one and the one a reader can act on.
+        live="$(curl -fsS --max-time 10 "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
+          | awk '/^migo_gateway_sessions_live/{print $2; exit}' || true)"
         if [ -n "$rss" ]; then
           # The timestamp is what makes a sample placeable: these are the only readings
           # taken *during* a step, and without it a peak cannot be attributed to the
           # step it happened in, nor can a gap in the series be seen as a gap.
-          echo "${rss} ${live:-0} $(date -u +%H:%M:%S)"
+          echo "${rss} ${live:--} $(date -u +%H:%M:%S)"
         fi
       fi
       sleep 5
@@ -299,7 +318,8 @@ stop_rss_monitor() {
 }
 
 report_memory_per_session() {
-  local line peak peak_live peak_at live_ceiling samples
+  local line peak peak_live peak_at live_ceiling samples numeric first_at last_at
+  local last_epoch now_epoch age
   # Both halves from one line, and the line is the peak-RSS one. The maxima of two columns
   # are two numbers from two moments, and dividing them is the cross-instant mistake the
   # comment above records one layer out — VmRSS during the run over a sessions_live read
@@ -307,11 +327,16 @@ report_memory_per_session() {
   # harder to see because both numbers are real and only their pairing is invented. The
   # highest live count is still printed, separately, because a reader checking the ratio
   # against the pool the client asked for needs to know whether any sample ever saw more.
-  line="$(sort -n "$RSS_LOG" 2>/dev/null | tail -n 1 || true)"
+  # Only samples whose second column is a number take part. A scrape that did not answer
+  # is recorded as `-`, and reading that as zero would put a fabricated zero into both the
+  # ceiling and the peak selection -- the same cross-instant mistake in a new costume,
+  # where the invented number now comes from a failed read rather than from a second moment.
+  numeric="$(awk '$2 ~ /^[0-9]+$/' "$RSS_LOG" 2>/dev/null || true)"
+  line="$(printf '%s\n' "$numeric" | sort -n | tail -n 1 || true)"
   peak="$(printf '%s\n' "$line" | awk '{print $1}')"
   peak_live="$(printf '%s\n' "$line" | awk '{print $2}')"
   peak_at="$(printf '%s\n' "$line" | awk '{print $3}')"
-  live_ceiling="$(awk '{if ($2+0 > m) m = $2+0} END{print m+0}' "$RSS_LOG" 2>/dev/null || echo 0)"
+  live_ceiling="$(printf '%s\n' "$numeric" | awk '{if ($2+0 > m) m = $2+0} END{print m+0}')"
   samples="$(wc -l <"$RSS_LOG" 2>/dev/null || echo 0)"
   if [ -n "$peak" ] && [ "${peak_live:-0}" -gt 0 ] 2>/dev/null; then
     echo "--- memory per session ---"
@@ -319,6 +344,26 @@ report_memory_per_session() {
       "${peak_live} live sessions = $((peak / peak_live)) kB per session (${samples} samples)"
     echo "  highest live count any sample saw: ${live_ceiling}" \
       "(the ratio above is the peak-RSS sample's own live count, not this one)"
+    # What the series covers, because a ceiling is only a ceiling over the window it was
+    # taken in. A sampler that dies mid-step leaves a series whose highest reading is the
+    # ramp's, and printed beside the client's own `connected 10000/10000` that reads as the
+    # node never having held them -- the exact misreading this reading was added to prevent,
+    # this time produced by the instrument. The last sample's distance from the moment of
+    # this report says whether the series ended with the step or before it.
+    first_at="$(head -n 1 "$RSS_LOG" 2>/dev/null | awk '{print $3}')"
+    last_at="$(tail -n 1 "$RSS_LOG" 2>/dev/null | awk '{print $3}')"
+    echo "  series: ${samples} sample(s) from ${first_at:-unknown} to ${last_at:-unknown} UTC"
+    last_epoch="$(date -u -d "$last_at" +%s 2>/dev/null || echo '')"
+    now_epoch="$(date -u +%s)"
+    if [ -n "$last_epoch" ]; then
+      age=$((now_epoch - last_epoch))
+      # A run crossing midnight UTC puts the last sample "in the future" of today's date.
+      if [ "$age" -lt 0 ]; then age=$((age + 86400)); fi
+      if [ "$age" -gt 60 ]; then
+        echo "  the series stopped ${age}s before this reading, so it covers only part of the" \
+          "step: the peak above is that window's peak and the ceiling is not the step's own"
+      fi
+    fi
   else
     # Not a footnote: this reading is the step's server-side evidence, and a step that
     # cannot produce it did not hold a pool to measure.
