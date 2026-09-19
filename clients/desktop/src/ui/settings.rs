@@ -30,10 +30,11 @@ use migo_core::{Id, Timestamp};
 
 use crate::chat_log::SavedLog;
 use crate::model::{Connection, DeviceRow, EvmWalletRow, SessionRow};
+use crate::net::call_devices::CallDevice;
 use crate::net::Command;
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets;
-use crate::ui::{ChatLogAction, Context, NavigationMode};
+use crate::ui::{CallDeviceAction, ChatLogAction, Context, NavigationMode};
 
 /// What the device list currently shows.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -171,6 +172,21 @@ fn wallet_counts(rows: &[EvmWalletRow]) -> (usize, usize) {
     (active, archived)
 }
 
+/// This machine's call devices, as the shell last asked the platform for them.
+///
+/// Read-only here for the reason every other fact on this pane is read-only: the pane draws what
+/// the shell hands it, and the shell asks on entering the pane and whenever the pane requests a
+/// re-scan. An empty list is an answer rather than a gap — a machine with no sound card, or none
+/// this build can put a name to — and the pickers' system-default rows stand whatever it says, so
+/// the group can never read as "no calls".
+#[derive(Default)]
+pub struct CallDevicesView {
+    /// Every input this machine can record a call from.
+    pub microphones: Vec<CallDevice>,
+    /// Every output it can play one through.
+    pub speakers: Vec<CallDevice>,
+}
+
 /// Everything the settings pane holds between frames.
 #[derive(Default)]
 pub struct SettingsState {
@@ -224,6 +240,8 @@ pub struct SettingsState {
     pub logs_dir: Option<PathBuf>,
     /// The snapshots' total size, for the storage group's one line.
     pub logs_bytes: u64,
+    /// This machine's microphones and speakers, for the Panggilan group's two pickers.
+    pub call_devices: CallDevicesView,
 }
 
 /// Draws the settings pane.
@@ -231,12 +249,14 @@ pub struct SettingsState {
 /// Scrolls as one document, so a device list long enough to push Sign out off the bottom of the
 /// window pushes it into reach of the wheel instead of out of the interface.
 ///
-/// Five groups, in the web panel's order and words — Chats & Log, Privasi & Keamanan,
-/// Penyimpanan & Data, Tampilan, Akun — because a person who set something on one client
-/// should find it where they left it on the next. What each group holds is this pane's own:
-/// the web panel's groups are doors to other panels, while this window holds everything
-/// inline, so each group gathers the sections that already lived here into the heading a
-/// person coming from the web or the phone expects.
+/// Six groups, in the web panel's order and words — Chats & Log, Privasi & Keamanan,
+/// Penyimpanan & Data, Tampilan, Panggilan, Akun — because a person who set something on one
+/// client should find it where they left it on the next. What each group holds is this pane's
+/// own: the web panel's groups are doors to other panels, while this window holds everything
+/// inline, so each group gathers the sections that already lived here into the heading a person
+/// coming from the web or the phone expects. Panggilan is the one group the web panel has no
+/// twin for, because the web and the phone ask which device a call uses on the call itself;
+/// this client asks once, here, and says why in the group's own first sentence.
 pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let column = 460.0_f32.min(ui.available_width() - space::XL * 2.0);
 
@@ -265,6 +285,10 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
 
                     widgets::subheader(ui, context.theme, "Tampilan");
                     appearance_section(ui, context);
+                    ui.add_space(space::LG);
+
+                    widgets::subheader(ui, context.theme, "Panggilan");
+                    calls_section(ui, context, state);
                     ui.add_space(space::LG);
 
                     widgets::subheader(ui, context.theme, "Akun");
@@ -659,6 +683,172 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
         .font(egui::FontId::proportional(font::TINY))
         .color(colors.text_muted),
     );
+}
+
+/// The Panggilan group: which microphone a call records from, and which speaker it plays
+/// through.
+///
+/// The phone asks this on the call itself, with a route picker beside its other call buttons,
+/// and the web asks it the same way on its own call screen; this client asks it here instead,
+/// once. A desktop's sound devices are set up at the desk and stay put — the headset plugged in
+/// last week is the headset this week — so the first second of a call is the wrong moment to be
+/// choosing between them, and a choice made here is a call that opens on the right device with
+/// nobody reaching for anything.
+///
+/// Both pickers carry the system's own pick as a row of their own, above whatever this machine
+/// reports, because that is a real answer and often the right one: a laptop that moves between
+/// rooms wants whatever the system says, which is what "no stored choice" means in the settings
+/// record and in the audio layer alike.
+fn calls_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    ui.label(
+        RichText::new(
+            "Which devices calls open on. Chosen here rather than on the call itself, so a call \
+             starts on the right headset without anyone reaching for a menu.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::MD);
+
+    block_label(ui, context, "Microphone");
+    let picked = pick_device(
+        ui,
+        context,
+        &state.call_devices.microphones,
+        context.call_microphone.as_deref(),
+        "microphone",
+    );
+    match picked {
+        Picked::Nothing => {}
+        Picked::System => context
+            .call_devices
+            .push(CallDeviceAction::SetMicrophone(None)),
+        Picked::Device(device) => context
+            .call_devices
+            .push(CallDeviceAction::SetMicrophone(Some(device))),
+    }
+
+    ui.add_space(space::MD);
+    block_label(ui, context, "Speaker");
+    let picked = pick_device(
+        ui,
+        context,
+        &state.call_devices.speakers,
+        context.call_speaker.as_deref(),
+        "speaker",
+    );
+    match picked {
+        Picked::Nothing => {}
+        Picked::System => context
+            .call_devices
+            .push(CallDeviceAction::SetSpeaker(None)),
+        Picked::Device(device) => context
+            .call_devices
+            .push(CallDeviceAction::SetSpeaker(Some(device))),
+    }
+
+    // One re-scan under both lists, not one per list: the machine's devices are one question —
+    // a headset plugged in appears in both directions at once — so a button per direction would
+    // be one act offered twice. Ghosted, because it asks nothing of the person and changes no
+    // choice: a device that appears after it is one they may now pick.
+    ui.add_space(space::MD);
+    if widgets::ghost_button(ui, context.theme, "Scan again")
+        .on_hover_text("Reads this machine's devices again — for a headset plugged in since.")
+        .clicked()
+    {
+        context.call_devices.push(CallDeviceAction::Rescan);
+    }
+}
+
+/// What a person did with one picker.
+///
+/// Three answers have to stay apart. A plain `Option<String>` would collapse two of them — the
+/// system's own pick and a named device are both "some string or nothing" — and a list read that
+/// way would take an untouched row for a choice and clear the person's pick on the frame it
+/// opened. An [`Option`] of an [`Option`] would keep the three apart and read as a riddle, so the
+/// answers are named instead.
+#[derive(Debug)]
+enum Picked {
+    /// No row was clicked, and nothing is to change.
+    Nothing,
+    /// The system's own pick: whichever device the machine would choose for itself.
+    System,
+    /// One named device, by the handle the audio layer opens it with.
+    Device(String),
+}
+
+/// Draws one picker — the system's own pick, then every device this machine reports — and
+/// answers what the person clicked.
+///
+/// `what` names the direction in words — "microphone", "speaker" — for the two sentences a list
+/// may have to say about itself. Both are about the thing the person came here to choose, so
+/// neither can be written about "the current selection" and left to the reader.
+fn pick_device(
+    ui: &mut Ui,
+    context: &Context<'_>,
+    devices: &[CallDevice],
+    chosen: Option<&str>,
+    what: &str,
+) -> Picked {
+    let colors = palette(context.theme);
+    let mut picked = Picked::Nothing;
+
+    // Full-width rows rather than buttons that hug their text: a device name is a line of its own,
+    // and a row whose hit area stops at the last letter of a short name is a row that reads as a
+    // label. Wrapping rather than truncating, because the difference between two devices on one
+    // card can be the last word of the name.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 0.0),
+        Layout::top_down(Align::Min).with_cross_justify(true),
+        |ui| {
+            if device_row(ui, "System default", chosen.is_none()) {
+                picked = Picked::System;
+            }
+            for device in devices {
+                if device_row(ui, &device.label, chosen == Some(device.id.as_str())) {
+                    picked = Picked::Device(device.id.clone());
+                }
+            }
+        },
+    );
+
+    // The remembered device is missing from this machine's list: unplugged, renumbered by the
+    // kernel, or a name carried over from another machine's settings file. The sentence says what
+    // a call will do — the same thing the audio layer does, from the same comparison — and the
+    // choice is left standing rather than cleared, because a headset unplugged for an afternoon
+    // is one the person wants back when it is plugged in again.
+    let missing = chosen.is_some_and(|chosen| !devices.iter().any(|device| device.id == chosen));
+    if devices.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "This machine reports no {what}s, so calls use the system default."
+            ))
+            .font(egui::FontId::proportional(font::TINY))
+            .color(colors.text_muted),
+        );
+    } else if missing {
+        ui.label(
+            RichText::new(format!(
+                "The {what} chosen for calls is not connected. Calls use the system default until \
+                 it is back."
+            ))
+            .font(egui::FontId::proportional(font::TINY))
+            .color(colors.text_muted),
+        );
+    }
+
+    picked
+}
+
+/// One row of a picker: a device's name, and whether it is the one standing.
+fn device_row(ui: &mut Ui, label: &str, selected: bool) -> bool {
+    ui.add(
+        egui::Button::new(RichText::new(label).font(egui::FontId::proportional(font::BODY)))
+            .selected(selected)
+            .wrap_mode(egui::TextWrapMode::Wrap),
+    )
+    .clicked()
 }
 
 /// The security checkup (§50): one line per fixed row — Identity, Devices, Wallets, Backup,

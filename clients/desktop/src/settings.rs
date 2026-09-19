@@ -177,6 +177,18 @@ pub struct Settings {
     /// run, or a file written before the field existed — means 1x, the brief's own default.
     #[serde(default)]
     pub voice_speed: Option<VoiceSpeed>,
+    /// The microphone a call records from, as the audio layer spells it: an ALSA PCM name on
+    /// Linux — `plughw:CARD=PCH,DEV=0` — and a device name on Windows and macOS. Absent means
+    /// the system's own pick, which is also what a call falls back to when the remembered device
+    /// is not connected. The name is kept rather than cleared when a device goes away, because a
+    /// headset unplugged for an afternoon is one the person wants back when it is plugged in
+    /// again; the settings pane says it is not connected rather than forgetting it.
+    #[serde(default)]
+    pub call_microphone: Option<String>,
+    /// The speaker a call plays through, spelled the same way, with the same zero state and the
+    /// same refusal to forget a device that is merely absent.
+    #[serde(default)]
+    pub call_speaker: Option<String>,
 }
 
 impl Settings {
@@ -195,6 +207,10 @@ impl Settings {
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::default(),
             voice_speed: None,
+            call_microphone: None,
+            call_speaker: None,
+            call_microphone: None,
+            call_speaker: None,
         }
     }
 
@@ -323,6 +339,8 @@ mod tests {
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
             voice_speed: None,
+            call_microphone: None,
+            call_speaker: None,
         };
         save(&path, &record).expect("save");
         let loaded = load(&path).expect("load");
@@ -435,6 +453,8 @@ mod tests {
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
             voice_speed: None,
+            call_microphone: None,
+            call_speaker: None,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
@@ -465,6 +485,8 @@ mod tests {
             auto_save_chat_logs: false,
             navigation_mode: NavigationMode::Tabbed,
             voice_speed: None,
+            call_microphone: None,
+            call_speaker: None,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
     }
@@ -557,6 +579,8 @@ mod tests {
         let path = std::env::temp_dir().join("migo-desktop-test-voice-speed.json");
         let record = Settings {
             voice_speed: Some(VoiceSpeed::Double),
+            call_microphone: None,
+            call_speaker: None,
             ..Settings::default_for_dev()
         };
         save(&path, &record).expect("save");
@@ -610,5 +634,56 @@ mod tests {
         assert_eq!(VoiceSpeed::Double.next(), VoiceSpeed::Normal);
         assert_eq!(VoiceSpeed::from_percent(0), VoiceSpeed::Normal);
         assert_eq!(VoiceSpeed::from_percent(137), VoiceSpeed::Normal);
+    }
+
+    /// The call devices round-trip, and a file written before the fields existed reads as the
+    /// system's own pick: which headset a call opens is the person's own choice, and an upgrade
+    /// must neither lose it nor invent one they never made. The zero state is pinned too,
+    /// because it is not "unset" but a real answer — follow the system — that the audio layer
+    /// and the settings pane both have to recognise.
+    #[test]
+    fn the_call_devices_round_trip_and_default_to_the_system_pick() {
+        let path = std::env::temp_dir().join("migo-desktop-test-call-devices.json");
+        let record = Settings {
+            call_microphone: Some("plughw:CARD=PCH,DEV=0".to_owned()),
+            call_speaker: Some("plughw:CARD=PCH,DEV=0".to_owned()),
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(
+            loaded.call_microphone.as_deref(),
+            Some("plughw:CARD=PCH,DEV=0")
+        );
+        assert_eq!(
+            loaded.call_speaker.as_deref(),
+            Some("plughw:CARD=PCH,DEV=0")
+        );
+        // The spelling is pinned: a settings file is user-readable, and an ALSA name is what a
+        // person looking for why a call went to the wrong headset has to be able to find.
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"call_microphone\": \"plughw:CARD=PCH,DEV=0\""));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(Settings::default_for_dev().call_microphone, None);
+        assert_eq!(Settings::default_for_dev().call_speaker, None);
+
+        let old_path = std::env::temp_dir().join("migo-desktop-test-call-devices-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&old_path, old.to_string()).expect("write");
+        let loaded = load(&old_path).expect("load");
+        assert_eq!(loaded.call_microphone, None);
+        assert_eq!(loaded.call_speaker, None);
+        let _ = fs::remove_file(&old_path);
     }
 }

@@ -317,6 +317,22 @@ pub struct Context<'a> {
     /// function that could reach the file system mid-draw could block the paint loop on a slow
     /// disk, and the boundary is what makes that structurally impossible.
     pub chat_log: &'a mut Vec<ChatLogAction>,
+    /// The microphone a call records from, as the settings record spells it, or `None` for the
+    /// system's own pick.
+    ///
+    /// Read-only, like [`Context::chat_log_auto_save`]: the choice lives in the settings record
+    /// and in the audio layer's own cell, and the pane that draws it hands a change back through
+    /// [`Context::call_devices`] — the same one-way street every shell-owned fact here travels.
+    pub call_microphone: Option<String>,
+    /// The speaker a call plays through, in the same spelling and with the same zero state.
+    pub call_speaker: Option<String>,
+    /// Call-audio intent pushed here and applied by the shell after the frame: which device later
+    /// calls open, and a fresh read of this machine's device list.
+    ///
+    /// Kept beside [`Context::chat_log`] rather than granted as a direct write, for that field's
+    /// own reason: a settings write touches the disk and a device list touches the sound system,
+    /// and neither belongs inside a layout pass where it could block the paint.
+    pub call_devices: &'a mut Vec<CallDeviceAction>,
 }
 
 /// What a screen asks the shell to do with a chat log, applied after the frame.
@@ -339,6 +355,22 @@ pub enum ChatLogAction {
     DeleteSaved { path: PathBuf },
     /// Delete every saved snapshot: the storage group's broom.
     ClearSaved,
+}
+
+/// What a screen asks the shell to do with a call's audio devices, applied after the frame.
+///
+/// The variants carry a choice in the spelling the platform uses for it, because that is what the
+/// settings record stores and what the audio layer opens. What the person saw — a device name in
+/// a list — is the pane's business and never leaves it.
+#[derive(Debug, Clone)]
+pub enum CallDeviceAction {
+    /// Record later calls from this device, or from whichever the system picks when it is `None`.
+    SetMicrophone(Option<String>),
+    /// Play later calls through this device, with the same zero state.
+    SetSpeaker(Option<String>),
+    /// Read this machine's call devices again: a headset plugged in after the pane was opened, or
+    /// one that went away while the pane sat there.
+    Rescan,
 }
 
 impl Context<'_> {

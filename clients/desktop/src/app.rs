@@ -24,6 +24,8 @@ use std::time::Duration;
 use crate::chat_log::{self, ChatLogLine};
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection, Toast, ToastKind};
+use crate::net::call_audio;
+use crate::net::call_devices;
 use crate::net::{server_probe, Command, Event, Net};
 use crate::settings::{self, ServerMode, Settings};
 use crate::theme::{self, font, palette, radius, space, Theme};
@@ -44,6 +46,7 @@ use crate::ui::server_form::AutoStatus;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
 use crate::ui::wallet::{TrackingTx, WalletState};
+use crate::ui::CallDeviceAction;
 use crate::ui::{widgets, ChatLogAction, Context, MainTab, NavigationMode, Place, Screen};
 
 /// The whole application state.
@@ -98,6 +101,10 @@ pub struct App {
     /// the logs directory, and the toasts that report what became of them. Reused rather than
     /// reallocated for the same reason.
     chat_log_actions: Vec<ChatLogAction>,
+    /// Call-audio intent pushed by the frame's screens, applied after the frame — the same seam
+    /// and the same reasoning as [`Self::chat_log_actions`], because a settings write touches the
+    /// disk and a device list touches the sound system, and neither belongs mid-layout.
+    call_device_actions: Vec<CallDeviceAction>,
     /// The persisted settings record: the source of truth for what gets written back to disk,
     /// updated field by field as the user changes things. Kept apart from the live values so
     /// that an environment override of the server (see `main`) never leaks into the file through
@@ -138,6 +145,14 @@ impl App {
         // The saved interface scale, the same way. Applied before the first frame so the first
         // thing a person sees is the size they chose, not a flash of the default snapping to it.
         cc.egui_ctx.set_zoom_factor(settings.zoom());
+
+        // The saved call devices reach the audio layer before any call can open one: the layer
+        // opens what this cell says and the shell only holds the record — the same seam, and the
+        // same reason, as the playback speed below it.
+        call_audio::set_chosen_devices(
+            settings.call_microphone.clone(),
+            settings.call_speaker.clone(),
+        );
 
         let net = Net::spawn(cc.egui_ctx.clone(), vault_path);
         // The saved playback speed reaches the worker before the first note of the session
@@ -199,6 +214,7 @@ impl App {
             toasts: Vec::new(),
             commands: Vec::new(),
             chat_log_actions: Vec::new(),
+            call_device_actions: Vec::new(),
             settings,
             settings_path,
             server_env_override,
@@ -1947,6 +1963,9 @@ impl App {
                 rich_presence: self.rich_presence,
                 chat_log_auto_save: self.settings.auto_save_chat_logs,
                 chat_log: &mut self.chat_log_actions,
+                call_microphone: self.settings.call_microphone.clone(),
+                call_speaker: self.settings.call_speaker.clone(),
+                call_devices: &mut self.call_device_actions,
                 navigation_mode: self.settings.navigation_mode,
                 voice_speed: self.settings.voice_speed(),
                 navigate,
@@ -2050,6 +2069,9 @@ impl App {
                 rich_presence: self.rich_presence,
                 chat_log_auto_save: self.settings.auto_save_chat_logs,
                 chat_log: &mut self.chat_log_actions,
+                call_microphone: self.settings.call_microphone.clone(),
+                call_speaker: self.settings.call_speaker.clone(),
+                call_devices: &mut self.call_device_actions,
                 navigation_mode: self.settings.navigation_mode,
                 voice_speed: self.settings.voice_speed(),
                 navigate: &mut *navigate,
@@ -2134,6 +2156,9 @@ impl App {
             rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut self.chat_log_actions,
+            call_microphone: self.settings.call_microphone.clone(),
+            call_speaker: self.settings.call_speaker.clone(),
+            call_devices: &mut self.call_device_actions,
             navigation_mode: self.settings.navigation_mode,
             voice_speed: self.settings.voice_speed(),
             navigate,
@@ -2219,7 +2244,13 @@ impl App {
             // The saved-log list is a fact about the disk, not the frame: read on entry so the
             // storage group's numbers are current, and after any action that touches the
             // directory (see `apply_chat_log_action`).
-            Place::Settings => self.refresh_saved_logs(),
+            Place::Settings => {
+                self.refresh_saved_logs();
+                // The device list is a fact about the machine rather than about the frame, and a
+                // headset may have been plugged in since the last visit, so it is read on entry
+                // for the same reason the log list is.
+                self.refresh_call_devices();
+            }
         }
     }
 
@@ -2241,6 +2272,7 @@ impl App {
         // event that lands here arrives outside a frame, and the fields a Context carries
         // must all be present even on a path that pushes nothing.
         let mut chat_log_actions = std::mem::take(&mut self.chat_log_actions);
+        let mut call_device_actions = std::mem::take(&mut self.call_device_actions);
         let server = self.auth.server.clone();
         let mut context = Context {
             theme: self.theme,
@@ -2251,6 +2283,9 @@ impl App {
             rich_presence: self.rich_presence,
             chat_log_auto_save: self.settings.auto_save_chat_logs,
             chat_log: &mut chat_log_actions,
+            call_microphone: self.settings.call_microphone.clone(),
+            call_speaker: self.settings.call_speaker.clone(),
+            call_devices: &mut call_device_actions,
             navigation_mode: self.settings.navigation_mode,
             voice_speed: self.settings.voice_speed(),
             navigate: &mut navigate,
@@ -2261,6 +2296,9 @@ impl App {
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
         self.chat_log_actions = chat_log_actions;
+        // Put back rather than applied: this path opens a conversation, and nothing it draws is
+        // the settings pane, so there is nothing here for it to have pushed.
+        self.call_device_actions = call_device_actions;
         self.desktop.open_chat(conversation_id);
     }
 
@@ -2342,6 +2380,45 @@ impl App {
             migo_core::Timestamp::now(),
             &chats,
         ))
+    }
+
+    /// Re-reads this machine's call devices into the settings panel: the microphones a call can
+    /// record from and the speakers it can play through, as the platform reports them. Called on
+    /// entering Settings and whenever the pane asks for a re-scan, so a headset plugged in after
+    /// the pane was opened is a fact rather than a memory of a frame ago.
+    fn refresh_call_devices(&mut self) {
+        self.settings_panel.call_devices.microphones = call_devices::microphones();
+        self.settings_panel.call_devices.speakers = call_devices::speakers();
+    }
+
+    /// Hands the settings record's call devices to the audio layer, which opens every call from
+    /// here on with them. The worker is not told: a call's audio is opened and played in this
+    /// process, so the cell and the record are the whole story, and they are written together so
+    /// they cannot come to disagree about what the next call will open.
+    fn publish_call_devices(&self) {
+        call_audio::set_chosen_devices(
+            self.settings.call_microphone.clone(),
+            self.settings.call_speaker.clone(),
+        );
+    }
+
+    /// Applies one call-device action the frame's screens asked for, after the frame: the shell
+    /// owns the settings record, the audio layer's cell and the device list, because all three
+    /// outlive the frame that asked.
+    fn apply_call_device_action(&mut self, action: CallDeviceAction) {
+        match action {
+            CallDeviceAction::SetMicrophone(device) => {
+                self.settings.call_microphone = device;
+                self.persist_settings();
+                self.publish_call_devices();
+            }
+            CallDeviceAction::SetSpeaker(device) => {
+                self.settings.call_speaker = device;
+                self.persist_settings();
+                self.publish_call_devices();
+            }
+            CallDeviceAction::Rescan => self.refresh_call_devices(),
+        }
     }
 
     /// Writes one conversation's snapshot, when auto-save is on. Called from both window-close
@@ -2580,6 +2657,9 @@ impl eframe::App for App {
                         rich_presence: self.rich_presence,
                         chat_log_auto_save: self.settings.auto_save_chat_logs,
                         chat_log: &mut self.chat_log_actions,
+                        call_microphone: self.settings.call_microphone.clone(),
+                        call_speaker: self.settings.call_speaker.clone(),
+                        call_devices: &mut self.call_device_actions,
                         navigation_mode: self.settings.navigation_mode,
                         voice_speed: self.settings.voice_speed(),
                         navigate: &mut navigate,
@@ -2775,6 +2855,12 @@ impl eframe::App for App {
         let chat_log_actions = std::mem::take(&mut self.chat_log_actions);
         for action in chat_log_actions {
             self.apply_chat_log_action(action);
+        }
+
+        // The frame's call-audio intent, applied here for the same reason and by the same trade.
+        let call_device_actions = std::mem::take(&mut self.call_device_actions);
+        for action in call_device_actions {
+            self.apply_call_device_action(action);
         }
 
         // The server disclosure commits a new value to `auth.server` only on a successful
