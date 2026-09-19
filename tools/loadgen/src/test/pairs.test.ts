@@ -121,10 +121,14 @@ test('every paired VU is opened to messages from strangers before the first conv
     firstStart !== -1 && lastOpening < firstStart,
     `a conversation was attempted before the opening was written: ${timeline.join(', ')}`,
   );
-  // One field, on the documented patch surface: the value is "everyone", and nothing else about
-  // the account is re-stated (an absent field is left untouched, so a wider patch would be the
-  // harness volunteering opinions nobody asked it for).
-  assert.deepEqual(patches, [{ whoCanMessage: EVERYONE }, { whoCanMessage: EVERYONE }]);
+  // One entry, not one per pair: `patches` collects VU 0's writes alone, because VU 0 is the only
+  // double this test hands an `onPrivacy` hook. The two-roles-per-pair claim is the timeline above,
+  // which names all four VUs; what this line pins is the patch itself: one field, on the documented
+  // surface, the value "everyone", and nothing else about the account re-stated (an absent field is
+  // left untouched, so a wider patch would be the harness volunteering opinions nobody asked it
+  // for). Two entries here would be asserting a second write this double cannot see -- which is how
+  // this line read when it was written, and CI is where that was found out.
+  assert.deepEqual(patches, [{ whoCanMessage: EVERYONE }]);
   assert.equal(metrics.operation('setup').errors, 0);
   assert.equal(a.conversationId, 'conv-0');
   assert.equal(c.conversationId, 'conv-2');
