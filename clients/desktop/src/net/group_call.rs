@@ -114,7 +114,10 @@ pub(crate) struct GroupCalls {
     turn: Option<Vec<migo_protocol::TurnServer>>,
     /// The media plane: the mesh of links to the other seats, built once the seat, the frame key,
     /// and the TURN list are all in hand, and dropped with the seat that owned it.
-    mesh: Option<GroupMesh>,
+    ///
+    /// `pub(super)` because the mesh reports on the 1:1 engine's tick channel: `call`'s select
+    /// loop is the one place a tick is applied, so it is the one place that has to reach in here.
+    pub(super) mesh: Option<GroupMesh>,
 }
 
 /// A join in flight.
@@ -819,7 +822,9 @@ impl Worker {
     /// an epoch that does not advance is a replay, and a blob that does not open under the
     /// held key is not this call's rotation — so a refused adopt is a no-op, not an error: the
     /// state keeps the key that works.
-    pub(super) fn on_group_key_update(&mut self, frame: &migo_protocol::Frame) {
+    /// Asynchronous since the mesh became a passenger: an adopted epoch rebuilds the links that
+    /// never connected, and rebuilding one means building a peer connection, which awaits.
+    pub(super) async fn on_group_key_update(&mut self, frame: &migo_protocol::Frame) {
         let Ok(update) = gateway::decode::<CallKeyUpdate>(frame) else {
             return;
         };

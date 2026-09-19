@@ -59,10 +59,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use bytes::Bytes;
 use migo_core::Id;
 use tokio::sync::mpsc;
 
@@ -270,7 +269,7 @@ fn mix_into(buckets: &mut HashMap<Id, VecDeque<i16>>, frame: usize) -> Vec<i16> 
     out
 }
 
-/// One peer connection in the mesh, and the negotiation state of that one link.
+/// One peer connection in the mesh, and what is fixed about it for the whole of its life.
 struct GroupLink {
     /// The peer account, for the overlay's name lookup.
     user: Id,
@@ -279,9 +278,23 @@ struct GroupLink {
     device: Id,
     /// The transport to that peer's device.
     pc: Arc<RTCPeerConnection>,
-    /// Whether the offer left. An answer for a link that never offered is a frame for a link that
-    /// already ended.
+    /// Whether the offer left. Fixed at construction because the side that dials is the side that
+    /// builds the link: an answer for a link that never offered is a frame for a link that already
+    /// ended, and which of the two a link is does not change after the fact.
     dialed: bool,
+    /// Where the peer's picture lands.
+    video: VideoSlot,
+    /// What a description or a candidate moves. Behind a lock because a link is shared by handle
+    /// rather than owned: the map holds one `Arc` and [`GroupMesh::link_for`] hands the same one
+    /// to a caller that must then await on it, and a value borrowed for that long cannot be
+    /// mutated in place. The lock is never contended — every field under it is touched from the
+    /// worker's single task — and it is never held across an await.
+    negotiation: Mutex<Negotiation>,
+}
+
+/// The negotiation state one link carries between its descriptions.
+#[derive(Default)]
+struct Negotiation {
     /// Whether the peer's description has been applied. Until it has, this side's candidates are
     /// held rather than sent: webrtc-rs drops a candidate added with no remote description, and a
     /// batch sent then would be a frame the peer could not use.
@@ -292,8 +305,24 @@ struct GroupLink {
     /// cannot be added to a connection with no remote description, and dropping them would lose
     /// the only path that worked.
     held_ice: Vec<IceCandidateJson>,
-    /// Where the peer's picture lands.
-    video: VideoSlot,
+}
+
+impl GroupLink {
+    /// The link's negotiation state.
+    ///
+    /// A poisoned lock gives its data back rather than panicking: nothing under these sections can
+    /// panic, so a poisoned lock means some unrelated task panicked while holding it, and a call
+    /// that went silent for that reason is a worse outcome than the panic itself.
+    fn negotiation(&self) -> MutexGuard<'_, Negotiation> {
+        self.negotiation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the peer's description has landed, read without holding the lock.
+    fn remote_set(&self) -> bool {
+        self.negotiation().remote_set
+    }
 }
 
 /// The mesh: every link this seat holds, the one microphone they share, and the mixer their audio
@@ -539,7 +568,7 @@ impl GroupMesh {
             && self
                 .links
                 .get(&from_device)
-                .is_some_and(|link| link.dialed && !link.remote_set);
+                .is_some_and(|link| link.dialed && !link.remote_set());
         if glare {
             self.close_link(from_device);
         } else if let Some(link) = self.links.get(&from_device) {
@@ -554,7 +583,7 @@ impl GroupMesh {
             .seats
             .iter()
             .find(|(_, device)| *device == from_device)?;
-        let link = self.new_link(account, from_device).await?;
+        let link = self.new_link(account, from_device, false).await?;
         // `insert` hands back whatever it displaced, so the guard needs no second lookup and cannot
         // be written wrong: a link that landed while this one was being built is kept, and the new
         // one is closed. Two transports to one peer is two offers for one answer.
@@ -586,7 +615,7 @@ impl GroupMesh {
                 // the loser rebuilds when our offer reaches it. A renegotiated offer over a
                 // settled link is a future flow, and applying one would answer a question nobody
                 // asked.
-                if link.remote_set || link.dialed {
+                if link.remote_set() || link.dialed {
                     return true;
                 }
                 if link.pc.set_remote_description(description).await.is_err() {
@@ -612,7 +641,7 @@ impl GroupMesh {
                 // An answer to an offer this side never sent is a frame for a link that already
                 // ended, or one from a peer that dialed a link we are not the dialer of. Both are
                 // no-ops rather than errors.
-                if !link.dialed || link.remote_set {
+                if !link.dialed || link.remote_set() {
                     return true;
                 }
                 if link.pc.set_remote_description(description).await.is_err() {
@@ -637,19 +666,21 @@ impl GroupMesh {
         let Ok(batch) = decode_ice_batch(plaintext) else {
             return;
         };
-        let Some(entry) = self.links.get_mut(&from_device) else {
+        // The link is cloned out of the map so the awaits below borrow nothing of this mesh: the
+        // worker's loop is the only thing running, and it must be free to take `&mut self` again
+        // the moment these candidates are in.
+        let Some(link) = self.links.get(&from_device).cloned() else {
             return;
         };
-        if !entry.remote_set {
-            // Candidates that arrive before the peer's description are held, not dropped: an ICE
-            // candidate cannot be added to a connection with no remote description, and the
-            // candidate that arrives first is often the one that would have connected.
-            entry.held_ice.extend(batch);
-            return;
+        {
+            let mut negotiation = link.negotiation();
+            if !negotiation.remote_set {
+                // Held, not dropped, for the reason the function's own note gives.
+                negotiation.held_ice.extend(batch);
+                return;
+            }
         }
-        // The connection is cloned out of the link so the awaits below borrow nothing: the map
-        // entry is a `&mut` into this mesh, and the worker's own loop is the only thing running.
-        let pc = entry.pc.clone();
+        let pc = link.pc.clone();
         for candidate in batch {
             let _ = pc
                 .add_ice_candidate(RTCIceCandidateInit {
@@ -675,18 +706,19 @@ impl GroupMesh {
                     let Ok(init) = candidate.to_json() else {
                         return;
                     };
-                    let arm = match self.links.get_mut(&device) {
+                    let arm = match self.links.get(&device) {
                         Some(link) => {
-                            link.held_ice.push(IceCandidateJson {
+                            let mut negotiation = link.negotiation();
+                            negotiation.held_ice.push(IceCandidateJson {
                                 candidate: Some(init.candidate),
                                 sdp_mid: init.sdp_mid,
                                 sdp_mline_index: init.sdp_mline_index.unwrap_or(0),
                                 username_fragment: init.username_fragment,
                             });
-                            if link.ice_linger_armed {
+                            if negotiation.ice_linger_armed {
                                 false
                             } else {
-                                link.ice_linger_armed = true;
+                                negotiation.ice_linger_armed = true;
                                 true
                             }
                         }
@@ -723,14 +755,17 @@ impl GroupMesh {
     /// and a batch sent then would be a frame the peer could not use. The batch waits in
     /// `held_ice` and leaves with the first flush after the description lands instead.
     async fn flush_ice(&mut self, device: Id) {
-        let Some(link) = self.links.get_mut(&device) else {
+        let Some(link) = self.links.get(&device).cloned() else {
             return;
         };
-        if !link.remote_set || link.held_ice.is_empty() {
-            return;
-        }
-        let batch = std::mem::take(&mut link.held_ice);
-        link.ice_linger_armed = false;
+        let batch = {
+            let mut negotiation = link.negotiation();
+            if !negotiation.remote_set || negotiation.held_ice.is_empty() {
+                return;
+            }
+            negotiation.ice_linger_armed = false;
+            std::mem::take(&mut negotiation.held_ice)
+        };
         // A batch that will not encode is dropped, not retried: the next candidate or the
         // connection's own gathering carries the link.
         if let Ok(plaintext) = encode_ice_batch(&batch) {
@@ -743,17 +778,15 @@ impl GroupMesh {
 
     /// Applies the candidates held while the peer's description was missing.
     async fn drain_held_ice(&mut self, link: &Arc<GroupLink>) {
-        let device = link.device;
-        let batch = match self.links.get_mut(&device) {
-            Some(entry) => std::mem::take(&mut entry.held_ice),
-            None => return,
+        // The flag flips first and unconditionally, because it is what `flush_ice` gates this
+        // side's own candidates on: a description that arrived with no candidate held for it yet
+        // would otherwise leave our batch waiting on a flag that never moved, and the link
+        // one-way — heard, but not hearing.
+        let batch = {
+            let mut negotiation = link.negotiation();
+            negotiation.remote_set = true;
+            std::mem::take(&mut negotiation.held_ice)
         };
-        if batch.is_empty() {
-            return;
-        }
-        if let Some(entry) = self.links.get_mut(&device) {
-            entry.remote_set = true;
-        }
         for candidate in batch {
             let _ = link
                 .pc
@@ -769,7 +802,7 @@ impl GroupMesh {
 
     /// Builds a link and, when this side is the dialer, sends its offer.
     async fn dial(&mut self, account: Id, device: Id) {
-        let Some(link) = self.new_link(account, device).await else {
+        let Some(link) = self.new_link(account, device, true).await else {
             return;
         };
         self.links.insert(device, link.clone());
@@ -780,9 +813,6 @@ impl GroupMesh {
         if link.pc.set_local_description(offer.clone()).await.is_err() {
             self.close_link(device);
             return;
-        }
-        if let Some(entry) = self.links.get_mut(&device) {
-            entry.dialed = true;
         }
         if let Ok(plaintext) = encode_sdp_description(&offer) {
             self.outbound.push(GroupOutbound::Sdp {
@@ -796,8 +826,10 @@ impl GroupMesh {
     /// the picture it receives, the pumps, and the callbacks that report as ticks.
     ///
     /// The link is *not* inserted here — the caller decides whether it won the race — so a link
-    /// that loses is closed without ever having been reachable.
-    async fn new_link(&mut self, account: Id, device: Id) -> Option<Arc<GroupLink>> {
+    /// that loses is closed without ever having been reachable. `dialed` says which side of the
+    /// negotiation this link is: the dialer builds it and then sends the offer, the answerer
+    /// builds it in reply to one, and nothing about the link changes that after the fact.
+    async fn new_link(&mut self, account: Id, device: Id, dialed: bool) -> Option<Arc<GroupLink>> {
         let pc = self
             .api
             .new_peer_connection(RTCConfiguration {
@@ -836,11 +868,9 @@ impl GroupMesh {
             user: account,
             device,
             pc: pc.clone(),
-            dialed: false,
-            remote_set: false,
-            ice_linger_armed: false,
-            held_ice: Vec::new(),
+            dialed,
             video: video.clone(),
+            negotiation: Mutex::new(Negotiation::default()),
         });
 
         let tick_tx = self.tick_tx.clone();
