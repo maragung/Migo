@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -50,7 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.migo.app.call.ActiveCall
-import com.migo.app.call.CallManager
+import com.migo.app.call.AudioOutput
 import com.migo.app.call.CallUiState
 import com.migo.app.call.LinkQuality
 import com.migo.app.call.QUALITY_CEILINGS
@@ -136,7 +135,7 @@ fun CallOverlay(
     remoteVideo: VideoTrack?,
     onMinimize: (() -> Unit)? = null,
     onSwitchCamera: (() -> Unit)? = null,
-    outputs: List<CallManager.AudioOutput> = emptyList(),
+    outputs: List<AudioOutput> = emptyList(),
     chosenOutput: Int? = null,
     onChooseOutput: ((Int) -> Unit)? = null,
     onStartScreenShare: ((Intent) -> Unit)? = null,
@@ -228,14 +227,14 @@ private fun IncomingCallScreen(
         status = "Incoming $kind",
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {
-            CallActionButton(
+            ActionDisc(
                 glyph = "📞",
                 label = "Accept $kind",
                 background = MaterialTheme.colorScheme.secondary,
                 contentColor = Color.White,
                 onClick = onAccept,
             )
-            CallActionButton(
+            ActionDisc(
                 glyph = "✕",
                 label = "Decline call",
                 background = MaterialTheme.colorScheme.error,
@@ -263,7 +262,7 @@ private fun ActiveCallScreen(
     onRateCall: (CallRating, ULong) -> Unit,
     onMinimize: (() -> Unit)?,
     onSwitchCamera: (() -> Unit)?,
-    outputs: List<CallManager.AudioOutput>,
+    outputs: List<AudioOutput>,
     chosenOutput: Int?,
     onChooseOutput: ((Int) -> Unit)?,
     onStartScreenShare: ((Intent) -> Unit)?,
@@ -433,7 +432,7 @@ private fun ActiveCallScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             when (display) {
-                CallDisplayState.Ringing -> CallActionButton(
+                CallDisplayState.Ringing -> ActionDisc(
                     glyph = "✕",
                     label = if (call.isCaller) "Cancel call" else "End call",
                     background = MaterialTheme.colorScheme.error,
@@ -441,7 +440,7 @@ private fun ActiveCallScreen(
                     onClick = if (call.isCaller) onCancel else onHangUp,
                 )
 
-                CallDisplayState.Connecting, CallDisplayState.Reconnecting -> CallActionButton(
+                CallDisplayState.Connecting, CallDisplayState.Reconnecting -> ActionDisc(
                     glyph = "✕",
                     label = "End call",
                     background = MaterialTheme.colorScheme.error,
@@ -471,7 +470,7 @@ private fun ActiveCallScreen(
                     // never opened, and both of those would get a control that cannot change
                     // anything.
                     if (state.cameraOn != null && screenSharing != true) {
-                        CallActionButton(
+                        ActionDisc(
                             glyph = if (state.cameraOn) "📷" else "🚫",
                             label = if (state.cameraOn) "Turn camera off" else "Turn camera on",
                             background = MaterialTheme.colorScheme.surfaceVariant,
@@ -487,7 +486,7 @@ private fun ActiveCallScreen(
                         call.mediaKind == CallMediaKind.Video &&
                         screenSharing != true
                     ) {
-                        CallActionButton(
+                        ActionDisc(
                             glyph = "🔄",
                             label = "Switch camera",
                             background = MaterialTheme.colorScheme.surfaceVariant,
@@ -499,7 +498,7 @@ private fun ActiveCallScreen(
                     // can actually draw the window it opens: a control that does nothing is worse
                     // than no control. A voice call has no picture to carry into a thumbnail.
                     if (onMinimize != null && call.mediaKind == CallMediaKind.Video) {
-                        CallActionButton(
+                        ActionDisc(
                             glyph = "▭",
                             label = "Minimize call",
                             background = MaterialTheme.colorScheme.surfaceVariant,
@@ -531,7 +530,7 @@ private fun ActiveCallScreen(
                             ceiling = state.qualityCeiling,
                             onChoose = onChooseQuality,
                         )
-                        CallActionButton(
+                        ActionDisc(
                             glyph = if (state.lowBandwidth) "🐢" else "🐇",
                             label = if (state.lowBandwidth) {
                                 "Leave low bandwidth mode"
@@ -543,14 +542,14 @@ private fun ActiveCallScreen(
                             onClick = { onToggleLowBandwidth(!state.lowBandwidth) },
                         )
                     }
-                    CallActionButton(
+                    ActionDisc(
                         glyph = if (state.muted) "🔇" else "🎙️",
                         label = if (state.muted) "Unmute microphone" else "Mute microphone",
                         background = MaterialTheme.colorScheme.surfaceVariant,
                         contentColor = MaterialTheme.colorScheme.onSurface,
                         onClick = onToggleMute,
                     )
-                    CallActionButton(
+                    ActionDisc(
                         glyph = "✕",
                         label = "End call",
                         background = MaterialTheme.colorScheme.error,
@@ -697,70 +696,6 @@ private fun CallStage(
     }
 }
 
-/**
- * One circular action button: a glyph on a colored disc. The glyphs are emoji characters, not an
- * icon font -- the app's own rule, and the web overlay's -- so a call screen ships with no asset
- * of its own. The [label] never shows on screen; it is what a screen reader says.
- */
-@Composable
-private fun CallActionButton(
-    glyph: String,
-    label: String,
-    background: Color,
-    contentColor: Color,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(72.dp)
-            .clip(CircleShape)
-            .background(background)
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = label },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
-    }
-}
-
-/**
- * Where the call is played, as a menu of the routes the phone listed.
- *
- * Drawn in the same circle as the neighbouring controls rather than as a text button, because the
- * row is a row of round controls and a labelled button beside them would read as belonging to a
- * different bar. The tick marks the route the call is on, and no tick is a real state rather than a
- * missing one: the app has not routed the call anywhere itself, so the phone is choosing, and
- * ticking a device on a guess would tell the user their sound is somewhere it may not be.
- */
-@Composable
-private fun AudioRouteButton(
-    outputs: List<CallManager.AudioOutput>,
-    chosenOutput: Int?,
-    onChooseOutput: (Int) -> Unit,
-) {
-    var open by remember { mutableStateOf(false) }
-    Box(contentAlignment = Alignment.Center) {
-        CallActionButton(
-            glyph = "🔊",
-            label = "Call audio",
-            background = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            onClick = { open = true },
-        )
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            outputs.forEach { output ->
-                val marked = if (output.id == chosenOutput) "✓ ${output.label}" else output.label
-                DropdownMenuItem(
-                    text = { Text(marked) },
-                    onClick = {
-                        onChooseOutput(output.id)
-                        open = false
-                    },
-                )
-            }
-        }
-    }
-}
 
 /**
  * The rung the user pins the call to, as a menu of the tiers it may be held at.
@@ -783,7 +718,7 @@ private fun QualityCeilingButton(
 ) {
     var open by remember { mutableStateOf(false) }
     Box(contentAlignment = Alignment.Center) {
-        CallActionButton(
+        ActionDisc(
             glyph = "📶",
             label = "Call quality",
             background = MaterialTheme.colorScheme.surfaceVariant,
@@ -841,7 +776,7 @@ private fun ScreenShareButton(
             onStart(projection)
         }
     }
-    CallActionButton(
+    ActionDisc(
         glyph = if (sharing) "🛑" else "🖥️",
         label = if (sharing) "Stop sharing screen" else "Share screen",
         background = if (sharing) {

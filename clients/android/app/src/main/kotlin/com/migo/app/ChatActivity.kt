@@ -238,6 +238,8 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
     val groupCallState by model.groupCallState.collectAsState()
     val groupCallLinks by model.groupCallLinks.collectAsState()
     val groupCallLocalVideo by model.groupCallLocalVideo.collectAsState()
+    val groupCallOutputs by model.groupCallOutputs.collectAsState()
+    val groupCallOutput by model.groupCallOutput.collectAsState()
     val callPeerId = callState.incoming?.callerId
         ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
     val remoteVideo by model.remoteVideo.collectAsState()
@@ -323,6 +325,13 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
             meId = (state as? AppState.SignedIn)?.accountId,
             links = groupCallLinks,
             localVideo = groupCallLocalVideo,
+            // The same routing layer the one-to-one screen draws, for the same reason: a route is
+            // a property of the phone carrying a call, and this call is carried by this phone. The
+            // menu is drawn only above one entry, so a phone below Android 12 -- where the list is
+            // honestly empty -- gets no control rather than one that cannot move the call.
+            outputs = groupCallOutputs,
+            chosenOutput = groupCallOutput,
+            onChooseOutput = model::chooseGroupCallOutput,
             onLeave = model::leaveGroupCall,
             onDismiss = model::dismissGroupCall,
             onToggleMute = model::toggleGroupCallMute,

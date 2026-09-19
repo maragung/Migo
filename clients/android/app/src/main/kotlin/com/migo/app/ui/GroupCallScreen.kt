@@ -2,7 +2,6 @@ package com.migo.app.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -33,11 +31,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.migo.app.call.ActiveGroupCall
+import com.migo.app.call.AudioOutput
 import com.migo.app.call.GroupCallPhase
 import com.migo.app.call.GroupCallUiState
 import com.migo.app.call.GroupLinkState
@@ -106,6 +103,17 @@ fun GroupCallOverlay(
     onToggleCamera: () -> Unit,
     /** Null where the device has one camera, so the control is absent rather than inert. */
     onSwitchCamera: (() -> Unit)?,
+    /**
+     * The routes this phone offers the call right now, and the one it is on.
+     *
+     * The same pair the one-to-one screen takes, read from the same layer
+     * ([com.migo.app.call.CallAudioRoute]): a route is a property of the phone carrying a call, and
+     * this call is carried by this phone. Empty below Android 12, which is why the control is drawn
+     * only above one entry rather than as an empty menu.
+     */
+    outputs: List<AudioOutput>,
+    chosenOutput: Int?,
+    onChooseOutput: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val call = state.call
@@ -142,6 +150,9 @@ fun GroupCallOverlay(
                 onToggleMute = onToggleMute,
                 onToggleCamera = onToggleCamera,
                 onSwitchCamera = onSwitchCamera,
+                outputs = outputs,
+                chosenOutput = chosenOutput,
+                onChooseOutput = onChooseOutput,
             )
         }
     }
@@ -168,6 +179,9 @@ private fun GroupCallScreen(
     onToggleMute: () -> Unit,
     onToggleCamera: () -> Unit,
     onSwitchCamera: (() -> Unit)?,
+    outputs: List<AudioOutput>,
+    chosenOutput: Int?,
+    onChooseOutput: (Int) -> Unit,
 ) {
     val glContext = LocalGroupEglContext.current
     // One tick per second while seated: the duration is the only number on screen that moves.
@@ -336,6 +350,18 @@ private fun GroupCallScreen(
                         )
                     }
                 }
+                // The routing menu keeps the one-to-one screen's own rule -- offered only where the
+                // phone listed more than one route -- and sits after the camera controls rather
+                // than among them, because where the call is played is not a property of what it
+                // carries: a voice seat gets it exactly as a video one does.
+                if (outputs.size > 1) {
+                    AudioRouteButton(
+                        outputs = outputs,
+                        chosenOutput = chosenOutput,
+                        onChooseOutput = onChooseOutput,
+                        size = 64.dp,
+                    )
+                }
                 GroupCallActionButton(
                     glyph = "✕",
                     label = if (call.phase == GroupCallPhase.Joining) {
@@ -481,10 +507,13 @@ private fun GroupCallErrorCard(message: String, onDismiss: () -> Unit) {
 }
 
 /**
- * One circular action button: a glyph on a colored disc, the call surface's own shape. The glyphs
- * are emoji characters, not an icon font -- the app's own rule, and the web overlay's -- so this
- * screen ships with no asset of its own. The [label] never shows on screen; it is what a screen
- * reader says.
+ * This screen's own control disc: the shared one at the size this overlay uses.
+ *
+ * The size is the whole difference and it is deliberate. The one-to-one call's control row is the
+ * only row on its screen and takes the larger disc; this overlay holds a roster, a column of tiles
+ * and a row of controls at once, and the denser disc is what keeps that row from crowding the
+ * tiles above it. Everything else -- the glyph, the label a screen reader reads, the disc itself --
+ * is the same control, because it is the same product.
  */
 @Composable
 private fun GroupCallActionButton(
@@ -494,15 +523,12 @@ private fun GroupCallActionButton(
     contentColor: Color,
     onClick: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .size(64.dp)
-            .clip(CircleShape)
-            .background(background)
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = label },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text = glyph, color = contentColor, fontSize = MigoGlyph.control)
-    }
+    ActionDisc(
+        glyph = glyph,
+        label = label,
+        background = background,
+        contentColor = contentColor,
+        onClick = onClick,
+        size = 64.dp,
+    )
 }
