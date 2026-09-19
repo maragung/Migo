@@ -63,7 +63,10 @@ function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): Virtual
           : Promise.resolve({ userId: `acct-${index}` });
       },
     },
-    startConversation: (kind: ConversationKind, members: readonly unknown[]) => {
+    // Bound but unused: the double records that a conversation was started and who it addressed,
+    // and the pair setup only ever opens Direct ones — the kind is asserted where it belongs, in
+    // the scenario tests, rather than re-asserted here through a parameter this file never reads.
+    startConversation: (_kind: ConversationKind, members: readonly unknown[]) => {
       timeline.push(`start:${index}`);
       hooks.onStart?.(members);
       return hooks.startFails
