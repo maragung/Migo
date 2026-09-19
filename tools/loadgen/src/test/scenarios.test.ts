@@ -27,7 +27,7 @@ import {
   TransportError,
 } from '@migo/sdk';
 
-import type { CallInviteResult } from '@migo/sdk';
+import type { CallInviteResult, Id } from '@migo/sdk';
 
 import { Logger } from '../logger.js';
 import { RunContext } from '../run-context.js';
@@ -129,13 +129,16 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
       // to tell a ring from a refusal, and a resolved-nothing invite hands it `undefined`, which
       // is `!== 0` and therefore reads as a refusal — the pair's invite was tallied as an error
       // and the whole walking-pair test failed on `call-invite ok 0 !== 1`. The status is the
-      // measurement, so the double has to carry it.
+      // measurement, so the double has to carry it. The parameter is `Id` rather than `string`
+      // for the same reason: `Id` is a branded string, so a plain one is not assignable to the
+      // result the annotation promises — which is what the build said, one commit after the test
+      // this annotation was added to fix.
       invite: (
-        _conversationId: string,
-        _calleeId: string,
+        _conversationId: Id,
+        _calleeId: Id,
         _mediaKind: number,
         _offer: Uint8Array,
-        callId: string,
+        callId: Id,
       ): Promise<CallInviteResult> => {
         hooks.onInvite?.(callId);
         if (hooks.inviteFails) return Promise.reject(new TransportError('invite refused'));
