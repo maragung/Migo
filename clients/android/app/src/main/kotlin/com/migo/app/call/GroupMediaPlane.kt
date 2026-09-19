@@ -3,7 +3,13 @@ package com.migo.app.call
 import android.content.Context
 import com.migo.core.MigoClient
 import com.migo.core.domain.GroupCallSeat
+import com.migo.core.domain.IceCandidateJson
+import com.migo.core.domain.SdpDescription
 import com.migo.core.domain.Subscription
+import com.migo.core.domain.decodeIceBatch
+import com.migo.core.domain.decodeSdpDescription
+import com.migo.core.domain.encodeIceBatch
+import com.migo.core.domain.encodeSdpDescription
 import com.migo.core.protocol.CallIce
 import com.migo.core.protocol.CallSdp
 import com.migo.core.protocol.TurnServer
@@ -644,7 +650,11 @@ class GroupMediaPlane(
                 }
                 if (link.epoch != epoch) {
                     stale.add(link)
-                } else if (link.dialer && !link.dialed) {
+                } else if (link.dialer && !link.dialed && !link.localSet && !link.remoteSet) {
+                    // Never a second description: a link that has offered once is waiting on its
+                    // answer, and a link that has a description in play at all -- an answerer's,
+                    // made when a peer's offer crossed its roster -- is negotiating as the other
+                    // side of the pair, whatever the roster went on to say about who dials.
                     redial.add(link)
                 }
             }
@@ -703,8 +713,8 @@ class GroupMediaPlane(
     /** Sends one description to a link, sealed under the call's frame key. */
     private fun sendDescription(link: Link, description: SessionDescription) {
         val call = callId ?: return
-        val plaintext = encodeGroupMediaFrame(
-            GroupMediaFrame.Description(description.type.canonicalForm(), description.description),
+        val plaintext = encodeSdpDescription(
+            SdpDescription(description.type.canonicalForm(), description.description),
         )
         // No key yet is the ordinary state of a link that was built the moment the roster landed:
         // the join's answer is still crossing. The frame is dropped rather than queued, because a
@@ -778,28 +788,77 @@ class GroupMediaPlane(
      */
     private fun handleSealedSdp(relay: CallSdp) {
         val call = callId ?: return
-        if (relay.callId != call) {
+        // Addressed relays, the same reading the key domain gives the same opcode: a frame naming
+        // another device is a sibling's mail, and only a frame naming this one is a link's.
+        if (relay.callId != call || relay.toDevice != ownDeviceId) {
             return
         }
-        val link = synchronized(lock) { linksByDevice[relay.fromDevice] } ?: return
         val opened = client.groupCallKeys.openFrame(call, relay.sealedSdp) ?: return
-        val frame = decodeGroupMediaFrame(opened) as? GroupMediaFrame.Description ?: return
-        // The signature is exact, so anything else under this key -- a candidate batch that
-        // overtook its description, or a future shape -- is not a description and is dropped
-        // rather than half-read.
-        receiveDescription(link, frame.type, frame.sdp)
+        // The bytes under this key are a *description*: candidates ride their own opcode, so the
+        // two shapes never share a channel and nothing here has to guess which arrived. What the
+        // decoder refuses is a shape this build does not know -- a future description type, or a
+        // member's malformed frame -- and it is dropped rather than half-applied.
+        val description = runCatching { decodeSdpDescription(opened) }.getOrNull() ?: return
+        val link = linkFor(relay.fromDevice, description.type) ?: return
+        receiveDescription(link, description.type, description.sdp)
+    }
+
+    /**
+     * The link a relay from one device belongs to, building it when an offer arrives first.
+     *
+     * A link is built from the roster, and the roster reaches the two sides of a link on
+     * different frames: the dialer learns the seat from the conversation's announcement and the
+     * answerer from the same announcement one device later, so an offer can cross a seat's
+     * arrival. Dropping it would not be a retry but a dead link -- the dialer has already offered
+     * and nothing on either side offers again -- so an offer for a seat this device knows and has
+     * not built yet builds the link here, on the answerer's side of it, which is what the web
+     * build does for the same reason.
+     *
+     * A link made this way answers and never dials, whatever the roster says about who should
+     * have: the peer's offer is already here, and a link that went on to offer after answering
+     * would put a second description on the wire that no side is waiting for. Two things keep
+     * that: the flag is cleared below, and [reconcile] offers only on a link that has never
+     * negotiated at all -- which covers the roster *changing its mind*, the transient
+     * disagreement between two concurrent joins' projections that also produces glare. Where the
+     * roster names this device the dialer, the glare rule decides, exactly as it does for a link
+     * that was already built.
+     */
+    private fun linkFor(device: Id, type: String): Link? {
+        synchronized(lock) { linksByDevice[device] }?.let { return it }
+        if (type != "offer") {
+            return null
+        }
+        val roster = seats
+        val seat = roster.firstOrNull { it.deviceId == device } ?: return null
+        if (dialsRemote(roster, accountId, device) && iKeepMyOffer(ownDeviceId, device)) {
+            return null
+        }
+        val built = runCatching { newLink(seat, roster.size - 1) }.getOrNull() ?: return null
+        built.dialer = false
+        synchronized(lock) {
+            // A tick that built the same link between the lookup above and here wins: the link
+            // this call made is the duplicate, and closing it is what keeps one connection per
+            // seat.
+            val existing = linksByDevice.putIfAbsent(device, built)
+            if (existing != null) {
+                closeLink(built)
+                return existing
+            }
+        }
+        openLink(built)
+        return built
     }
 
     private fun handleSealedIce(relay: CallIce) {
         val call = callId ?: return
-        if (relay.callId != call) {
+        if (relay.callId != call || relay.toDevice != ownDeviceId) {
             return
         }
         val link = synchronized(lock) { linksByDevice[relay.fromDevice] } ?: return
         val opened = client.groupCallKeys.openFrame(call, relay.sealedCandidates) ?: return
-        val frame = decodeGroupMediaFrame(opened) as? GroupMediaFrame.Candidates ?: return
-        for (candidate in frame.candidates) {
-            val ice = IceCandidate(candidate.sdpMid, candidate.sdpMLineIndex, candidate.candidate)
+        val candidates = runCatching { decodeIceBatch(opened) }.getOrNull() ?: return
+        for (candidate in candidates) {
+            val ice = IceCandidate(candidate.sdpMid, candidate.sdpMLineIndex, candidate.candidate ?: "")
             // A candidate that arrives before the peer's description has nowhere to attach: the
             // stack refuses it and the pair is never tried. Held rather than dropped, and applied
             // the moment the description lands -- which is the same discipline the one-to-one plane
@@ -854,10 +913,14 @@ class GroupMediaPlane(
             link.iceBatch.clear()
             copy
         }
-        val plaintext = encodeGroupMediaFrame(
-            GroupMediaFrame.Candidates(
-                batch.map { GroupIceCandidate(it.sdpMid ?: "", it.sdpMLineIndex, it.sdp) },
-            ),
+        val plaintext = encodeIceBatch(
+            batch.map {
+                IceCandidateJson(
+                    candidate = it.sdp,
+                    sdpMid = it.sdpMid,
+                    sdpMLineIndex = it.sdpMLineIndex,
+                )
+            },
         )
         val sealed = client.groupCallKeys.sealFrame(call, plaintext)
         if (sealed == null) {
