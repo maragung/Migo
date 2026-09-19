@@ -8,9 +8,10 @@
  * cryptographically independent, just as separate devices are.
  */
 
-import { MigoClient, Platform, BandwidthMode, serverEndpointFromUrl } from '@migo/sdk';
+import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
 import type { ConnectionState, Id, WireBytes } from '@migo/sdk';
 
+import { clientEndpoint } from './config.js';
 import type { Config } from './config.js';
 
 export interface VirtualUserDeps {
@@ -56,7 +57,10 @@ export class VirtualUser {
     this.#config = deps.config;
     this.#passphrase = deps.passphrase;
     this.client = MigoClient.create({
-      server: serverEndpointFromUrl(deps.config.apiUrl),
+      // Built from both URLs rather than from `apiUrl` alone: see `clientEndpoint`. The SDK's
+      // own derivation reads a loopback `http://` origin as the split-port dev pair, which is
+      // not the single-port node these harnesses start.
+      server: clientEndpoint(deps.config),
       deviceDisplayName: `loadgen/${deps.runTag}/${index}`,
       requestTimeoutMs: deps.config.requestTimeoutMs,
       hello: {

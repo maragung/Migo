@@ -9,6 +9,9 @@
  * refused to start.
  */
 
+import { serverEndpointFromUrl } from '@migo/sdk';
+import type { ServerEndpoint, WsScheme } from '@migo/sdk';
+
 import type { LogLevel } from './logger.js';
 
 export interface Config {
@@ -125,6 +128,68 @@ function deriveGatewayUrl(apiUrl: string): string {
   return url.toString();
 }
 
+/**
+ * The {@link ServerEndpoint} the virtual users dial — built from both URLs, not from `apiUrl` alone.
+ *
+ * This exists because `serverEndpointFromUrl` cannot be handed a loopback REST URL and be expected to
+ * guess right. Its rule is the *dev pair*: on a loopback host a plain `http://` origin is assumed to
+ * be the two-listener development shape, so the gateway moves to `rest + 1`. That is the correct
+ * reading of `http://localhost:18080` for a developer running the dev pair, and the wrong reading of
+ * every node this tool is pointed at: both load harnesses start a single `migod` that serves `/ws`
+ * on the one port it binds (`MIGO_HTTP__BIND=127.0.0.1:$NODE_PORT`, `--api-url
+ * http://localhost:$NODE_PORT`), so the derived gateway port was one nothing listens on and every
+ * virtual user's WebSocket was refused before a single session existed. The run then measured a node
+ * it never reached: zero frames in, zero sessions live, an error rate of zero over a denominator of
+ * zero, and — because nothing was left holding the event loop — an exit status of zero.
+ *
+ * So the gateway is not derived here; it is read off {@link Config.gatewayUrl}, which the CLI or the
+ * environment has already resolved to a URL naming an actual listener. `--gateway-url` therefore
+ * governs the run instead of merely describing it in the report, and the port the report prints is
+ * the port the sockets went to. The same explicit override the e2e harness applies, for the same
+ * reason, against the same single-port node.
+ *
+ * The endpoint type carries one host, so the three ways a gateway URL could ask for something this
+ * shape cannot say are refused rather than quietly replaced: another host would dial the API host
+ * while the report said otherwise, a non-WebSocket scheme has no transport here, and a path other
+ * than `/ws` cannot be honoured because the SDK does not let callers choose the gateway path. A load
+ * run against the wrong target is worse than one that refused to start — the module's own rule.
+ */
+export function clientEndpoint(config: Config): ServerEndpoint {
+  const endpoint = serverEndpointFromUrl(config.apiUrl);
+  let gateway: URL;
+  try {
+    gateway = new URL(config.gatewayUrl);
+  } catch {
+    throw new ConfigError(`--gateway-url is not a valid URL: ${config.gatewayUrl}`);
+  }
+  if (gateway.protocol !== 'ws:' && gateway.protocol !== 'wss:') {
+    throw new ConfigError(
+      `--gateway-url must be a ws:// or wss:// URL, got "${config.gatewayUrl}" — the SDK's only ` +
+        'realtime transport in this build is a WebSocket',
+    );
+  }
+  const gatewayHost = gateway.hostname.toLowerCase();
+  if (gatewayHost !== endpoint.host) {
+    throw new ConfigError(
+      `--gateway-url names host "${gatewayHost}" while --api-url names "${endpoint.host}"; a server ` +
+        'endpoint has one host, so this run cannot dial a gateway on a different one — point both ' +
+        'flags at the same node',
+    );
+  }
+  if (gateway.pathname !== '/' && gateway.pathname !== '/ws') {
+    throw new ConfigError(
+      `--gateway-url has path "${gateway.pathname}"; the SDK dials the gateway at "/ws" and does ` +
+        'not let callers choose the path, so this URL would be silently rewritten to the one the ' +
+        'server answers',
+    );
+  }
+  const scheme: WsScheme = gateway.protocol === 'wss:' ? 'Wss' : 'Ws';
+  const portText = gateway.port;
+  const gatewayPort =
+    portText === '' ? (scheme === 'Wss' ? 443 : 80) : Number.parseInt(portText, 10);
+  return { ...endpoint, gatewayPort, scheme };
+}
+
 function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
   if (raw === undefined) return fallback;
   const value = Number(raw);
@@ -208,7 +273,8 @@ OPTIONS
   --rate <n>                 per-VU operations per second; 0 = as fast as possible (default: 5)
   --connect-concurrency <n>  max simultaneous registrations while ramping up (default: 20)
   --api-url <url>            server REST base (default: $MIGO_API_URL or http://localhost:8080)
-  --gateway-url <url>        realtime gateway (default: derived from --api-url, path /ws)
+  --gateway-url <url>        realtime gateway the sessions dial; must name the same host as
+                             --api-url and the path /ws (default: --api-url's port, /ws)
   --app-version <v>          version presented in the client hello (default: 0.1.0)
   --locale <l>               account locale (default: en-US)
   --country <c>              account country (default: ID)
