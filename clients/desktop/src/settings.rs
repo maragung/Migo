@@ -209,8 +209,6 @@ impl Settings {
             voice_speed: None,
             call_microphone: None,
             call_speaker: None,
-            call_microphone: None,
-            call_speaker: None,
         }
     }
 

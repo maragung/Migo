@@ -802,11 +802,11 @@ fn pick_device(
         egui::vec2(ui.available_width(), 0.0),
         Layout::top_down(Align::Min).with_cross_justify(true),
         |ui| {
-            if device_row(ui, "System default", chosen.is_none()) {
+            if call_device_row(ui, "System default", chosen.is_none()) {
                 picked = Picked::System;
             }
             for device in devices {
-                if device_row(ui, &device.label, chosen == Some(device.id.as_str())) {
+                if call_device_row(ui, &device.label, chosen == Some(device.id.as_str())) {
                     picked = Picked::Device(device.id.clone());
                 }
             }
@@ -841,8 +841,14 @@ fn pick_device(
     picked
 }
 
-/// One row of a picker: a device's name, and whether it is the one standing.
-fn device_row(ui: &mut Ui, label: &str, selected: bool) -> bool {
+/// One row of a call-device picker: a device's name, and whether it is the one standing.
+///
+/// Named for the pane rather than for the row, because this file already has a `device_row` and
+/// the two are different things entirely: that one is a line of the *account's* device list, with
+/// a revoke button beside it, and this one is a name in a picker that answers a question about
+/// audio. Two functions with one name would compile as a redefinition, and the compiler would be
+/// right to refuse — nothing about the call sites tells them apart.
+fn call_device_row(ui: &mut Ui, label: &str, selected: bool) -> bool {
     ui.add(
         egui::Button::new(RichText::new(label).font(egui::FontId::proportional(font::BODY)))
             .selected(selected)

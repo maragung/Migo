@@ -104,7 +104,9 @@ mod platform {
                     _ => format!("plughw:{},{}", pcm.card, pcm.device),
                 },
                 label: match cards.get(&pcm.card).map(|card| card.label.as_str()) {
-                    Some(card) if !card.label.is_empty() => format!("{card} \u{2014} {}", pcm.name),
+                    Some(label) if !label.is_empty() => {
+                        format!("{label} \u{2014} {}", pcm.name)
+                    }
                     _ => pcm.name.clone(),
                 },
             })
