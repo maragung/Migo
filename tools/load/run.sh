@@ -37,6 +37,24 @@ if [ ! -x "$MIGOD_BIN" ]; then
   exit 1
 fi
 
+# "30s" / "2m" -> milliseconds, or 0 when the spelling is not one of those. A zero disables the
+# duration half of the report check rather than failing a run over a unit nobody supports.
+duration_ms() {
+  local spec="${1:-}"
+  local value="${spec%[sm]}"
+  case "$spec" in
+    *s | *m) ;;
+    *) printf '0'; return ;;
+  esac
+  case "$value" in
+    '' | *[!0-9]*) printf '0'; return ;;
+  esac
+  case "$spec" in
+    *s) printf '%s' "$((value * 1000))" ;;
+    *m) printf '%s' "$((value * 60000))" ;;
+  esac
+}
+
 LOADGEN="$REPO_ROOT/tools/loadgen/dist/main.js"
 if [ ! -f "$LOADGEN" ]; then
   echo "loadgen not built at $LOADGEN; build it with:" >&2
@@ -140,6 +158,19 @@ if [ "$LOAD_STATUS" -ne 0 ]; then
   echo "==> tail of the node's log ($NODE_LOG):" >&2
   tail -n 60 "$NODE_LOG" >&2
   exit "$LOAD_STATUS"
+fi
+
+# A zero exit is still not a verdict, so the report is read back and asked the questions the exit
+# status cannot answer: did the run finish, did it hold its duration, did the sessions open. Before
+# this, loadgen could leave with 0 having written nothing — the loop drains, Node exits with its
+# default code — and the gate recorded a pass for a run that never happened.
+if ! node "$HERE/check-report.mjs" "$REPORT_FILE" \
+  --expect-vus "$LOAD_VUS" \
+  --requested-ms "$(duration_ms "$LOAD_DURATION")"; then
+  echo "==> loadgen exited 0 but the run did not happen" >&2
+  echo "==> tail of the node's log ($NODE_LOG):" >&2
+  tail -n 60 "$NODE_LOG" >&2
+  exit 1
 fi
 
 # The contract the run cannot see from inside: the node it hammered must still

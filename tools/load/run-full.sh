@@ -243,37 +243,96 @@ report_memory_per_session() {
   fi
 }
 
+# "90s" / "2m" -> milliseconds, or 0 when the spelling is not one of those. A zero disables the
+# duration half of the report check rather than failing a step over a unit nobody supports.
+duration_ms() {
+  local spec="${1:-}"
+  local value="${spec%[sm]}"
+  case "$spec" in
+    *s | *m) ;;
+    *) printf '0'; return ;;
+  esac
+  case "$value" in
+    '' | *[!0-9]*) printf '0'; return ;;
+  esac
+  case "$spec" in
+    *s) printf '%s' "$((value * 1000))" ;;
+    *m) printf '%s' "$((value * 60000))" ;;
+  esac
+}
+
 FAILED_STEPS=""
 FIRST_FAILURE=0
 
 # Runs one loadgen step, prints its report and the node metrics, records the verdict.
+#
+# The verdict is not the exit status. loadgen leaves with 0 both when a run finished and when it
+# ended without finishing at all — the event loop drains mid-`await`, Node exits with its default
+# code, nothing reaches stdout — so the step's own report is read back and checked against what the
+# step asked for (check-report.mjs). Without that, this function reported six passes for six runs
+# that never happened: steps declaring ninety to a hundred and twenty seconds finishing in one to
+# seventeen, every report file empty, and not one session ever connected or `/health` ever seeing a
+# live gateway session. The elapsed time is printed either way, because a pass in two seconds is the
+# shape the old defect took and it should be legible at a glance.
 run_step() {
   local step="$1"
   shift
   echo ""
   echo "==> step: $step"
   echo "    $*"
+
+  # Read out of the step's own command line rather than passed separately, so a call site cannot
+  # drift from what loadgen was actually asked to do.
+  local expect_vus="0" requested_ms="0" previous="" arg
+  for arg in "$@"; do
+    case "$previous" in
+      --vus) expect_vus="$arg" ;;
+      --duration) requested_ms="$(duration_ms "$arg")" ;;
+    esac
+    previous="$arg"
+  done
+
   local report="$WORK_DIR/reports/$step.json"
-  local status
+  local errors="$WORK_DIR/reports/$step.err"
+  local started status elapsed
+  started="$(date +%s)"
   set +e
   node "$LOADGEN" \
     --api-url "http://localhost:$NODE_PORT" \
     --max-error-rate "$ERROR_BUDGET" \
     --output json \
     "$@" \
-    >"$report"
+    >"$report" \
+    2>"$errors"
   status=$?
   set -e
+  elapsed=$(( $(date +%s) - started ))
+
   cat "$report"
+  cat "$errors" >&2
   print_metrics "$step"
+
+  local reason=""
   if [ "$status" -ne 0 ]; then
-    echo "==> step '$step' FAILED (loadgen exit $status)" >&2
+    reason="loadgen exit $status"
+  elif ! node "$HERE/check-report.mjs" "$report" \
+    --expect-vus "$expect_vus" \
+    --requested-ms "$requested_ms"; then
+    reason="loadgen exited 0 but the run did not happen"
+  fi
+
+  if [ -n "$reason" ]; then
+    echo "==> step '$step' FAILED after ${elapsed}s ($reason)" >&2
+    echo "==> loadgen's own diagnostics ($errors):" >&2
+    tail -n 40 "$errors" >&2
     echo "==> tail of the node's log ($NODE_LOG):" >&2
     tail -n 60 "$NODE_LOG" >&2
     FAILED_STEPS="$FAILED_STEPS $step"
-    if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=$status; fi
+    if [ "$FIRST_FAILURE" -eq 0 ]; then
+      if [ "$status" -ne 0 ]; then FIRST_FAILURE=$status; else FIRST_FAILURE=1; fi
+    fi
   else
-    echo "==> step '$step' passed"
+    echo "==> step '$step' passed (${elapsed}s)"
   fi
 }
 
@@ -355,13 +414,34 @@ for _ in $(seq 1 600); do
   sleep 0.5
 done
 if [ "$MARKER_SEEN" -ne 1 ]; then
-  echo "==> outage step never reached steady state; tail of loadgen stderr:" >&2
-  tail -n 40 "$OUTAGE_ERR" >&2
+  # Say which of the two ways it failed before saying anything else: a loadgen that already exited
+  # is a different fault from one still running and stuck, and the old message could not tell them
+  # apart. Everything needed to tell is dumped here — the whole of stderr (it is short: a run that
+  # never reaches steady state has said almost nothing), whatever part of the report was written,
+  # and the node log, which is the only place the server's own view of the run appears. The previous
+  # version printed forty lines of one of those three and left the failure undiagnosable.
+  echo "==> outage step never reached steady state" >&2
+  if kill -0 "$LOADGEN_PID" 2>/dev/null; then
+    echo "==> loadgen (pid $LOADGEN_PID) is still running; killing it" >&2
+  else
+    echo "==> loadgen exited before reaching steady state" >&2
+  fi
   kill "$LOADGEN_PID" 2>/dev/null || true
-  wait "$LOADGEN_PID" 2>/dev/null || true
+  set +e
+  wait "$LOADGEN_PID"
+  OUTAGE_STATUS=$?
+  set -e
   LOADGEN_PID=""
+  echo "==> loadgen exit $OUTAGE_STATUS; its stderr in full ($OUTAGE_ERR):" >&2
+  cat "$OUTAGE_ERR" >&2
+  echo "==> its report, if any ($OUTAGE_REPORT):" >&2
+  if [ -s "$OUTAGE_REPORT" ]; then cat "$OUTAGE_REPORT" >&2; else echo "    (empty)" >&2; fi
+  echo "==> tail of the node's log ($NODE_LOG):" >&2
+  tail -n 60 "$NODE_LOG" >&2
   FAILED_STEPS="$FAILED_STEPS outage"
-  if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=1; fi
+  if [ "$FIRST_FAILURE" -eq 0 ]; then
+    if [ "$OUTAGE_STATUS" -ne 0 ]; then FIRST_FAILURE=$OUTAGE_STATUS; else FIRST_FAILURE=1; fi
+  fi
 else
   sleep "$OUTAGE_KILL_AFTER"
   echo "==> killing the node (SIGKILL, pid $NODE_PID)"
@@ -378,12 +458,25 @@ else
   cat "$OUTAGE_REPORT"
   tail -n 5 "$OUTAGE_ERR" || true
   print_metrics outage
+  # The same report check the other five steps get, for the same reason: a zero exit is not a
+  # verdict. The duration asked for is split across the settle windows, so only the connected count
+  # and the finish are asserted here — a run that reached the marker has already shown it started.
+  OUTAGE_REASON=""
   if [ "$OUTAGE_STATUS" -ne 0 ]; then
-    echo "==> step 'outage' FAILED (loadgen exit $OUTAGE_STATUS)" >&2
+    OUTAGE_REASON="loadgen exit $OUTAGE_STATUS"
+  elif ! node "$HERE/check-report.mjs" "$OUTAGE_REPORT" --expect-vus "$OUTAGE_VUS"; then
+    OUTAGE_REASON="loadgen exited 0 but the run did not happen"
+  fi
+  if [ -n "$OUTAGE_REASON" ]; then
+    echo "==> step 'outage' FAILED ($OUTAGE_REASON)" >&2
+    echo "==> loadgen's own diagnostics ($OUTAGE_ERR):" >&2
+    tail -n 40 "$OUTAGE_ERR" >&2
     echo "==> tail of the node's log ($NODE_LOG):" >&2
     tail -n 60 "$NODE_LOG" >&2
     FAILED_STEPS="$FAILED_STEPS outage"
-    if [ "$FIRST_FAILURE" -eq 0 ]; then FIRST_FAILURE=$OUTAGE_STATUS; fi
+    if [ "$FIRST_FAILURE" -eq 0 ]; then
+      if [ "$OUTAGE_STATUS" -ne 0 ]; then FIRST_FAILURE=$OUTAGE_STATUS; else FIRST_FAILURE=1; fi
+    fi
   else
     echo "==> step 'outage' passed"
   fi
