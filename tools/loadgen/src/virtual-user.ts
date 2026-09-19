@@ -9,7 +9,7 @@
  */
 
 import { MigoClient, Platform, BandwidthMode, serverEndpointFromUrl } from '@migo/sdk';
-import type { Id, WireBytes } from '@migo/sdk';
+import type { ConnectionState, Id, WireBytes } from '@migo/sdk';
 
 import type { Config } from './config.js';
 
@@ -20,6 +20,13 @@ export interface VirtualUserDeps {
   readonly runTag: string;
   /** Sink for inbound event-handling errors, surfaced by the client off the request path. */
   readonly onEventError: (error: unknown) => void;
+  /**
+   * Sink for the SDK transport's connection-state transitions, passed straight through to
+   * {@link MigoClient}. Loadgen reads it only to say where a stalled run had got to: a run that
+   * drains mid-connect fails identically whether it never opened a socket or opened one and never
+   * finished the handshake, and those are different bugs.
+   */
+  readonly onStateChange: (state: ConnectionState) => void;
 }
 
 export class VirtualUser {
@@ -59,6 +66,7 @@ export class VirtualUser {
         bandwidthMode: BandwidthMode.Normal,
       },
       onEventError: deps.onEventError,
+      onStateChange: deps.onStateChange,
     });
   }
 

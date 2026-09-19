@@ -64,7 +64,14 @@ export async function run(
   log.info(`building ${config.vus} virtual users for scenario "${scenario.name}"`);
   const vus = Array.from(
     { length: config.vus },
-    (_unused, index) => new VirtualUser(index, { config, passphrase, runTag, onEventError }),
+    (_unused, index) =>
+      new VirtualUser(index, {
+        config,
+        passphrase,
+        runTag,
+        onEventError,
+        onStateChange: (state) => tracker.observeState(state),
+      }),
   );
 
   // Open-ended deadline for the connect phase; the real one is set just before steady state.
@@ -81,9 +88,11 @@ export async function run(
         await vu.start();
         metrics.latency('connect').record(performance.now() - started);
         metrics.recordOk('connect');
+        tracker.observeConnect(true);
         log.debug(`VU ${vu.index} connected`);
       } catch (error) {
         metrics.recordError('connect', classifyError(error), describeError(error));
+        tracker.observeConnect(false);
         log.debug(`VU ${vu.index} failed to connect: ${describe(error)}`);
       }
     });

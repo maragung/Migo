@@ -36,3 +36,25 @@ test('the stall message names the phase, the await, and the drained loop', () =>
   );
   assert.equal(messages.size, 6);
 });
+
+test('the evidence clause says how far the virtual users got', () => {
+  const tracker = new PhaseTracker();
+  // The empty tracker is the loudest case: nothing ever reached the gateway, so the stall is before
+  // the first session rather than inside one — and a bare phase name cannot say that.
+  assert.match(tracker.snapshot(), /Not one virtual user reached the gateway/);
+
+  tracker.observeState('connecting');
+  tracker.observeState('connecting');
+  tracker.observeConnect(false);
+  const message = stallMessage(tracker.phase, tracker.snapshot());
+  assert.match(message, /0 virtual user\(s\) had finished connecting and 1 had failed/);
+  assert.match(message, /connecting x2/);
+  // The evidence is appended, never swapped in: the phase sentence is what makes the exit code mean
+  // anything, and a reader who only gets the tally still cannot tell a stall from a slow run.
+  assert.match(message, /event loop is now empty/);
+});
+
+test('the evidence clause is omitted when there is none, with no dangling separator', () => {
+  assert.equal(stallMessage('preparing'), stallMessage('preparing', ''));
+  assert.doesNotMatch(stallMessage('preparing'), /\s$/);
+});

@@ -34,6 +34,9 @@ const CONFIG: Config = {
   logLevel: 'normal',
 };
 
+/** The stand-in the helper hands the VU as its transport-state sink, so tests can assert on it. */
+const STATE_PROBE = (): void => {};
+
 /** Construct a VirtualUser with the SDK factory stubbed, returning the VU and the captured options. */
 function buildWithStubbedClient(
   index: number,
@@ -55,12 +58,18 @@ function buildWithStubbedClient(
       passphrase: 'pw',
       runTag: 'tag42',
       onEventError: () => {},
+      onStateChange: STATE_PROBE,
     });
     return { vu, created, client };
   } finally {
     (MigoClient as unknown as { create: unknown }).create = original;
   }
 }
+
+test('the transport-state probe is handed to the SDK client, not swallowed', () => {
+  const { created } = buildWithStubbedClient(1, CONFIG);
+  assert.equal(created['onStateChange'], STATE_PROBE);
+});
 
 test('the throwaway username is prefix_runTag_index and server-legal', () => {
   assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen_tag42_3');

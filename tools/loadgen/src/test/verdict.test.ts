@@ -95,6 +95,33 @@ test('a run that connected and measured nothing is not a pass', () => {
   assert.equal(verdict.reason, 'no-measurement');
 });
 
+test('the connect scenario is measured by connecting, and nothing else is', () => {
+  // The one scenario whose work is the connect phase: ten thousand sessions held for a minute is a
+  // measurement of the server, and a rule that demanded a steady-state operation of it would reject
+  // the step the brief names first.
+  const idle = report({
+    scenario: 'connect',
+    requestedVus: 10_000,
+    connectedCount: 10_000,
+    durationMs: 60_000,
+    targetDurationMs: 60_000,
+    operations: [{ label: 'connect', ok: 10_000, errors: 0 }],
+  });
+  assert.equal(judgeReport(idle, { step: 'idle-10k', minConnected: 10_000 }).ok, true);
+  // The same report under a scenario that is supposed to do more than connect: every success in it
+  // is a lifecycle phase, so it measured nothing the step is named for.
+  const idleAsMessaging = report({
+    scenario: 'messaging',
+    durationMs: 120_000,
+    targetDurationMs: 120_000,
+    operations: [{ label: 'connect', ok: 10_000, errors: 0 }],
+  });
+  const verdict = judgeReport(idleAsMessaging, { step: 'msg-rate' });
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.reason, 'no-measurement');
+  assert.match(verdict.detail, /10000 success\(es\) in lifecycle phases and 0 at the work/);
+});
+
 test('an interrupted run is never a verdict on the window it was asked for', () => {
   const verdict = judgeReport(report({ interrupted: true }), { step: 'calls' });
   assert.equal(verdict.ok, false);

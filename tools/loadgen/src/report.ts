@@ -29,8 +29,12 @@ export interface RunOutcome {
  * Labels that name a lifecycle phase or a settle-phase verdict rather than a steady-state
  * operation with a throughput — a "calls per second" computed from verdict samples would be
  * meaningless, and a connect-phase count is not an operation rate.
+ *
+ * Exported because it is also the line `verdict.ts` draws when it asks whether a run measured the
+ * work its scenario names: for every scenario but `connect`, a report whose successes are all in
+ * these labels measured nothing but the act of connecting. One definition, because two would drift.
  */
-const PHASE_LABELS = new Set([
+export const PHASE_LABELS = new Set([
   'connect',
   'setup',
   'event',

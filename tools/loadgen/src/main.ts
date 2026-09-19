@@ -84,7 +84,7 @@ let finished = false;
 process.on('beforeExit', () => {
   if (finished) return;
   finished = true;
-  process.stderr.write(`${stallMessage(tracker.phase)}\n`);
+  process.stderr.write(`${stallMessage(tracker.phase, tracker.snapshot())}\n`);
   process.exitCode = EXIT_STALLED;
 });
 

@@ -21,6 +21,8 @@
 
 import { readFile } from 'node:fs/promises';
 
+import { PHASE_LABELS } from './report.js';
+
 /** What a step claims about itself, for {@link judgeReport} to hold the report to. */
 export interface ReportExpectations {
   /** The step's name, for the message. */
@@ -168,18 +170,35 @@ export function judgeReport(
     };
   }
   let ok = 0;
+  let phaseOk = 0;
+  let measuredOk = 0;
   for (const entry of operations as unknown[]) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const count = (entry as Record<string, unknown>)['ok'];
-    if (typeof count === 'number' && Number.isFinite(count)) ok += count;
+    const record = entry as Record<string, unknown>;
+    const count = record['ok'];
+    if (typeof count !== 'number' || !Number.isFinite(count)) continue;
+    ok += count;
+    // A lifecycle label counts that the run got as far as it did, never that the scenario ran: the
+    // connect phase succeeds in every run that opens a socket, including one that opens a socket and
+    // then does nothing else for its whole window. Only the scenario's own operations are a
+    // measurement of the scenario — except for the `connect` scenario, whose work is connecting, and
+    // which the hold ratio above and `minConnected` already hold to its real shape.
+    const label = record['label'];
+    if (typeof label === 'string' && PHASE_LABELS.has(label)) {
+      phaseOk += count;
+    } else {
+      measuredOk += count;
+    }
   }
-  if (ok === 0) {
+  const measured = scenario === 'connect' ? phaseOk : measuredOk;
+  if (measured === 0) {
     return {
       ok: false,
       reason: 'no-measurement',
       detail:
-        `step '${step}': every operation in the report counted zero successes — the run connected ` +
-        'and then did nothing, which is not a measurement of the scenario it names',
+        `step '${step}': the scenario "${scenario}" counted no successful operation of its own — ` +
+        `${phaseOk} success(es) in lifecycle phases and ${measuredOk} at the work it is named for, ` +
+        'which is a run that connected and then did nothing',
     };
   }
 

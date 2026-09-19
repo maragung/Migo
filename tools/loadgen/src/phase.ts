@@ -33,6 +33,10 @@ export type RunPhase =
  */
 export class PhaseTracker {
   #phase: RunPhase = 'building';
+  /** How many transport-state transitions ran in each direction, by state name. */
+  readonly #states = new Map<string, number>();
+  #connected = 0;
+  #failed = 0;
 
   /** Records the phase the run is entering. Monotonic by construction: the run only goes forward. */
   set(phase: RunPhase): void {
@@ -47,6 +51,49 @@ export class PhaseTracker {
   /** Whether the run reached its end. A drain after this is an ordinary exit, not a stall. */
   get finished(): boolean {
     return this.#phase === 'done';
+  }
+
+  /**
+   * Records one transport-state transition, from the SDK's own `onStateChange`.
+   *
+   * Counted as transitions, not as a census, and that is the useful reading: the states a run
+   * reports are ordered (`connecting`, then `authenticating`, then `ready`), so a tally of
+   * `connecting 20` with no `ready` says twenty sessions began their gateway handshake and not one
+   * finished it — which is a different bug, with a different owner, from a run that never got a
+   * socket at all.
+   */
+  observeState(state: string): void {
+    this.#states.set(state, (this.#states.get(state) ?? 0) + 1);
+  }
+
+  /** Records how one virtual user's connect attempt ended. */
+  observeConnect(ok: boolean): void {
+    if (ok) this.#connected += 1;
+    else this.#failed += 1;
+  }
+
+  /**
+   * How far the virtual users had got when the run stopped moving.
+   *
+   * The phase alone says which await the run was sitting on; this says what the thing behind that
+   * await had actually done by then, and the two together are the difference between "the connect
+   * phase never finished" and "the connect phase never started". An empty tracker is itself the
+   * answer in the second case, so it says so rather than listing nothing.
+   */
+  snapshot(): string {
+    if (this.#states.size === 0 && this.#connected === 0 && this.#failed === 0) {
+      return (
+        'Not one virtual user reached the gateway: no transport ever reported a state change, so ' +
+        'the run stopped before its first session left the REST bootstrap.'
+      );
+    }
+    const states = [...this.#states.entries()]
+      .map(([state, count]) => `${state} x${count}`)
+      .join(', ');
+    return (
+      `By then ${this.#connected} virtual user(s) had finished connecting and ${this.#failed} had ` +
+      `failed; transport states seen, in order of transition: ${states}.`
+    );
   }
 }
 
@@ -71,12 +118,15 @@ const WAITING_ON: Record<RunPhase, string> = {
  * exit rule cannot tell "the loop drained" from "the machine is slow", and the difference decides
  * whether the answer is a longer timeout or a bug hunt — so the message says it outright.
  */
-export function stallMessage(phase: RunPhase): string {
-  return (
+export function stallMessage(phase: RunPhase, evidence?: string): string {
+  const message =
     `loadgen: the run never finished. It was ${WAITING_ON[phase]}, and the event loop is now ` +
     'empty — no socket, no timer, and no pending I/O is keeping this process alive. That means ' +
     'an awaited step will never settle, not that the run is slow: whatever it is waiting on had ' +
     'already happened, or will never be signalled. No report was written, so this run measured ' +
-    'nothing and must not be read as a pass.'
-  );
+    'nothing and must not be read as a pass.';
+  // The evidence is optional so a caller with nothing to add prints one clean sentence rather than
+  // a trailing colon; `PhaseTracker.snapshot` always has something to say, and `main.ts` always
+  // passes it.
+  return evidence === undefined || evidence === '' ? message : `${message} ${evidence}`;
 }
