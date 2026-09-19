@@ -32,6 +32,7 @@ import com.migo.app.model.AppState
 import com.migo.app.ui.CallOverlay
 import com.migo.app.ui.GroupCallOverlay
 import com.migo.app.ui.LocalCallEglContext
+import com.migo.app.ui.LocalGroupEglContext
 import com.migo.app.ui.MigoTheme
 import com.migo.core.store.ThemeChoice
 import com.migo.core.wire.Id
@@ -235,6 +236,8 @@ private fun ChatActivityScreen(conversationId: Id, title: String, model: AppView
 internal fun SessionOverlays(model: AppViewModel, state: AppState) {
     val callState by model.callState.collectAsState()
     val groupCallState by model.groupCallState.collectAsState()
+    val groupCallLinks by model.groupCallLinks.collectAsState()
+    val groupCallLocalVideo by model.groupCallLocalVideo.collectAsState()
     val callPeerId = callState.incoming?.callerId
         ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
     val remoteVideo by model.remoteVideo.collectAsState()
@@ -310,11 +313,27 @@ internal fun SessionOverlays(model: AppViewModel, state: AppState) {
     // or failed to join. The roster's names are resolved here at the composition root, the same
     // place the call overlay resolves its peer's, and the "you" mark is the signed-in account's
     // own id.
-    GroupCallOverlay(
-        state = groupCallState,
-        names = model::displayName,
-        meId = (state as? AppState.SignedIn)?.accountId,
-        onLeave = model::leaveGroupCall,
-        onDismiss = model::dismissGroupCall,
-    )
+    // The group call's renderers need *its own* engine's GL context, which is minted with the
+    // plane's factories and only exists once the first link is built: provided here, around the
+    // overlay, so a tile drawn for that link is initialized against the context its track lives on.
+    CompositionLocalProvider(LocalGroupEglContext provides model.groupCallEglContext) {
+        GroupCallOverlay(
+            state = groupCallState,
+            names = model::displayName,
+            meId = (state as? AppState.SignedIn)?.accountId,
+            links = groupCallLinks,
+            localVideo = groupCallLocalVideo,
+            onLeave = model::leaveGroupCall,
+            onDismiss = model::dismissGroupCall,
+            onToggleMute = model::toggleGroupCallMute,
+            onToggleCamera = model::toggleGroupCallCamera,
+            // Null where the device has one camera, so the control is absent rather than present
+            // and unable to move -- the same rule the one-to-one screen's switch button keeps.
+            onSwitchCamera = if (model.callCanSwitchCamera) {
+                { model.switchGroupCallCamera() }
+            } else {
+                null
+            },
+        )
+    }
 }

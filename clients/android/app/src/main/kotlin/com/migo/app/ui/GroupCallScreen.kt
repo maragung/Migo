@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -27,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,14 +40,27 @@ import androidx.compose.ui.unit.dp
 import com.migo.app.call.ActiveGroupCall
 import com.migo.app.call.GroupCallPhase
 import com.migo.app.call.GroupCallUiState
+import com.migo.app.call.GroupLinkState
+import com.migo.app.call.qualityTierLabel
 import com.migo.core.domain.formatCallDuration
 import com.migo.core.domain.groupCallNoteLabel
 import com.migo.core.domain.mediaKindLabel
 import com.migo.core.wire.Id
 import kotlinx.coroutines.delay
+import org.webrtc.EglBase
+import org.webrtc.VideoTrack
 
 /**
- * The group-call screen: the roster, the count, and the words for every way the call can stop.
+ * The group call's own video GL context, provided by the host that composes this overlay.
+ *
+ * Separate from [LocalCallEglContext] because a group call is a second WebRTC engine with an EGL
+ * context of its own: a renderer initialized against the one-to-one plane's would be drawing
+ * through a context its tracks were never minted on.
+ */
+val LocalGroupEglContext = staticCompositionLocalOf<EglBase.Context?> { null }
+
+/**
+ * The group-call screen: the roster, the tiles, and the words for every way the call can stop.
  *
  * A port of `clients/web/src/components/group-call-overlay.tsx`. It renders over the whole shell
  * while this device holds a group-call seat (or shows why it lost one), and nothing at all
@@ -60,11 +75,15 @@ import kotlinx.coroutines.delay
  * session. None of them collapses into "call ended", because they are different facts about what
  * the user should do next.
  *
- * # No media, said honestly
+ * # The media, and what each line says about it
  *
- * This build carries the roster, not the media plane. The screen renders avatars and names and
- * says so in one dim line -- a "voice call" that silently played nothing would be the interface
- * lying about what it did.
+ * The call is a mesh ([com.migo.app.call.GroupMediaPlane]), so this screen draws one tile per link
+ * -- a seat whose camera is off is a monogram, a seat that is sending one is its picture -- beside
+ * a self-view of this device's own camera. Every tile carries its link's own state rather than the
+ * call's: a mesh has one transport per peer, and a screen that said "connected" for a call would be
+ * saying something true of no particular link. A seat that is still negotiating says so, and a seat
+ * whose link has produced a measurement says which rung it is on -- the same ladder, and the same
+ * words, the one-to-one call screen uses.
  *
  * # Back
  *
@@ -77,8 +96,16 @@ fun GroupCallOverlay(
     state: GroupCallUiState,
     names: (Id) -> String,
     meId: Id?,
+    /** One entry per other seat, as the mesh has them. Empty until the first link is built. */
+    links: List<GroupLinkState>,
+    /** This device's own camera track, for the self-view tile; null when the camera is off. */
+    localVideo: VideoTrack?,
     onLeave: () -> Unit,
     onDismiss: () -> Unit,
+    onToggleMute: () -> Unit,
+    onToggleCamera: () -> Unit,
+    /** Null where the device has one camera, so the control is absent rather than inert. */
+    onSwitchCamera: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val call = state.call
@@ -105,8 +132,16 @@ fun GroupCallOverlay(
                 call = call,
                 names = names,
                 meId = meId,
+                links = links,
+                localVideo = localVideo,
+                muted = state.muted,
+                cameraOn = state.cameraOn,
+                cameraAvailable = state.cameraAvailable,
                 onLeave = onLeave,
                 onDismiss = onDismiss,
+                onToggleMute = onToggleMute,
+                onToggleCamera = onToggleCamera,
+                onSwitchCamera = onSwitchCamera,
             )
         }
     }
@@ -123,9 +158,18 @@ private fun GroupCallScreen(
     call: ActiveGroupCall,
     names: (Id) -> String,
     meId: Id?,
+    links: List<GroupLinkState>,
+    localVideo: VideoTrack?,
+    muted: Boolean,
+    cameraOn: Boolean,
+    cameraAvailable: Boolean,
     onLeave: () -> Unit,
     onDismiss: () -> Unit,
+    onToggleMute: () -> Unit,
+    onToggleCamera: () -> Unit,
+    onSwitchCamera: (() -> Unit)?,
 ) {
+    val glContext = LocalGroupEglContext.current
     // One tick per second while seated: the duration is the only number on screen that moves.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val live = call.note == null
@@ -177,10 +221,13 @@ private fun GroupCallScreen(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
-            if (seated) {
+            if (seated && links.isNotEmpty() && links.none { it.connected || it.quality != null }) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Roster only in this build — media arrives later.",
+                    // Said only while it is the whole truth: every seat is a link, every link is
+                    // still negotiating, and a screen that stayed silent here would look like one
+                    // that had connected and found nothing to draw.
+                    text = "Connecting to ${links.size} other seat${if (links.size == 1) "" else "s"}…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -189,7 +236,8 @@ private fun GroupCallScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // The roster, in join order, one line per account. Scrollable rather than capped: a
+            // The roster, in join order, one line per account -- and, beside each seat, the state
+            // of *its* link and its picture if it is sending one. Scrollable rather than capped: a
             // group call's whole point is that the count is not two, and a roster that silently
             // truncated would be the screen lying about who is on it.
             Column(
@@ -198,27 +246,38 @@ private fun GroupCallScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // This device's own line heads the roster, and it is the one line drawn from the
+                // camera rather than from a link -- there is no link to oneself, so the roster's own
+                // entry would otherwise read "Connecting…" for the whole call. A monogram stands in
+                // while the camera is off, which is the same tile every other seat without a
+                // picture gets; drawing the picture's frame empty would claim a camera that is off.
+                val selfName = if (meId != null) names(meId) else null
+                if (seated && selfName != null) {
+                    GroupSeatTile(
+                        name = selfName,
+                        isSelf = true,
+                        video = if (cameraOn) localVideo else null,
+                        // This seat's own state is never a link's: the mesh's links are between
+                        // devices, and a self-view that reported one would be reporting a transport
+                        // it does not have.
+                        status = null,
+                        glContext = glContext,
+                    )
+                }
                 for (seat in call.seats) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Monogram(name = names(seat.userId), size = 32.dp)
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = names(seat.userId),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        if (meId != null && seat.userId == meId) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "You",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                    // Skipped where it is this device's own seat: it is the line above, drawn from
+                    // the camera, and two lines for one person would be the roster miscounting.
+                    if (meId != null && seat.userId == meId) {
+                        continue
                     }
+                    val link = links.firstOrNull { it.deviceId == seat.deviceId }
+                    GroupSeatTile(
+                        name = names(seat.userId),
+                        isSelf = false,
+                        video = link?.video,
+                        status = linkStatus(link = link, live = live),
+                        glContext = glContext,
+                    )
                 }
             }
         }
@@ -230,9 +289,53 @@ private fun GroupCallScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 48.dp),
-            horizontalArrangement = Arrangement.spacedBy(32.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             if (live) {
+                // The microphone is on every call, so its control is too. The camera is not: a call
+                // past the product's stream limit negotiated no video line, and a control that
+                // could not send anything is absent rather than present and inert.
+                GroupCallActionButton(
+                    glyph = if (muted) "🔇" else "🎙",
+                    label = if (muted) "Unmute your microphone" else "Mute your microphone",
+                    background = if (muted) {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    contentColor = if (muted) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onPrimary
+                    },
+                    onClick = onToggleMute,
+                )
+                if (cameraAvailable && call.phase == GroupCallPhase.Seated) {
+                    GroupCallActionButton(
+                        glyph = if (cameraOn) "📹" else "📷",
+                        label = if (cameraOn) "Turn your camera off" else "Turn your camera on",
+                        background = if (cameraOn) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        contentColor = if (cameraOn) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        onClick = onToggleCamera,
+                    )
+                    if (cameraOn && onSwitchCamera != null) {
+                        GroupCallActionButton(
+                            glyph = "🔄",
+                            label = "Switch camera",
+                            background = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = onSwitchCamera,
+                        )
+                    }
+                }
                 GroupCallActionButton(
                     glyph = "✕",
                     label = if (call.phase == GroupCallPhase.Joining) {
@@ -251,6 +354,98 @@ private fun GroupCallScreen(
             }
         }
     }
+}
+
+/**
+ * One seat's line: its picture where it is sending one, its monogram where it is not, its name,
+ * and the state of *its* link.
+ *
+ * The state is the link's own and never the call's. A mesh has one transport per peer, so a seat
+ * can be connected while another is still negotiating, and a line that reported the call's state
+ * would be reporting a fact about no particular link. The words are the ones the one-to-one screen
+ * already uses for the same ladder ([qualityTierLabel]), because a rung is a rung whether or not a
+ * third person is on the other end of it.
+ *
+ * A link that has produced no measurement yet says so rather than claiming a rung: the ladder is a
+ * measurement, and a tile that opened on "Full" would be claiming a link quality nobody measured.
+ */
+@Composable
+private fun GroupSeatTile(
+    name: String,
+    isSelf: Boolean,
+    video: VideoTrack?,
+    status: String?,
+    glContext: EglBase.Context?,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (video != null) {
+            VideoSurface(
+                track = video,
+                glContext = glContext,
+                modifier = Modifier
+                    .size(width = 96.dp, height = 72.dp)
+                    .clip(RoundedCornerShape(MigoRadius.md)),
+                contentDescription = "$name's video",
+            )
+        } else {
+            Box(
+                modifier = Modifier.size(width = 96.dp, height = 72.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Monogram(name = name, size = 32.dp)
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (isSelf) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "You",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            // Null where there is nothing honest to say: a note has ended the screen and the links
+            // went with it, and this seat is the one with no link at all.
+            if (status != null) {
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * What one seat's line says about its link, or null where it should say nothing.
+ *
+ * The words are the ones the one-to-one screen already uses for the same ladder
+ * ([qualityTierLabel]), because a rung is a rung whether or not a third person is on the other end
+ * of it. A link that has produced no measurement says "Connected" rather than naming a rung: a tile
+ * that opened on "Full" would be claiming a link quality nobody had measured. A link that is not
+ * there yet -- the seat arrived a moment ago -- says so instead of claiming one either way.
+ *
+ * Null once the call has a note: the links were torn down with the seat, so there is no link state
+ * left to report, and a line about a connection that is gone is the sort of thing a screen should
+ * not say.
+ */
+private fun linkStatus(link: GroupLinkState?, live: Boolean): String? = when {
+    !live -> null
+    link == null || !link.connected -> "Connecting…"
+    link.quality == null -> "Connected"
+    else -> qualityTierLabel(link.quality)
 }
 
 /**
@@ -301,7 +496,7 @@ private fun GroupCallActionButton(
 ) {
     Box(
         modifier = Modifier
-            .size(72.dp)
+            .size(64.dp)
             .clip(CircleShape)
             .background(background)
             .clickable(onClick = onClick)

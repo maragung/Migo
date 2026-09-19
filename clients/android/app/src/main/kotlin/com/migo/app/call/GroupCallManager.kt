@@ -1,5 +1,6 @@
 package com.migo.app.call
 
+import android.content.Context
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.domain.CallMediaKind
@@ -18,6 +19,7 @@ import com.migo.core.domain.placeholderSealedOffer
 import com.migo.core.domain.seatArrived
 import com.migo.core.domain.seatDeparted
 import com.migo.core.domain.seatsFromSnapshot
+import com.migo.core.protocol.TurnServer
 import com.migo.core.wire.Id
 import com.migo.core.wire.newId
 import kotlinx.coroutines.CancellationException
@@ -27,6 +29,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.webrtc.EglBase
+import org.webrtc.VideoTrack
 
 /** What a failed join says, in the web overlay's own words. */
 const val GROUP_CALL_JOIN_FAILED: String = "Could not join the group call."
@@ -44,18 +48,24 @@ const val GROUP_CALL_JOIN_FAILED: String = "Could not join the group call."
  * the session is established and closed where it ends; the screens never see the domain, only the
  * state and the action methods.
  *
- * This build renders the roster only -- media for a group call arrives in a later build, and the
- * join's offer is the sealed placeholder the protocol defines for exactly that state: a genuine
- * sealed envelope (an empty-sdp offer, sealed under a per-call key with the call id as associated
- * data), so the join is end-to-end opaque to the server from the first frame. The key is minted
- * here and kept for the call's life -- a call this device *starts*; a call it *joins* keeps no
- * minted key, because its running key arrives by the ask-and-answer below. The frame-key
- * agreement between participants is the core's
- * own domain now (section 163): a started call's minted key becomes its epoch-0 frame key, a
- * joined call's first key is the running one a seated participant hands over, and the manager
- * below fires the domain's triggers on roster movement -- every join, departure and
- * mid-call ask re-keys the call exactly as the section requires -- which is also why the roster
- * has no media to attach to it yet: the keys are agreed before the plane that would use them.
+ * The media itself is [GroupMediaPlane]'s: a full mesh, one WebRTC connection per other seat,
+ * dialed and sealed under the call's frame key exactly as section 165 requires and section 163's key
+ * agreement makes possible. This class owns the roster and the four endings; the plane owns the
+ * connections, and the two meet in three places -- the seat list the roster folds is the seat list
+ * the plane builds links from, the relays the join reply carries are the relays its links are built
+ * over, and the frame-key rotations the roster's movement triggers are what make a link that has not
+ * finished negotiating rebuild itself under the key that actually stands.
+ *
+ * The join's offer is still the sealed placeholder the protocol defines for a roster-only join: a
+ * genuine sealed envelope (an empty-sdp offer, sealed under a per-call key with the call id as
+ * associated data), so the join stays end-to-end opaque to the server from the first frame, and the
+ * media descriptions that matter are relayed seat to seat afterwards. The key is minted here and
+ * kept for the call's life -- a call this device *starts*; a call it *joins* keeps no minted key,
+ * because its running key arrives by the ask-and-answer below. The frame-key agreement between
+ * participants is the core's own domain (section 163): a started call's minted key becomes its
+ * epoch-0 frame key, a joined call's first key is the running one a seated participant hands over,
+ * and the manager below fires the domain's triggers on roster movement -- every join, departure and
+ * mid-call ask re-keys the call exactly as the section requires.
  *
  * # The join's two halves
  *
@@ -79,6 +89,8 @@ const val GROUP_CALL_JOIN_FAILED: String = "Could not join the group call."
  * "continued on another device" and then "you left the call" is narrating two different calls.
  */
 class GroupCallManager(
+    /** The application context, which is what the media plane's engine is built against. */
+    private val context: Context,
     private val client: MigoClient,
     private val accountId: Id,
     /** This session's own device, the second half of the moved-to-another-device test. */
@@ -92,6 +104,28 @@ class GroupCallManager(
      */
     private val closingScope: CoroutineScope,
 ) {
+    /**
+     * The mesh: one connection per other seat, and this device's own tracks on all of them.
+     *
+     * Declared before the state it is published through, because the screen reads the plane's flows
+     * through this class rather than reaching past it -- a screen that held the plane itself could
+     * outlive the call it belongs to.
+     */
+    private val media = GroupMediaPlane(context, client, accountId, ownDeviceId, scope)
+
+    /** One entry per other seat, in the order the plane built the links. */
+    val mediaLinks: StateFlow<List<GroupLinkState>> = media.links
+
+    /** This device's own camera track, for the call screen's self-view. */
+    val localVideo: StateFlow<VideoTrack?> = media.localVideo
+
+    /** The GL context the call screen's renderers must be initialized against. */
+    val eglContext: EglBase.Context?
+        get() = media.eglContext
+
+    /** The TURN relays the join reply carried, kept for every link built afterwards. */
+    @Volatile private var joinRelays: List<TurnServer> = emptyList()
+
     // --- the state the screen reads ---
 
     private val _state = MutableStateFlow(GroupCallUiState())
@@ -129,6 +163,15 @@ class GroupCallManager(
         when {
             next == null -> if (previous != null) forgetFrameKey(previous.callId)
             next.note != null -> forgetFrameKey(next.callId)
+        }
+        // A call that stops being live here takes its media with it: every reason a screen stops
+        // showing a call -- a hang-up, a retirement, the seat moving to another device, a dropped
+        // session -- is a reason this device must stop sending a microphone and a camera into it.
+        if (next == null || next.note != null) {
+            if (previous != null) {
+                media.stop()
+            }
+            _state.update { it.copy(muted = false, cameraOn = false, cameraAvailable = false) }
         }
         active = next
         _state.update { it.copy(call = next, error = if (next == null) null else it.error) }
@@ -174,10 +217,25 @@ class GroupCallManager(
      */
     fun attach(): List<Subscription> {
         refreshInProgress()
+        // The camera control's availability follows the links: a call past the product's stream
+        // limit negotiates no video line at all, so the button is absent there rather than present
+        // and unable to send anything.
+        scope.launch {
+            media.links.collect { links ->
+                val available = links.any { it.videoCapable }
+                if (available != _state.value.cameraAvailable) {
+                    _state.update { it.copy(cameraAvailable = available) }
+                }
+            }
+        }
         return listOf(
             client.onGroupCallRoster(::handleRoster),
             client.onGroupCallJoined(::handleParticipantJoined),
             client.onGroupCallLeft(::handleParticipantLeft),
+            // The plane's own: it claims every relay that opens under the call's frame key, which
+            // is the media describing itself, and quietly passes on the ones that do not -- the key
+            // exchange, which the core's key domain is already reading (see [GroupMediaPlane]).
+            *media.attach().toTypedArray(),
         )
     }
 
@@ -283,12 +341,17 @@ class GroupCallManager(
                 if (callId == null) {
                     client.groupCallKeys.seated(joinedCallId, conversationId, callKey)
                 }
-                client.groupCalls.join(
+                val accepted = client.groupCalls.join(
                     conversationId,
                     CallMediaKind.Audio,
                     placeholderSealedOffer(callKey, joinedCallId),
                     joinedCallId,
                 )
+                // The plane opens on the accept rather than on the join frame: the relays are half
+                // of what a link is built over, and a link built before they arrived would be one
+                // the reconcile below rebuilds a moment later.
+                joinRelays = accepted.servers
+                media.begin(joinedCallId, active?.seats.orEmpty(), joinRelays)
                 // The snapshot may already have marked the seat accepted (it is published, not
                 // replied); this only fills in the timestamp for a reply that won the race.
                 val call = active
@@ -329,6 +392,43 @@ class GroupCallManager(
     }
 
     /**
+     * Mutes or unmutes this device on the whole call.
+     *
+     * One microphone feeds every link, so the mute is one write rather than one per peer. Refused
+     * once the call has a note, which is the same rule every other control keeps: there is no call
+     * left to mute.
+     */
+    fun toggleGroupMute() {
+        val call = active ?: return
+        if (call.note != null) return
+        val next = !media.isMuted()
+        media.setMuted(next)
+        _state.update { it.copy(muted = next) }
+    }
+
+    /**
+     * Turns this device's camera on or off on the whole call.
+     *
+     * The state is read back from the plane rather than assumed, because turning a camera on can
+     * fail -- another application may hold it -- and a button that keeps claiming a picture the
+     * call is not sending is the one answer worse than no picture. A no-op where no link carries a
+     * video line, which is a call past the product's stream limit: the control is absent there, and
+     * an absent control that still answered would be a lie about what the call can do.
+     */
+    fun toggleGroupCamera() {
+        val call = active ?: return
+        if (call.note != null) return
+        if (!media.cameraAvailable()) return
+        media.setCameraOn(!media.isCameraOn())
+        _state.update { it.copy(cameraOn = media.isCameraOn()) }
+    }
+
+    /** Flips to the other camera, on every link at once. */
+    fun switchGroupCamera() {
+        media.switchCamera()
+    }
+
+    /**
      * Dismisses the ended screen or the failure card, leaving nothing tracked. Refused while a
      * call is live -- the web build's own rule, because a back press during a live call is a
      * navigation instinct, not a wish to hang up on the whole group.
@@ -355,14 +455,19 @@ class GroupCallManager(
         if (roster.callId != call.callId) {
             return
         }
+        val seats = seatsFromSnapshot(roster.participants)
         setActive(
             call.copy(
                 phase = GroupCallPhase.Seated,
-                seats = seatsFromSnapshot(roster.participants),
+                seats = seats,
                 participantCount = roster.participantCount,
                 joinedAt = call.joinedAt ?: now(),
             ),
         )
+        // The mesh opens or grows on the authoritative seat list. Both halves of the join pass
+        // through here -- the reply's is the relays and no seats, this one is the seats -- so this
+        // is the one place the plane can be told the truth about who is in the call.
+        media.begin(roster.callId, seats, joinRelays)
         // The frame-key trigger (section 163): a snapshot that shows other seats means this device
         // joined a call people are already in. A device holding the call's key is seated among
         // them and rotates -- its own arrival changed the membership; a device holding none is the
@@ -395,12 +500,14 @@ class GroupCallManager(
             publishProgress()
             return
         }
+        val seats = seatArrived(call.seats, event.userId, event.deviceId, now())
         setActive(
             call.copy(
-                seats = seatArrived(call.seats, event.userId, event.deviceId, now()),
+                seats = seats,
                 participantCount = event.participantCount,
             ),
         )
+        media.syncSeats(seats)
         // The join changed the call's membership, so the frame key rotates (section 163). This
         // connection never hears its own join announced -- the server publishes it excluding the
         // origin session -- so a rotation here is always for somebody else's arrival.
@@ -442,13 +549,17 @@ class GroupCallManager(
             publishProgress()
             return
         }
+        val seats = seatDeparted(call.seats, event.userId)
         setActive(
             call.copy(
                 note = if (isCallRetired(event.participantCount)) GroupCallNote.Ended else null,
-                seats = seatDeparted(call.seats, event.userId),
+                seats = seats,
                 participantCount = event.participantCount,
             ),
         )
+        // A retired call's note has already stopped the plane in [setActive]; a call that simply
+        // got smaller drops the one seat and keeps the rest of the mesh standing.
+        media.syncSeats(seats)
         // A departure changed the call's membership too, so the frame key rotates here as well
         // (section 163) -- for the retirement the rotation is moot (nobody is left to adopt it,
         // and the store is dropped with the note), but for a call that simply got smaller it is
@@ -474,7 +585,7 @@ data class ActiveGroupCall(
     val callId: Id,
     /** The conversation whose group call this is. */
     val conversationId: Id,
-    /** What the join carried; the title's label and nothing else in this build -- no media rides it yet. */
+    /** What the join carried. The mesh negotiates its own media; this stays the join's own label. */
     val mediaKind: CallMediaKind,
     /** Whether the join reply or the roster snapshot has landed (see [GroupCallManager]). */
     val phase: GroupCallPhase,
@@ -499,4 +610,10 @@ data class GroupCallUiState(
      * header's join affordance, one entry per conversation with a live call to join.
      */
     val inProgress: Map<Id, GroupCallInProgress> = emptyMap(),
+    /** Whether this device's microphone is muted on the call. */
+    val muted: Boolean = false,
+    /** Whether this device's camera is on. Read back from the plane, so a refusal shows as off. */
+    val cameraOn: Boolean = false,
+    /** Whether any link carries a video line, which is what makes the camera control meaningful. */
+    val cameraAvailable: Boolean = false,
 )
