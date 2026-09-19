@@ -27,6 +27,8 @@ import {
   TransportError,
 } from '@migo/sdk';
 
+import type { CallInviteResult } from '@migo/sdk';
+
 import { Logger } from '../logger.js';
 import { RunContext } from '../run-context.js';
 import { getScenario, scenarioNames } from '../scenarios.js';
@@ -36,6 +38,14 @@ import type { VirtualUser } from '../virtual-user.js';
 
 const QUIET = new Logger('quiet');
 const future = (): number => performance.now() + 60_000;
+
+/**
+ * The two invite statuses these tests need, spelled the way the field documents them
+ * (`0=Ringing, ... 3=Blocked`). The wire carries a bare number and the SDK exports no constant for
+ * it, so the scenario and this suite would otherwise each carry a silent copy.
+ */
+const INVITE_RINGING = 0;
+const INVITE_BLOCKED = 3;
 
 /** The slice of a call event the scenario's listeners read; the double's events carry these. */
 interface CallEventDouble {
@@ -60,6 +70,13 @@ interface VuHooks {
   // Calls-surface observations.
   onInvite?: (callId: string) => void;
   inviteFails?: boolean;
+  /**
+   * The status the double's invite answers with. Absent means ringing, which is what a healthy
+   * plane returns; a test that wants the server's refusal sets this, because a refusal arrives as
+   * a *resolved* invite carrying a non-zero status and not as a rejected promise (`inviteFails` is
+   * the transport-level failure, a different fact).
+   */
+  inviteStatus?: number;
   onAnswer?: (callId: string) => void;
   onRelaySdp?: (callId: string, toDevice: string) => void;
   onRelayIce?: (callId: string, toDevice: string) => void;
@@ -107,17 +124,26 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
         hooks.iceRelay = handler;
         return () => {};
       },
+      // Resolves the wire's own `CallInviteResult`, not nothing. A `Promise<void>` here is a
+      // double that lies about the surface it stands in for: the workload reads `invited.status`
+      // to tell a ring from a refusal, and a resolved-nothing invite hands it `undefined`, which
+      // is `!== 0` and therefore reads as a refusal — the pair's invite was tallied as an error
+      // and the whole walking-pair test failed on `call-invite ok 0 !== 1`. The status is the
+      // measurement, so the double has to carry it.
       invite: (
         _conversationId: string,
         _calleeId: string,
         _mediaKind: number,
         _offer: Uint8Array,
         callId: string,
-      ): Promise<void> => {
+      ): Promise<CallInviteResult> => {
         hooks.onInvite?.(callId);
-        return hooks.inviteFails
-          ? Promise.reject(new TransportError('invite refused'))
-          : Promise.resolve();
+        if (hooks.inviteFails) return Promise.reject(new TransportError('invite refused'));
+        return Promise.resolve({
+          callId,
+          status: hooks.inviteStatus ?? INVITE_RINGING,
+          expiresAt: Date.now() + 30_000,
+        });
       },
       answer: (callId: string, _answer: Uint8Array): Promise<void> => {
         hooks.onAnswer?.(callId);
@@ -540,6 +566,40 @@ test('a calls pair walks invite, auto-answer, SDP relay, ICE relay and end', asy
   assert.equal(ended.length, 1);
   assert.equal(ended[0]?.[1], CallEndReason.ByCaller);
   assert.ok(metrics.operation('call-setup').latency.count > 0, 'setup latency was measured');
+});
+
+test('an invite answered without a ring fails as a refusal, not as a setup timeout', async () => {
+  // The other half of the transport-level refusal below, and the one the full-scale run found the
+  // hard way: the server answers a policy refusal with `BLOCKED` in an ordinary reply, so the
+  // invite *resolves* and the caller has to read the status to know nobody was rung. Without this
+  // the step tallied 4,000 resolved invites against 4,000 setup timeouts on a run where no callee
+  // rang once.
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, future());
+  const senderHooks: VuHooks = {
+    inviteStatus: INVITE_BLOCKED,
+    onInvite: () => {
+      // One refused cycle is enough to prove the point; stop before a second.
+      ctx.interrupt();
+    },
+  };
+  const sender = makeVu(0, senderHooks);
+  const receiver = makeVu(1);
+  const vus = [sender, receiver];
+  const calls = scenario('calls');
+  await calls.prepare(vus, ctx);
+  const [workload] = calls.workloads(vus);
+  if (workload === undefined) throw new Error('expected a workload');
+  // Must resolve promptly: a wait left armed would only clear on the 15 s setup timeout.
+  await workload(ctx);
+  assert.equal(metrics.operation('call-invite').ok, 0, 'a refusal is not a placed call');
+  assert.equal(metrics.operation('call-invite').errors, 1);
+  assert.deepEqual(metrics.operation('call-invite').errorsByClass, [['local:InviteRefused', 1]]);
+  assert.equal(
+    metrics.operation('call-setup').errors,
+    0,
+    'a refused invite is not a setup timeout',
+  );
 });
 
 test('a refused invite disarms the SDP wait instead of hanging the pair on a phantom timeout', async () => {
