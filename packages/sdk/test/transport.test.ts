@@ -787,7 +787,7 @@ async function closedPort(): Promise<number> {
   return port;
 }
 
-test('a gateway nothing is listening on fails the connect instead of leaving the caller waiting', async () => {
+test('a gateway nothing is listening on fails the connect instead of leaving the caller waiting', async (t) => {
   // The question this test was written to ask has now been answered, and the answer was the bad
   // one. Both load harnesses spent at least a week pointed one port past the node they had started,
   // so every virtual user's socket was refused — and what the run recorded was never `connected
@@ -822,16 +822,27 @@ test('a gateway nothing is listening on fails the connect instead of leaving the
     },
     heartbeatMs: 600_000,
   });
+  // Bounded well below the handshake deadline on purpose. A refusal is an immediate ECONNREFUSED,
+  // so a client that reports it three hundred milliseconds in is working and one that reports it
+  // thirty seconds in is sitting out a deadline meant for a node that accepted the connection and
+  // went quiet — a different bug wearing the same green tick. Two seconds is a thousand times the
+  // round trip and a fifteenth of the deadline, so the gap the assertion measures is unambiguous
+  // even on a loaded runner.
   const outcome = await Promise.race([
     transport.connect().then(
       () => 'resolved',
       (error: unknown) => `rejected: ${String(error)}`,
     ),
     new Promise<string>((resolve) => {
-      setTimeout(() => resolve('still pending after 3000 ms'), 3_000);
+      setTimeout(() => resolve('still pending after 2000 ms'), 2_000);
     }),
   ]);
   transport.close();
+  // Printed whether the test passes or fails: which mechanism ended the wait is the answer to
+  // "which platform assumption was wrong", and a green tick that hides it would leave the next
+  // reader to re-derive it. The error handler's message names itself; a TimeoutError means the
+  // platform dispatched neither `error` nor `close` and the deadline is what carried it.
+  t.diagnostic(`the refusal was reported as: ${outcome}`);
   assert.match(
     outcome,
     /^rejected:/,
