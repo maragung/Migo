@@ -32,6 +32,7 @@ pub(crate) mod call_video;
 pub mod chain;
 pub mod gateway;
 pub(crate) mod group_call;
+pub(crate) mod group_media;
 pub(crate) mod media;
 pub mod quic;
 pub mod rest;
@@ -8876,7 +8877,11 @@ impl Worker {
             // key a rotating peer fanned out. The mid-call join's ask and answer ride the
             // `CallSdp` arm above, because that is the frame the server projects both into.
             Opcode::CallSfuEvent => self.on_sfu_event(&frame).await,
-            Opcode::CallKeyUpdate => self.on_group_key_update(&frame),
+            Opcode::CallKeyUpdate => self.on_group_key_update(&frame).await,
+            // The join's own reply: the group call's TURN list. It rides the request's opcode
+            // because the roster answer is a separate, pushed frame — the reply names no call of
+            // its own, and the only join this session has in flight is the one it just sent.
+            Opcode::CallSfuJoin => self.on_group_turn(&frame).await,
             // A member device's copy of a rotated sender-key chain, sealed pairwise for this
             // device and forwarded to this account's user topic. The receiving half of the
             // membership trigger — the sending half lives in `on_conversation_member`.

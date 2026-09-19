@@ -67,8 +67,10 @@ use migo_protocol::{
     CallSfuParticipant, CallStateEvent, KeyBundleRequest, Opcode,
 };
 
+use super::call::ice_servers_from;
 use super::call_signal::{self, CallEndReason};
 use super::gateway;
+use super::group_media::{GroupMesh, GroupOutbound};
 use super::{Event, Worker};
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
@@ -106,6 +108,16 @@ pub(crate) struct GroupCalls {
     /// an entry dies only two ways — the roster empties (the call retired) or this device
     /// takes a seat in the conversation (it is nobody's spectator anymore).
     in_progress: HashMap<Id, (Id, u32)>,
+    /// The join's TURN list, as `CALL_SFU_JOIN`'s reply carried it. `None` until that reply
+    /// lands: a mesh built without it would gather against the STUN fallback alone, which is a
+    /// link that works on one LAN and nowhere else.
+    turn: Option<Vec<migo_protocol::TurnServer>>,
+    /// The media plane: the mesh of links to the other seats, built once the seat, the frame key,
+    /// and the TURN list are all in hand, and dropped with the seat that owned it.
+    ///
+    /// `pub(super)` because the mesh reports on the 1:1 engine's tick channel: `call`'s select
+    /// loop is the one place a tick is applied, so it is the one place that has to reach in here.
+    pub(super) mesh: Option<GroupMesh>,
 }
 
 /// A join in flight.
@@ -188,6 +200,8 @@ impl GroupCalls {
             seat: None,
             joining: None,
             in_progress: HashMap::new(),
+            turn: None,
+            mesh: None,
         }
     }
 
@@ -391,6 +405,9 @@ impl Worker {
             call_id: seat.call_id,
             reason: CallEndReason::ByCaller.to_wire(),
         };
+        // The media goes before the frame does: a leave that the server honoured while this device
+        // kept sending would be a seat the roster no longer counts and a microphone still open.
+        self.end_group_media();
         self.request(Opcode::CallEnd, &end).await;
         self.sink.send(Event::GroupCallEnded { conversation_id });
     }
@@ -464,6 +481,11 @@ impl Worker {
             conversation_id,
             participant_count: count,
         });
+        // A founding seat minted its key a line ago and can start the plane at once; a joiner
+        // beside others is still keyless, and the ask below is what starts it — both paths reach
+        // `maybe_start_group_media`, so neither ordering of the key and the roster is special.
+        self.maybe_start_group_media().await;
+        self.sync_group_seats().await;
         if count > 1 {
             self.send_group_key_ask().await;
         }
@@ -562,6 +584,10 @@ impl Worker {
                 participant_count: seat.seats.len() as u32,
             });
         }
+        // The new seat gets its link before the rotation, so the offer that opens it is sealed at
+        // the epoch the joiner is about to be given — a link opened after the rotation would be
+        // offering under a key the joiner does not hold yet.
+        self.sync_group_seats().await;
         if rotate_now {
             self.rotate_group_call_key().await;
         }
@@ -621,12 +647,174 @@ impl Worker {
         }
         if let Some(conversation_id) = ended_conversation {
             self.group_calls.seat = None;
+            self.end_group_media();
             self.sink.send(Event::GroupCallEnded { conversation_id });
             return;
         }
+        self.sync_group_seats().await;
         if rotate_now {
             self.rotate_group_call_key().await;
         }
+    }
+
+    /// The answer to this session's `CALL_SFU_JOIN`: the group call's own TURN list.
+    ///
+    /// The join asks for two things and the server answers them in two frames, because they are
+    /// two different kinds of fact: the roster is *news* — it is pushed to the account's user
+    /// topic, and every sibling device hears it — while the relay list is a *reply*, private to
+    /// the connection that asked. So this frame names no call and needs no correlation: the only
+    /// join this session has in flight is the one it just sent.
+    pub(super) async fn on_group_turn(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::CallTurnResponse>(frame) else {
+            return;
+        };
+        self.group_calls.turn = Some(response.servers);
+        self.maybe_start_group_media().await;
+    }
+
+    /// Starts the media plane if everything it needs has landed: a seat, a frame key to seal with,
+    /// and a TURN list to gather against.
+    ///
+    /// Called from each of the three places one of those arrives, rather than from a timer, so the
+    /// plane starts on the last arrival however the three are ordered — the key can precede the
+    /// roster's answer to the join, or follow it, and neither ordering is a special case here.
+    async fn maybe_start_group_media(&mut self) {
+        if self.group_calls.mesh.is_some() {
+            return;
+        }
+        let Some((account, device)) = self.own_seat_ids() else {
+            return;
+        };
+        let Some(servers) = self
+            .group_calls
+            .turn
+            .as_ref()
+            .map(|turn| ice_servers_from(turn))
+        else {
+            return;
+        };
+        let keyed = self
+            .group_calls
+            .seat
+            .as_ref()
+            .is_some_and(|seat| seat.key.is_some());
+        if !keyed {
+            // A keyless seat has nothing to seal its signalling with, and the ask that ends that
+            // state is already in flight; the answer that installs the key calls back here.
+            return;
+        }
+        let tick_tx = self.calls.tick_sender();
+        let mesh = match GroupMesh::open(account, device, servers, tick_tx) {
+            Ok(mesh) => mesh,
+            Err(reason) => {
+                // No microphone or no speaker is a machine that cannot take part, and saying so is
+                // better than a seat that looks joined and stays silent.
+                self.sink.toast(reason, ToastKind::Error);
+                return;
+            }
+        };
+        self.group_calls.mesh = Some(mesh);
+        self.sync_group_seats().await;
+    }
+
+    /// Hands the mesh the roster it should be linked to, and sends whatever that produced.
+    pub(super) async fn sync_group_seats(&mut self) {
+        let Some(seats) = self
+            .group_calls
+            .seat
+            .as_ref()
+            .map(|seat| seat.seats.clone())
+        else {
+            return;
+        };
+        if let Some(mesh) = self.group_calls.mesh.as_mut() {
+            mesh.sync_seats(seats).await;
+        }
+        self.flush_group_outbound().await;
+    }
+
+    /// Seals and sends the signalling the mesh produced.
+    ///
+    /// The split is the same one the inbound half keeps in reverse: the mesh knows *what* to say
+    /// and to which device, and the seat knows *how* to seal it, so the key never crosses into the
+    /// plane and the plane never has to know what epoch it is on. A frame the key refuses to seal
+    /// is dropped, not retried: the next roster sync or the link's own gathering carries it.
+    pub(super) async fn flush_group_outbound(&mut self) {
+        let outbound = match self.group_calls.mesh.as_mut() {
+            Some(mesh) => mesh.take_outbound(),
+            None => return,
+        };
+        if outbound.is_empty() {
+            return;
+        }
+        let Some(my_device) = self.device_id() else {
+            return;
+        };
+        // The sealing borrow and the sends are separated on purpose: a key borrow from the seat
+        // and a `request` that needs the whole worker cannot be held at once, and the frames are
+        // few enough that collecting them costs nothing.
+        let (call_id, sealed) = {
+            let Some(seat) = self.group_calls.seat.as_ref() else {
+                return;
+            };
+            let Some(key) = seat.key.as_ref() else {
+                return;
+            };
+            let sealed: Vec<(Opcode, Id, Vec<u8>)> = outbound
+                .into_iter()
+                .filter_map(|frame| {
+                    let (opcode, to_device, plaintext) = match frame {
+                        GroupOutbound::Sdp {
+                            to_device,
+                            plaintext,
+                        } => (Opcode::CallSdp, to_device, plaintext),
+                        GroupOutbound::Ice {
+                            to_device,
+                            plaintext,
+                        } => (Opcode::CallIce, to_device, plaintext),
+                    };
+                    key.seal_frame(&plaintext, &mut OsRandom)
+                        .ok()
+                        .map(|sealed| (opcode, to_device, sealed))
+                })
+                .collect();
+            (seat.call_id, sealed)
+        };
+        for (opcode, to_device, sealed) in sealed {
+            match opcode {
+                Opcode::CallIce => {
+                    let relay = migo_protocol::CallIce {
+                        call_id,
+                        from_device: my_device,
+                        to_device,
+                        sealed_candidates: sealed,
+                    };
+                    self.request(Opcode::CallIce, &relay).await;
+                }
+                _ => {
+                    let relay = CallSdp {
+                        call_id,
+                        from_device: my_device,
+                        to_device,
+                        sealed_sdp: sealed,
+                    };
+                    self.request(Opcode::CallSdp, &relay).await;
+                }
+            }
+        }
+    }
+
+    /// Ends the media plane and forgets the TURN list with it: the next seat asks for its own.
+    ///
+    /// Synchronous because every caller is: an offline gateway, a sign-out, and a conversation's
+    /// teardown all end a call from a path that must not have to become async to do it, and the
+    /// links' own closes are spawned inside the mesh.
+    pub(super) fn end_group_media(&mut self) {
+        if let Some(mesh) = self.group_calls.mesh.as_mut() {
+            mesh.shutdown();
+        }
+        self.group_calls.mesh = None;
+        self.group_calls.turn = None;
     }
 
     /// One `CALL_KEY_UPDATE`: the rotator's sealed next epoch, fanned out by the server to the
@@ -634,7 +822,9 @@ impl Worker {
     /// an epoch that does not advance is a replay, and a blob that does not open under the
     /// held key is not this call's rotation — so a refused adopt is a no-op, not an error: the
     /// state keeps the key that works.
-    pub(super) fn on_group_key_update(&mut self, frame: &migo_protocol::Frame) {
+    /// Asynchronous since the mesh became a passenger: an adopted epoch rebuilds the links that
+    /// never connected, and rebuilding one means building a peer connection, which awaits.
+    pub(super) async fn on_group_key_update(&mut self, frame: &migo_protocol::Frame) {
         let Ok(update) = gateway::decode::<CallKeyUpdate>(frame) else {
             return;
         };
@@ -649,7 +839,17 @@ impl Worker {
         let Some(key) = seat.key.as_mut() else {
             return;
         };
-        let _ = key.adopt(update.epoch, &update.sealed_key_material);
+        let adopted = key.adopt(update.epoch, &update.sealed_key_material).is_ok();
+        if adopted {
+            // The epoch moved, so every negotiation still in flight was sealed at the epoch it
+            // left under and will not open now. Rebuilding the links that never connected is what
+            // lets them connect at all; a connected link is left alone, because the frame key
+            // seals signalling and not media.
+            if let Some(mesh) = self.group_calls.mesh.as_mut() {
+                mesh.reset_unconnected().await;
+            }
+            self.sync_group_seats().await;
+        }
     }
 
     /// The group half of a `CALL_SDP` relay: returns whether the frame belonged to this
@@ -670,6 +870,30 @@ impl Worker {
             return false;
         }
         let (conversation_id, call_id) = (seat.conversation_id, seat.call_id);
+        // The media half is tried first, and the order is not a preference: AEAD makes the test
+        // exact. A signalling frame of this call is sealed under the frame key; the join flow's
+        // two frames are sealed under pairwise-derived keys that the frame key cannot open. So
+        // "does the frame key open this" is a decision with one right answer, not a guess between
+        // two shapes — and asking it first spares a media frame the two decode attempts the join
+        // paths would make of it.
+        let opened = self
+            .group_calls
+            .seat
+            .as_ref()
+            .and_then(|seat| seat.key.as_ref())
+            .and_then(|key| key.open_frame(&relay.sealed_sdp).ok());
+        if let Some(plaintext) = opened {
+            let handled = match self.group_calls.mesh.as_mut() {
+                // No mesh yet — the key landed before the TURN list — is a frame the plane will
+                // never see, so it is left unclaimed rather than answered with a silent true.
+                Some(mesh) => mesh.on_remote_sdp(relay.from_device, &plaintext).await,
+                None => false,
+            };
+            if handled {
+                self.flush_group_outbound().await;
+                return true;
+            }
+        }
         if let Some(joiner) =
             self.open_group_key_ask(conversation_id, relay.from_device, &relay.sealed_sdp)
         {
@@ -697,6 +921,33 @@ impl Worker {
                     seat.key = Some(key);
                 }
             }
+        }
+        // The key is the last thing the plane was waiting on, whichever way it arrived: this is
+        // the ask's answer landing on a seat that already had its TURN list and its roster.
+        self.maybe_start_group_media().await;
+        self.sync_group_seats().await;
+        true
+    }
+
+    /// The group half of a `CALL_ICE` relay: returns whether the frame belonged to this device's
+    /// seat, on the same terms [`Self::on_group_call_relay`] answers for descriptions.
+    ///
+    /// Candidates are opened under the frame key, so a batch the key refuses was not this seat's
+    /// — and unlike a description there is no second shape a candidate batch can wear: the join
+    /// flow's sealed blobs are control payloads, never batch JSON.
+    pub(super) async fn on_group_ice(&mut self, relay: &migo_protocol::CallIce) -> bool {
+        let opened = self
+            .group_calls
+            .seat
+            .as_ref()
+            .filter(|seat| seat.call_id == relay.call_id)
+            .and_then(|seat| seat.key.as_ref())
+            .and_then(|key| key.open_frame(&relay.sealed_candidates).ok());
+        let Some(plaintext) = opened else {
+            return false;
+        };
+        if let Some(mesh) = self.group_calls.mesh.as_mut() {
+            mesh.on_remote_ice(relay.from_device, &plaintext).await;
         }
         true
     }
@@ -934,6 +1185,7 @@ impl Worker {
     /// and the snapshot it was waiting for died with the socket.
     pub(super) fn group_calls_offline(&mut self) {
         self.group_calls.joining = None;
+        self.end_group_media();
         if let Some(seat) = self.group_calls.seat.take() {
             self.sink.send(Event::GroupCallEnded {
                 conversation_id: seat.conversation_id,
@@ -948,6 +1200,7 @@ impl Worker {
         self.group_calls.joining = None;
         self.group_calls.seat = None;
         self.group_calls.in_progress.clear();
+        self.end_group_media();
     }
 
     /// Drops the seat of one conversation, for the conversation's own teardown (a leave, a
@@ -963,6 +1216,7 @@ impl Worker {
             .is_some_and(|seat| seat.conversation_id == conversation_id);
         if dropped {
             self.group_calls.seat = None;
+            self.end_group_media();
         }
         if self
             .group_calls

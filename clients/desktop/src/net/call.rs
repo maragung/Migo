@@ -70,6 +70,7 @@ use super::call_signal::{
     ANSWERED_ELSEWHERE_MESSAGE, CALL_KEY_EVENT, CALL_KEY_LEN, INVITE_RINGING, MISSED_CALL_MESSAGE,
 };
 use super::call_video;
+use super::group_media::GroupTick;
 use super::{Event, Sink, Worker};
 use crate::crypto::content::{self, Content};
 use crate::model::ToastKind;
@@ -129,10 +130,19 @@ pub(crate) enum CallTick {
     KeyArrived { call_id: Id },
     /// The TURN fetch did not answer in time; proceed on the STUN fallback.
     TurnTimeout,
+    /// One report from the group call's mesh: a link's candidate, its transport, or its linger.
+    /// Carried on this channel rather than a second one of its own, so the group plane shares the
+    /// worker's one select loop — a second channel would be a second place engine state can
+    /// change, which is the race the tick exists to prevent.
+    Group(GroupTick),
 }
 
 /// Arms one tick: sleeps, then reports.
-fn arm_later(tick_tx: &mpsc::UnboundedSender<CallTick>, tick: CallTick, after: Duration) {
+pub(super) fn arm_later(
+    tick_tx: &mpsc::UnboundedSender<CallTick>,
+    tick: CallTick,
+    after: Duration,
+) {
     let tick_tx = tick_tx.clone();
     tokio::spawn(async move {
         tokio::time::sleep(after).await;
@@ -143,7 +153,7 @@ fn arm_later(tick_tx: &mpsc::UnboundedSender<CallTick>, tick: CallTick, after: D
 /// The ICE servers for one call's peer connection: the configured TURN relays, then the public
 /// STUN fallback. An entry with an empty username is an anonymous relay; the credential fields
 /// stay empty rather than invented.
-fn ice_servers_from(turn: &[migo_protocol::TurnServer]) -> Vec<RTCIceServer> {
+pub(super) fn ice_servers_from(turn: &[migo_protocol::TurnServer]) -> Vec<RTCIceServer> {
     let mut servers: Vec<RTCIceServer> = turn
         .iter()
         .map(|server| RTCIceServer {
@@ -196,7 +206,7 @@ async fn playback_pump(
 /// stream. Runs on its own thread because the microphone channel blocks, and blocking an async
 /// runtime thread is the microphone's to do only from the outside. The thread ends when the
 /// microphone's guard drops and the channel closes.
-fn spawn_capture_pump(
+pub(super) fn spawn_capture_pump(
     microphone: std::sync::mpsc::Receiver<Vec<i16>>,
     rate: u32,
     muted: Arc<AtomicBool>,
@@ -435,6 +445,12 @@ impl Calls {
             Some(ticks) => ticks.recv().await,
             None => std::future::pending().await,
         }
+    }
+
+    /// The tick channel, for a plane that needs to report on it: the group call's mesh builds its
+    /// callbacks against this sender, so its reports land in the same loop as the 1:1 engine's.
+    pub(super) fn tick_sender(&self) -> mpsc::UnboundedSender<CallTick> {
+        self.tick_tx.clone()
     }
 
     /// Whether a call occupies this device — an ended call still on screen does not block a new
@@ -1503,6 +1519,13 @@ impl Worker {
         if relay.to_device != my_device {
             return;
         }
+        // The group half is tried first, exactly as the SDP arm does it and for the same reason:
+        // a group call's candidates are sealed under the call's frame key, not a 1:1 call key, and
+        // the two engines never share a call id — so the seat decides whether a batch is its
+        // business before the 1:1 engine ever looks at it.
+        if self.on_group_ice(&relay).await {
+            return;
+        }
         let context = {
             let Some(call) = self.calls.active.as_ref() else {
                 return;
@@ -1802,6 +1825,15 @@ impl Worker {
                     let request = migo_protocol::CallTurnFetch { call_id };
                     self.request(Opcode::CallTurnFetch, &request).await;
                 }
+            }
+            // The group call's mesh: one link's report, applied to that link and nothing else.
+            // The mesh lives beside the seat, so a tick that arrives after the seat ended finds
+            // no mesh and does nothing — the same check every other arm makes in its own words.
+            CallTick::Group(tick) => {
+                if let Some(mesh) = self.group_calls.mesh.as_mut() {
+                    mesh.on_tick(tick).await;
+                }
+                self.flush_group_outbound().await;
             }
             CallTick::TurnTimeout => {
                 // The fetch did not answer in time; the call proceeds on the STUN fallback
