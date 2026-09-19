@@ -8,11 +8,37 @@
  * cryptographically independent, just as separate devices are.
  */
 
-import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import { BandwidthMode, DEFAULT_CLIENT_FEATURES, MigoClient, Platform, protocol } from '@migo/sdk';
 import type { ConnectionState, EventErrorHandler, Id, WireBytes } from '@migo/sdk';
 
 import { clientEndpoint } from './config.js';
 import type { Config } from './config.js';
+
+/**
+ * The bits a load-generator session offers: the SDK's stock set plus the call family.
+ *
+ * `CALLS` is here because a scenario drives it and the server gates it. Every opcode the `calls`
+ * scenario touches — 224 `CALL_INVITE` through 231 `CALL_ICE`, and the `CALL_INVITE_EVENT` that
+ * answers one — carries `feature: "CALLS"` in the protocol table, the gateway refuses a frame
+ * whose bit the session did not offer, and it withholds the family's events from such a session
+ * as well, so a run that never offers the bit measures its own refusal rather than the relay it is
+ * named for. That is what the first honest full-scale run printed: `call-invite` with `ok: 0`
+ * against 466,958 errors, every one `remote:FEATURE_NOT_NEGOTIATED`, and an `errorRate` of 0.9979
+ * on a step that had connected all 1,000 sessions and held its whole 120-second window — the
+ * receiver's session was as silent as the caller's, for the same missing bit.
+ *
+ * The stock set stays the base rather than being spelled out again here, so a bit added to the
+ * SDK's default reaches this tool without an edit. The two families the SDK leaves to the
+ * application stay left out for the reason it gives: `GROUP_CALL`'s SFU opcodes are not
+ * feature-gated by the server at all, and no scenario drives them. `ECONOMY` and `GAMES` are the
+ * same case seen from `clients/web`'s side — a bit belongs to a client that spends and plays, and
+ * this one does neither, so offering either would be a promise about work the tool does not do.
+ *
+ * Offering a bit a scenario never uses costs that scenario nothing: the server checks a bit
+ * against the frames that carry it, not against the session, so the ten thousand idle sessions of
+ * the connect scenario pay for `CALLS` with nothing beyond the bitmask they were already sending.
+ */
+const LOADGEN_FEATURES: bigint = DEFAULT_CLIENT_FEATURES | protocol.FEATURE.CALLS;
 
 export interface VirtualUserDeps {
   readonly config: Config;
@@ -78,6 +104,7 @@ export class VirtualUser {
         appVersion: deps.config.appVersion,
         locale: deps.config.locale,
         bandwidthMode: BandwidthMode.Normal,
+        features: LOADGEN_FEATURES,
       },
       onEventError: deps.onEventError,
       onStateChange: deps.onStateChange,

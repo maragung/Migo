@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BandwidthMode, MigoClient, Platform } from '@migo/sdk';
+import { BandwidthMode, DEFAULT_CLIENT_FEATURES, MigoClient, Platform, protocol } from '@migo/sdk';
 import type { EventErrorHandler } from '@migo/sdk';
 
 import { clientEndpoint } from '../config.js';
@@ -144,6 +144,26 @@ test('the client hello identifies the tool as a load test on the configured vers
   assert.equal(hello['appVersion'], '9.9.9');
   assert.equal(hello['locale'], 'en-GB');
   assert.equal(hello['bandwidthMode'], BandwidthMode.Normal);
+});
+
+test('the hello offers the call family the calls scenario drives', () => {
+  // The bit is not decoration: the gateway answers `CALL_INVITE` (224) and every frame after it
+  // `FEATURE_NOT_NEGOTIATED` when the session did not offer `CALLS`, and withholds the family's
+  // events from that session as well. That is how a step which connected 1,000 sessions and held
+  // its whole 120-second window placed no call at all — 466,958 refusals against `ok: 0` — so a
+  // hello that loses the bit again measures the refusal rather than the relay, and nothing else in
+  // this tool would say so. The stock set is asserted alongside it because an explicit bitmask
+  // that replaced the default instead of extending it would drop `E2E_V1`, and every scenario
+  // would go on reporting throughput while sealing nothing.
+  const { created } = buildWithStubbedClient(3, CONFIG);
+  const hello = created['hello'] as Record<string, unknown>;
+  const features = hello['features'];
+  assert.ok(typeof features === 'bigint', 'the load-test hello must carry a feature bitmask');
+  assert.ok(
+    (features & protocol.FEATURE.CALLS) !== 0n,
+    'the load-test hello must offer FEATURE.CALLS, or the calls scenario measures its own refusal',
+  );
+  assert.equal(features & DEFAULT_CLIENT_FEATURES, DEFAULT_CLIENT_FEATURES);
 });
 
 test('wireBytes is the client transport counters, snapshotted at call time', () => {
