@@ -55,6 +55,12 @@
 #   OUTAGE_VUS / OUTAGE_DURATION / OUTAGE_KILL_AFTER       step 6
 #   ERROR_BUDGET    loadgen --max-error-rate (default: 0.05)
 #   KEEP_ALIVE      if set, leave the node running after the run
+#   EVIDENCE_DIR    if set, the run's evidence — the RSS log, the per-step /metrics
+#                   dumps, the node's own log, every step's JSON report — is copied
+#                   there on the way out, however the run ends. CI sets it to
+#                   tools/load/logs and uploads that path, so a nightly that fails on
+#                   step 4 keeps the numbers that explain step 4 rather than only the
+#                   sentence saying it failed.
 
 set -euo pipefail
 
@@ -91,6 +97,15 @@ OUTAGE_DURATION="${OUTAGE_DURATION:-90s}"
 OUTAGE_KILL_AFTER="${OUTAGE_KILL_AFTER:-20}"  # seconds of steady traffic before the kill
 ERROR_BUDGET="${ERROR_BUDGET:-0.05}"
 KEEP_ALIVE="${KEEP_ALIVE:-}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-}"
+# A relative evidence path is taken from the repository root rather than from wherever this
+# script was invoked: CI names `tools/load/logs` and uploads exactly that path from the root,
+# and a run started by hand from tools/load has to land in the same place or the artifact is
+# empty on the nights someone is watching most closely.
+case "$EVIDENCE_DIR" in
+  "" | /*) ;;
+  *) EVIDENCE_DIR="$REPO_ROOT/$EVIDENCE_DIR" ;;
+esac
 
 if [ ! -x "$MIGOD_BIN" ]; then
   echo "migod binary not found at $MIGOD_BIN; build it with:" >&2
@@ -120,9 +135,27 @@ NODE_PID=""
 LOADGEN_PID=""
 RSS_MONITOR_PID=""
 
+# The working directory is a mktemp one, so everything in it dies with the trap below: the
+# RSS log, the per-step metrics dumps, the node's log, every step's JSON report. A run that
+# fails keeps those or it keeps nothing — the step line says a step failed, and only the
+# files say why. Collected inside the trap, so a run that dies mid-step still hands over
+# the evidence up to the step it died in.
+collect_evidence() {
+  [ -n "$EVIDENCE_DIR" ] || return 0
+  mkdir -p "$EVIDENCE_DIR"
+  cp -f "$RSS_LOG" "$EVIDENCE_DIR/rss.log" 2>/dev/null || true
+  cp -f "$NODE_LOG" "$EVIDENCE_DIR/node.log" 2>/dev/null || true
+  cp -f "$WORK_DIR"/metrics-*.txt "$EVIDENCE_DIR/" 2>/dev/null || true
+  cp -f "$WORK_DIR"/reports/*.json "$EVIDENCE_DIR/" 2>/dev/null || true
+  echo "==> Evidence copied to $EVIDENCE_DIR"
+}
+
 cleanup() {
+  # Before the teardown below removes the only copy.
+  collect_evidence
   if [ -n "$RSS_MONITOR_PID" ]; then
     kill "$RSS_MONITOR_PID" 2>/dev/null || true
+    wait "$RSS_MONITOR_PID" 2>/dev/null || true
   fi
   if [ -n "$LOADGEN_PID" ]; then
     kill "$LOADGEN_PID" 2>/dev/null || true
@@ -208,8 +241,14 @@ print_metrics() {
     return
   fi
   echo "--- node metrics after '$step' ---"
+  # The session counters ride beside the gauge because the gauge cannot be read alone:
+  # `sessions_live` is opened minus closed, so an idle step that asked for ten thousand
+  # sessions and shows a peak of 2,960 live is either a node that never held them or a
+  # pool that churned — a defect on one reading and a fact about the run on the other.
+  # `sessions_opened_total` and `sessions_closed_total` are what separate the two, and
+  # the arithmetic has to close: live = opened - closed, at every step.
   grep -E \
-    '^migo_gateway_(sessions_live|frames_dropped_total|frames_in_total|frames_out_total|resume_total)' \
+    '^migo_gateway_(sessions_live|sessions_opened_total|sessions_closed_total|frames_dropped_total|frames_in_total|frames_out_total|resume_total)' \
     "$metrics_file" || echo "  (no gateway metric lines)"
   grep -E '^migo_(reconnect_total|media_)' "$metrics_file" || true
 }
@@ -231,10 +270,18 @@ start_rss_monitor() {
       if [ -n "$NODE_PID" ] && kill -0 "$NODE_PID" 2>/dev/null; then
         local rss live
         rss="$(awk '/^VmRSS/{print $2}' "/proc/$NODE_PID/status" 2>/dev/null || true)"
-        live="$(curl -fsS "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
+        # --max-time: /metrics is read by a sampler that must keep its cadence, and a
+        # node busy enough to be worth sampling is a node whose metrics scrape can take
+        # seconds. Without a deadline one slow response stalls the loop and the samples
+        # either side of it are simply missing, which is indistinguishable in the log
+        # from a step that held no pool.
+        live="$(curl -fsS --max-time 5 "http://localhost:$NODE_PORT/metrics" 2>/dev/null \
           | awk '/^migo_gateway_sessions_live/{print $2; exit}')"
         if [ -n "$rss" ]; then
-          echo "${rss} ${live:-0}"
+          # The timestamp is what makes a sample placeable: these are the only readings
+          # taken *during* a step, and without it a peak cannot be attributed to the
+          # step it happened in, nor can a gap in the series be seen as a gap.
+          echo "${rss} ${live:-0} $(date -u +%H:%M:%S)"
         fi
       fi
       sleep 5
@@ -252,14 +299,26 @@ stop_rss_monitor() {
 }
 
 report_memory_per_session() {
-  local peak peak_live samples
-  peak="$(sort -n "$RSS_LOG" 2>/dev/null | tail -n 1 | awk '{print $1}' || true)"
-  peak_live="$(awk '{if ($2+0 > m) m = $2+0} END{print m+0}' "$RSS_LOG" 2>/dev/null || echo 0)"
+  local line peak peak_live peak_at live_ceiling samples
+  # Both halves from one line, and the line is the peak-RSS one. The maxima of two columns
+  # are two numbers from two moments, and dividing them is the cross-instant mistake the
+  # comment above records one layer out — VmRSS during the run over a sessions_live read
+  # after it. Taking them independently is the same mistake one layer in, where it is
+  # harder to see because both numbers are real and only their pairing is invented. The
+  # highest live count is still printed, separately, because a reader checking the ratio
+  # against the pool the client asked for needs to know whether any sample ever saw more.
+  line="$(sort -n "$RSS_LOG" 2>/dev/null | tail -n 1 || true)"
+  peak="$(printf '%s\n' "$line" | awk '{print $1}')"
+  peak_live="$(printf '%s\n' "$line" | awk '{print $2}')"
+  peak_at="$(printf '%s\n' "$line" | awk '{print $3}')"
+  live_ceiling="$(awk '{if ($2+0 > m) m = $2+0} END{print m+0}' "$RSS_LOG" 2>/dev/null || echo 0)"
   samples="$(wc -l <"$RSS_LOG" 2>/dev/null || echo 0)"
-  if [ -n "$peak" ] && [ "$peak_live" -gt 0 ] 2>/dev/null; then
+  if [ -n "$peak" ] && [ "${peak_live:-0}" -gt 0 ] 2>/dev/null; then
     echo "--- memory per session ---"
-    echo "  node VmRSS peak ${peak} kB while it reported a peak of ${peak_live} live" \
-      "sessions = $((peak / peak_live)) kB per session (${samples} samples)"
+    echo "  node VmRSS peak ${peak} kB at ${peak_at:-unknown} UTC, the same sample showing" \
+      "${peak_live} live sessions = $((peak / peak_live)) kB per session (${samples} samples)"
+    echo "  highest live count any sample saw: ${live_ceiling}" \
+      "(the ratio above is the peak-RSS sample's own live count, not this one)"
   else
     # Not a footnote: this reading is the step's server-side evidence, and a step that
     # cannot produce it did not hold a pool to measure.

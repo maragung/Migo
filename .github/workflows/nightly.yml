@@ -411,6 +411,13 @@ jobs:
       # The database it creates (migo_loadfull) is fresh on every runner, so a
       # scheduled run never inherits a previous night's accounts.
       PG_PORT: '5432'
+      # run-full.sh keeps its working directory to itself (a mktemp one, removed by its
+      # exit trap), so the readings taken *during* a step — the RSS/session samples, the
+      # per-step /metrics dumps, the node's log, every step's JSON report — are copied
+      # here on the way out and uploaded below. Without it a failed nightly keeps the
+      # step that failed and nothing that explains it, which is how the memory-per-session
+      # reading spent a night as a sentence about a number nobody could check.
+      EVIDENCE_DIR: tools/load/logs
 
     steps:
       - uses: actions/checkout@v4
@@ -442,6 +449,16 @@ jobs:
 
       - name: Full-scale load run — migod (release) under tools/load/run-full.sh
         run: make test-load-full
+
+      # always(): the files matter most when the step above fails, and the exit trap has
+      # already copied them by the time this runs.
+      - name: Upload load evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-full-evidence
+          path: tools/load/logs/
+          retention-days: 7
 
   audit:
     name: Dependency advisories (reports, does not gate)
