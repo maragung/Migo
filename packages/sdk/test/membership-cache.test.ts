@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { MigoClient } from '../src/client.js';
-import type { Grant } from '../src/index.js';
+import type { EventErrorHandler, Grant } from '../src/index.js';
 import { decodeBody, encodeBody } from '../src/codec.js';
 import { identity } from '@migo/crypto';
 import {
@@ -325,7 +325,7 @@ class ScriptedServer {
 }
 
 /** A client with a live (fake) session over a scripted server. */
-async function connectedClient(): Promise<{
+async function connectedClient(options: { onEventError?: EventErrorHandler } = {}): Promise<{
   client: MigoClient;
   server: ScriptedServer;
 }> {
@@ -353,6 +353,7 @@ async function connectedClient(): Promise<{
     },
     // The far edge of the heartbeat so an idle session is truly idle.
     heartbeatMs: 600_000,
+    ...(options.onEventError === undefined ? {} : { onEventError: options.onEventError }),
     fetch: () => Promise.reject(new TypeError('unexpected call')),
   });
 
@@ -684,6 +685,90 @@ test('teardownRoom without a bridge drops the room topic alone, and is safe to r
       dropped.filter((topic) => topic.kind === TopicKind.Conversation).length,
       1,
       'no conversation topic was guessed at',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+/**
+ * A membership event is not an instruction to mint a chain.
+ *
+ * The rotation handler exists so a departure cannot be read by the key the departed member
+ * holds: the devices that *have* an outbound chain move it past the change and redistribute.
+ * A device with no chain has nothing to move — it has never sent into the conversation — and
+ * `redistributeSenderKey` would mint one before asking for an audience, which throws for a
+ * membership this client never loaded. A device that has just been invited is exactly that
+ * device: the fan-out reaches the new member before any list row names the conversation, so
+ * the first thing a fresh invite does is report an error about a join it did nothing wrong
+ * about. These two tests pin both halves — the skip, and that the skip is not a refusal to
+ * rotate.
+ */
+
+/** Runs the event loop until a rotation's round trips have settled. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) {
+    await tick();
+  }
+}
+
+test('an event for a conversation this device owes no key on is not answered with one', async () => {
+  const errors: number[] = [];
+  const { client, server } = await connectedClient({
+    onEventError: (opcode) => errors.push(opcode),
+  });
+  try {
+    // No `loadConversations`: the conversation is not even in this client's cache, which is
+    // the fresh-invite shape — the event arrives first and the list follows.
+    server.memberEvent(29, MemberChange.Joined);
+    await settle();
+
+    assert.deepEqual(
+      errors,
+      [],
+      'a join this device owes no key on is not an error the application has to handle',
+    );
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.CONVERSATION_ROSTER).length,
+      0,
+      'no roster was read to build an audience for a chain this device does not hold',
+    );
+    assert.ok(
+      !server.asked.includes(OP.GROUP_KEY_DISTRIBUTE),
+      'no distribution left for a chain that was never minted',
+    );
+    assert.ok(
+      !server.asked.includes(OP.KEY_BUNDLE_FETCH),
+      'no bundle was fetched to seal a distribution that was never due',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a device that holds a chain still rotates onto the change', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    // Ten members; the list row names eight, so the audience is a preview and the rotation's
+    // distribution has to read the roster — the wire work the guard must not skip.
+    server.roster = [20, 21, 22, 23, 24, 25, 26, 27, 28, 29];
+    await client.loadConversations(30);
+
+    // This device has sent into the conversation, so it holds a chain.
+    client.messaging.rotateSenderKey(idOf(0x5eed));
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.CONVERSATION_ROSTER).length,
+      0,
+      'a local rotation is not a distribution',
+    );
+
+    server.memberEvent(20, MemberChange.Left);
+    await settle();
+
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.CONVERSATION_ROSTER).length,
+      1,
+      'the departure moved the chain and the audience was read to redistribute it',
     );
   } finally {
     await client.disconnect();

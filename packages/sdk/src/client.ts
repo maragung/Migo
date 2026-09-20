@@ -1067,7 +1067,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
    * server-side, and their old chain dies with the epoch it was minted at.
    *
    * The redistribution is fire-and-forget on purpose: it runs *after* the cache patch above, an
-   * error in it (a device unreachable, a membership this client never loaded) must never un-deliver
+   * error in it (a device unreachable, a distribution the server refuses) must never un-deliver
    * the member event to the application's own listeners, and the next send re-attempts the
    * distribution to whoever still lacks one ({@link GroupCrypto.needsDistribution}). A connect or
    * disconnect is presence, not membership — the sender-key audience does not move, so neither does
@@ -1080,6 +1080,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource, GapFiller 
       event.change === MemberChange.Kicked ||
       event.change === MemberChange.Banned;
     if (!joined && !departed) {
+      return;
+    }
+    // Nothing of ours to rotate: a conversation this device has never sent into has no outbound
+    // chain, and `redistributeSenderKey` would mint one before asking `recipientDevices` for an
+    // audience — which throws for a membership this client has not loaded, by design, because
+    // sealing for a group whose roster is unknown is how a member gets left out. A device that has
+    // just been invited is in exactly that state, so without this the commonest flow in the
+    // product reports an event error for a join it did nothing wrong about. The joiner is not the
+    // device that owes the group a key: the members that hold a chain rotate it and send it, and
+    // this device's own first send distributes its chain to whoever still lacks one.
+    if (!ctx.messaging.hasSenderKey(event.conversationId)) {
       return;
     }
     void ctx.messaging
