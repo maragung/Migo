@@ -733,11 +733,15 @@ impl Meters {
         Opcode::ALL
             .iter()
             .map(|opcode| {
-                let value = self.frames_undelivered.iter().map_or(0, |per_opcode| {
-                    per_opcode
-                        .get(&opcode.to_wire())
-                        .map_or(0, |counter| counter.get())
-                });
+                // Summed over the reasons, with the reasons that never lost this opcode
+                // contributing nothing: an iterator has no `map_or`, and a fold that
+                // skipped the missing entries is what the sentence above describes.
+                let value = self
+                    .frames_undelivered
+                    .iter()
+                    .filter_map(|per_opcode| per_opcode.get(&opcode.to_wire()))
+                    .map(|counter| counter.get())
+                    .sum::<u64>();
                 (opcode.name(), value)
             })
             .collect()
