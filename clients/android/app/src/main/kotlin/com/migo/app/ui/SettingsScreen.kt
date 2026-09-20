@@ -29,7 +29,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.migo.app.call.CallInput
 import com.migo.app.model.AppState
+import com.migo.core.domain.CallInputDevice
+import com.migo.core.domain.CallInputResolution
+import com.migo.core.domain.resolveCallInput
 import com.migo.core.store.AppSettings
 import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.NavigationMode
@@ -50,19 +54,31 @@ import com.migo.core.store.ThemeChoice
  * The chat-log group carries the feature's one unavoidable sentence out loud: a saved log is
  * plaintext on this device, and the switch that writes it is the same switch that owns that
  * fact.
+ *
+ * The call group's microphone list is the one row here whose offer is a *preference* rather than a
+ * command, because that is the whole of what the platform provides: the chosen device is handed to
+ * the recorder as a preference, and a phone that cannot honour it -- the device has gone, another
+ * app holds it -- falls back to its own choice. The sentence under the list says so, and the list
+ * itself is read from the phone rather than remembered, so a headset plugged in while the pane is
+ * open is a row that appears.
  */
 @Composable
 fun SettingsScreen(
     state: AppState.SignedIn,
     preferences: AppSettings,
+    /** The microphones the phone is offering, read when the pane opened. */
+    callInputs: List<CallInput> = emptyList(),
     onTheme: (ThemeChoice) -> Unit,
     onNavigationMode: (NavigationMode) -> Unit,
     onSendReadReceipts: (Boolean) -> Unit,
     onSendTypingIndicators: (Boolean) -> Unit,
     onMediaAutoDownload: (MediaAutoDownload) -> Unit,
+    /** The microphone calls should record from, or null for the phone's own choice. */
+    onCallInputDevice: (CallInputDevice?) -> Unit,
     onAutoSaveChatLogs: (Boolean) -> Unit,
     onSaveAllChats: (Uri) -> Unit,
     onRefreshStorage: () -> Unit,
+    onRefreshCallInputs: () -> Unit,
     onClearCaches: () -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
@@ -79,7 +95,10 @@ fun SettingsScreen(
     // The storage group's numbers are null until a walk lands, and a walk only happens on entry:
     // the sizes are facts of the moment the panel was opened, not live figures anybody needs
     // watched.
-    LaunchedEffect(Unit) { onRefreshStorage() }
+    LaunchedEffect(Unit) {
+        onRefreshStorage()
+        onRefreshCallInputs()
+    }
 
     Column(modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         ScreenTitle(title = "Settings")
@@ -192,6 +211,23 @@ fun SettingsScreen(
         Text(
             text = "Clears temporary media, voice-note recordings and playback scratch. Chat " +
                 "logs and the account's own files are not touched.",
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalMigoExtra.current.faint,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        // --- Panggilan ---
+
+        SectionLabel(text = "Panggilan")
+        MicrophonePicker(
+            inputs = callInputs,
+            saved = preferences.callInputDevice,
+            onChoose = onCallInputDevice,
+        )
+        Text(
+            text = microphoneNote(callInputs, preferences.callInputDevice),
             style = MaterialTheme.typography.labelSmall,
             color = LocalMigoExtra.current.faint,
             modifier = Modifier.padding(horizontal = 16.dp),
@@ -373,6 +409,123 @@ private fun FactRow(label: String, value: String) {
         )
         Spacer(modifier = Modifier.width(12.dp))
         OneLine(text = value, modifier = Modifier.weight(1f))
+    }
+}
+
+/**
+ * The microphone a call records from, as the list the phone is offering.
+ *
+ * Ticked rather than pill-shaped like the few-way rows above, because a phone's microphone list is
+ * as long as its hardware makes it and equal-width pills would set every row's width to the longest
+ * device name on the phone. This is the same shape the in-call route menu uses, for the same list
+ * of the same platform's devices.
+ *
+ * The first row is the phone's own choice and not a device: a null in the store, a tick with no
+ * device behind it, and the state every fresh install is in.
+ */
+@Composable
+private fun MicrophonePicker(
+    inputs: List<CallInput>,
+    saved: CallInputDevice?,
+    onChoose: (CallInputDevice?) -> Unit,
+) {
+    val resolution = resolveCallInput(saved, inputs.map { it.device })
+    DeviceRow(
+        label = "System default",
+        sub = "Whichever microphone the phone picks for the call",
+        chosen = resolution is CallInputResolution.SystemDefault,
+        onClick = { onChoose(null) },
+    )
+    val devices = inputs.map { it.device }
+    inputs.forEachIndexed { index, input ->
+        // A device the phone neither names nor addresses cannot be found again on the next call, so
+        // offering it would be offering a choice the app cannot keep. The row is drawn as a fact
+        // rather than left out, because a person looking for their microphone in a list that omits
+        // it would conclude the app does not see it at all.
+        val findable = resolveCallInput(input.device, devices) is CallInputResolution.Resolved
+        DeviceRow(
+            label = input.label,
+            sub = if (findable) null else "This phone names it too little to remember the choice",
+            chosen = resolution is CallInputResolution.Resolved && resolution.index == index,
+            enabled = findable,
+            onClick = { onChoose(input.device) },
+        )
+    }
+}
+
+/**
+ * What the microphone list cannot say by ticking a row.
+ *
+ * Three cases and never more than one sentence, in the order the person meets them: a phone that
+ * lists nothing (an empty list is a legitimate answer, not a failure), a chosen microphone that is
+ * not here (the choice is kept, so the sentence has to say that it is kept rather than that it was
+ * lost), and the ordinary case, where the one thing worth saying is that Android treats the choice
+ * as a preference. That last sentence is not a hedge: the platform hands the device to the recorder
+ * as a preference and is free to ignore it, and a setting that appears to command a device the
+ * phone may decline to use would be the interface overstating what it did.
+ */
+private fun microphoneNote(inputs: List<CallInput>, saved: CallInputDevice?): String = when {
+    inputs.isEmpty() ->
+        "This phone is not reporting any microphones right now, so calls record from whichever " +
+            "one it picks."
+    resolveCallInput(saved, inputs.map { it.device }) is CallInputResolution.Missing -> {
+        val name = saved?.name?.takeIf { it.isNotEmpty() } ?: "The microphone you chose"
+        "$name is not connected right now; calls record from the phone's own choice until it is " +
+            "back, and the choice is kept."
+    }
+    else ->
+        "Android treats this as a preference rather than a command: if the chosen microphone is " +
+            "gone or another app is holding it, the call uses the phone's own choice instead of " +
+            "failing."
+}
+
+/**
+ * One selectable device: a tick on the one in use, then the name and what needs saying about it.
+ *
+ * The tick leads rather than trails so the names line up in one column whatever their length, and
+ * the unticked rows keep the same leading space rather than shifting left. A row that is not
+ * enabled is a device the app cannot remember the choice of (see [MicrophonePicker]), drawn in the
+ * faint ink the panel uses for a fact rather than a control.
+ */
+@Composable
+private fun DeviceRow(
+    label: String,
+    sub: String?,
+    chosen: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (chosen) "\u2713" else "",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.width(20.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    LocalMigoExtra.current.faint
+                },
+            )
+            if (sub != null) {
+                Text(
+                    text = sub,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalMigoExtra.current.faint,
+                )
+            }
+        }
     }
 }
 

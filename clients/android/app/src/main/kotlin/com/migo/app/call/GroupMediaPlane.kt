@@ -1,6 +1,7 @@
 package com.migo.app.call
 
 import android.content.Context
+import android.media.AudioManager
 import com.migo.core.MigoClient
 import com.migo.core.domain.GroupCallSeat
 import com.migo.core.domain.IceCandidateJson
@@ -229,6 +230,10 @@ class GroupMediaPlane(
                 webrtcInitialized = true
             }
             val module = JavaAudioDeviceModule.builder(context).createAudioDeviceModule()
+            // The same standing choice the one-to-one call honours, read here rather than passed
+            // in: the two engines never run at once and neither owns the preference, so both take
+            // it from the one place that does (see [PreferredCallInput]).
+            PreferredCallInput.applyTo(module, systemAudio())
             val gl = EglBase.create()
             val built = PeerConnectionFactory.builder()
                 .setAudioDeviceModule(module)
@@ -254,6 +259,26 @@ class GroupMediaPlane(
             _localVideo.value = picture
             return built
         }
+    }
+
+    /**
+     * The system audio service, the only thing this plane needs from the platform outside WebRTC's
+     * own objects: it is where the microphones a call may record from are listed.
+     */
+    private fun systemAudio(): AudioManager =
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    /**
+     * Records this group call from the microphone the user chose, if the phone still has it.
+     *
+     * A no-op before the engine exists, and deliberately so rather than a lazily-built engine: the
+     * choice is applied where the audio module is built, and an engine that is built later reads the
+     * same preference then — [PreferredCallInput] is process-wide precisely so that both orders mean
+     * the same thing.
+     */
+    fun applyPreferredInput() {
+        val module = audioModule ?: return
+        PreferredCallInput.applyTo(module, systemAudio())
     }
 
     // --- lifecycle ---

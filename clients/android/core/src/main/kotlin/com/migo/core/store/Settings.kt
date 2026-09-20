@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
+import com.migo.core.domain.CallInputDevice
 import com.migo.core.protocol.BandwidthMode
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
@@ -312,6 +313,20 @@ data class AppSettings(
     val voiceNoteSpeed: VoiceNoteSpeed = VoiceNoteSpeed.Speed1x,
 
     /**
+     * The microphone calls record from, or null for the phone's own choice.
+     *
+     * A standing preference rather than a per-call one, and deliberately not the shape the call's
+     * output route takes: which speaker a call plays through is a decision about one call, made
+     * while it runs and forgotten when it ends, but which microphone a person speaks into is a fact
+     * about their desk — the same headset every time. So this is stored, and the id the platform
+     * gave the device is not: see [CallInputDevice] for what is kept instead and why.
+     *
+     * Null is the default and not a missing value: a fresh install has made no choice, which is the
+     * phone choosing, which is what every call did before this setting existed.
+     */
+    val callInputDevice: CallInputDevice? = null,
+
+    /**
      * Whether closing a conversation window writes that conversation's transcript to app-private
      * storage as a plain-text log.
      *
@@ -372,6 +387,13 @@ private val KEY_SHARE_PRESENCE = booleanPreferencesKey("share_presence")
 private val KEY_MEDIA_AUTO_DOWNLOAD = stringPreferencesKey("media_auto_download")
 private val KEY_VOICE_NOTE_SPEED = stringPreferencesKey("voice_note_speed")
 private val KEY_AUTO_SAVE_CHAT_LOGS = booleanPreferencesKey("auto_save_chat_logs")
+// The chosen microphone, as three keys rather than one encoded string: a device's product name is
+// free-form text that may contain whatever separator an encoding would have chosen, and the type is
+// the key whose presence says a choice exists at all — a device that will not name itself still has
+// a type, while a name may legitimately be empty.
+private val KEY_CALL_INPUT_TYPE = intPreferencesKey("call_input_type")
+private val KEY_CALL_INPUT_NAME = stringPreferencesKey("call_input_name")
+private val KEY_CALL_INPUT_ADDRESS = stringPreferencesKey("call_input_address")
 private val KEY_ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
 private val KEY_LAST_BACKUP_EXPORT_MS = longPreferencesKey("last_backup_export_ms")
 private val KEY_LAST_IDENTITY_ROTATION_MS = longPreferencesKey("last_identity_rotation_ms")
@@ -416,6 +438,7 @@ private fun Preferences.toAppSettings(): AppSettings {
             VoiceNoteSpeed.entries,
             defaults.voiceNoteSpeed,
         ),
+        callInputDevice = readCallInputDevice(this),
         autoSaveChatLogs = this[KEY_AUTO_SAVE_CHAT_LOGS] ?: defaults.autoSaveChatLogs,
         onboardingComplete = this[KEY_ONBOARDING_COMPLETE] ?: defaults.onboardingComplete,
         lastBackupExportMs = this[KEY_LAST_BACKUP_EXPORT_MS] ?: defaults.lastBackupExportMs,
@@ -443,10 +466,40 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_SHARE_PRESENCE] = sharePresence
     preferences[KEY_MEDIA_AUTO_DOWNLOAD] = mediaAutoDownload.name
     preferences[KEY_VOICE_NOTE_SPEED] = voiceNoteSpeed.name
+    // Written in full or removed in full: three keys are one value here, and a half-written record
+    // would be a choice the reader has to guess the shape of.
+    val input = callInputDevice
+    if (input == null) {
+        preferences.remove(KEY_CALL_INPUT_TYPE)
+        preferences.remove(KEY_CALL_INPUT_NAME)
+        preferences.remove(KEY_CALL_INPUT_ADDRESS)
+    } else {
+        preferences[KEY_CALL_INPUT_TYPE] = input.type
+        preferences[KEY_CALL_INPUT_NAME] = input.name
+        preferences[KEY_CALL_INPUT_ADDRESS] = input.address
+    }
     preferences[KEY_AUTO_SAVE_CHAT_LOGS] = autoSaveChatLogs
     preferences[KEY_ONBOARDING_COMPLETE] = onboardingComplete
     preferences[KEY_LAST_BACKUP_EXPORT_MS] = lastBackupExportMs
     preferences[KEY_LAST_IDENTITY_ROTATION_MS] = lastIdentityRotationMs
+}
+
+/**
+ * Reads the chosen call microphone, or null when there is none.
+ *
+ * The type key is the record's existence: every device the platform reports has a type, so its
+ * presence is what distinguishes a choice from no choice, and the two text fields are read as empty
+ * when they are absent rather than treated as a malformed record. A device that will not name itself
+ * and reports no address is a real device — the built-in microphone on some phones is one — and
+ * refusing to read it back would silently turn the user's choice into the default.
+ */
+private fun readCallInputDevice(preferences: Preferences): CallInputDevice? {
+    val type = preferences[KEY_CALL_INPUT_TYPE] ?: return null
+    return CallInputDevice(
+        name = preferences[KEY_CALL_INPUT_NAME] ?: "",
+        type = type,
+        address = preferences[KEY_CALL_INPUT_ADDRESS] ?: "",
+    )
 }
 
 /**

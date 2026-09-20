@@ -923,6 +923,23 @@ class CallManager(
      */
     fun chooseOutput(deviceId: Int): Boolean = audioRoute.choose(deviceId)
 
+    /**
+     * Records this call from the microphone the user chose, if the phone still has it.
+     *
+     * The choice is a standing preference, not a property of this call, so unlike the output route
+     * it is read rather than chosen here: [PreferredCallInput] holds it and does the resolving, and
+     * this is only the seam that gives the manager's own module and the phone's own listing to it.
+     * Called where the call's audio is opened and again whenever the choice changes, so a
+     * microphone picked while a call is running takes effect on that call rather than the next one.
+     *
+     * A preference is all the platform offers here: WebRTC hands the device to `AudioRecord` as a
+     * preferred one, and a phone that cannot honour it — the device went away, another app holds it
+     * — falls back to its own choice rather than failing the call. The settings pane says so.
+     */
+    fun applyPreferredInput() {
+        PreferredCallInput.applyTo(audioModule, audioManager)
+    }
+
     /** Mutes or unmutes this side's microphone. */
     fun toggleMute() {
         muted = !muted
@@ -1533,6 +1550,10 @@ class CallManager(
      * are how WebRTC itself says "audio only".
      */
     private fun attachMedia(pc: PeerConnection, camera: CameraVideoCapturer?) {
+        // Before the source exists, because the preference is read when the capture opens: a device
+        // named here is the microphone this call's first frame comes from, and naming it afterwards
+        // would leave the call's opening moments on the phone's choice.
+        applyPreferredInput()
         val source = factory.createAudioSource(MediaConstraints())
         val track = factory.createAudioTrack("migo-voice", source)
         audioSender = pc.addTrack(track, listOf("migo"))
