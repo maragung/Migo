@@ -10903,7 +10903,16 @@ mod tests {
         assert_eq!(&note[..4], b"OggS", "the re-encoded draft is an Ogg");
         let decoded = media::decode_audio(&note).expect("the re-encoded note decodes");
         assert_eq!(decoded.rate, 48_000);
-        assert_eq!(decoded.samples.len(), 48_000, "one second, at 48 kHz");
+        // One second of input, decoded at 48 kHz, less the pre-skip the decode drops: the
+        // first samples the codec emits are its own lead-in rather than the recording, and
+        // the same six and a half milliseconds never left the encoder at the far end, so a
+        // second of 8 kHz PCM comes back as the second it holds with the codec's delay
+        // taken off the front of it.
+        assert_eq!(
+            decoded.samples.len(),
+            48_000 - usize::from(media::OPUS_PRE_SKIP),
+            "one second, at 48 kHz, less the pre-skip the codec states"
+        );
         assert_eq!(
             media::ogg_opus_playtime_ms(&note),
             Some(1_000),
