@@ -607,6 +607,36 @@ test('compressed batches unpack as the vectors say', async () => {
   }
 });
 
+test('a compressed element unpacks as the vectors say', async () => {
+  // Decode-only, for the same reason as the compressed envelope: the element's payload is raw
+  // DEFLATE. What is pinned here is the *scope* of the compression flag — the envelope in this
+  // case is not compressed at all, so a receiver that inflates only the envelope hands its
+  // decoder a DEFLATE stream, reads a field length out of it, and fails on a bytes field whose
+  // length is in the billions. That is exactly the failure a server-produced batch of
+  // compressible call frames produced against this client.
+  const file = load('batch.json');
+  for (const item of section(file, 'element_compressed_cases', 'batch.json')) {
+    const elements = elementsOf(item);
+    const label = caseName(item);
+    const decoded = decodeFrame(bytesOf(item, 'hex'));
+
+    assert.equal(
+      decoded.header.flags & (flags.BATCH | flags.COMPRESSED),
+      flags.BATCH,
+      `case \`${label}\` is a plain envelope holding a compressed element`,
+    );
+    // Without this the case could pass vacuously: a receiver that ignored the element's
+    // flag would be comparing plaintext to plaintext if the vector itself carried none.
+    assert.equal(
+      (elements[0]?.header.flags ?? 0) & flags.COMPRESSED,
+      flags.COMPRESSED,
+      `case \`${label}\` pins a first element that carries its own COMPRESSED flag`,
+    );
+    const unpacked = await unpackFrame(decoded);
+    expectFrames(label, unpacked, elements);
+  }
+});
+
 test('malformed batches are rejected', async () => {
   const file = load('batch.json');
   for (const item of section(file, 'invalid', 'batch.json')) {
@@ -707,7 +737,7 @@ test('every vector file is present and populated', () => {
     ['varint.json', ['cases', 'zigzag', 'invalid']],
     ['frames.json', ['cases', 'length_prefixed', 'invalid']],
     ['mse.json', ['cases', 'invalid']],
-    ['batch.json', ['cases', 'compressed_cases', 'invalid']],
+    ['batch.json', ['cases', 'compressed_cases', 'element_compressed_cases', 'invalid']],
     ['compress.json', ['cases', 'frames', 'policy', 'invalid']],
   ];
   let total = 0;

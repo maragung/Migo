@@ -210,6 +210,32 @@ class BatchCompressVectorsTest {
     }
 
     @Test
+    fun aCompressedElementUnpacksAsTheVectorsSay() {
+        // Decode-only, for the same reason as the compressed envelope: the element's payload is
+        // raw DEFLATE. What is pinned here is the *scope* of the compression flag — the envelope
+        // in this case is not compressed at all, so a receiver that inflates only the envelope
+        // hands its decoder a DEFLATE stream and reads a field length in the billions out of it.
+        for (case in section(load("batch.json"), "element_compressed_cases", "batch.json")) {
+            val elements = elementsOf(case)
+            val decoded = decodeFrame(hex(text(case, "hex")))
+
+            assertEquals(
+                "`${name(case)}` is a plain envelope holding a compressed element",
+                Flags.BATCH,
+                decoded.header.flags and (Flags.BATCH or Flags.COMPRESSED),
+            )
+            // Without this the case could pass vacuously: a receiver that ignored the element's
+            // flag would be comparing plaintext to plaintext if the vector itself carried none.
+            assertEquals(
+                "`${name(case)}` pins a first element that carries its own COMPRESSED flag",
+                Flags.COMPRESSED,
+                elements[0].header.flags and Flags.COMPRESSED,
+            )
+            expectFrames(name(case), unpackFrame(decoded), elements)
+        }
+    }
+
+    @Test
     fun malformedBatchesAreRejected() {
         for (case in section(load("batch.json"), "invalid", "batch.json")) {
             // The headers of these frames are well-formed; it is the payload that is
@@ -300,7 +326,7 @@ class BatchCompressVectorsTest {
     @Test
     fun everyBatchAndCompressVectorFileIsPresentAndPopulated() {
         val expected = listOf(
-            "batch.json" to listOf("cases", "compressed_cases", "invalid"),
+            "batch.json" to listOf("cases", "compressed_cases", "element_compressed_cases", "invalid"),
             "compress.json" to listOf("cases", "frames", "policy", "invalid"),
         )
         for ((file, sections) in expected) {

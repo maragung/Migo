@@ -60,10 +60,18 @@ fun encodeBatch(frames: List<Frame>): Frame {
 }
 
 /**
- * Turns one received frame into the list of frames to dispatch: inflates a compressed payload,
- * then unpacks a batch. This is the function a transport should call on every inbound frame. A
- * frame without the `BATCH` flag comes back as a one-element list, so the caller keeps a single
- * dispatch path and never has to ask which shape arrived.
+ * Turns one received frame into the list of frames to dispatch: inflates every payload a
+ * `COMPRESSED` flag says is compressed, then unpacks a batch. This is the function a transport
+ * should call on every inbound frame. A frame without the `BATCH` flag comes back as a
+ * one-element list, so the caller keeps a single dispatch path and never has to ask which shape
+ * arrived.
+ *
+ * The compression flag is scoped to the frame that carries it, and an element is a complete
+ * frame: a server encodes a frame once for a whole fan-out and only then packs it into an
+ * envelope, so an element whose payload cleared the policy arrives still deflated and says so
+ * with its own flag, never the envelope's. Inflating the envelope alone leaves that element to
+ * be decoded as plaintext, which is not a lost frame but a decode failure — the reader takes a
+ * length out of a DEFLATE stream and gets one in the billions.
  */
 fun unpackFrame(frame: Frame): List<Frame> {
     val payload = if ((frame.header.flags and Flags.COMPRESSED) != 0) {
@@ -75,7 +83,13 @@ fun unpackFrame(frame: Frame): List<Frame> {
     if ((frame.header.flags and Flags.BATCH) == 0) {
         return listOf(Frame(frame.header, payload))
     }
-    return decodeBatchPayload(payload)
+    return decodeBatchPayload(payload).map { element ->
+        if ((element.header.flags and Flags.COMPRESSED) != 0) {
+            Frame(element.header, Compress.inflateRaw(element.payload, Limits.MAX_FRAME_BYTES))
+        } else {
+            element
+        }
+    }
 }
 
 /**

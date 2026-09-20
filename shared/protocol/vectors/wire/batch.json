@@ -1,7 +1,7 @@
 {
-  "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, and the hostile payloads a receiver must refuse.",
-  "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE stream in `compressed_cases` is written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
-  "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope.",
+  "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, a compressed element inside a plain one, and the hostile payloads a receiver must refuse.",
+  "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE streams in `compressed_cases` and `element_compressed_cases` are written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
+  "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope. `element_compressed_cases` are decode-only for the same reason as `compressed_cases`, and pin the scope of the compression flag: an element is a complete frame, so its own COMPRESSED bit — not the envelope's — says its payload is raw DEFLATE, and the elements those cases expect are the inflated bytes with the flag still on the header.",
   "cases": [
     {
       "name": "empty_batch",
@@ -2820,6 +2820,44 @@
         "payload": "63d661643060482412e830321832261109741805049818890400"
       },
       "hex": "0105000063d661643060482412e830321832261109741805049818890400"
+    }
+  ],
+  "element_compressed_cases": [
+    {
+      "name": "an_element_keeps_its_own_compressed_flag",
+      "elements": [
+        {
+          "version": 1,
+          "flags": 1,
+          "opcode": 48,
+          "correlation": 0,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+        },
+        {
+          "version": 1,
+          "flags": 0,
+          "opcode": 49,
+          "correlation": 1,
+          "trace": null,
+          "fragment": null,
+          "metadata": null,
+          "payload": "6e6f7420636f6d70726573736564"
+        }
+      ],
+      "frame": {
+        "version": 1,
+        "flags": 4,
+        "opcode": 0,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": null,
+        "payload": "020901013000ab2212000012010031016e6f7420636f6d70726573736564"
+      },
+      "hex": "01040000020901013000ab2212000012010031016e6f7420636f6d70726573736564"
     }
   ],
   "invalid": [
