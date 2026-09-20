@@ -1574,7 +1574,7 @@ impl Worker {
             return;
         }
         let ringing_id = self.calls.ringing.as_ref().map(|ring| ring.call_id);
-        if ends_ringing_call(event.state, ringing_id) {
+        if ends_ringing_call(event.state, event.call_id, ringing_id) {
             // The call this ring belongs to ended before anyone answered here — the caller
             // canceled, or the invite expired. Retire the ring and state the fact: a screen
             // that keeps ringing a dead call teaches its user to distrust every ring after it.
@@ -1586,7 +1586,7 @@ impl Worker {
             self.calls.emit(&self.sink);
             return;
         }
-        if answers_ringing_call(event.state, ringing_id) {
+        if answers_ringing_call(event.state, event.call_id, ringing_id) {
             // Another device on this account answered. The server rings every device and
             // publishes the Connecting state to both parties, so this one hears the call move
             // on without it — retire the ring and say where the call went, because "missed"

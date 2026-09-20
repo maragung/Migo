@@ -176,6 +176,10 @@ mod platform {
     /// One line of the PCM table. A line that is not one — a blank, a header, a shape a future
     /// kernel writes differently — is not an error worth reporting: it is a device that does not
     /// appear in a picker, which the system-default row still covers.
+    ///
+    /// A line that names no direction is not a device either, however well its address parses:
+    /// the kernel writes a clause for each direction the device has, so a line without one is a
+    /// shape this parser does not know rather than a device that can neither play nor record.
     fn parse_pcm(line: &str) -> Option<Pcm> {
         let mut clauses = line.split(" : ");
         let (address, name) = clauses.next()?.split_once(": ")?;
@@ -187,15 +191,18 @@ mod platform {
             playback: 0,
             capture: 0,
         };
+        let mut stated = false;
         for clause in clauses {
             let clause = clause.trim();
             if let Some(count) = clause.strip_prefix("playback ") {
                 pcm.playback = count.trim().parse().unwrap_or(0);
+                stated = true;
             } else if let Some(count) = clause.strip_prefix("capture ") {
                 pcm.capture = count.trim().parse().unwrap_or(0);
+                stated = true;
             }
         }
-        Some(pcm)
+        stated.then_some(pcm)
     }
 
     #[cfg(test)]

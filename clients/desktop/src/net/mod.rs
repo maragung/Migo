@@ -1947,7 +1947,8 @@ fn is_sequenced(frame: &Frame) -> bool {
 }
 
 /// One conversation's sequence account: the contiguous watermark, the highest seq ever seen,
-/// and the stall the last unproductive fill stopped at.
+/// the brick a hole left the account holding, and the stall the last unproductive fill stopped
+/// at.
 ///
 /// §152 makes a conversation's sequence numbers gapless by construction, so "what this client
 /// holds" is a *prefix*, and the watermark names its top: it advances only when the next brick
@@ -1971,6 +1972,18 @@ struct SeqAccount {
     /// persistent (purged) hole must never become. The stall lifts the moment the watermark
     /// moves.
     stalled_at: Option<u64>,
+    /// The lowest seq routed above the watermark that the prefix has not swallowed yet.
+    ///
+    /// A hole is named as its own top, and the brick that top was named for has already been
+    /// routed: a catch-up page that returned the hole's tail before its head, or a live event
+    /// that landed between two fills, leaves the account holding ground it cannot stand on yet.
+    /// Without this the watermark would stop one short of a hole that *is* filled — the prefix
+    /// ends under a brick the account is already holding, and the next fill re-asks for a seq
+    /// that was delivered minutes ago. Only the lowest such seq is held, because it is the only
+    /// one the prefix can reach next, and it is one `u64` however long a purged conversation
+    /// leaves the hole open — an unbounded set of held bricks would be a leak a remote peer
+    /// could drive.
+    held_above: Option<u64>,
 }
 
 impl SeqAccount {
@@ -1995,8 +2008,19 @@ impl SeqAccount {
             self.watermark = seq;
             None
         } else {
+            // A hole — and the brick that opened it is held: it is above the prefix, and it is
+            // the lowest such seq, which is the one the prefix steps onto when the gap below it
+            // closes.
+            self.held_above.get_or_insert(seq);
             Some(self.highest_seen)
         };
+        if self.held_above == Some(self.watermark + 1) {
+            // The gap closed onto a brick the account already held: the hole's fill and this
+            // event between them covered every seq up to it, so it is contiguous ground now and
+            // waiting for its redelivery would hold the watermark one short of the truth.
+            self.watermark += 1;
+            self.held_above = None;
+        }
         if self
             .stalled_at
             .is_some_and(|stalled| stalled != self.watermark)
@@ -10879,7 +10903,16 @@ mod tests {
         assert_eq!(&note[..4], b"OggS", "the re-encoded draft is an Ogg");
         let decoded = media::decode_audio(&note).expect("the re-encoded note decodes");
         assert_eq!(decoded.rate, 48_000);
-        assert_eq!(decoded.samples.len(), 48_000, "one second, at 48 kHz");
+        // One second of input, decoded at 48 kHz, less the pre-skip the decode drops: the
+        // first samples the codec emits are its own lead-in rather than the recording, and
+        // the same six and a half milliseconds never left the encoder at the far end, so a
+        // second of 8 kHz PCM comes back as the second it holds with the codec's delay
+        // taken off the front of it.
+        assert_eq!(
+            decoded.samples.len(),
+            48_000 - usize::from(media::OPUS_PRE_SKIP),
+            "one second, at 48 kHz, less the pre-skip the codec states"
+        );
         assert_eq!(
             media::ogg_opus_playtime_ms(&note),
             Some(1_000),

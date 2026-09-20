@@ -32,10 +32,19 @@
 //!
 //! # What is deliberately not here
 //!
-//! Device selection, echo cancellation, and level meters. The default devices
-//! and the OS's own cancellation are what every other Migo client uses, and the
-//! one honest failure mode — "Microphone unavailable" — is surfaced rather than
-//! papered over with a silent stream of zeros.
+//! Echo cancellation and level meters. The OS's own cancellation is what every
+//! other Migo client uses, and the one honest failure mode — "Microphone
+//! unavailable" — is surfaced rather than papered over with a silent stream of
+//! zeros.
+//!
+//! Device selection *is* here, and it is the one decision this module holds that
+//! the rest of the audio path does not make for itself: [`set_chosen_devices`] is
+//! the shell's write, [`chosen_microphone`] and [`chosen_speaker`] are the read,
+//! and [`open_microphone`] and [`open_speaker`] apply it with the fallback to the
+//! system's own pick that the settings pane promises. The names are
+//! [`crate::net::call_devices`]' — an ALSA PCM name on Linux, a cpal device name
+//! on Windows and macOS — and they are read back by the same spelling they were
+//! stored in, which is why no call site holds a device name of its own.
 
 use std::fmt;
 use std::sync::mpsc as std_mpsc;
@@ -862,17 +871,23 @@ mod tests {
 
     /// µ-law is not lossless — it is 8 bits of logarithmic quantization — but
     /// its error is bounded, and the bound is the codec's own: half a segment
-    /// step, worst case in the loudest segment.
+    /// step, worst case in the loudest segment. The top segment's step is 1 024
+    /// decoded, so the bound there is 512, and `CLIP` — the widest input the
+    /// codec can state — lands 511 short of the rail it encodes to.
+    ///
+    /// The two `i16` rails are not in this list: they are past `CLIP`, where the
+    /// encoder clamps rather than quantizes and no error bound applies at all.
+    /// Their one behaviour is pinned in `the_loudest_samples_clip_rather_than_wrap`.
     #[test]
     fn a_linear_sample_round_trips_within_the_codecs_own_error() {
         assert_eq!(ulaw_to_linear(linear_to_ulaw(0)), 0, "silence is exact");
         for sample in [
             1i16, -1, 100, -100, 1_000, -1_000, 5_000, -5_000, 10_000, -10_000, 20_000, -20_000,
-            32_635, -32_635, 32_767, -32_768,
+            32_635, -32_635,
         ] {
             let decoded = ulaw_to_linear(linear_to_ulaw(sample));
             assert!(
-                (decoded - sample).abs() <= 256,
+                (decoded - sample).abs() <= 512,
                 "{sample} came back as {decoded}"
             );
         }
