@@ -130,6 +130,7 @@ impl Dropped {
 /// never had a mailbox to land in — which is the other way a `Critical` frame, the class
 /// backpressure may never drop, still fails to arrive. A call event that vanishes while
 /// the call's own counters say it was sent is read here or nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Undelivered {
     /// The topic had no subscriber set at all, so there was no target to refuse.
     NoSubscribers,
