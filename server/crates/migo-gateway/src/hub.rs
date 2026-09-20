@@ -311,8 +311,11 @@ impl Hub {
             // already gone out, and the frame is gone — which for a `Critical` frame, the
             // class backpressure may never drop, is the one way an event a call's own
             // counters say was sent never arrives. Counted here because this line is the only
-            // place that can name it.
-            self.meters.frame_undelivered(Undelivered::NoSubscribers);
+            // place that can name it — and named by opcode as well as by reason, because a
+            // refusal count on its own cannot say whether the frames being refused are the
+            // ones a client is waiting for.
+            self.meters
+                .frame_undelivered(Undelivered::NoSubscribers, opcode);
             return;
         };
         let targets: Vec<Id> = set.iter().copied().collect();
@@ -325,7 +328,8 @@ impl Hub {
                 // entry, left by a departure that did not release the topics it held. Every
                 // frame addressed to it is lost the same silent way, for as long as the
                 // entry survives.
-                self.meters.frame_undelivered(Undelivered::SessionGone);
+                self.meters
+                    .frame_undelivered(Undelivered::SessionGone, opcode);
                 continue;
             };
             if let Some(bit) = opcode.feature() {
@@ -334,7 +338,8 @@ impl Hub {
                     // bit. Legal, and until it is counted here indistinguishable from a frame
                     // that was lost — a client missing one feature bit would otherwise look
                     // exactly like a server dropping its events.
-                    self.meters.frame_undelivered(Undelivered::FeatureAbsent);
+                    self.meters
+                        .frame_undelivered(Undelivered::FeatureAbsent, opcode);
                     continue;
                 }
             }
@@ -356,10 +361,12 @@ impl Hub {
             match outcome {
                 PushOutcome::Dropped(class) => self.meters.frame_dropped(class),
                 PushOutcome::NotSubscribed => {
-                    self.meters.frame_undelivered(Undelivered::NotSubscribed);
+                    self.meters
+                        .frame_undelivered(Undelivered::NotSubscribed, opcode);
                 }
                 PushOutcome::Closed => {
-                    self.meters.frame_undelivered(Undelivered::QueueClosed);
+                    self.meters
+                        .frame_undelivered(Undelivered::QueueClosed, opcode);
                 }
                 _ => {}
             }

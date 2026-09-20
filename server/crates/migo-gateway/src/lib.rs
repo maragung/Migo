@@ -454,7 +454,7 @@ impl Gateway {
     }
 
     /// The frames a fan-out could not hand to any mailbox since this gateway opened,
-    /// labelled by why.
+    /// labelled by why, summed over every opcode the series is split across.
     ///
     /// The third reader in this family, and the one a call's own counters cannot replace:
     /// `CALL_SDP` and `CALL_INVITE_EVENT` are `Critical`, so the dropped series is blind to
@@ -464,6 +464,19 @@ impl Gateway {
     #[must_use]
     pub fn undelivered_frames_total(&self) -> Vec<(&'static str, u64)> {
         self.inner.meters.undelivered_frames_total()
+    }
+
+    /// The same frames, labelled by the opcode they were — what kind of frame was lost,
+    /// rather than which door refused it.
+    ///
+    /// A reason alone cannot answer the question a delivery investigation actually asks. A
+    /// calls step can read fourteen thousand refusals and a thousand call relays that never
+    /// arrived, and those two numbers do not connect until the series says how many of the
+    /// refusals were `CALL_SDP`. Every opcode is listed, so the zero for a call opcode is as
+    /// legible as the total — the answer "not this path" is only usable when it is printed.
+    #[must_use]
+    pub fn undelivered_frames_by_opcode(&self) -> Vec<(&'static str, u64)> {
+        self.inner.meters.undelivered_frames_by_opcode()
     }
 
     /// Publishes a server-originated frame to one topic, for callers outside a session.
