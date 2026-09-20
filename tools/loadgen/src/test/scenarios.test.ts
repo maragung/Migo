@@ -61,7 +61,19 @@ interface VuHooks {
   onSend?: (conversationId: string, content: unknown, options?: unknown) => void;
   onStart?: (kind: ConversationKind, members: readonly unknown[]) => void;
   startFails?: boolean;
-  onWatch?: (id: string) => void;
+  /** Called when this VU lists its conversations — the invite answer — once per list. */
+  onList?: () => void;
+  /**
+   * The conversation ids this VU's list answers with.
+   *
+   * Defaults to the conversation the sender to its left created — `conv-<index - 1>`, the id this
+   * double's own `startConversation` mints — because that is what every paired scenario in this
+   * file drives: the sender sits at index 0 and its receiver at 1. A scenario whose sender is a
+   * different VU sets this explicitly, which is exactly the fan-out below: one group conversation
+   * owned by index 0 and every other VU a member of it. A test that wants the list to come back
+   * short sets it too.
+   */
+  list?: readonly string[];
   // The listeners the full-scale scenarios register, captured for the test to fire.
   incomingCall?: (event: CallEventDouble) => void;
   sdpRelay?: (event: CallEventDouble) => void;
@@ -198,9 +210,15 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
         ? Promise.reject(new TransportError('start failed'))
         : Promise.resolve({ conversationId: `conv-${index}` });
     },
-    watchConversation: (id: string): Promise<void> => {
-      hooks.onWatch?.(id);
-      return Promise.resolve();
+    // Bound but unused by every scenario here, which lists rather than watches; kept so the double
+    // still answers the shape the SDK's client is.
+    watchConversation: (): Promise<void> => Promise.resolve(),
+    loadConversations: (): Promise<{ conversations: { conversationId: string }[] }> => {
+      hooks.onList?.();
+      const ids = hooks.list ?? [`conv-${index - 1}`];
+      return Promise.resolve({
+        conversations: ids.map((conversationId) => ({ conversationId })),
+      });
     },
   };
   return {
@@ -326,12 +344,12 @@ test('a failing presence op is counted by class, not swallowed', async () => {
 test('messaging setup pairs adjacent connected VUs and subscribes each receiver', async () => {
   const ctx = new RunContext(new Metrics(), QUIET, 0, future());
   const starts: Array<{ kind: ConversationKind; members: readonly unknown[] }> = [];
-  const watched: string[] = [];
+  const listed: number[] = [];
   const vus = [
     makeVu(0, { onStart: (kind, members) => starts.push({ kind, members }) }),
-    makeVu(1, { onWatch: (id) => watched.push(id) }),
+    makeVu(1, { onList: () => listed.push(1) }),
     makeVu(2, { onStart: (kind, members) => starts.push({ kind, members }) }),
-    makeVu(3, { onWatch: (id) => watched.push(id) }),
+    makeVu(3, { onList: () => listed.push(3), list: ['conv-2'] }),
   ];
   await scenario('messaging').prepare(vus, ctx);
 
@@ -345,7 +363,12 @@ test('messaging setup pairs adjacent connected VUs and subscribes each receiver'
     { kind: ConversationKind.Direct, members: ['acct-1'] },
     { kind: ConversationKind.Direct, members: ['acct-3'] },
   ]);
-  assert.deepEqual(watched.sort(), ['conv-0', 'conv-2']);
+  // Index 3 spells its list out even though the value is the one the double would have defaulted
+  // to, because the default is defined in the other test file: a receiver here that quietly relied
+  // on it would stay green if that default moved, and this is the receiver of the pair whose sender
+  // is index 2 rather than index 0 — the only one in this file whose conversation a neighbour other
+  // than the first VU created.
+  assert.deepEqual(listed.sort(), [1, 3]);
 });
 
 test('messaging setup warns on an odd number of connected VUs and pairs the rest', async () => {
@@ -403,8 +426,8 @@ test('fanout setup creates one group conversation of every other account and war
       onStart: (kind, members) => starts.push({ kind, members }),
       onSend: (_conversationId, content) => sends.push(content),
     }),
-    makeVu(1),
-    makeVu(2),
+    makeVu(1, { list: ['conv-0'] }),
+    makeVu(2, { list: ['conv-0'] }),
   ];
   await scenario('fanout').prepare(vus, ctx);
 
@@ -422,7 +445,12 @@ test('fanout setup warns when more VUs connect than a group may hold', async () 
   const starts: Array<{ kind: ConversationKind; members: readonly unknown[] }> = [];
   // 257 connected VUs: one over the product ceiling of 256, so one must stay idle.
   const vus = Array.from({ length: 257 }, (_unused, i) =>
-    makeVu(i, i === 0 ? { onStart: (kind, members) => starts.push({ kind, members }) } : {}),
+    makeVu(
+      i,
+      i === 0
+        ? { onStart: (kind, members) => starts.push({ kind, members }) }
+        : { list: ['conv-0'] },
+    ),
   );
   const stderr = await withStderr(() => scenario('fanout').prepare(vus, ctx));
   assert.ok(stderr.includes('stay idle'));
@@ -443,8 +471,8 @@ test('fanout rules one ok verdict per acknowledged message that reached every re
     },
   };
   const sender = makeVu(0, senderHooks);
-  const receiverA = makeVu(1);
-  const receiverB = makeVu(2);
+  const receiverA = makeVu(1, { list: ['conv-0'] });
+  const receiverB = makeVu(2, { list: ['conv-0'] });
   const vus = [sender, receiverA, receiverB];
   const fanout = scenario('fanout');
   await fanout.prepare(vus, ctx);
@@ -478,8 +506,8 @@ test('fanout verdict names a short fan-out and an over fan-out per message', asy
     },
   };
   const sender = makeVu(0, senderHooks);
-  const receiverA = makeVu(1);
-  const receiverB = makeVu(2);
+  const receiverA = makeVu(1, { list: ['conv-0'] });
+  const receiverB = makeVu(2, { list: ['conv-0'] });
   const vus = [sender, receiverA, receiverB];
   const fanout = scenario('fanout');
   await fanout.prepare(vus, ctx);

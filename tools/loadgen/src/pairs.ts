@@ -10,6 +10,7 @@
  */
 
 import { ConversationKind } from '@migo/sdk';
+import type { Id } from '@migo/sdk';
 
 import { runPool } from './pool.js';
 import type { RunContext } from './run-context.js';
@@ -50,10 +51,59 @@ export function pairUp(vus: readonly VirtualUser[]): VuPair[] {
 }
 
 /**
+ * How many rows a receiver lists when it answers an invite: a fixture account holds one conversation.
+ */
+const INVITE_LIST_PAGE = 50;
+
+/**
+ * Answers an invite the way a real client does — by listing, not by watching.
+ *
+ * `watchConversation` subscribes a topic and touches nothing else, and the membership cache
+ * `recipientDevices` reads is primed by `loadConversations` — the call a client's connect makes,
+ * and the one `clients/web` re-makes when an invite arrives on a conversation its list does not
+ * hold. A receiver that only ever *watched* the conversation it was added to is a client no product
+ * ships, and the SDK says so once per invite, deterministically:
+ *
+ *   - A create seats every named member and publishes one `Joined` for each of them, and the
+ *     dispatcher mirrors that event to the member's own user topic — because a member who has just
+ *     been added cannot be a subscriber of a conversation it has never heard of, so the copy on the
+ *     conversation topic would reach nobody. That is the server's own comment on the fan-out.
+ *   - Every SDK session subscribes its own user topic at connect, so the event arrives whatever the
+ *     subscribe timing: one per receiving device, never zero, never two.
+ *   - The member-event handler does two things with it. It patches the membership cache, which for a
+ *     conversation this client has never loaded is a deliberate no-op ("the roster read will find
+ *     the truth"). Then it rotates the sender key onto the epoch the event names and redistributes
+ *     it, whose audience lookup throws `membership for conversation … is unknown` into
+ *     `onEventError` as `op 53`.
+ *
+ * That is the `sdk` wall every step of the nightly carried, exactly once per receiving device: 500
+ * on the thousand-VU steps, 255 on the 256-member fan-out, 20 on the forty-VU ones. The harness was
+ * the unprimed client, not the SDK — the error is the true and only signal a client gets when it
+ * holds a conversation it cannot seal for, and the fix belongs on the side that skipped the prime.
+ *
+ * Listing rather than `rememberMembers` on purpose: the set could be asserted here (it is the two
+ * accounts of the pair), but a fixture that vouches for a roster it never read stops testing the
+ * server's own answer, and a member's view of a conversation comes from the list. The presence
+ * check is the price — a receiver whose list does not carry the conversation it was just invited to
+ * is a server fault, and it fails here as a `setup` error rather than as a membership error one
+ * event later.
+ */
+export async function listInvitedConversations(vu: VirtualUser, conversationId: Id): Promise<void> {
+  const page = await vu.client.loadConversations(INVITE_LIST_PAGE);
+  if (!page.conversations.some((row) => row.conversationId === conversationId)) {
+    throw new Error(
+      `conversation ${conversationId} is not in the list VU ${vu.index} was invited to`,
+    );
+  }
+}
+
+/**
  * Opens one direct E2E conversation per pair: the sender starts it (which distributes the sender
- * key and subscribes the sender) and the receiver watches it, so the inbound decrypt path is
- * exercised too. Sets each sender's `conversationId` and `partner`; failures are tallied under
- * `setup`, never thrown.
+ * key and subscribes the sender) and the receiver answers the invite by listing its conversations —
+ * the priming a real client's connect does, and the whole subject of
+ * {@link listInvitedConversations} — so the inbound decrypt path is exercised on a client that is
+ * in the state a product actually reaches, rather than on one the SDK can only report on. Sets each
+ * sender's `conversationId` and `partner`; failures are tallied under `setup`, never thrown.
  */
 export async function openDirectConversations(
   pairs: readonly VuPair[],
@@ -67,7 +117,7 @@ export async function openDirectConversations(
       ]);
       sender.conversationId = summary.conversationId;
       sender.partner = receiver;
-      await receiver.client.watchConversation(summary.conversationId);
+      await listInvitedConversations(receiver, summary.conversationId);
     } catch (error) {
       ctx.metrics.recordError('setup', classifyError(error), describeError(error));
       ctx.log.debug(`pair ${sender.index}/${receiver.index} setup failed`);

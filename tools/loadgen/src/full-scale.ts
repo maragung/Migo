@@ -52,7 +52,12 @@ import {
 } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
-import { openCallsToStrangers, openDirectConversations, pairUp } from './pairs.js';
+import {
+  listInvitedConversations,
+  openCallsToStrangers,
+  openDirectConversations,
+  pairUp,
+} from './pairs.js';
 import { runPool } from './pool.js';
 import type { RunContext } from './run-context.js';
 import { sleep } from './run-context.js';
@@ -102,14 +107,15 @@ let fanoutRun: FanoutRun | undefined;
  * of one group conversation.
  *
  * `prepare` builds the largest single fanout group the product admits (a group conversation of up
- * to {@link GROUP_MEMBER_CEILING} members), subscribes every member, and pays the one-time
- * sender-key distribution with an unmeasured warm-up send — that distribution is real cost a
- * first message in a fresh group pays, but it is one-time, and the number this scenario exists to
- * measure is the fan-out, so it lands in the setup phase where every other one-time cost already
- * lands. Steady state is a single sender streaming sealed messages at the target rate while every
- * receiver times when its copy arrived; the settle phase then demands each acknowledged message
- * reached every receiver — fan-out that silently loses a member is loss the error budget cannot
- * see, because the sender's send succeeded.
+ * to {@link GROUP_MEMBER_CEILING} members), subscribes every member the way a client's connect does
+ * — a list, which primes the membership cache the SDK's redistribution needs, rather than a bare
+ * watch — and pays the one-time sender-key distribution with an unmeasured warm-up send: that
+ * distribution is real cost a first message in a fresh group pays, but it is one-time, and the
+ * number this scenario exists to measure is the fan-out, so it lands in the setup phase where every
+ * other one-time cost already lands. Steady state is a single sender streaming sealed messages at
+ * the target rate while every receiver times when its copy arrived; the settle phase then demands
+ * each acknowledged message reached every receiver — fan-out that silently loses a member is loss
+ * the error budget cannot see, because the sender's send succeeded.
  */
 const fanout: Scenario = {
   name: 'fanout',
@@ -153,7 +159,14 @@ const fanout: Scenario = {
 
       // Subscribe every member and arm its delivery timer. The listener only times ids the
       // steady-state loop minted, so the warm-up below is invisible to the metrics. A member
-      // whose watch fails is a setup error but not a wasted run: it simply is not a receiver.
+      // whose subscribe fails is a setup error but not a wasted run: it simply is not a receiver.
+      //
+      // Each member answers its own invite by listing, not by watching, for the reason
+      // `listInvitedConversations` records at length: a member that only watched would hold a
+      // conversation it cannot seal for, and this scenario's own 255-event wall — one per receiving
+      // device, `op 53`, `membership for conversation … is unknown` — was that state and nothing
+      // else. `loadConversations` subscribes the conversation as well, so the member still becomes
+      // a receiver here.
       await runPool(members, FANOUT_SUBSCRIBE_CONCURRENCY, async (vu) => {
         vu.client.messaging.onMessage((message) => {
           const started = run.sendStarts.get(message.messageId);
@@ -163,7 +176,7 @@ const fanout: Scenario = {
           run.deliveries.set(message.messageId, (run.deliveries.get(message.messageId) ?? 0) + 1);
         });
         try {
-          await vu.client.watchConversation(summary.conversationId);
+          await listInvitedConversations(vu, summary.conversationId);
           run.receivers += 1;
         } catch (error) {
           ctx.metrics.recordError(

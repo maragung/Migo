@@ -1,5 +1,5 @@
 /**
- * The three doors every direct-pair scenario goes through, in the order they are knocked on.
+ * The four doors every direct-pair scenario goes through, in the order they are knocked on.
  *
  * The first is privacy. A freshly registered account answers `who_can_message = friends`, and the
  * messaging service enforces that setting at the conversation's door and again on every send, so
@@ -21,6 +21,16 @@
  * instead of an error — which is how a calls step came to report four thousand placed calls on a
  * run where no callee was ever rung. It is opened for both call kinds before any call is placed,
  * and it is asserted here because nothing else in the harness would notice it going missing.
+ *
+ * The fourth is the receiver's own membership, and it is the one nobody knocked on twice: the
+ * receiver used to *watch* the conversation it had just been invited to and nothing more, which
+ * subscribes a topic and leaves the membership cache empty. The SDK rotates and redistributes the
+ * sender key on the invite event that follows, that redistribution needs an audience, and an
+ * audience lookup on an unprimed conversation throws — the `sdk` wall every step of the nightly
+ * carried, exactly once per receiving device. The receiver lists now, as a real client's connect
+ * does, and both halves of that are asserted below: that the list is asked for, and that a list
+ * which does not carry the conversation fails here as a `setup` error rather than surfacing one
+ * event later as a membership error.
  */
 
 import assert from 'node:assert/strict';
@@ -49,14 +59,23 @@ interface VuHooks {
   startFails?: boolean;
   /** Called when this VU starts a conversation, with the members it addressed. */
   onStart?: (members: readonly unknown[]) => void;
+  /**
+   * The conversation ids this VU's list answers with.
+   *
+   * Defaults to the conversation the pair's sender created — the even VU immediately to its left,
+   * whose `startConversation` mints `conv-<its index>` — because that is the fixture's whole point
+   * for the receiver role: a client invited to a conversation, listing, and finding it there.
+   */
+  list?: readonly string[];
 }
 
 /**
  * A VirtualUser whose client records only what the pair setup asks of it.
  *
  * The `timeline` array is shared by every double in a test and is what makes the ordering
- * assertion possible: both the profile writes and the conversation creations append to it, so the
- * test can see that no conversation was attempted before every opening was written.
+ * assertion possible: the profile writes, the conversation creations and the receivers' list reads
+ * all append to it, so the test can see that no conversation was attempted before every opening was
+ * written, and that a receiver listed before it was asked to hold anything.
  */
 function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): VirtualUser {
   const client = {
@@ -80,7 +99,17 @@ function makeVu(index: number, timeline: string[], hooks: VuHooks = {}): Virtual
         ? Promise.reject(new TransportError('start refused'))
         : Promise.resolve({ conversationId: `conv-${index}` });
     },
+    // Bound but unused by the pair setup, which lists rather than watches; kept so the double is
+    // still the shape the SDK's client is, and so a test that reached for it would find a function
+    // rather than an `undefined`.
     watchConversation: (): Promise<void> => Promise.resolve(),
+    loadConversations: (): Promise<{ conversations: { conversationId: string }[] }> => {
+      timeline.push(`list:${index}`);
+      const ids = hooks.list ?? [`conv-${index - 1}`];
+      return Promise.resolve({
+        conversations: ids.map((conversationId) => ({ conversationId })),
+      });
+    },
   };
   return {
     index,
@@ -139,6 +168,49 @@ test('every paired VU is opened to messages from strangers before the first conv
   assert.equal(metrics.operation('setup').errors, 0);
   assert.equal(a.conversationId, 'conv-0');
   assert.equal(c.conversationId, 'conv-2');
+
+  // The receivers listed: one list per receiver, never for a sender, which is the fourth door (see
+  // the file docstring). Sorted, and ordered per pair rather than by first-and-last, because the
+  // pairs run concurrently through `runPool` — the two pairs' events interleave, so the only order
+  // the run actually guarantees is that a receiver lists after *its own* sender created the
+  // conversation it is looking for. A list read before that create would find nothing and would
+  // have primed nothing, so a bare count would pass on a run that answered no invite at all.
+  assert.deepEqual(timeline.filter((event) => event.startsWith('list:')).sort(), [
+    'list:1',
+    'list:3',
+  ]);
+  for (const [sender, receiver] of [
+    ['start:0', 'list:1'],
+    ['start:2', 'list:3'],
+  ] as const) {
+    const created = timeline.indexOf(sender);
+    const listed = timeline.indexOf(receiver);
+    assert.ok(
+      created !== -1 && listed > created,
+      `${receiver} did not follow ${sender}: ${timeline.join(', ')}`,
+    );
+  }
+});
+
+test('a receiver whose list does not carry the conversation it was invited to is a setup error', async () => {
+  // The other half of the fourth door. A client that is invited and lists and does not find the
+  // conversation has been told two contradictory things by the server, and the harness must fail
+  // here — as a `setup` error, counted like every other pair refusal — rather than carry on into a
+  // receiver that holds a conversation it can neither seal for nor read. Left to the SDK this is
+  // the `op 53` membership error one event later, which names the client rather than the cause.
+  const timeline: string[] = [];
+  const a = makeVu(0, timeline);
+  const b = makeVu(1, timeline, { list: [] });
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, future());
+
+  await openDirectConversations([{ sender: a, receiver: b }], ctx);
+
+  assert.equal(metrics.operation('setup').errors, 1, 'the missing conversation is counted once');
+  assert.ok(timeline.includes('list:1'), 'the receiver did list; the answer was what was wrong');
+  // The sender's own half still stands: the conversation exists and the caller holds it, which is
+  // why a scenario's remaining pairs are unaffected by one receiver's bad answer.
+  assert.equal(a.conversationId, 'conv-0');
 });
 
 test('a VU that two pairs share is opened once, and a VU in no pair never at all', async () => {
