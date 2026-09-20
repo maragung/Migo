@@ -305,19 +305,17 @@ impl Hub {
         exclude: Option<Id>,
     ) {
         let key = TopicKey::of(topic);
-        let targets: Vec<Id> = match self.subscribers.get(&key) {
-            Some(set) => set.iter().copied().collect(),
-            None => {
-                // Nobody held the topic when the fan-out began, so there was no target to
-                // refuse and nobody to tell. The publish returns, the sender's
-                // acknowledgement has already gone out, and the frame is gone — which for a
-                // `Critical` frame, the class backpressure may never drop, is the one way an
-                // event a call's own counters say was sent never arrives. Counted here
-                // because this line is the only place that can name it.
-                self.meters.frame_undelivered(Undelivered::NoSubscribers);
-                return;
-            }
+        let Some(set) = self.subscribers.get(&key) else {
+            // Nobody held the topic when the fan-out began, so there was no target to refuse
+            // and nobody to tell. The publish returns, the sender's acknowledgement has
+            // already gone out, and the frame is gone — which for a `Critical` frame, the
+            // class backpressure may never drop, is the one way an event a call's own
+            // counters say was sent never arrives. Counted here because this line is the only
+            // place that can name it.
+            self.meters.frame_undelivered(Undelivered::NoSubscribers);
+            return;
         };
+        let targets: Vec<Id> = set.iter().copied().collect();
         for session_id in targets {
             if Some(session_id) == exclude {
                 continue;
