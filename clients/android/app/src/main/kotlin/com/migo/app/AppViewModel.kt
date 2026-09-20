@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.migo.app.call.AudioOutput
+import com.migo.app.call.CallInput
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallService
 import com.migo.app.call.CallUiState
@@ -21,6 +22,8 @@ import com.migo.app.call.GroupCallUiState
 import com.migo.app.call.GroupLinkState
 import com.migo.app.call.LinkQuality
 import com.migo.app.call.MICROPHONE_UNAVAILABLE
+import com.migo.app.call.PreferredCallInput
+import com.migo.app.call.callInputsOf
 import com.migo.app.media.MEDIA_SEAL_DOMAIN
 import com.migo.app.media.VOICE_NOTE_MAX_MS
 import com.migo.app.media.VOICE_SEAL_DOMAIN
@@ -87,6 +90,7 @@ import com.migo.core.account.eip55
 import com.migo.core.account.parseAddress
 import com.migo.core.account.sealContainer
 import com.migo.core.crypto.Content
+import com.migo.core.domain.CallInputDevice
 import com.migo.core.domain.CallMediaKind
 import com.migo.core.domain.CallState
 import com.migo.core.domain.ChatLogLine
@@ -238,6 +242,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * below, the same one-object discipline every other surface keeps.
      */
     private var callManager: CallManager? = null
+
+    private val _callInputs = MutableStateFlow<List<CallInput>>(emptyList())
+
+    /**
+     * The system audio service, for the one thing here that is the phone's rather than any
+     * session's: the microphones a call may record from. Read through the application context,
+     * because the list outlives every screen that asks for it.
+     */
+    private val systemAudio: AudioManager by lazy {
+        getApplication<Application>().getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
 
     private val _callState = MutableStateFlow(CallUiState())
 
@@ -1262,6 +1277,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun chooseCallOutput(deviceId: Int) {
         callManager?.chooseOutput(deviceId)
+    }
+
+    /**
+     * The microphones the phone is offering, as the settings pane shows them.
+     *
+     * A flow rather than a read at draw time because the list is the phone's and changes under the
+     * pane: a headset plugged in while the settings screen is open is a row the user expects to
+     * appear. [refreshCallInputs] is what re-reads it, called on entry to the pane — the same
+     * on-demand shape the storage figures above use, for the same reason: nobody needs the list
+     * watched while nobody is looking at it.
+     */
+    val callInputs: StateFlow<List<CallInput>> = _callInputs.asStateFlow()
+
+    /** Re-reads the microphones the phone is offering right now. */
+    fun refreshCallInputs() {
+        _callInputs.value = callInputsOf(systemAudio)
+    }
+
+    /**
+     * Records calls from one of the microphones the phone listed, or from the phone's own choice
+     * when [device] is null.
+     *
+     * The choice has to land in three places and all three matter: the settings store, so it is
+     * still there after a restart; the process-wide memory both engines read where they open their
+     * audio (see [PreferredCallInput]); and the engines themselves, because a person who changes
+     * microphone *during* a call means that call rather than the next one. Nothing is awaited on
+     * the write, exactly as every other setting here.
+     */
+    fun setCallInputDevice(device: CallInputDevice?) {
+        PreferredCallInput.remember(device)
+        setPreference { it.copy(callInputDevice = device) }
+        callManager?.applyPreferredInput()
+        groupCallManager?.applyPreferredInput()
     }
 
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
@@ -5361,6 +5409,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // resubscribe the composition. Its closing scope is the application's, because the manager
         // must fire its last CALL_END even when the view model is being cleared and its own scope
         // is already cancelled.
+        // A session is where a fresh process meets a stored preference: the engines read the
+        // process-wide memory when they open their audio, and seeding it here is what makes that
+        // memory and the settings store agree from the first call of the session.
+        PreferredCallInput.remember(preferences.value.callInputDevice)
         val manager = CallManager(
             context = getApplication(),
             client = opened.client,

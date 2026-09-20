@@ -113,6 +113,19 @@ class GroupCallManager(
      */
     private val media = GroupMediaPlane(context, client, accountId, ownDeviceId, scope)
 
+    /**
+     * Records this group call from the microphone the user chose, if the phone still has it.
+     *
+     * The one-to-one manager's twin of this exists for the same reason (see
+     * [CallManager.applyPreferredInput]): a microphone changed during a call is meant for that call
+     * rather than the next one, and the plane is the only thing holding this call's audio module.
+     * A no-op before the plane has built one, where the choice is applied as the module is built
+     * instead -- the preference is process-wide, so both orders mean the same thing.
+     */
+    fun applyPreferredInput() {
+        media.applyPreferredInput()
+    }
+
     /** One entry per other seat, in the order the plane built the links. */
     val mediaLinks: StateFlow<List<GroupLinkState>> = media.links
 

@@ -381,17 +381,23 @@ internal fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifi
 
         AppState.Section.SETTINGS -> {
             val preferences by model.preferences.collectAsState()
+            // The microphone list is the phone's and is re-read on entry rather than watched, so it
+            // is collected here as the panel's own copy of what the phone last reported.
+            val callInputs by model.callInputs.collectAsState()
             SettingsScreen(
                 state = state,
                 preferences = preferences,
+                callInputs = callInputs,
                 onTheme = model::setTheme,
                 onNavigationMode = model::setNavigationMode,
                 onSendReadReceipts = model::setSendReadReceipts,
                 onSendTypingIndicators = model::setSendTypingIndicators,
                 onMediaAutoDownload = model::setMediaAutoDownload,
+                onCallInputDevice = model::setCallInputDevice,
                 onAutoSaveChatLogs = model::setAutoSaveChatLogs,
                 onSaveAllChats = model::saveAllChatsTo,
                 onRefreshStorage = model::refreshStorage,
+                onRefreshCallInputs = model::refreshCallInputs,
                 onClearCaches = model::clearCaches,
                 onSignOut = model::signOut,
                 modifier = modifier,
