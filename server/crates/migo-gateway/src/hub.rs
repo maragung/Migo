@@ -30,7 +30,7 @@ use dashmap::DashMap;
 use migo_core::{Id, Timestamp};
 use migo_protocol::{DeliveryClass, Topic};
 
-use crate::metrics::{Meters, Refused};
+use crate::metrics::{Meters, Refused, Undelivered};
 use crate::outbound::PushOutcome;
 use crate::session::SessionHandle;
 use crate::topic::TopicKey;
@@ -307,34 +307,63 @@ impl Hub {
         let key = TopicKey::of(topic);
         let targets: Vec<Id> = match self.subscribers.get(&key) {
             Some(set) => set.iter().copied().collect(),
-            None => return,
+            None => {
+                // Nobody held the topic when the fan-out began, so there was no target to
+                // refuse and nobody to tell. The publish returns, the sender's
+                // acknowledgement has already gone out, and the frame is gone — which for a
+                // `Critical` frame, the class backpressure may never drop, is the one way an
+                // event a call's own counters say was sent never arrives. Counted here
+                // because this line is the only place that can name it.
+                self.meters.frame_undelivered(Undelivered::NoSubscribers);
+                return;
+            }
         };
         for session_id in targets {
             if Some(session_id) == exclude {
                 continue;
             }
-            if let Some(handle) = self.sessions.get(&session_id) {
-                if let Some(bit) = opcode.feature() {
-                    if handle.features() & bit == 0 {
-                        continue;
-                    }
+            let Some(handle) = self.sessions.get(&session_id) else {
+                // The subscriber set named a session the hub has already forgotten: a stale
+                // entry, left by a departure that did not release the topics it held. Every
+                // frame addressed to it is lost the same silent way, for as long as the
+                // entry survives.
+                self.meters.frame_undelivered(Undelivered::SessionGone);
+                continue;
+            };
+            if let Some(bit) = opcode.feature() {
+                if handle.features() & bit == 0 {
+                    // Withheld on purpose: the session never negotiated the opcode's feature
+                    // bit. Legal, and until it is counted here indistinguishable from a frame
+                    // that was lost — a client missing one feature bit would otherwise look
+                    // exactly like a server dropping its events.
+                    self.meters.frame_undelivered(Undelivered::FeatureAbsent);
+                    continue;
                 }
-                // The gated push: the snapshot above says who was listening when the
-                // fan-out started, the mailbox's topic set says who is listening when the
-                // frame is enqueued, and the second is the truth that wins — a revocation
-                // or unsubscribe that raced this walk delivers nothing past the moment it
-                // returned. `NotSubscribed` is policy, not a drop, and is not counted.
-                let outcome = handle.outbound().push_for_topic(
-                    key,
-                    encoded.clone(),
-                    class,
-                    opcode,
-                    coalesce_key,
-                    now,
-                );
-                if let PushOutcome::Dropped(class) = outcome {
-                    self.meters.frame_dropped(class);
+            }
+            // The gated push: the snapshot above says who was listening when the
+            // fan-out started, the mailbox's topic set says who is listening when the
+            // frame is enqueued, and the second is the truth that wins — a revocation
+            // or unsubscribe that raced this walk delivers nothing past the moment it
+            // returned. Neither refusal is a drop, and neither was counted before: a frame
+            // the gate refused left no trace at all, which is how a topic that stopped being
+            // watched in the wrong millisecond read as a clean run.
+            let outcome = handle.outbound().push_for_topic(
+                key,
+                encoded.clone(),
+                class,
+                opcode,
+                coalesce_key,
+                now,
+            );
+            match outcome {
+                PushOutcome::Dropped(class) => self.meters.frame_dropped(class),
+                PushOutcome::NotSubscribed => {
+                    self.meters.frame_undelivered(Undelivered::NotSubscribed);
                 }
+                PushOutcome::Closed => {
+                    self.meters.frame_undelivered(Undelivered::QueueClosed);
+                }
+                _ => {}
             }
         }
     }

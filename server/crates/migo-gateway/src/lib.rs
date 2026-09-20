@@ -453,6 +453,19 @@ impl Gateway {
         self.inner.meters.dropped_frames_total()
     }
 
+    /// The frames a fan-out could not hand to any mailbox since this gateway opened,
+    /// labelled by why.
+    ///
+    /// The third reader in this family, and the one a call's own counters cannot replace:
+    /// `CALL_SDP` and `CALL_INVITE_EVENT` are `Critical`, so the dropped series is blind to
+    /// them, and a run whose store says a call connected while its client never saw the
+    /// relay reads the difference here — `no_subscribers` when the topic had no watcher at
+    /// all, `not_subscribed` when the watcher's gate had already closed.
+    #[must_use]
+    pub fn undelivered_frames_total(&self) -> Vec<(&'static str, u64)> {
+        self.inner.meters.undelivered_frames_total()
+    }
+
     /// Publishes a server-originated frame to one topic, for callers outside a session.
     ///
     /// The mesh ingest path is the reason this exists: an event that arrives over the

@@ -122,6 +122,54 @@ impl Dropped {
     }
 }
 
+/// Why a fan-out had nowhere to put a frame.
+///
+/// Every one of these paths is silent by construction: the publish returns, the sender's
+/// acknowledgement went out before it ran, and the frame is gone without a trace. The
+/// dropped-frame series names the frames backpressure took; this names the frames that
+/// never had a mailbox to land in — which is the other way a `Critical` frame, the class
+/// backpressure may never drop, still fails to arrive. A call event that vanishes while
+/// the call's own counters say it was sent is read here or nowhere.
+pub(crate) enum Undelivered {
+    /// The topic had no subscriber set at all, so there was no target to refuse.
+    NoSubscribers,
+    /// The subscriber set named a session the hub no longer holds: a stale entry, which is
+    /// what a departure that did not release its topics leaves behind.
+    SessionGone,
+    /// The session did not negotiate the opcode's feature bit, so the frame was withheld
+    /// from it deliberately.
+    FeatureAbsent,
+    /// The session had taken the topic off its own fan-out gate between the snapshot and
+    /// the push, so the mailbox refused the frame.
+    NotSubscribed,
+    /// The session's queue was already closed; the frame was discarded.
+    QueueClosed,
+}
+
+impl Undelivered {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::NoSubscribers,
+        Self::SessionGone,
+        Self::FeatureAbsent,
+        Self::NotSubscribed,
+        Self::QueueClosed,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NoSubscribers => "no_subscribers",
+            Self::SessionGone => "session_gone",
+            Self::FeatureAbsent => "feature_absent",
+            Self::NotSubscribed => "not_subscribed",
+            Self::QueueClosed => "queue_closed",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Why a subscription a client asked for was not granted.
 ///
 /// The two reasons stay apart because they mean different things to whoever reads the dashboard:
@@ -345,6 +393,7 @@ pub(crate) struct Meters {
     frames_out: Arc<Counter>,
     batches_out: Arc<Counter>,
     frames_dropped: Vec<Arc<Counter>>,
+    frames_undelivered: Vec<Arc<Counter>>,
     resume: Vec<Arc<Counter>>,
     handshake_rejected: Vec<Arc<Counter>>,
     rate_limited: Arc<Counter>,
@@ -488,6 +537,17 @@ impl Meters {
                 &Dropped::ALL,
                 |class| class.label(),
             ),
+            frames_undelivered: per_variant(
+                registry,
+                "migo_gateway_frames_undelivered_total",
+                "Frames a fan-out could not hand to any mailbox, by reason. These are not \
+                 backpressure drops and are counted nowhere else: the sender's \
+                 acknowledgement has already gone out, so a frame named here is one a client \
+                 believes was delivered.",
+                "reason",
+                &Undelivered::ALL,
+                |reason| reason.label(),
+            ),
             resume: per_variant(
                 registry,
                 "migo_gateway_resume_total",
@@ -569,6 +629,13 @@ impl Meters {
         }
     }
 
+    /// Counts one frame a fan-out could not hand to a mailbox, however it was refused.
+    pub(crate) fn frame_undelivered(&self, reason: Undelivered) {
+        if let Some(counter) = self.frames_undelivered.get(reason.index()) {
+            counter.inc();
+        }
+    }
+
     /// The frames-written counter's current value, for a composition test that needs
     /// the number in a failure message rather than on a dashboard.
     pub(crate) fn frames_out_total(&self) -> u64 {
@@ -587,6 +654,23 @@ impl Meters {
                     .get(class.index())
                     .map_or(0, |counter| counter.get());
                 (class.label(), value)
+            })
+            .collect()
+    }
+
+    /// The undelivered-frame counters' current values by reason, for the same readers
+    /// `dropped_frames_total` serves. A run whose calls step shows more calls connected
+    /// than relays that arrived finds the difference in this list, named by the path that
+    /// lost it.
+    pub(crate) fn undelivered_frames_total(&self) -> Vec<(&'static str, u64)> {
+        Undelivered::ALL
+            .iter()
+            .map(|reason| {
+                let value = self
+                    .frames_undelivered
+                    .get(reason.index())
+                    .map_or(0, |counter| counter.get());
+                (reason.label(), value)
             })
             .collect()
     }

@@ -522,9 +522,11 @@ async fn a_ring_places_and_cancels_across_nodes() {
     // its gateway wrote, and what it dropped under backpressure.
     let beta_evidence = || {
         format!(
-            "beta's gateway wrote {} frames and dropped {:?}",
+            "beta's gateway wrote {} frames, dropped {:?} under backpressure, and could not \
+             hand {:?} to any mailbox",
             app_b.gateway.frames_out_total(),
             app_b.gateway.dropped_frames_total(),
+            app_b.gateway.undelivered_frames_total(),
         )
     };
 
