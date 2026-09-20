@@ -52,7 +52,12 @@ import {
 } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
-import { openDirectConversations, pairUp } from './pairs.js';
+import {
+  listInvitedConversations,
+  openCallsToStrangers,
+  openDirectConversations,
+  pairUp,
+} from './pairs.js';
 import { runPool } from './pool.js';
 import type { RunContext } from './run-context.js';
 import { sleep } from './run-context.js';
@@ -102,14 +107,15 @@ let fanoutRun: FanoutRun | undefined;
  * of one group conversation.
  *
  * `prepare` builds the largest single fanout group the product admits (a group conversation of up
- * to {@link GROUP_MEMBER_CEILING} members), subscribes every member, and pays the one-time
- * sender-key distribution with an unmeasured warm-up send — that distribution is real cost a
- * first message in a fresh group pays, but it is one-time, and the number this scenario exists to
- * measure is the fan-out, so it lands in the setup phase where every other one-time cost already
- * lands. Steady state is a single sender streaming sealed messages at the target rate while every
- * receiver times when its copy arrived; the settle phase then demands each acknowledged message
- * reached every receiver — fan-out that silently loses a member is loss the error budget cannot
- * see, because the sender's send succeeded.
+ * to {@link GROUP_MEMBER_CEILING} members), subscribes every member the way a client's connect does
+ * — a list, which primes the membership cache the SDK's redistribution needs, rather than a bare
+ * watch — and pays the one-time sender-key distribution with an unmeasured warm-up send: that
+ * distribution is real cost a first message in a fresh group pays, but it is one-time, and the
+ * number this scenario exists to measure is the fan-out, so it lands in the setup phase where every
+ * other one-time cost already lands. Steady state is a single sender streaming sealed messages at
+ * the target rate while every receiver times when its copy arrived; the settle phase then demands
+ * each acknowledged message reached every receiver — fan-out that silently loses a member is loss
+ * the error budget cannot see, because the sender's send succeeded.
  */
 const fanout: Scenario = {
   name: 'fanout',
@@ -153,7 +159,14 @@ const fanout: Scenario = {
 
       // Subscribe every member and arm its delivery timer. The listener only times ids the
       // steady-state loop minted, so the warm-up below is invisible to the metrics. A member
-      // whose watch fails is a setup error but not a wasted run: it simply is not a receiver.
+      // whose subscribe fails is a setup error but not a wasted run: it simply is not a receiver.
+      //
+      // Each member answers its own invite by listing, not by watching, for the reason
+      // `listInvitedConversations` records at length: a member that only watched would hold a
+      // conversation it cannot seal for, and this scenario's own 255-event wall — one per receiving
+      // device, `op 53`, `membership for conversation … is unknown` — was that state and nothing
+      // else. `loadConversations` subscribes the conversation as well, so the member still becomes
+      // a receiver here.
       await runPool(members, FANOUT_SUBSCRIBE_CONCURRENCY, async (vu) => {
         vu.client.messaging.onMessage((message) => {
           const started = run.sendStarts.get(message.messageId);
@@ -163,7 +176,7 @@ const fanout: Scenario = {
           run.deliveries.set(message.messageId, (run.deliveries.get(message.messageId) ?? 0) + 1);
         });
         try {
-          await vu.client.watchConversation(summary.conversationId);
+          await listInvitedConversations(vu, summary.conversationId);
           run.receivers += 1;
         } catch (error) {
           ctx.metrics.recordError(
@@ -270,6 +283,30 @@ const CALL_HOLD_MS = 5_000;
 const CALL_SETUP_TIMEOUT_MS = 15_000;
 
 /**
+ * The status `CallInviteResult` carries when an invite is genuinely ringing — 0 ringing, 1
+ * declined, 2 expired, 3 blocked, 4 busy, the vocabulary `packages/protocol` documents on the
+ * field itself. The SDK does not export it as a constant and `clients/web` spells its own copy for
+ * the same reason (`call-signal.ts`'s `INVITE_RINGING`); a shared export is what should replace
+ * these copies, and until one exists the copies are the thing that has to agree.
+ */
+const INVITE_RINGING = 0;
+
+/**
+ * An invite the server answered without ringing anyone, as a named error rather than a bare one.
+ *
+ * `classifyError` reads a plain `Error`'s own `name` into its class (`local:<name>`), so the name
+ * is what makes the wall legible in the report: `local:InviteRefused` says what happened, and the
+ * message carries the status that says which refusal it was.
+ */
+function inviteRefusedError(status: number): Error {
+  const error = new Error(
+    `the server answered invite status ${status} without ringing the callee (0 ringing, 1 declined, 2 expired, 3 blocked, 4 busy)`,
+  );
+  error.name = 'InviteRefused';
+  return error;
+}
+
+/**
  * Deterministic placeholder bytes of `len`, standing in for the sealed offer, answer, or
  * candidate batch. Stable across runs by construction: byte i is a fixed function of i.
  */
@@ -292,6 +329,21 @@ interface CallPair {
   readonly pendingSdp: Map<Id, { invitedAt: number; resolve: (device: Id) => void }>;
   /** When the caller handed its ICE batch to sendIce, by callId, for the receiver's timer. */
   readonly iceSentAt: Map<Id, number>;
+  /**
+   * Every call this pair has invited, by callId, mapped to the moment it invited — the record that
+   * makes a stray relay legible.
+   *
+   * Without it the two listener bodies below have nothing to say about a relay whose wait is gone:
+   * `pendingSdp` and `iceSentAt` are both *deleted* when a wait ends (on the setup timeout, on a
+   * refused invite, on the match, and at the end of the hold), so an arriving relay found no entry
+   * and was dropped in silence — indistinguishable, in `call-setup`'s tally, from a relay that
+   * never came at all. That is the blind spot this map closes: a relay for a call the pair did
+   * place is counted as late, with how late it was, and a relay for a call it never placed is
+   * counted as the orphan it is. Entries are deliberately never pruned, because the question a
+   * stray asks is about the pair's whole history in the step, and a pair places a few dozen calls
+   * in a run.
+   */
+  readonly placedCalls: Map<Id, number>;
 }
 
 let callsRun: CallPair[] | undefined;
@@ -311,6 +363,11 @@ let callsRun: CallPair[] | undefined;
  * The sealed blobs are placeholder material of realistic size (section 165); the media plane is
  * WebRTC between the two devices and never touches the server, so nothing here is a stub of a
  * server surface — the signaling plane is the whole server surface of a call.
+ *
+ * A relay that arrives with no wait behind it is counted rather than dropped, because the two are
+ * otherwise the same line in this step's report: one for a call the pair did place is late — a
+ * straggler, which at load is legitimate, and which carries how far past its wait it landed — and
+ * one for a call it never placed is an orphan, which is not. See `CallPair.placedCalls`.
  */
 const calls: Scenario = {
   name: 'calls',
@@ -323,6 +380,9 @@ const calls: Scenario = {
     if (vus.filter((vu) => vu.connected).length % 2 === 1) {
       ctx.log.warn('an odd number of VUs connected; one has no partner and will stay idle');
     }
+    // Before the conversations exist, and for the reason the message opening gives: the gate is
+    // read when the invite arrives, and a callee whose policy refuses the caller is never rung.
+    await openCallsToStrangers(pairs, ctx);
     await openDirectConversations(pairs, ctx);
 
     const formed: CallPair[] = [];
@@ -334,6 +394,7 @@ const calls: Scenario = {
         conversationId: sender.conversationId,
         pendingSdp: new Map(),
         iceSentAt: new Map(),
+        placedCalls: new Map(),
       };
       formed.push(pair);
 
@@ -355,7 +416,26 @@ const calls: Scenario = {
       // the relay's fromDevice is the target the caller's own ICE batch needs.
       sender.client.calls.onSdp((event) => {
         const pending = pair.pendingSdp.get(event.callId);
-        if (pending === undefined) return;
+        if (pending === undefined) {
+          // No wait left for this call: the fifteen-second window expired, the invite was refused
+          // and disarmed its own wait, the relay already landed, or the call was never this pair's.
+          // `placedCalls` is what tells those apart. Late is legitimate at load — a relay and a
+          // timeout are not far apart in a step this busy — so it is counted, with its own
+          // latency, which is measured from the invite it belonged to and therefore says how far
+          // past the window it landed. An orphan is not legitimate, and fails as one.
+          const invitedAt = pair.placedCalls.get(event.callId);
+          if (invitedAt !== undefined) {
+            ctx.metrics.latency('call-sdp-late').record(performance.now() - invitedAt);
+            ctx.metrics.recordOk('call-sdp-late');
+          } else {
+            ctx.metrics.recordError(
+              'call-relay-orphan',
+              'orphan-sdp',
+              `an SDP relay arrived for call ${event.callId}, which this pair never invited`,
+            );
+          }
+          return;
+        }
         pair.pendingSdp.delete(event.callId);
         ctx.metrics.latency('call-setup').record(performance.now() - pending.invitedAt);
         ctx.metrics.recordOk('call-setup');
@@ -364,7 +444,25 @@ const calls: Scenario = {
       // The callee's ICE arrival: the far end of the caller's relay, timed against sendIce.
       receiver.client.calls.onIce((event) => {
         const sentAt = pair.iceSentAt.get(event.callId);
-        if (sentAt === undefined) return;
+        if (sentAt === undefined) {
+          // The same two readings the SDP listener makes, for the same reason: `iceSentAt` is
+          // deleted when the hold ends, so a candidate batch that straggles past its own hang-up
+          // is late rather than lost, and one for a call the pair never placed is an orphan.
+          if (pair.placedCalls.has(event.callId)) {
+            // Counted, not timed. `iceSentAt` is the moment a delivery is timed against and it is
+            // the very thing this branch found missing, so a latency here would be measured from a
+            // different moment than `call-ice-deliver` uses and would read as a comparison it is
+            // not.
+            ctx.metrics.recordOk('call-ice-late');
+          } else {
+            ctx.metrics.recordError(
+              'call-relay-orphan',
+              'orphan-ice',
+              `an ICE relay arrived for call ${event.callId}, which this pair never invited`,
+            );
+          }
+          return;
+        }
         ctx.metrics.latency('call-ice-deliver').record(performance.now() - sentAt);
         ctx.metrics.recordOk('call-ice-deliver');
       });
@@ -397,16 +495,31 @@ const calls: Scenario = {
                 resolve(device);
               },
             });
+            // Written here, with the wait and not after the invite's reply, because the record has
+            // to exist before the relay can arrive: a relay that beat the invite home would
+            // otherwise be read as an orphan the moment the two listeners consult it.
+            pair.placedCalls.set(callId, invitedAt);
             void ctx
-              .measure('call-invite', () =>
-                pair.sender.client.calls.invite(
+              .measure('call-invite', async () => {
+                const invited = await pair.sender.client.calls.invite(
                   pair.conversationId,
                   pair.receiver.client.accountId,
                   CallMediaKind.Audio,
                   PLACEHOLDER_OFFER,
                   callId,
-                ),
-              )
+                );
+                // A resolved invite is not a ring, and the difference is the whole measurement.
+                // The server answers a policy refusal with `BLOCKED` in an ordinary reply — brief
+                // section 180 makes a refusal and a block the same answer on the caller's screen —
+                // so counting the resolution alone reported 4,000 placed calls on a step where no
+                // callee was ever rung: `call-answer` is absent from that step's report entirely,
+                // and all 4,000 `call-setup` waits timed out. A refusal has to fail here, as a
+                // refusal, or the step's own tally argues that work happened.
+                if (invited.status !== INVITE_RINGING) {
+                  throw inviteRefusedError(invited.status);
+                }
+                return invited;
+              })
               .then((invited) => {
                 if (invited) return;
                 inviteFailed = true;

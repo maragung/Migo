@@ -521,10 +521,22 @@ async fn a_ring_places_and_cancels_across_nodes() {
     // every wait's failure message carries the far node's own delivery counters: what
     // its gateway wrote, and what it dropped under backpressure.
     let beta_evidence = || {
+        // Only the opcodes that lost something: this series lists every opcode the
+        // protocol knows, and a hundred and thirty zeroes would bury the one line that
+        // says whether the frames this test is waiting for are among them.
+        let by_opcode: Vec<(&'static str, u64)> = app_b
+            .gateway
+            .undelivered_frames_by_opcode()
+            .into_iter()
+            .filter(|(_, lost)| *lost > 0)
+            .collect();
         format!(
-            "beta's gateway wrote {} frames and dropped {:?}",
+            "beta's gateway wrote {} frames, dropped {:?} under backpressure, could not \
+             hand {:?} to any mailbox, and lost {:?} by opcode",
             app_b.gateway.frames_out_total(),
             app_b.gateway.dropped_frames_total(),
+            app_b.gateway.undelivered_frames_total(),
+            by_opcode,
         )
     };
 

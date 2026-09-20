@@ -8,16 +8,24 @@
  * when a scenario has no steady-state op. Let the scenario settle, when it has a settle phase, so
  * in-flight work lands before any integrity verdict. Finally disconnect and hand back the metrics.
  * Ctrl-C at any point flips the run to a graceful stop and still reports what was gathered.
+ *
+ * The optional {@link PhaseTracker} is how a caller that outlives this promise learns which
+ * await the run was sitting on when the event loop drained — the case where this function never
+ * resolves at all, so nothing here can report it. See `main.ts`, which reads the tracker from a
+ * `beforeExit` hook.
  */
+
+import type { EventErrorHandler } from '@migo/sdk';
 
 import type { Config } from './config.js';
 import type { Logger } from './logger.js';
 import { runPool } from './pool.js';
 import type { RunOutcome } from './report.js';
 import { RunContext, sleep } from './run-context.js';
+import { PhaseTracker } from './phase.js';
 import { getScenario } from './scenarios.js';
 import type { Workload } from './scenarios.js';
-import { classifyError, describeError, Metrics } from './stats.js';
+import { classifyError, describeError, eventErrorRecorder, Metrics } from './stats.js';
 import { VirtualUser } from './virtual-user.js';
 import { summarizeWireBytes } from './wire-bytes.js';
 
@@ -29,7 +37,11 @@ interface ServerConfig {
   readonly passphraseMinLength: number | undefined;
 }
 
-export async function run(config: Config, log: Logger): Promise<RunOutcome> {
+export async function run(
+  config: Config,
+  log: Logger,
+  tracker: PhaseTracker = new PhaseTracker(),
+): Promise<RunOutcome> {
   const scenario = getScenario(config.scenario);
   if (scenario === undefined) throw new Error(`unknown scenario "${config.scenario}"`);
   if (config.vus < scenario.minVus) {
@@ -47,13 +59,23 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
   const metrics = new Metrics();
   const passphrase = buildPassphrase(config, server.passphraseMinLength);
   const runTag = makeRunTag();
-  const onEventError = (error: unknown): void =>
-    metrics.recordError('event', classifyError(error), describeError(error));
+  // Typed as the SDK's own handler, not as a loose arrow: the boundary at which a wrong arity
+  // stops being a compile error is exactly where this tool mis-classified 255 real failures by
+  // their opcode. See `eventErrorRecorder`.
+  const onEventError: EventErrorHandler = eventErrorRecorder(metrics);
 
+  tracker.set('building');
   log.info(`building ${config.vus} virtual users for scenario "${scenario.name}"`);
   const vus = Array.from(
     { length: config.vus },
-    (_unused, index) => new VirtualUser(index, { config, passphrase, runTag, onEventError }),
+    (_unused, index) =>
+      new VirtualUser(index, {
+        config,
+        passphrase,
+        runTag,
+        onEventError,
+        onStateChange: (state) => tracker.observeState(state),
+      }),
   );
 
   // Open-ended deadline for the connect phase; the real one is set just before steady state.
@@ -61,6 +83,7 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
   const releaseSignals = installSignalHandlers(ctx, log);
 
   try {
+    tracker.set('connecting');
     log.info(`connecting with concurrency ${config.connectConcurrency}...`);
     await runPool(vus, config.connectConcurrency, async (vu) => {
       if (ctx.interrupted) return;
@@ -69,9 +92,11 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
         await vu.start();
         metrics.latency('connect').record(performance.now() - started);
         metrics.recordOk('connect');
+        tracker.observeConnect(true);
         log.debug(`VU ${vu.index} connected`);
       } catch (error) {
         metrics.recordError('connect', classifyError(error), describeError(error));
+        tracker.observeConnect(false);
         log.debug(`VU ${vu.index} failed to connect: ${describe(error)}`);
       }
     });
@@ -80,10 +105,12 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
 
     let durationMsActual = 0;
     if (connectedCount > 0 && !ctx.interrupted) {
+      tracker.set('preparing');
       log.info('preparing scenario...');
       await scenario.prepare(vus, ctx);
 
       const workloads = scenario.workloads(vus);
+      tracker.set('steady-state');
       const startedAt = performance.now();
       ctx.setDeadline(startedAt + config.durationMs);
       log.info(
@@ -98,6 +125,7 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
       // draining, integrity verdicts recording. Skipped on an interrupt — a stop asked for is a
       // stop honored, with the partial results — and bounded by the scenario itself.
       if (scenario.settle !== undefined && !ctx.interrupted) {
+        tracker.set('settling');
         log.info('settling (waiting for in-flight work before the verdict)...');
         await scenario.settle(vus, ctx);
       }
@@ -105,24 +133,29 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
       log.warn('no virtual users connected; skipping the workload');
     }
 
+    tracker.set('disconnecting');
     log.info('disconnecting...');
     // Captured before teardown flips `connected`: these are the VUs whose sessions the byte
-    // summary speaks for. A VU that never connected has no transport and nothing to report.
+    // summary speaks for, and a VU that never connected has no transport and nothing to report.
     const sessionVus = vus.filter((vu) => vu.connected);
+    // Read in the same breath, before the close, because the counters belong to the transport and
+    // closing the session discards it: `MigoClient.wireBytes` answers from the connected context
+    // and answers zero once there is none, which its own doc states. A reading taken after
+    // `teardown` is therefore zero by construction rather than by measurement — and that is
+    // exactly what the first honest full-scale run printed for every step, `wire bytes: 0 sent, 0
+    // received` next to 53,550 measured deliveries over 256 sessions. The close's own bytes are
+    // the price of reading a live session honestly; the numbers, not two frames, are the point.
+    const sessionBytes = sessionVus.map((vu) => vu.wireBytes());
     await teardown(vus, config);
-    // Read after teardown so the session close itself is paid for in the counters — those bytes
-    // crossed the wire too. Normalized over the steady-state window, the same window the
-    // throughput figures use, so the per-minute byte rate and the per-second op rate describe
-    // the same run.
-    const wireBytes = summarizeWireBytes(
-      sessionVus.map((vu) => vu.wireBytes()),
-      durationMsActual,
-    );
+    // Normalized over the steady-state window, the same window the throughput figures use, so the
+    // per-minute byte rate and the per-second op rate describe the same run.
+    const wireBytes = summarizeWireBytes(sessionBytes, durationMsActual);
     log.info(
       `wire bytes: ${wireBytes.sentBytes} sent, ${wireBytes.receivedBytes} received` +
         ` (${Math.round(wireBytes.bytesPerUserPerMinute)} B/user/min across ${wireBytes.users} users)`,
     );
 
+    tracker.set('done');
     return {
       config,
       scenarioName: scenario.name,

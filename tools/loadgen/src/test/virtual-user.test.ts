@@ -10,8 +10,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BandwidthMode, MigoClient, Platform } from '@migo/sdk';
+import { BandwidthMode, DEFAULT_CLIENT_FEATURES, MigoClient, Platform, protocol } from '@migo/sdk';
+import type { EventErrorHandler } from '@migo/sdk';
 
+import { clientEndpoint } from '../config.js';
 import type { Config } from '../config.js';
 import { VirtualUser } from '../virtual-user.js';
 
@@ -34,11 +36,15 @@ const CONFIG: Config = {
   logLevel: 'normal',
 };
 
+/** The stand-in the helper hands the VU as its transport-state sink, so tests can assert on it. */
+const STATE_PROBE = (): void => {};
+
 /** Construct a VirtualUser with the SDK factory stubbed, returning the VU and the captured options. */
 function buildWithStubbedClient(
   index: number,
   config: Config,
   client: Record<string, unknown> = {},
+  onEventError: EventErrorHandler = () => {},
 ): { vu: VirtualUser; created: Record<string, unknown>; client: Record<string, unknown> } {
   // Bound so the restored factory keeps its class as `this`, exactly as the original did.
   const original = MigoClient.create.bind(MigoClient);
@@ -54,13 +60,30 @@ function buildWithStubbedClient(
       config,
       passphrase: 'pw',
       runTag: 'tag42',
-      onEventError: () => {},
+      onEventError,
+      onStateChange: STATE_PROBE,
     });
     return { vu, created, client };
   } finally {
     (MigoClient as unknown as { create: unknown }).create = original;
   }
 }
+
+test('the event-error sink reaches the client by identity, not through a wrapper', () => {
+  // The runner hands each VU the SDK-typed recorder that keeps the opcode in the sample, and a
+  // wrapper here — `(error) => sink(error)` — is precisely how the arity was lost the first time:
+  // the sink takes `(opcode, cause)`, so a one-argument pass-through hands every real cause's
+  // place to an opcode. The annotation makes that a build error; identity is the runtime half,
+  // and it is what says the deps field is a pass-through rather than a re-shaping.
+  const handler: EventErrorHandler = (_opcode, _cause) => {};
+  const { created } = buildWithStubbedClient(1, CONFIG, {}, handler);
+  assert.equal(created['onEventError'], handler);
+});
+
+test('the transport-state probe is handed to the SDK client, not swallowed', () => {
+  const { created } = buildWithStubbedClient(1, CONFIG);
+  assert.equal(created['onStateChange'], STATE_PROBE);
+});
 
 test('the throwaway username is prefix_runTag_index and server-legal', () => {
   assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen_tag42_3');
@@ -98,7 +121,14 @@ test('the MigoClient is created with the run endpoint, timeout, and identifiable
   const server = created['server'] as Record<string, unknown>;
   assert.equal(server['host'], 'localhost');
   assert.equal(server['port'], 8080);
-  assert.equal(server['gatewayPort'], 8081);
+  // The gateway port is the one the run's own URLs name, never the SDK's loopback split-port
+  // guess: both load harnesses start a single migod listening on one port with the gateway role,
+  // so a virtual user dialling `rest + 1` knocks on a closed port, fails to connect, and leaves a
+  // run that measures nothing while exiting zero. The literal is asserted because that is the
+  // regression, and the equality with `clientEndpoint` because a literal alone would let the
+  // derivation and the wiring drift apart again exactly as they did.
+  assert.equal(server['gatewayPort'], 8080);
+  assert.equal(server['gatewayPort'], clientEndpoint(CONFIG).gatewayPort);
   assert.equal(server['transport'], 'WebSocket');
   assert.equal(server['scheme'], 'Ws');
   assert.equal(server['restScheme'], 'Http');
@@ -114,6 +144,26 @@ test('the client hello identifies the tool as a load test on the configured vers
   assert.equal(hello['appVersion'], '9.9.9');
   assert.equal(hello['locale'], 'en-GB');
   assert.equal(hello['bandwidthMode'], BandwidthMode.Normal);
+});
+
+test('the hello offers the call family the calls scenario drives', () => {
+  // The bit is not decoration: the gateway answers `CALL_INVITE` (224) and every frame after it
+  // `FEATURE_NOT_NEGOTIATED` when the session did not offer `CALLS`, and withholds the family's
+  // events from that session as well. That is how a step which connected 1,000 sessions and held
+  // its whole 120-second window placed no call at all — 466,958 refusals against `ok: 0` — so a
+  // hello that loses the bit again measures the refusal rather than the relay, and nothing else in
+  // this tool would say so. The stock set is asserted alongside it because an explicit bitmask
+  // that replaced the default instead of extending it would drop `E2E_V1`, and every scenario
+  // would go on reporting throughput while sealing nothing.
+  const { created } = buildWithStubbedClient(3, CONFIG);
+  const hello = created['hello'] as Record<string, unknown>;
+  const features = hello['features'];
+  assert.ok(typeof features === 'bigint', 'the load-test hello must carry a feature bitmask');
+  assert.ok(
+    (features & protocol.FEATURE.CALLS) !== 0n,
+    'the load-test hello must offer FEATURE.CALLS, or the calls scenario measures its own refusal',
+  );
+  assert.equal(features & DEFAULT_CLIENT_FEATURES, DEFAULT_CLIENT_FEATURES);
 });
 
 test('wireBytes is the client transport counters, snapshotted at call time', () => {

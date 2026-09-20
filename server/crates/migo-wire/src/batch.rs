@@ -25,6 +25,15 @@
 //! * At most [`MAX_BATCH_ITEMS`] elements.
 //! * **No nesting.** A batch inside a batch is rejected, because otherwise a
 //!   small frame could describe an exponentially large expansion.
+//!
+//! Every flag is scoped to the frame that carries it, an element included: a `COMPRESSED`
+//! element is raw DEFLATE whatever the envelope's flags say, and it is the element's own flag
+//! that a receiver reads to know so. This decoder stays lazy about it — an element comes back
+//! with its payload exactly as it appeared, and [`Frame::payload_inflated`] (or [`crate::from_frame`],
+//! which calls it) is what turns a flagged payload back into the bytes the sender wrote. The
+//! shape is not hypothetical: the gateway encodes a frame once for a whole fan-out and only
+//! then packs it into an envelope, so a frame the compression policy accepted arrives inside a
+//! batch still deflated.
 
 use bytes::BytesMut;
 
@@ -220,6 +229,52 @@ mod tests {
         );
         assert!(compressed.payload.len() < batch.payload.len());
         assert_eq!(decode_batch(&compressed).expect("unpacks"), original);
+    }
+
+    #[test]
+    fn a_compressed_element_arrives_inside_a_plain_envelope() {
+        // The shape the gateway produces, and the one a receiver that looks only at the
+        // envelope gets wrong. A frame is encoded once for a whole fan-out, so a payload that
+        // clears the compression policy is already deflated by the time the batch writer sees
+        // it: this packs a compressed frame beside a plain one and pins that the envelope stays
+        // plain — `encode_batch` never compresses it — while the element keeps its own flag and
+        // its deflated payload. The plaintext is not lost; it is one `payload_inflated` away,
+        // which is what `from_frame` calls and what a client that reads an element's payload
+        // without asking its flag never does.
+        let compressible = Bytes::from("migo ".repeat(200));
+        let compressed = Frame::compressing(FrameHeader::new(0x30, 0), compressible.clone());
+        assert!(
+            compressed.header.is_compressed(),
+            "the payload must trip the policy, or this test guards nothing"
+        );
+        let plain = Frame::simple(0x31, 1, Bytes::from_static(b"not compressed"));
+
+        let batch = encode_batch(&[compressed, plain.clone()]).expect("packs");
+        assert!(batch.header.is_batch(), "two frames are enveloped");
+        assert!(
+            !batch.header.is_compressed(),
+            "the envelope is built with Frame::new and is never compressed"
+        );
+
+        let unpacked = decode_batch(&batch).expect("unpacks");
+        assert_eq!(unpacked.len(), 2);
+        assert!(
+            unpacked[0].header.is_compressed(),
+            "the element carries its own flag, which is what says its payload is DEFLATE"
+        );
+        assert_ne!(
+            unpacked[0].payload, compressible,
+            "the element's payload is the deflated bytes, not the plaintext"
+        );
+        assert_eq!(
+            unpacked[0].payload_inflated().expect("inflates"),
+            compressible,
+            "and inflating it by its own flag restores what the sender wrote"
+        );
+        assert_eq!(
+            unpacked[1], plain,
+            "the plain element rides along untouched"
+        );
     }
 
     #[test]

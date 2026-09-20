@@ -595,6 +595,52 @@ fn compressed_batches_unpack_as_the_vectors_say() {
 }
 
 #[test]
+fn a_compressed_element_is_inflated_by_its_own_flag() {
+    // The scope of the compression flag, which the reference decoder keeps deliberately lazy:
+    // `decode_batch` hands each element back with its payload exactly as it appeared, and
+    // `Frame::payload_inflated` — which `from_frame` calls — is what turns a flagged payload
+    // back into the bytes the sender wrote. An element is a complete frame, so its own flag,
+    // never the envelope's, is what says its payload is raw DEFLATE: a server encodes a frame
+    // once for a whole fan-out and only then packs it into an envelope. This case pins the
+    // contract every decode site relies on, and the client implementations that read an
+    // element's payload without asking it are wrong against it.
+    let file = load("batch.json");
+    for case in section(&file, "element_compressed_cases", "batch.json") {
+        let expected = elements_of(case);
+        let decoded = Frame::decode(Bytes::from(bytes_of(case, "hex")))
+            .unwrap_or_else(|e| panic!("case `{}` must decode: {e}", name(case)));
+        assert!(
+            decoded.header.is_batch() && !decoded.header.is_compressed(),
+            "case `{}` is a plain envelope holding a compressed element",
+            name(case)
+        );
+        assert!(
+            expected[0].header.is_compressed(),
+            "case `{}` pins a first element that carries its own COMPRESSED flag",
+            name(case)
+        );
+        let unpacked = decode_batch(&decoded)
+            .unwrap_or_else(|e| panic!("case `{}` must unpack: {e}", name(case)));
+        assert_eq!(
+            unpacked.len(),
+            expected.len(),
+            "element count for case `{}`",
+            name(case)
+        );
+        for (got, want) in unpacked.iter().zip(&expected) {
+            assert_eq!(got.header, want.header, "header for case `{}`", name(case));
+            assert_eq!(
+                got.payload_inflated()
+                    .unwrap_or_else(|e| panic!("case `{}` must inflate: {e}", name(case))),
+                want.payload,
+                "payload for case `{}`",
+                name(case)
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_batches_are_rejected() {
     let file = load("batch.json");
     for case in section(&file, "invalid", "batch.json") {
@@ -722,7 +768,15 @@ fn every_vector_file_is_present_and_populated() {
         ("varint.json", &["cases", "zigzag", "invalid"]),
         ("frames.json", &["cases", "length_prefixed", "invalid"]),
         ("mse.json", &["cases", "invalid"]),
-        ("batch.json", &["cases", "compressed_cases", "invalid"]),
+        (
+            "batch.json",
+            &[
+                "cases",
+                "compressed_cases",
+                "element_compressed_cases",
+                "invalid",
+            ],
+        ),
         ("compress.json", &["cases", "frames", "policy", "invalid"]),
     ];
     let mut total = 0;

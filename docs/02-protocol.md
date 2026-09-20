@@ -182,6 +182,15 @@ Coalescing is separate and applies to `Coalescable` classes: within a linger win
 only the newest presence/typing/count event per key survives. A room where 800 people
 toggle presence emits one aggregated update, not 800.
 
+An element of a batch is a **complete frame**, header included, so every flag is scoped to the
+frame that carries it. A `COMPRESSED` element is raw `deflate-raw` whatever the envelope's own
+flags say, and a receiver must inflate it before decoding: this is the shape the server
+actually produces, because a frame is encoded once for a whole fan-out and only then packed
+into an envelope. A compressed envelope is inflated first, and each flagged element after it.
+
+A batch is never nested: a `BATCH` element is refused rather than unpacked, because a small
+frame describing a large expansion is an amplification primitive.
+
 ## 8. Acknowledgement and redelivery
 
 Frames flagged `ACK_REQUIRED` are held in the session's redelivery buffer until the

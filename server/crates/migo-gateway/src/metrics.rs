@@ -11,7 +11,10 @@
 //! how much they sent, straight off the metrics endpoint. So every series here is either
 //! unlabelled or labelled by a closed enum — a close reason, a drop class, a resume outcome,
 //! a handshake-rejection reason — whose cardinality is fixed at compile time and whose growth
-//! is a diff a reviewer sees.
+//! is a diff a reviewer sees. The one series labelled by protocol opcode is the same shape: a
+//! generated table, fixed at compile time, whose growth is a diff in the generated file — and
+//! it names a frame kind, never a party, so `CALL_SDP` says what was lost and nothing about
+//! who it was for.
 //!
 //! The handshake-rejection reasons are recorded even though every refused client is handed
 //! the same opaque error (sections 48, 161): the client must not learn why it was turned
@@ -24,7 +27,7 @@ use std::sync::Arc;
 use migo_core::metrics::{Counter, Gauge, Histogram, Registry};
 use migo_core::Error as CoreError;
 use migo_protocol::fault::kind_of;
-use migo_protocol::{codes, error_symbol};
+use migo_protocol::{codes, error_symbol, Opcode};
 
 /// Why a session ended, for the `migo_gateway_sessions_closed_total` series.
 ///
@@ -114,6 +117,55 @@ impl Dropped {
         match self {
             Self::Coalescable => "coalescable",
             Self::Droppable => "droppable",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Why a fan-out had nowhere to put a frame.
+///
+/// Every one of these paths is silent by construction: the publish returns, the sender's
+/// acknowledgement went out before it ran, and the frame is gone without a trace. The
+/// dropped-frame series names the frames backpressure took; this names the frames that
+/// never had a mailbox to land in — which is the other way a `Critical` frame, the class
+/// backpressure may never drop, still fails to arrive. A call event that vanishes while
+/// the call's own counters say it was sent is read here or nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Undelivered {
+    /// The topic had no subscriber set at all, so there was no target to refuse.
+    NoSubscribers,
+    /// The subscriber set named a session the hub no longer holds: a stale entry, which is
+    /// what a departure that did not release its topics leaves behind.
+    SessionGone,
+    /// The session did not negotiate the opcode's feature bit, so the frame was withheld
+    /// from it deliberately.
+    FeatureAbsent,
+    /// The session had taken the topic off its own fan-out gate between the snapshot and
+    /// the push, so the mailbox refused the frame.
+    NotSubscribed,
+    /// The session's queue was already closed; the frame was discarded.
+    QueueClosed,
+}
+
+impl Undelivered {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::NoSubscribers,
+        Self::SessionGone,
+        Self::FeatureAbsent,
+        Self::NotSubscribed,
+        Self::QueueClosed,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NoSubscribers => "no_subscribers",
+            Self::SessionGone => "session_gone",
+            Self::FeatureAbsent => "feature_absent",
+            Self::NotSubscribed => "not_subscribed",
+            Self::QueueClosed => "queue_closed",
         }
     }
 
@@ -345,6 +397,7 @@ pub(crate) struct Meters {
     frames_out: Arc<Counter>,
     batches_out: Arc<Counter>,
     frames_dropped: Vec<Arc<Counter>>,
+    frames_undelivered: Vec<HashMap<u32, Arc<Counter>>>,
     resume: Vec<Arc<Counter>>,
     handshake_rejected: Vec<Arc<Counter>>,
     rate_limited: Arc<Counter>,
@@ -373,6 +426,42 @@ fn per_variant<T>(
         .map(|variant| registry.counter(name, help, &[(key, label(variant))]))
         .collect()
 }
+
+/// Registers one counter per opcode for a single reason, each labelled with the opcode's own
+/// generated name — the name the wire log and the `ERROR` frame already carry, so this series
+/// cannot disagree with the frame it counts.
+///
+/// A reason says which door refused a frame; it cannot say whether the frames being refused
+/// are the ones a step is missing. `migo_gateway_frames_undelivered_total` reads
+/// fourteen thousand refusals on a calls step and a step's own counters read a thousand call
+/// relays that never arrived; only the opcode tells those two apart.
+fn per_opcode(
+    registry: &Registry,
+    name: &'static str,
+    help: &'static str,
+    reason: Undelivered,
+) -> HashMap<u32, Arc<Counter>> {
+    Opcode::ALL
+        .iter()
+        .map(|opcode| {
+            (
+                opcode.to_wire(),
+                registry.counter(
+                    name,
+                    help,
+                    &[("reason", reason.label()), ("opcode", opcode.name())],
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The help text every reason-and-opcode pair of the undelivered series shares, so the whole
+/// family is one line on a dashboard and one filter in a query.
+const UNDELIVERED_HELP: &str = "Frames a fan-out could not hand to any mailbox, by reason and \
+by the kind of frame it was. These are not backpressure drops and are counted nowhere else: \
+the sender's acknowledgement has already gone out, so a frame named here is one a client \
+believes was delivered.";
 
 /// Registers the section-174 error series — one counter per protocol error code, labelled
 /// by the code's symbol and its behavioural class — and hands them back for `Meters::new`
@@ -488,6 +577,17 @@ impl Meters {
                 &Dropped::ALL,
                 |class| class.label(),
             ),
+            frames_undelivered: Undelivered::ALL
+                .iter()
+                .map(|reason| {
+                    per_opcode(
+                        registry,
+                        "migo_gateway_frames_undelivered_total",
+                        UNDELIVERED_HELP,
+                        *reason,
+                    )
+                })
+                .collect(),
             resume: per_variant(
                 registry,
                 "migo_gateway_resume_total",
@@ -569,6 +669,17 @@ impl Meters {
         }
     }
 
+    /// Counts one frame a fan-out could not hand to a mailbox, however it was refused, and
+    /// whatever kind of frame it was.
+    pub(crate) fn frame_undelivered(&self, reason: Undelivered, opcode: Opcode) {
+        let Some(by_opcode) = self.frames_undelivered.get(reason.index()) else {
+            return;
+        };
+        if let Some(counter) = by_opcode.get(&opcode.to_wire()) {
+            counter.inc();
+        }
+    }
+
     /// The frames-written counter's current value, for a composition test that needs
     /// the number in a failure message rather than on a dashboard.
     pub(crate) fn frames_out_total(&self) -> u64 {
@@ -587,6 +698,51 @@ impl Meters {
                     .get(class.index())
                     .map_or(0, |counter| counter.get());
                 (class.label(), value)
+            })
+            .collect()
+    }
+
+    /// The undelivered-frame counters' current values by reason, summed over every opcode
+    /// they are split across, for the same readers `dropped_frames_total` serves. A run whose
+    /// calls step shows more calls connected than relays that arrived finds the difference in
+    /// this list, named by the path that lost it.
+    pub(crate) fn undelivered_frames_total(&self) -> Vec<(&'static str, u64)> {
+        Undelivered::ALL
+            .iter()
+            .map(|reason| {
+                let value = self
+                    .frames_undelivered
+                    .get(reason.index())
+                    .map_or(0, |per_opcode| {
+                        per_opcode.values().map(|counter| counter.get()).sum()
+                    });
+                (reason.label(), value)
+            })
+            .collect()
+    }
+
+    /// The undelivered-frame counters' current values by opcode, summed over every reason,
+    /// in the order `Opcode::ALL` lists them.
+    ///
+    /// This is the reader the calls investigation needed and the reason alone could not be:
+    /// fourteen thousand refusals is a number about the gateway, and the question was whether
+    /// any of them were the call relays a step was missing. A zero here for every `CALL_*`
+    /// opcode is a real answer — it says the loss is not this path — and it is only legible
+    /// because the opcodes are listed one by one rather than summed.
+    pub(crate) fn undelivered_frames_by_opcode(&self) -> Vec<(&'static str, u64)> {
+        Opcode::ALL
+            .iter()
+            .map(|opcode| {
+                // Summed over the reasons, with the reasons that never lost this opcode
+                // contributing nothing: an iterator has no `map_or`, and a fold that
+                // skipped the missing entries is what the sentence above describes.
+                let value = self
+                    .frames_undelivered
+                    .iter()
+                    .filter_map(|per_opcode| per_opcode.get(&opcode.to_wire()))
+                    .map(|counter| counter.get())
+                    .sum::<u64>();
+                (opcode.name(), value)
             })
             .collect()
     }

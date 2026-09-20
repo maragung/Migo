@@ -38,8 +38,9 @@ if [ ! -x "$MIGOD_BIN" ]; then
 fi
 
 LOADGEN="$REPO_ROOT/tools/loadgen/dist/main.js"
-if [ ! -f "$LOADGEN" ]; then
-  echo "loadgen not built at $LOADGEN; build it with:" >&2
+JUDGE="$REPO_ROOT/tools/loadgen/dist/judge.js"
+if [ ! -f "$LOADGEN" ] || [ ! -f "$JUDGE" ]; then
+  echo "loadgen not built ($LOADGEN, $JUDGE); build it with:" >&2
   echo "  (cd $REPO_ROOT && make build-ts)" >&2
   exit 1
 fi
@@ -113,10 +114,12 @@ wait_health() {
 wait_health
 
 echo "==> Load: $LOAD_VUS concurrent sessions for $LOAD_DURATION (error budget $ERROR_BUDGET)"
-# The exit code is the verdict (0 success, 1 nothing connected or fatal,
+# The exit code is the first verdict (0 success, 1 nothing connected or fatal,
 # 3 error budget exceeded, 4 wire-byte budget exceeded by more than the
-# section-171 headroom), so the report is captured for the log either way and the
-# status decides the script's own exit.
+# section-171 headroom, 5 the run never finished), so the report is captured for the
+# log either way and the status decides the script's own exit — and then the report
+# itself is judged against what this gate promises, because an exit code of zero is
+# also what a run that never happened returns.
 set +e
 node "$LOADGEN" \
   --scenario connect \
@@ -136,10 +139,32 @@ cat "$REPORT_FILE"
 # auth) is explained there, and a load harness that hides the server's error
 # message cannot be debugged from the CI log alone.
 if [ "$LOAD_STATUS" -ne 0 ]; then
-  echo "==> loadgen exited $LOAD_STATUS (1 nothing connected/fatal, 3 error budget exceeded, 4 byte budget exceeded)" >&2
+  echo "==> loadgen exited $LOAD_STATUS (1 nothing connected/fatal, 3 error budget exceeded, 4 byte budget exceeded, 5 the run never finished)" >&2
   echo "==> tail of the node's log ($NODE_LOG):" >&2
   tail -n 60 "$NODE_LOG" >&2
   exit "$LOAD_STATUS"
+fi
+
+# The exit code above is loadgen's verdict on its budget, and it is not the same question as this
+# gate's, which is whether the sessions opened at all. Both directions of that gap have been read as
+# a pass: a run whose event loop drains mid-flight writes no report and exits 0, and a run that
+# opened nothing has no error over no operations and exits 0 too. So the report is checked against
+# what this gate promises — N concurrent sessions opened, held for the duration — and the script
+# fails with the judge's own code when it does not describe that run. This is the gate CI runs on
+# every push; it was green through a week in which no session it claims to open ever opened.
+set +e
+node "$JUDGE" \
+  --step "$LOAD_VUS-sessions" \
+  --min-connected "$LOAD_VUS" \
+  --max-error-rate "$ERROR_BUDGET" \
+  "$REPORT_FILE"
+VERDICT_STATUS=$?
+set -e
+if [ "$VERDICT_STATUS" -ne 0 ]; then
+  echo "==> the run's report does not support a pass (judge exit $VERDICT_STATUS)" >&2
+  echo "==> tail of the node's log ($NODE_LOG):" >&2
+  tail -n 60 "$NODE_LOG" >&2
+  exit "$VERDICT_STATUS"
 fi
 
 # The contract the run cannot see from inside: the node it hammered must still

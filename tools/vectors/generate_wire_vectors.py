@@ -1103,6 +1103,35 @@ def batch_file() -> dict:
         }
     ]
 
+    # An element that carries its own COMPRESSED flag, inside an envelope that carries
+    # none. This is the shape the gateway actually produces, and it is the one an
+    # envelope-only reader gets wrong: a frame is encoded once for a whole fan-out and
+    # only then packed into an envelope, so a frame the compression policy accepted
+    # arrives inside a batch still deflated, and the element's own flag — not the
+    # envelope's — is what says so. An element is a complete frame (header included), so
+    # a receiver that inflates the envelope alone hands its decoder a DEFLATE stream and
+    # reads a varint length out of it. Decode-only, like `compressed_cases` and for the
+    # same reason, and the expectation is the plaintext with the flag still on the header.
+    element_plain = b"z" * 40
+    element_stream = deflate_runs(element_plain)
+    inflate_check("an_element_keeps_its_own_compressed_flag", element_stream, element_plain)
+    element_wire_spec, element_bytes = frame_spec(
+        flags=FLAG_COMPRESSED, opcode=0x30, payload=element_stream
+    )
+    element_spec = dict(element_wire_spec, payload=element_plain.hex())
+    plain_spec, plain_bytes = frame_spec(opcode=0x31, correlation=1, payload=b"not compressed")
+    element_spec_frame, element_envelope = envelope_spec(
+        batch_payload([element_bytes, plain_bytes]), FLAG_BATCH
+    )
+    element_compressed_cases = [
+        {
+            "name": "an_element_keeps_its_own_compressed_flag",
+            "elements": [element_spec, plain_spec],
+            "frame": element_spec_frame,
+            "hex": element_envelope.hex(),
+        }
+    ]
+
     invalid = [
         {
             "name": "count_over_the_item_limit",
@@ -1186,11 +1215,12 @@ def batch_file() -> dict:
     ]
 
     return {
-        "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, and the hostile payloads a receiver must refuse.",
-        "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE stream in `compressed_cases` is written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
-        "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope.",
+        "$comment": "The BATCH envelope: whole frames packed into one transport message, the compressed envelope, a compressed element inside a plain one, and the hostile payloads a receiver must refuse.",
+        "provenance": "case list hand-chosen; envelope bytes computed by tools/vectors/generate_wire_vectors.py from migo.md sections 140, 154 and 155; the DEFLATE streams in `compressed_cases` and `element_compressed_cases` are written bit by bit from RFC 1951 and self-checked against zlib's inflater before emission",
+        "note": "`cases` are both directions: the elements must pack to `hex`, and `hex` must unpack to the elements with the envelope header in `frame`. `compressed_cases` are decode-only — a COMPRESSED envelope's payload is raw DEFLATE, whose exact bytes are not pinned across implementations (see compress.json) — so the runner decodes `hex` and unpacks it rather than re-encoding. A frame without the BATCH flag unpacks to itself, which is why `a_lone_frame_is_sent_bare` has no envelope. `element_compressed_cases` are decode-only for the same reason as `compressed_cases`, and pin the scope of the compression flag: an element is a complete frame, so its own COMPRESSED bit — not the envelope's — says its payload is raw DEFLATE, and the elements those cases expect are the inflated bytes with the flag still on the header.",
         "cases": cases,
         "compressed_cases": compressed_cases,
+        "element_compressed_cases": element_compressed_cases,
         "invalid": invalid,
     }
 

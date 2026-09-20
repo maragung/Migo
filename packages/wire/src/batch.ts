@@ -80,12 +80,19 @@ export function encodeBatch(frames: readonly Frame[]): Frame {
 }
 
 /**
- * Turns one received frame into the list of frames to dispatch: inflates a compressed
- * payload, then unpacks a batch.
+ * Turns one received frame into the list of frames to dispatch: inflates every payload a
+ * `COMPRESSED` flag says is compressed, then unpacks a batch.
  *
  * This is the function a transport should call on every inbound frame. A frame without the
  * `BATCH` flag comes back as a one-element list, so the caller keeps a single dispatch
  * path and never has to ask which shape arrived.
+ *
+ * The compression flag is scoped to the frame that carries it, and an element is a
+ * complete frame: a server encodes a frame once for a whole fan-out and only then packs it
+ * into an envelope, so an element whose payload cleared the policy arrives still deflated
+ * and says so with its own flag, never the envelope's. Inflating the envelope alone leaves
+ * that element to be decoded as plaintext, which is not a lost frame but a decode failure —
+ * the reader takes a length out of a DEFLATE stream and gets one in the billions.
  */
 export async function unpackFrame(frame: Frame): Promise<Frame[]> {
   const payload =
@@ -96,7 +103,13 @@ export async function unpackFrame(frame: Frame): Promise<Frame[]> {
   if ((frame.header.flags & flags.BATCH) === 0) {
     return [{ header: frame.header, payload }];
   }
-  return decodeBatchPayload(payload);
+  return Promise.all(
+    decodeBatchPayload(payload).map(async (element) =>
+      (element.header.flags & flags.COMPRESSED) !== 0
+        ? { header: element.header, payload: await inflateRaw(element.payload, MAX_FRAME_BYTES) }
+        : element,
+    ),
+  );
 }
 
 /**

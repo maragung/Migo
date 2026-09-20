@@ -11,6 +11,7 @@
  */
 
 import { RemoteError, TimeoutError, TransportError, SdkError } from '@migo/sdk';
+import type { EventErrorHandler } from '@migo/sdk';
 
 import { redact } from './redact.js';
 
@@ -198,4 +199,46 @@ export function describeError(error: unknown): string | undefined {
   if (detail === undefined || detail === '') return undefined;
   const capped = detail.length > SAMPLE_CAP ? `${detail.slice(0, SAMPLE_CAP)}…` : detail;
   return redact(capped);
+}
+
+/**
+ * The sink an SDK client routes every event-handler failure to, bound to one run's metrics.
+ *
+ * The parameter order is the SDK's, not this tool's: {@link EventErrorHandler} is
+ * `(opcode: number, cause: unknown) => void`, and every dispatch site passes them that way round —
+ * the client's own `GROUP_KEY_DISTRIBUTE` and `SUBSCRIBE` catches, and every `ListenerSet.deliver`.
+ * The return type is that alias for a reason. A one-parameter arrow is assignable to it, so
+ * `(error: unknown) => classifyError(error)` compiles and reads as if it were right, while the
+ * opcode — a number — is what actually arrives. `classifyError(53)` is `unknown` for every real
+ * cause and `describeError(53)` is undefined, so the whole label collapses into a count with no
+ * diagnosis, and no threshold can see it because the pooled rate stays under 1%. That is exactly
+ * what the honest full-scale run printed for the 256-member fan-out: `ok 0  err 255`, classed
+ * `unknown 255`, sample map empty, one per receiving device, inside an error rate of 0.47%. The
+ * report was the thing that failed.
+ *
+ * The opcode rides along in the sample because it is the one half of the pair that survives an
+ * unclassifiable cause. It is readable without a lookup table: opcodes are the numbers in
+ * `@migo/protocol`'s generated table, so `op 53` is `GROUP_KEY_DISTRIBUTE` and greps against it.
+ * Naming it here would mean a dependency on that package for one string, which the count does not
+ * need — a report that can say *which* event failed and *how* is the whole difference from before.
+ *
+ * What it paid for itself on, and what the first reading of those 255 got wrong: the label was
+ * restored and the same series came back naming `op 53` — `GROUP_KEY_DISTRIBUTE` — with
+ * `membership for conversation … is unknown` as the sample, once per receiving device, on every
+ * paired step of the nightly as well as the fan-out. Those were not fan-out failures at all. They
+ * were the harness's own receivers: a client invited to a conversation it never listed holds no
+ * membership for it, the SDK's member-event handler rotates its sender key and redistributes on the
+ * invite regardless, and the redistribution's audience lookup is the one place that says so. The
+ * wall was the tool's, and the opcode is what made it findable — which is the whole argument for
+ * this function, made by its own first result.
+ */
+export function eventErrorRecorder(metrics: Metrics): EventErrorHandler {
+  return (opcode, cause) => {
+    const detail = describeError(cause);
+    metrics.recordError(
+      'event',
+      classifyError(cause),
+      detail === undefined ? `op ${opcode}` : `op ${opcode}: ${detail}`,
+    );
+  };
 }

@@ -27,6 +27,8 @@ import {
   TransportError,
 } from '@migo/sdk';
 
+import type { CallInviteResult, Id } from '@migo/sdk';
+
 import { Logger } from '../logger.js';
 import { RunContext } from '../run-context.js';
 import { getScenario, scenarioNames } from '../scenarios.js';
@@ -36,6 +38,14 @@ import type { VirtualUser } from '../virtual-user.js';
 
 const QUIET = new Logger('quiet');
 const future = (): number => performance.now() + 60_000;
+
+/**
+ * The two invite statuses these tests need, spelled the way the field documents them
+ * (`0=Ringing, ... 3=Blocked`). The wire carries a bare number and the SDK exports no constant for
+ * it, so the scenario and this suite would otherwise each carry a silent copy.
+ */
+const INVITE_RINGING = 0;
+const INVITE_BLOCKED = 3;
 
 /** The slice of a call event the scenario's listeners read; the double's events carry these. */
 interface CallEventDouble {
@@ -51,7 +61,19 @@ interface VuHooks {
   onSend?: (conversationId: string, content: unknown, options?: unknown) => void;
   onStart?: (kind: ConversationKind, members: readonly unknown[]) => void;
   startFails?: boolean;
-  onWatch?: (id: string) => void;
+  /** Called when this VU lists its conversations — the invite answer — once per list. */
+  onList?: () => void;
+  /**
+   * The conversation ids this VU's list answers with.
+   *
+   * Defaults to the conversation the sender to its left created — `conv-<index - 1>`, the id this
+   * double's own `startConversation` mints — because that is what every paired scenario in this
+   * file drives: the sender sits at index 0 and its receiver at 1. A scenario whose sender is a
+   * different VU sets this explicitly, which is exactly the fan-out below: one group conversation
+   * owned by index 0 and every other VU a member of it. A test that wants the list to come back
+   * short sets it too.
+   */
+  list?: readonly string[];
   // The listeners the full-scale scenarios register, captured for the test to fire.
   incomingCall?: (event: CallEventDouble) => void;
   sdpRelay?: (event: CallEventDouble) => void;
@@ -60,6 +82,13 @@ interface VuHooks {
   // Calls-surface observations.
   onInvite?: (callId: string) => void;
   inviteFails?: boolean;
+  /**
+   * The status the double's invite answers with. Absent means ringing, which is what a healthy
+   * plane returns; a test that wants the server's refusal sets this, because a refusal arrives as
+   * a *resolved* invite carrying a non-zero status and not as a rejected promise (`inviteFails` is
+   * the transport-level failure, a different fact).
+   */
+  inviteStatus?: number;
   onAnswer?: (callId: string) => void;
   onRelaySdp?: (callId: string, toDevice: string) => void;
   onRelayIce?: (callId: string, toDevice: string) => void;
@@ -107,17 +136,29 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
         hooks.iceRelay = handler;
         return () => {};
       },
+      // Resolves the wire's own `CallInviteResult`, not nothing. A `Promise<void>` here is a
+      // double that lies about the surface it stands in for: the workload reads `invited.status`
+      // to tell a ring from a refusal, and a resolved-nothing invite hands it `undefined`, which
+      // is `!== 0` and therefore reads as a refusal — the pair's invite was tallied as an error
+      // and the whole walking-pair test failed on `call-invite ok 0 !== 1`. The status is the
+      // measurement, so the double has to carry it. The parameter is `Id` rather than `string`
+      // for the same reason: `Id` is a branded string, so a plain one is not assignable to the
+      // result the annotation promises — which is what the build said, one commit after the test
+      // this annotation was added to fix.
       invite: (
-        _conversationId: string,
-        _calleeId: string,
+        _conversationId: Id,
+        _calleeId: Id,
         _mediaKind: number,
         _offer: Uint8Array,
-        callId: string,
-      ): Promise<void> => {
+        callId: Id,
+      ): Promise<CallInviteResult> => {
         hooks.onInvite?.(callId);
-        return hooks.inviteFails
-          ? Promise.reject(new TransportError('invite refused'))
-          : Promise.resolve();
+        if (hooks.inviteFails) return Promise.reject(new TransportError('invite refused'));
+        return Promise.resolve({
+          callId,
+          status: hooks.inviteStatus ?? INVITE_RINGING,
+          expiresAt: Date.now() + 30_000,
+        });
       },
       answer: (callId: string, _answer: Uint8Array): Promise<void> => {
         hooks.onAnswer?.(callId);
@@ -155,15 +196,29 @@ function makeVu(index: number, hooks: VuHooks = {}): VirtualUser {
     get connectionState(): string {
       return hooks.connectionState ?? 'ready';
     },
+    // The pair setup opens every paired VU's `who_can_message` before it opens a conversation, so a
+    // double standing in for a VirtualUser has to answer that call. The behaviour — who is written,
+    // in what order, and what a refusal counts as — is asserted in pairs.test.ts; here it only has
+    // to resolve, because a double that throws on it turns one refusal into three errors and hides
+    // the error this file's setup test is actually counting.
+    profile: {
+      updateProfile: (): Promise<unknown> => Promise.resolve({}),
+    },
     startConversation: (kind: ConversationKind, members: readonly unknown[]) => {
       hooks.onStart?.(kind, members);
       return hooks.startFails
         ? Promise.reject(new TransportError('start failed'))
         : Promise.resolve({ conversationId: `conv-${index}` });
     },
-    watchConversation: (id: string): Promise<void> => {
-      hooks.onWatch?.(id);
-      return Promise.resolve();
+    // Bound but unused by every scenario here, which lists rather than watches; kept so the double
+    // still answers the shape the SDK's client is.
+    watchConversation: (): Promise<void> => Promise.resolve(),
+    loadConversations: (): Promise<{ conversations: { conversationId: string }[] }> => {
+      hooks.onList?.();
+      const ids = hooks.list ?? [`conv-${index - 1}`];
+      return Promise.resolve({
+        conversations: ids.map((conversationId) => ({ conversationId })),
+      });
     },
   };
   return {
@@ -289,12 +344,12 @@ test('a failing presence op is counted by class, not swallowed', async () => {
 test('messaging setup pairs adjacent connected VUs and subscribes each receiver', async () => {
   const ctx = new RunContext(new Metrics(), QUIET, 0, future());
   const starts: Array<{ kind: ConversationKind; members: readonly unknown[] }> = [];
-  const watched: string[] = [];
+  const listed: number[] = [];
   const vus = [
     makeVu(0, { onStart: (kind, members) => starts.push({ kind, members }) }),
-    makeVu(1, { onWatch: (id) => watched.push(id) }),
+    makeVu(1, { onList: () => listed.push(1) }),
     makeVu(2, { onStart: (kind, members) => starts.push({ kind, members }) }),
-    makeVu(3, { onWatch: (id) => watched.push(id) }),
+    makeVu(3, { onList: () => listed.push(3), list: ['conv-2'] }),
   ];
   await scenario('messaging').prepare(vus, ctx);
 
@@ -308,7 +363,12 @@ test('messaging setup pairs adjacent connected VUs and subscribes each receiver'
     { kind: ConversationKind.Direct, members: ['acct-1'] },
     { kind: ConversationKind.Direct, members: ['acct-3'] },
   ]);
-  assert.deepEqual(watched.sort(), ['conv-0', 'conv-2']);
+  // Index 3 spells its list out even though the value is the one the double would have defaulted
+  // to, because the default is defined in the other test file: a receiver here that quietly relied
+  // on it would stay green if that default moved, and this is the receiver of the pair whose sender
+  // is index 2 rather than index 0 — the only one in this file whose conversation a neighbour other
+  // than the first VU created.
+  assert.deepEqual(listed.sort(), [1, 3]);
 });
 
 test('messaging setup warns on an odd number of connected VUs and pairs the rest', async () => {
@@ -366,8 +426,8 @@ test('fanout setup creates one group conversation of every other account and war
       onStart: (kind, members) => starts.push({ kind, members }),
       onSend: (_conversationId, content) => sends.push(content),
     }),
-    makeVu(1),
-    makeVu(2),
+    makeVu(1, { list: ['conv-0'] }),
+    makeVu(2, { list: ['conv-0'] }),
   ];
   await scenario('fanout').prepare(vus, ctx);
 
@@ -385,7 +445,12 @@ test('fanout setup warns when more VUs connect than a group may hold', async () 
   const starts: Array<{ kind: ConversationKind; members: readonly unknown[] }> = [];
   // 257 connected VUs: one over the product ceiling of 256, so one must stay idle.
   const vus = Array.from({ length: 257 }, (_unused, i) =>
-    makeVu(i, i === 0 ? { onStart: (kind, members) => starts.push({ kind, members }) } : {}),
+    makeVu(
+      i,
+      i === 0
+        ? { onStart: (kind, members) => starts.push({ kind, members }) }
+        : { list: ['conv-0'] },
+    ),
   );
   const stderr = await withStderr(() => scenario('fanout').prepare(vus, ctx));
   assert.ok(stderr.includes('stay idle'));
@@ -406,8 +471,8 @@ test('fanout rules one ok verdict per acknowledged message that reached every re
     },
   };
   const sender = makeVu(0, senderHooks);
-  const receiverA = makeVu(1);
-  const receiverB = makeVu(2);
+  const receiverA = makeVu(1, { list: ['conv-0'] });
+  const receiverB = makeVu(2, { list: ['conv-0'] });
   const vus = [sender, receiverA, receiverB];
   const fanout = scenario('fanout');
   await fanout.prepare(vus, ctx);
@@ -441,8 +506,8 @@ test('fanout verdict names a short fan-out and an over fan-out per message', asy
     },
   };
   const sender = makeVu(0, senderHooks);
-  const receiverA = makeVu(1);
-  const receiverB = makeVu(2);
+  const receiverA = makeVu(1, { list: ['conv-0'] });
+  const receiverB = makeVu(2, { list: ['conv-0'] });
   const vus = [sender, receiverA, receiverB];
   const fanout = scenario('fanout');
   await fanout.prepare(vus, ctx);
@@ -532,6 +597,118 @@ test('a calls pair walks invite, auto-answer, SDP relay, ICE relay and end', asy
   assert.equal(ended.length, 1);
   assert.equal(ended[0]?.[1], CallEndReason.ByCaller);
   assert.ok(metrics.operation('call-setup').latency.count > 0, 'setup latency was measured');
+});
+
+test('a relay for a call whose wait is gone is counted, not dropped in silence', async () => {
+  // The blind spot the calls step's own report could not see through. Both relay listeners returned
+  // silently when the call id they arrived with had no wait left, and both waits are *deleted* when
+  // they end — on the fifteen-second setup timeout, on a refused invite, on the match, and at the
+  // end of the hold — so a straggler and a relay that never came were the same line in the report:
+  // the `call-setup` timeout. A step that cannot tell those apart cannot say what it measured, so
+  // the strays are counted now — and the four fired below are both of the shapes one can take, once
+  // for a call that has been through a whole cycle and once for a call id this pair never invited.
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, performance.now() + 100);
+  const senderHooks: VuHooks = {};
+  const receiverHooks: VuHooks = {};
+  const sender = makeVu(0, senderHooks);
+  const receiver = makeVu(1, receiverHooks);
+  const vus = [sender, receiver];
+  const calls = scenario('calls');
+  await calls.prepare(vus, ctx);
+
+  // One honest cycle first, so the pair has a call in its history and both of its waits have been
+  // armed and then ended — which is the state a stray arrives into.
+  const invited: string[] = [];
+  senderHooks.onInvite = (callId) => {
+    invited.push(callId);
+    queueMicrotask(() => receiverHooks.incomingCall?.({ callId, callerDevice: 'dev-caller' }));
+  };
+  receiverHooks.onRelaySdp = (callId) => {
+    senderHooks.sdpRelay?.({ callId, fromDevice: 'dev-callee' });
+  };
+  senderHooks.onRelayIce = (callId) => {
+    receiverHooks.iceRelay?.({ callId });
+  };
+
+  const [workload] = calls.workloads(vus);
+  if (workload === undefined) throw new Error('expected a workload');
+  await workload(ctx);
+  // A `const` off the collector rather than a `let` the closure assigns: narrowing a variable a
+  // callback can write is the one place this suite could pass by accident, since a reader cannot
+  // see what the closure did to it between the guard and the use.
+  const placed = invited[0];
+  if (placed === undefined) throw new Error('expected the pair to have placed a call');
+
+  // The strays: a second copy of each relay for the call that has already connected and ended, and
+  // one of each for a call id this pair never invited at all.
+  senderHooks.sdpRelay?.({ callId: placed, fromDevice: 'dev-callee' });
+  receiverHooks.iceRelay?.({ callId: placed });
+  senderHooks.sdpRelay?.({ callId: 'call-never-invited', fromDevice: 'dev-callee' });
+  receiverHooks.iceRelay?.({ callId: 'call-never-invited' });
+
+  // The honest cycle is untouched by them — the point of counting a stray is that it stops being
+  // indistinguishable from the relay that was supposed to arrive, not that it replaces the tally.
+  for (const label of ['call-setup', 'call-ice-deliver']) {
+    assert.equal(metrics.operation(label).ok, 1, `${label} still happened exactly once`);
+    assert.equal(metrics.operation(label).errors, 0, `${label} still never failed`);
+  }
+  assert.equal(metrics.operation('call-sdp-late').ok, 1, 'a straggling relay is counted as late');
+  assert.equal(metrics.operation('call-sdp-late').errors, 0);
+  assert.ok(
+    metrics.operation('call-sdp-late').latency.count > 0,
+    'a late relay carries how late it was, measured from the invite it belonged to',
+  );
+  // Counted but not timed: the moment a delivery is timed against is the very entry this branch
+  // found missing, so a latency here would not be comparable with `call-ice-deliver`'s.
+  assert.equal(metrics.operation('call-ice-late').ok, 1);
+  assert.equal(metrics.operation('call-ice-late').errors, 0);
+  assert.equal(metrics.operation('call-ice-late').latency.count, 0);
+  assert.equal(
+    metrics.operation('call-relay-orphan').errors,
+    2,
+    'a relay for a call this pair never placed is an orphan, not a straggler',
+  );
+  // Read as a map rather than deep-compared as an array. The array would work — the sort is stable,
+  // so the tie order is the insertion order — but that order is which listener happened to fire
+  // first, and pinning it would make this assertion fail on a reordering that changed nothing.
+  const orphans = new Map(metrics.operation('call-relay-orphan').errorsByClass);
+  assert.equal(orphans.get('orphan-sdp'), 1);
+  assert.equal(orphans.get('orphan-ice'), 1);
+});
+
+test('an invite answered without a ring fails as a refusal, not as a setup timeout', async () => {
+  // The other half of the transport-level refusal below, and the one the full-scale run found the
+  // hard way: the server answers a policy refusal with `BLOCKED` in an ordinary reply, so the
+  // invite *resolves* and the caller has to read the status to know nobody was rung. Without this
+  // the step tallied 4,000 resolved invites against 4,000 setup timeouts on a run where no callee
+  // rang once.
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, future());
+  const senderHooks: VuHooks = {
+    inviteStatus: INVITE_BLOCKED,
+    onInvite: () => {
+      // One refused cycle is enough to prove the point; stop before a second.
+      ctx.interrupt();
+    },
+  };
+  const sender = makeVu(0, senderHooks);
+  const receiver = makeVu(1);
+  const vus = [sender, receiver];
+  const calls = scenario('calls');
+  await calls.prepare(vus, ctx);
+  const [workload] = calls.workloads(vus);
+  if (workload === undefined) throw new Error('expected a workload');
+  // Must resolve promptly: a wait left armed would only clear on the 15 s setup timeout.
+  await workload(ctx);
+  assert.equal(metrics.operation('call-invite').ok, 0, 'a refusal is not a placed call');
+  assert.equal(metrics.operation('call-invite').errors, 1);
+  assert.deepEqual(metrics.operation('call-invite').errorsByClass, [['local:InviteRefused', 1]]);
+  assert.equal(
+    metrics.operation('call-setup').errors,
+    0,
+    'a refused invite is not a setup timeout',
+  );
 });
 
 test('a refused invite disarms the SDP wait instead of hanging the pair on a phantom timeout', async () => {
