@@ -571,6 +571,84 @@ test('a calls pair walks invite, auto-answer, SDP relay, ICE relay and end', asy
   assert.ok(metrics.operation('call-setup').latency.count > 0, 'setup latency was measured');
 });
 
+test('a relay for a call whose wait is gone is counted, not dropped in silence', async () => {
+  // The blind spot the calls step's own report could not see through. Both relay listeners returned
+  // silently when the call id they arrived with had no wait left, and both waits are *deleted* when
+  // they end — on the fifteen-second setup timeout, on a refused invite, on the match, and at the
+  // end of the hold — so a straggler and a relay that never came were the same line in the report:
+  // the `call-setup` timeout. A step that cannot tell those apart cannot say what it measured, so
+  // the strays are counted now — and the four fired below are both of the shapes one can take, once
+  // for a call that has been through a whole cycle and once for a call id this pair never invited.
+  const metrics = new Metrics();
+  const ctx = new RunContext(metrics, QUIET, 0, performance.now() + 100);
+  const senderHooks: VuHooks = {};
+  const receiverHooks: VuHooks = {};
+  const sender = makeVu(0, senderHooks);
+  const receiver = makeVu(1, receiverHooks);
+  const vus = [sender, receiver];
+  const calls = scenario('calls');
+  await calls.prepare(vus, ctx);
+
+  // One honest cycle first, so the pair has a call in its history and both of its waits have been
+  // armed and then ended — which is the state a stray arrives into.
+  const invited: string[] = [];
+  senderHooks.onInvite = (callId) => {
+    invited.push(callId);
+    queueMicrotask(() => receiverHooks.incomingCall?.({ callId, callerDevice: 'dev-caller' }));
+  };
+  receiverHooks.onRelaySdp = (callId) => {
+    senderHooks.sdpRelay?.({ callId, fromDevice: 'dev-callee' });
+  };
+  senderHooks.onRelayIce = (callId) => {
+    receiverHooks.iceRelay?.({ callId });
+  };
+
+  const [workload] = calls.workloads(vus);
+  if (workload === undefined) throw new Error('expected a workload');
+  await workload(ctx);
+  // A `const` off the collector rather than a `let` the closure assigns: narrowing a variable a
+  // callback can write is the one place this suite could pass by accident, since a reader cannot
+  // see what the closure did to it between the guard and the use.
+  const placed = invited[0];
+  if (placed === undefined) throw new Error('expected the pair to have placed a call');
+
+  // The strays: a second copy of each relay for the call that has already connected and ended, and
+  // one of each for a call id this pair never invited at all.
+  senderHooks.sdpRelay?.({ callId: placed, fromDevice: 'dev-callee' });
+  receiverHooks.iceRelay?.({ callId: placed });
+  senderHooks.sdpRelay?.({ callId: 'call-never-invited', fromDevice: 'dev-callee' });
+  receiverHooks.iceRelay?.({ callId: 'call-never-invited' });
+
+  // The honest cycle is untouched by them — the point of counting a stray is that it stops being
+  // indistinguishable from the relay that was supposed to arrive, not that it replaces the tally.
+  for (const label of ['call-setup', 'call-ice-deliver']) {
+    assert.equal(metrics.operation(label).ok, 1, `${label} still happened exactly once`);
+    assert.equal(metrics.operation(label).errors, 0, `${label} still never failed`);
+  }
+  assert.equal(metrics.operation('call-sdp-late').ok, 1, 'a straggling relay is counted as late');
+  assert.equal(metrics.operation('call-sdp-late').errors, 0);
+  assert.ok(
+    metrics.operation('call-sdp-late').latency.count > 0,
+    'a late relay carries how late it was, measured from the invite it belonged to',
+  );
+  // Counted but not timed: the moment a delivery is timed against is the very entry this branch
+  // found missing, so a latency here would not be comparable with `call-ice-deliver`'s.
+  assert.equal(metrics.operation('call-ice-late').ok, 1);
+  assert.equal(metrics.operation('call-ice-late').errors, 0);
+  assert.equal(metrics.operation('call-ice-late').latency.count, 0);
+  assert.equal(
+    metrics.operation('call-relay-orphan').errors,
+    2,
+    'a relay for a call this pair never placed is an orphan, not a straggler',
+  );
+  // Read as a map rather than deep-compared as an array. The array would work — the sort is stable,
+  // so the tie order is the insertion order — but that order is which listener happened to fire
+  // first, and pinning it would make this assertion fail on a reordering that changed nothing.
+  const orphans = new Map(metrics.operation('call-relay-orphan').errorsByClass);
+  assert.equal(orphans.get('orphan-sdp'), 1);
+  assert.equal(orphans.get('orphan-ice'), 1);
+});
+
 test('an invite answered without a ring fails as a refusal, not as a setup timeout', async () => {
   // The other half of the transport-level refusal below, and the one the full-scale run found the
   // hard way: the server answers a policy refusal with `BLOCKED` in an ordinary reply, so the

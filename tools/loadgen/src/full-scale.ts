@@ -316,6 +316,21 @@ interface CallPair {
   readonly pendingSdp: Map<Id, { invitedAt: number; resolve: (device: Id) => void }>;
   /** When the caller handed its ICE batch to sendIce, by callId, for the receiver's timer. */
   readonly iceSentAt: Map<Id, number>;
+  /**
+   * Every call this pair has invited, by callId, mapped to the moment it invited — the record that
+   * makes a stray relay legible.
+   *
+   * Without it the two listener bodies below have nothing to say about a relay whose wait is gone:
+   * `pendingSdp` and `iceSentAt` are both *deleted* when a wait ends (on the setup timeout, on a
+   * refused invite, on the match, and at the end of the hold), so an arriving relay found no entry
+   * and was dropped in silence — indistinguishable, in `call-setup`'s tally, from a relay that
+   * never came at all. That is the blind spot this map closes: a relay for a call the pair did
+   * place is counted as late, with how late it was, and a relay for a call it never placed is
+   * counted as the orphan it is. Entries are deliberately never pruned, because the question a
+   * stray asks is about the pair's whole history in the step, and a pair places a few dozen calls
+   * in a run.
+   */
+  readonly placedCalls: Map<Id, number>;
 }
 
 let callsRun: CallPair[] | undefined;
@@ -335,6 +350,11 @@ let callsRun: CallPair[] | undefined;
  * The sealed blobs are placeholder material of realistic size (section 165); the media plane is
  * WebRTC between the two devices and never touches the server, so nothing here is a stub of a
  * server surface — the signaling plane is the whole server surface of a call.
+ *
+ * A relay that arrives with no wait behind it is counted rather than dropped, because the two are
+ * otherwise the same line in this step's report: one for a call the pair did place is late — a
+ * straggler, which at load is legitimate, and which carries how far past its wait it landed — and
+ * one for a call it never placed is an orphan, which is not. See `CallPair.placedCalls`.
  */
 const calls: Scenario = {
   name: 'calls',
@@ -361,6 +381,7 @@ const calls: Scenario = {
         conversationId: sender.conversationId,
         pendingSdp: new Map(),
         iceSentAt: new Map(),
+        placedCalls: new Map(),
       };
       formed.push(pair);
 
@@ -382,7 +403,26 @@ const calls: Scenario = {
       // the relay's fromDevice is the target the caller's own ICE batch needs.
       sender.client.calls.onSdp((event) => {
         const pending = pair.pendingSdp.get(event.callId);
-        if (pending === undefined) return;
+        if (pending === undefined) {
+          // No wait left for this call: the fifteen-second window expired, the invite was refused
+          // and disarmed its own wait, the relay already landed, or the call was never this pair's.
+          // `placedCalls` is what tells those apart. Late is legitimate at load — a relay and a
+          // timeout are not far apart in a step this busy — so it is counted, with its own
+          // latency, which is measured from the invite it belonged to and therefore says how far
+          // past the window it landed. An orphan is not legitimate, and fails as one.
+          const invitedAt = pair.placedCalls.get(event.callId);
+          if (invitedAt !== undefined) {
+            ctx.metrics.latency('call-sdp-late').record(performance.now() - invitedAt);
+            ctx.metrics.recordOk('call-sdp-late');
+          } else {
+            ctx.metrics.recordError(
+              'call-relay-orphan',
+              'orphan-sdp',
+              `an SDP relay arrived for call ${event.callId}, which this pair never invited`,
+            );
+          }
+          return;
+        }
         pair.pendingSdp.delete(event.callId);
         ctx.metrics.latency('call-setup').record(performance.now() - pending.invitedAt);
         ctx.metrics.recordOk('call-setup');
@@ -391,7 +431,25 @@ const calls: Scenario = {
       // The callee's ICE arrival: the far end of the caller's relay, timed against sendIce.
       receiver.client.calls.onIce((event) => {
         const sentAt = pair.iceSentAt.get(event.callId);
-        if (sentAt === undefined) return;
+        if (sentAt === undefined) {
+          // The same two readings the SDP listener makes, for the same reason: `iceSentAt` is
+          // deleted when the hold ends, so a candidate batch that straggles past its own hang-up
+          // is late rather than lost, and one for a call the pair never placed is an orphan.
+          if (pair.placedCalls.has(event.callId)) {
+            // Counted, not timed. `iceSentAt` is the moment a delivery is timed against and it is
+            // the very thing this branch found missing, so a latency here would be measured from a
+            // different moment than `call-ice-deliver` uses and would read as a comparison it is
+            // not.
+            ctx.metrics.recordOk('call-ice-late');
+          } else {
+            ctx.metrics.recordError(
+              'call-relay-orphan',
+              'orphan-ice',
+              `an ICE relay arrived for call ${event.callId}, which this pair never invited`,
+            );
+          }
+          return;
+        }
         ctx.metrics.latency('call-ice-deliver').record(performance.now() - sentAt);
         ctx.metrics.recordOk('call-ice-deliver');
       });
@@ -424,6 +482,10 @@ const calls: Scenario = {
                 resolve(device);
               },
             });
+            // Written here, with the wait and not after the invite's reply, because the record has
+            // to exist before the relay can arrive: a relay that beat the invite home would
+            // otherwise be read as an orphan the moment the two listeners consult it.
+            pair.placedCalls.set(callId, invitedAt);
             void ctx
               .measure('call-invite', async () => {
                 const invited = await pair.sender.client.calls.invite(
