@@ -457,6 +457,19 @@ export class MessagingDomain {
   }
 
   /**
+   * Whether this device holds an outbound sender-key chain for a conversation.
+   *
+   * False for a conversation this device has never sent into, including one it is a member of and
+   * has merely listed: `loadConversations` primes the *audience* cache, and a chain is minted only
+   * where something is actually sealed. The membership-change handler reads it to tell "nothing of
+   * mine to rotate" from "rotate what I hold" — the difference between a device that has just been
+   * invited, which owes the group no key, and a member whose chain a departure must move past.
+   */
+  hasSenderKey(conversationId: Id): boolean {
+    return this.#groupCrypto.hasSenderKey(conversationId);
+  }
+
+  /**
    * Rotates the sender key for a conversation, so a departed member's key can no longer read new
    * messages. The next {@link send} re-distributes the fresh key to every remaining device.
    */
