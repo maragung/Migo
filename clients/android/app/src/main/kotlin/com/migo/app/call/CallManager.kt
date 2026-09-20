@@ -2,6 +2,7 @@ package com.migo.app.call
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.media.projection.MediaProjection
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
@@ -924,6 +925,14 @@ class CallManager(
     fun chooseOutput(deviceId: Int): Boolean = audioRoute.choose(deviceId)
 
     /**
+     * The system audio service, which is where the microphones this call may record from are
+     * listed. Asked for here rather than kept in a field because the listing is the platform's
+     * and this class only ever reads it; the output route keeps its own, for the same reason.
+     */
+    private fun systemAudio(): AudioManager =
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    /**
      * Records this call from the microphone the user chose, if the phone still has it.
      *
      * The choice is a standing preference, not a property of this call, so unlike the output route
@@ -937,7 +946,7 @@ class CallManager(
      * — falls back to its own choice rather than failing the call. The settings pane says so.
      */
     fun applyPreferredInput() {
-        PreferredCallInput.applyTo(audioModule, audioManager)
+        PreferredCallInput.applyTo(audioModule, systemAudio())
     }
 
     /** Mutes or unmutes this side's microphone. */
