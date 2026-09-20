@@ -303,6 +303,53 @@ jobs:
       - name: Clippy, warnings denied
         run: make lint-desktop
 
+  # ------------------------------------------------------------- desktop tests
+  # The desktop client's own test suite, which until this job existed was run by nothing.
+  # The `desktop` job above is fmt and clippy, and `cargo clippy --all-targets` type-checks
+  # the client's #[cfg(test)] modules without executing one of them: every desktop assertion
+  # was compiled, linted, and never evaluated, so the count status.md reports as a gate was a
+  # count of tests that had not run. A job of its own rather than two more steps above,
+  # because running a test *links* — a test binary is a real binary — and the job above is
+  # deliberately built so that it never does. The apt list below is the price of running the
+  # suite for real, and paying it in the lint job would make every pull request against any
+  # part of this repository buy a windowing stack it has no use for.
+  desktop-tests:
+    name: Desktop client — tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same list release.yml installs for the shipped binary, and for the same reason:
+      # the test binary links eframe, glow, glutin and winit, so the X11, Wayland, xkbcommon
+      # and mesa headers have to be there even though no test opens a window.
+      - name: Install the GUI development libraries the test binary links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # A key of its own rather than the lint job's: that cache holds metadata for a
+          # workspace that never linked, and a linking build behind it would either thrash
+          # it or be handed artifacts it cannot use.
+          workspaces: clients/desktop
+          key: desktop-tests
+
+      - name: Tests
+        run: make test-desktop
+
   # --------------------------------------------------------------- desktop (windows)
   # The release workflow ships a Windows x86_64 build of the desktop client, so Windows has
   # to stay green between releases too, not just discover breakage at tag time. `cargo check`

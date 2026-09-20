@@ -321,7 +321,7 @@ doc-check: ## Fail on broken intra-doc links (CI gate)
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc $(MANIFEST) --workspace --no-deps
 
 .PHONY: test
-test: test-server test-web ## Run all tests
+test: test-server test-desktop test-web ## Run all tests
 
 .PHONY: test-server
 test-server: ## Run the Rust test suite
@@ -331,6 +331,23 @@ test-server: ## Run the Rust test suite
 	# was the one suite a gateway failure silenced. Every crate's tests run and
 	# every failure is named, so one red crate cannot mask another's verdict.
 	$(CARGO) test $(MANIFEST) --workspace --no-fail-fast
+
+.PHONY: test-desktop
+test-desktop: ## Run the desktop client's test suite (CI gate)
+	# The desktop workspace is not a member of the server one, so `test-server` never
+	# reaches these tests, and its own job in ci.yml is fmt and clippy: `cargo clippy
+	# --all-targets` type-checks every #[cfg(test)] module in the client without ever
+	# executing one. Until this target existed, each of the desktop's assertions was
+	# compiled, linted, and never evaluated — a suite that could not fail.
+	#
+	# Unlike `check-desktop`, this one links: a test binary is a real binary, so it needs
+	# the X11, Wayland, xkbcommon and GL development headers that `check-desktop` avoids.
+	# That is why it is its own CI job rather than two steps in the lint job, which is
+	# built never to link.
+	#
+	# --no-fail-fast to match the server suite: a panic in the first binary cargo runs
+	# must not hide the verdict of every binary after it.
+	$(CARGO) test $(DESKTOP_MANIFEST) --workspace --no-fail-fast
 
 .PHONY: test-contract
 test-contract: ## Contract suites against real backends (needs MIGO_TEST_DATABASE_URL, MIGO_TEST_REDIS_URL)

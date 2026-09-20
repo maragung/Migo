@@ -32,10 +32,19 @@
 //!
 //! # What is deliberately not here
 //!
-//! Device selection, echo cancellation, and level meters. The default devices
-//! and the OS's own cancellation are what every other Migo client uses, and the
-//! one honest failure mode — "Microphone unavailable" — is surfaced rather than
-//! papered over with a silent stream of zeros.
+//! Echo cancellation and level meters. The OS's own cancellation is what every
+//! other Migo client uses, and the one honest failure mode — "Microphone
+//! unavailable" — is surfaced rather than papered over with a silent stream of
+//! zeros.
+//!
+//! Device selection *is* here, and it is the one decision this module holds that
+//! the rest of the audio path does not make for itself: [`set_chosen_devices`] is
+//! the shell's write, [`chosen_microphone`] and [`chosen_speaker`] are the read,
+//! and [`open_microphone`] and [`open_speaker`] apply it with the fallback to the
+//! system's own pick that the settings pane promises. The names are
+//! [`crate::net::call_devices`]' — an ALSA PCM name on Linux, a cpal device name
+//! on Windows and macOS — and they are read back by the same spelling they were
+//! stored in, which is why no call site holds a device name of its own.
 
 use std::fmt;
 use std::sync::mpsc as std_mpsc;

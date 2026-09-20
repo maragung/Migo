@@ -815,10 +815,11 @@ fn pick_device(
 
     // The remembered device is missing from this machine's list: unplugged, renumbered by the
     // kernel, or a name carried over from another machine's settings file. The sentence says what
-    // a call will do — the same thing the audio layer does, from the same comparison — and the
-    // choice is left standing rather than cleared, because a headset unplugged for an afternoon
-    // is one the person wants back when it is plugged in again.
-    let missing = chosen.is_some_and(|chosen| !devices.iter().any(|device| device.id == chosen));
+    // a call will do — the audio layer opens the remembered name, fails, and falls back to the
+    // system's own pick, which is what a person watching a list cannot see — and the choice is
+    // left standing rather than cleared, because a headset unplugged for an afternoon is one the
+    // person wants back when it is plugged in again.
+    let missing = remembered_device_is_missing(devices, chosen);
     if devices.is_empty() {
         ui.label(
             RichText::new(format!(
@@ -839,6 +840,18 @@ fn pick_device(
     }
 
     picked
+}
+
+/// Whether the device a call is set to use is one this machine no longer reports.
+///
+/// Read by the id and never by the label: the id is the handle the audio layer opens, and the
+/// label is only what a person read on the row, so two cards that name themselves the same are
+/// still two devices and a device the platform has renamed is still the same one. The three
+/// answers the pane has to keep apart are all about this — the system's own pick has no handle to
+/// look up and so can never be missing, a handle on this machine's list is there whether or not
+/// it is the row that stands, and a handle that is absent is the sentence about the headset.
+fn remembered_device_is_missing(devices: &[CallDevice], chosen: Option<&str>) -> bool {
+    chosen.is_some_and(|chosen| !devices.iter().any(|device| device.id == chosen))
 }
 
 /// One row of a call-device picker: a device's name, and whether it is the one standing.
@@ -1971,6 +1984,57 @@ mod tests {
             SessionsView::from_result(Err("cannot reach the server".to_owned())),
             SessionsView::Unavailable("cannot reach the server".to_owned())
         );
+    }
+
+    /// The picker's missing-device rule, which is the whole of what a person is told about a
+    /// headset that is not there: the sentence is about the handle the settings record holds,
+    /// never about the name on the row.
+    #[test]
+    fn the_missing_device_rule_reads_the_handle_and_not_the_name() {
+        let devices = vec![
+            call_device(
+                "plughw:CARD=PCH,DEV=0",
+                "HDA Intel PCH \u{2014} ALC887-VD Analog",
+            ),
+            call_device("plughw:CARD=Device,DEV=0", "USB Audio"),
+        ];
+
+        // The system's own pick is a real answer with no handle to look up, so it can never be
+        // missing: the pane must not tell a person their choice went away when they made none.
+        assert!(!remembered_device_is_missing(&devices, None));
+        // A handle this machine reports is present even when it is not the row that stands — this
+        // rule answers "will a call find it", and "is it selected" is the row's own drawing.
+        assert!(!remembered_device_is_missing(
+            &devices,
+            Some("plughw:CARD=PCH,DEV=0")
+        ));
+        assert!(!remembered_device_is_missing(
+            &devices,
+            Some("plughw:CARD=Device,DEV=0")
+        ));
+        // Absent: unplugged, renumbered by the kernel, or carried over from another machine.
+        assert!(remembered_device_is_missing(
+            &devices,
+            Some("plughw:CARD=Gone,DEV=0")
+        ));
+        // A machine that reports nothing has nothing that can be found, so a stored choice is
+        // missing rather than silently satisfied by the empty list.
+        assert!(remembered_device_is_missing(
+            &[],
+            Some("plughw:CARD=PCH,DEV=0")
+        ));
+        // The label is not the handle: a stored value that happens to equal a device's *name* is
+        // still a handle no card answers to.
+        assert!(remembered_device_is_missing(&devices, Some("USB Audio")));
+    }
+
+    /// One call device as the platform reports it: the handle the audio layer opens, and the
+    /// name the settings pane draws.
+    fn call_device(id: &str, label: &str) -> CallDevice {
+        CallDevice {
+            id: id.to_owned(),
+            label: label.to_owned(),
+        }
     }
 
     #[test]
