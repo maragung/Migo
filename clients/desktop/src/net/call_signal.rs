@@ -402,24 +402,33 @@ pub fn ring_timeout(expires_at: Timestamp, now: Timestamp) -> Duration {
 
 /// Whether a state event means the ringing call was answered — by this device
 /// or a sibling — which retires the ring without ending the call.
+///
+/// The event must be the ringing call's own. The server publishes a state for
+/// every call on the account, so a transition belonging to some other call is
+/// another call's business: retiring this ring over it would tell the user their
+/// caller hung up when the call they are looking at is still ringing. The id is
+/// read from the event rather than from the ring the caller already holds,
+/// because the ring is what this answer is about to retire.
 #[must_use]
-pub fn answers_ringing_call(state: u32, ringing: Option<Id>) -> bool {
-    match ringing {
-        None => false,
-        Some(_) => matches!(
-            CallState::from_wire(state),
-            Some(CallState::Connecting | CallState::Connected)
-        ),
+pub fn answers_ringing_call(state: u32, event_call_id: Id, ringing: Option<Id>) -> bool {
+    if ringing != Some(event_call_id) {
+        // No ring tracked at all, or one belonging to another call.
+        return false;
     }
+    matches!(
+        CallState::from_wire(state),
+        Some(CallState::Connecting | CallState::Connected)
+    )
 }
 
-/// Whether a state event means the ringing call is over.
+/// Whether a state event means the ringing call is over, under the same rule:
+/// only the ringing call's own state can end its ring.
 #[must_use]
-pub fn ends_ringing_call(state: u32, ringing: Option<Id>) -> bool {
-    match ringing {
-        None => false,
-        Some(_) => matches!(CallState::from_wire(state), Some(CallState::Ended)),
+pub fn ends_ringing_call(state: u32, event_call_id: Id, ringing: Option<Id>) -> bool {
+    if ringing != Some(event_call_id) {
+        return false;
     }
+    matches!(CallState::from_wire(state), Some(CallState::Ended))
 }
 
 /// What this device does with an inbound invite.
@@ -546,13 +555,23 @@ pub const fn end_reason_label(reason: Option<CallEndReason>) -> &'static str {
 }
 
 /// The full line an ended call shows: the invite status first (a blocked invite
-/// says "Unavailable", not a refusal that never happened), then the reason.
+/// says "Unavailable", not a refusal that never happened), then the reason the
+/// call itself ended with.
+///
+/// A status that never became an end reason — a screen rebuilt from the invite
+/// alone, or a call whose reason was lost on the way — still says what it meant:
+/// the statuses are the same statement the reason enum makes, minus the one
+/// member the enum does not have, so they fold through [`invite_end_reason`]
+/// rather than falling back to "Call ended", which is the one line that says
+/// nothing. A reason the call did end with outranks the invite's own history:
+/// once the call has an ending of its own, that is the ending to show.
 #[must_use]
 pub fn ended_reason_line(invite_status: Option<u32>, end_reason: Option<CallEndReason>) -> String {
-    if invite_status == Some(INVITE_BLOCKED) {
-        return "Unavailable".to_owned();
+    match (invite_status, end_reason) {
+        (Some(INVITE_BLOCKED), _) => "Unavailable".to_owned(),
+        (Some(status), None) => end_reason_label(Some(invite_end_reason(status))).to_owned(),
+        (_, reason) => end_reason_label(reason).to_owned(),
     }
-    end_reason_label(end_reason).to_owned()
 }
 
 /// What a media kind is called on a ring: "Incoming voice call".
@@ -839,28 +858,32 @@ mod tests {
     #[test]
     fn a_sibling_device_answering_retires_the_ring_without_ending_the_call() {
         let ringing = call_id();
-        assert!(answers_ringing_call(1, Some(ringing)));
-        assert!(answers_ringing_call(2, Some(ringing)));
+        assert!(answers_ringing_call(1, ringing, Some(ringing)));
+        assert!(answers_ringing_call(2, ringing, Some(ringing)));
         assert!(
-            !answers_ringing_call(0, Some(ringing)),
+            !answers_ringing_call(0, ringing, Some(ringing)),
             "a Ringing transition is not an answer"
         );
         assert!(
-            !answers_ringing_call(2, Some(other_call_id())),
+            !answers_ringing_call(2, other_call_id(), Some(ringing)),
             "another call's state is not ours"
         );
         assert!(
-            !answers_ringing_call(2, None),
+            !answers_ringing_call(2, ringing, None),
             "no ring tracked, nothing to retire"
         );
-        assert!(ends_ringing_call(4, Some(ringing)));
+        assert!(ends_ringing_call(4, ringing, Some(ringing)));
         assert!(
-            !ends_ringing_call(3, Some(ringing)),
+            !ends_ringing_call(3, ringing, Some(ringing)),
             "a live transition does not end the ring"
         );
         assert!(
-            !ends_ringing_call(4, Some(other_call_id())),
+            !ends_ringing_call(4, other_call_id(), Some(ringing)),
             "another call's end is not ours"
+        );
+        assert!(
+            !ends_ringing_call(4, ringing, None),
+            "and a state with no ring to end ends nothing"
         );
     }
 

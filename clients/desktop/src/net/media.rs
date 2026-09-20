@@ -391,7 +391,21 @@ pub(crate) fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio, String> {
         // and the reader is what the decode loop takes by &mut.
         let channels = track.codec_params.channels;
         let sample_rate = track.codec_params.sample_rate;
-        return decode_opus(format.as_mut(), track_id, channels, sample_rate);
+        // The two things the container states that the decode has to obey, copied out with the
+        // parameters themselves: the pre-skip — the samples the codec holds back before the
+        // recording's own first sample — and the length the stream's pages state. Both are
+        // absent for a container that does not state them (a browser's WebM), and the decode is
+        // then left exactly as it was.
+        let pre_skip = u64::from(track.codec_params.delay.unwrap_or(0));
+        let stated = ogg_opus_stated_samples(bytes);
+        return decode_opus(
+            format.as_mut(),
+            track_id,
+            channels,
+            sample_rate,
+            pre_skip,
+            stated,
+        );
     }
 
     let mut decoder = symphonia::default::get_codecs()
@@ -448,11 +462,22 @@ pub(crate) fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio, String> {
 /// frame (120 ms) and the return value is the count of frames actually decoded, so a note
 /// of any packet duration decodes without knowing its frame sizes in advance. A damaged
 /// packet is skipped rather than fatal, the same mercy the symphonia path shows.
+///
+/// What comes out of the codec is not yet the recording. Opus is stated *late*: the
+/// encoder's own lookahead is the first thing the decoder emits — the identification
+/// header names it as the pre-skip, and a player that does not drop it plays every note
+/// six and a half milliseconds behind the microphone, with the last six and a half
+/// milliseconds of the recording still inside the encoder. The stream's stated length
+/// bounds the other end, where a writer may have padded its final packet past the granule.
+/// `pre_skip` and `stated` are the container's statements of both; a container that makes
+/// neither leaves the decode as it stands.
 fn decode_opus(
     format: &mut dyn symphonia::core::formats::FormatReader,
     track_id: u32,
     channels: Option<symphonia::core::audio::Channels>,
     sample_rate: Option<u32>,
+    pre_skip: u64,
+    stated: Option<u64>,
 ) -> Result<DecodedAudio, String> {
     // The container names its channels as a mask; Opus itself is mono or stereo, so the
     // mask is only asked how many it names. A track claiming more than two is malformed.
@@ -498,6 +523,22 @@ fn decode_opus(
             }
         }
     }
+    if samples.is_empty() {
+        return Err("the recording has no audio in it".to_owned());
+    }
+    // The pre-skip comes off the head — the samples the codec held back, not the recording —
+    // and the stream's stated length bounds the tail, clamped to what the packets actually
+    // decoded to in both directions: a note whose tail died with the process states less than
+    // it holds, and one that stopped early may not hold all it states. Every sample between
+    // the two is the recording, in the order the microphone heard it.
+    let start = (pre_skip as usize).min(samples.len());
+    let playable = match stated {
+        Some(stated) if stated > pre_skip => (stated - pre_skip) as usize,
+        _ => samples.len() - start,
+    };
+    let end = start.saturating_add(playable).min(samples.len());
+    samples.drain(..start);
+    samples.truncate(end - start);
     if samples.is_empty() {
         return Err("the recording has no audio in it".to_owned());
     }
@@ -867,6 +908,16 @@ impl<W: std::io::Write> OggOpusEncoder<W> {
     /// with silence when `pad_tail` — a speaker cut off mid-word still gets their last
     /// twenty milliseconds — and dropped when it is the cap's own overrun, so a note the
     /// cap stopped does not claim time it was refused.
+    ///
+    /// The codec's delay is *not* fed back. libopus holds one lookahead — the six and a
+    /// half milliseconds the identification header states as the pre-skip — so the input
+    /// samples it is still holding when the stream ends are never emitted, and a note ends
+    /// that much before the microphone's last sample. Feeding the lookahead back as silence
+    /// at the end would recover them, and is what `opusenc` does; it also means the granule
+    /// must stop at the note's own samples rather than at the frames written, which changes
+    /// what every page of every note states and is therefore a change to be made on purpose
+    /// rather than here. Until it is, the note is six and a half milliseconds short and
+    /// says so.
     pub(crate) fn finish(mut self, pad_tail: bool) -> std::io::Result<W> {
         self.start()?;
         if pad_tail && !self.pending.is_empty() {
@@ -904,12 +955,16 @@ pub(crate) fn encode_ogg_opus(
     Ok(out)
 }
 
-/// States a note's playing time off the pages themselves: the last granule position any
-/// complete page carries, less the pre-skip, in milliseconds. The encoded stream's own
-/// statement of its length — independent of any descriptor — and one that stays honest
-/// for a draft whose tail died with the process, because a truncated page simply is not
-/// counted. `None` when the bytes hold no complete page that states any audio.
-pub(crate) fn ogg_opus_playtime_ms(bytes: &[u8]) -> Option<u64> {
+/// The number of playable samples an Ogg Opus stream states, or `None` when the bytes are
+/// not one or hold no complete page that states any audio.
+///
+/// The last granule position any *complete* page carries, less the pre-skip: RFC 7845's own
+/// arithmetic, and the encoded stream's own statement of its length, independent of any
+/// descriptor. It stays honest for a draft whose tail died with the process — a truncated
+/// page simply is not counted, so the figure is what can be played rather than what was
+/// meant — and it is the length the decoder trims its own output to, which is why it is
+/// stated in samples here and read by the caller that needs samples.
+fn ogg_opus_stated_samples(bytes: &[u8]) -> Option<u64> {
     let mut last = 0u64;
     let mut offset = 0usize;
     while offset + 27 <= bytes.len() {
@@ -937,7 +992,13 @@ pub(crate) fn ogg_opus_playtime_ms(bytes: &[u8]) -> Option<u64> {
     if last < u64::from(OPUS_PRE_SKIP) {
         return None;
     }
-    Some((last - u64::from(OPUS_PRE_SKIP)) * 1_000 / 48_000)
+    Some(last - u64::from(OPUS_PRE_SKIP))
+}
+
+/// States a note's playing time off the pages themselves: [`ogg_opus_stated_samples`], in
+/// milliseconds. `None` when the bytes state no audio at all.
+pub(crate) fn ogg_opus_playtime_ms(bytes: &[u8]) -> Option<u64> {
+    Some(ogg_opus_stated_samples(bytes)? * 1_000 / 48_000)
 }
 
 #[cfg(test)]
@@ -1202,8 +1263,11 @@ mod tests {
             .expect("one second encodes");
         let decoded = decode_audio(&ogg).expect("the note decodes");
         assert_eq!(decoded.rate, 48_000);
-        // 50 frames of 20 ms, 960 samples at 48 kHz each: exactly the second that went in.
-        assert_eq!(decoded.samples.len(), 48_000);
+        // 50 frames of 20 ms, 960 samples at 48 kHz each, less the pre-skip the decode drops:
+        // the codec's own lead-in is not the recording — the second that went in starts at the
+        // note's first sample now, and ends six and a half milliseconds early, because the
+        // samples the encoder was still holding when the stream stopped were never emitted.
+        assert_eq!(decoded.samples.len(), 48_000 - usize::from(OPUS_PRE_SKIP));
         let loudest = decoded
             .samples
             .iter()
@@ -1332,8 +1396,8 @@ mod tests {
         truncated.truncate(truncated.len() - 1);
         assert_eq!(
             ogg_opus_playtime_ms(&truncated),
-            None,
-            "a stream whose only audio page was cut short states no time"
+            Some(1_180),
+            "a stream whose last page was cut short states the time its complete pages hold"
         );
     }
 
@@ -1372,7 +1436,11 @@ mod tests {
             .expect("one second at the legacy rate encodes");
         let decoded = decode_audio(&ogg).expect("the note decodes");
         assert_eq!(decoded.rate, 48_000);
-        assert_eq!(decoded.samples.len(), 48_000, "one second, at 48 kHz");
+        assert_eq!(
+            decoded.samples.len(),
+            48_000 - usize::from(OPUS_PRE_SKIP),
+            "one second, at 48 kHz, less the codec's delay"
+        );
     }
 
     /// The amplitude scale is the Android client's: silence is 0, full scale is 255, and the
