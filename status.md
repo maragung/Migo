@@ -3190,3 +3190,43 @@ Gerbang: server workspace cargo fmt/clippy/test 1863 lolos, desktop
 111/111, web 416/416, sdk 167/167, kotlin-check 0 problem,
 protocol-check/entity-check/brief-check/vector-check bersih, lint-js
 bersih, prettier bersih.
+
+## 79. Guess-the-number: tebakan yang diputar ulang ditolak aturannya, dan action id berhenti menjanjikan idempotensi
+
+- **Cacatnya**: engine guess-the-number menerima nilai yang sudah dipegang rondenya.
+  Aturan rumah ketiga engine adalah state sebagai satu-satunya ingatan apakah sebuah
+  langkah sudah mendarat — sel tic-tac-toe yang terisi dan kursi rock-paper-scissors
+  yang terambil ditolak oleh aturannya sendiri, masing-masing dengan test yang dinamai
+  untuk itu — sedangkan guess-the-number hanya memeriksa rentang, sehingga tebakan
+  kedua atas angka yang sama lolos: satu percobaan sungguhan terbakar untuk angka yang
+  rondenya sudah menjawab, dan itu bertentangan dengan janji view pemainnya sendiri,
+  yang mempersempit rentang di sekitar setiap tebakan sehingga angka yang dikatakannya
+  sudah tidak berlaku justru masih diterima aturannya. Yang mengirim ulang bukan
+  penyerang melainkan orang yang kehilangan ack lalu mengulang, atau device kedua yang
+  membawa view basi.
+- **Perbaikannya**: apply menolak nilai yang sudah ada di round.guesses sebagai
+  IllegalMove("you have already guessed that"), sebelum cabang Correct dan tanpa
+  memakan percobaan, dengan postur yang sama dengan dua engine lain: yang menolak
+  adalah aturannya, bukan id yang dipilih client — dispatcher memang membuang
+  action_id yang datang dari client, dan id yang dipasok client tidak akan pernah
+  menjadi pertahanan terhadap client yang menghilangkannya.
+- **Klaim yang salah ikut dibetulkan**: komentar arm GAME_ACTION di
+  migod/src/dispatch.rs mengklaim replay dikalahkan compare-and-set di store, padahal
+  CAS mengalahkan penulis yang berlomba dan bukan pengulangan; doc IllegalMove di
+  migo-games/src/metrics.rs kini menyebut angka yang sudah ditebak; doc submit dan
+  SubmitOptions.actionId di SDK, doc kelas dan submit di port Kotlin, serta §177
+  migo.md berhenti mengatakan bahwa server mencatat id itu dan menjawab ulangan dengan
+  hasil yang sama, karena server tidak pernah membacanya — pengulangan ditolak oleh
+  aturan, bukan dikenali oleh id, dan getView adalah cara pemanggil mengetahui apa yang
+  sebenarnya mendarat.
+- **Test**: guessing_a_number_the_round_already_holds_is_refused_and_costs_no_attempt
+  menuntut penolakan VALIDATION_FAILED, riwayat tetap [50, 20] tanpa entri kedua, sisa
+  percobaan berkurang dua dan bukan tiga, dua langkah mendarat, dan satu penolakan
+  illegal_move tercatat.
+
+Gerbang: server workspace cargo fmt/clippy/test 2487 lolos (0 gagal, 11 ignored, 129
+suite), web 655/655, sdk 280/280, loadgen 149/149, crypto 67/67, wire 24/24, protocol
+11/11, android :core dan :app testDebugUnitTest hijau lewat Build SUCCESSFUL (job-nya
+tidak mencetak jumlah test), desktop fmt+clippy dan Windows check bersih, kotlin-check
+0 problem, brief-check 62 check 0 problem, doc-check hijau, prettier bersih, e2e dan
+load gate hijau.
