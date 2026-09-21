@@ -47,7 +47,6 @@ use migo_core::{Error, Id, Timestamp};
 use migo_protocol::{fault, BandwidthMode};
 use migo_sfu::{
     Adaptation, InboundFrame, JoinOutcome, LinkStats, Member, PublishRequest, Sfu, SfuConfig,
-    StreamKind,
 };
 
 use crate::wire::{encode_delivery_datagram, encode_reply, LinkNumbers, Reply, Request, SeatWire};

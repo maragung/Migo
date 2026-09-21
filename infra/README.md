@@ -84,12 +84,12 @@ load profile is bandwidth rather than application logic. The stack above therefo
 runs it as a service of its own, and the `sfu` configuration section is split
 between the two:
 
-| Key                 | `migod`                       | `sfu`                          |
-| ------------------- | ----------------------------- | ------------------------------ |
-| `sfu.public_url`    | set — it tells clients where  | set — the same value           |
-| `sfu.ticket_key`    | set — it signs admissions     | set — the same value           |
-| `sfu.bind`          | never set — it opens no media | set — the socket it listens on |
-| `sfu.metrics_bind`  | never set                     | set, optionally                |
+| Key                | `migod`                       | `sfu`                          |
+| ------------------ | ----------------------------- | ------------------------------ |
+| `sfu.public_url`   | set — it tells clients where  | set — the same value           |
+| `sfu.ticket_key`   | set — it signs admissions     | set — the same value           |
+| `sfu.bind`         | never set — it opens no media | set — the socket it listens on |
+| `sfu.metrics_bind` | never set                     | set, optionally                |
 
 A join of three or more is answered with the address and a short-lived **ticket**: an
 HMAC over this call, this account, this device and an expiry. The media plane checks

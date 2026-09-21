@@ -36,7 +36,7 @@
 //! is refused before it is read, and a declared list length is checked against the bytes that
 //! actually remain rather than trusted. A short read is an error, never a panic.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use migo_core::{Id, Timestamp};
 use migo_protocol::BandwidthMode;
@@ -1190,7 +1190,7 @@ mod tests {
         let mut body = vec![TAG_ROSTER_REPLY];
         body.extend_from_slice(&1u16.to_be_bytes());
         body.extend_from_slice(&[1u8; 32]);
-        body.push(BandwidthMode::Normal.to_wire());
+        body.push(mode_byte(BandwidthMode::Normal));
         body.push(u8::MAX);
         assert_eq!(decode_reply(&body).err(), Some(WireError::Short));
     }
