@@ -154,6 +154,18 @@ impl Engine for GuessNumber {
         if !(1..=round.bound).contains(&value) {
             return Err(Reject::IllegalMove("guess is out of range").into());
         }
+        // A number the round already holds is refused, the same posture the other two engines
+        // take and for the same reason: a replayed move must never land twice. Here the rules are
+        // the whole of the defence, because the `action_id` a client mints for the wire is
+        // discarded by the dispatcher — so the state is the only memory of what has been guessed,
+        // and a second arrival of the same guess would otherwise spend a real attempt on a number
+        // the round has already answered. It is also what the player's own view promises: `render`
+        // narrows the range around every guess, so the number it says is no longer in play is one
+        // the rules refuse as well. A stale view — a second device, an event that never arrived —
+        // is exactly who re-sends it.
+        if round.guesses.contains(&value) {
+            return Err(Reject::IllegalMove("you have already guessed that").into());
+        }
         if matches!(feedback(value, round.secret), Feedback::Correct) {
             round.solved = true;
         }
