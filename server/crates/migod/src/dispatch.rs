@@ -1242,10 +1242,13 @@ impl Dispatcher for AppDispatcher {
                 let request: GameAction = from_frame(frame).map_err(fault::from_wire)?;
                 // `room_id` and `action_id` arrive and are not trusted. The conversation a game
                 // belongs to comes from the game itself, so a client cannot fan its move out
-                // onto a topic the game is not in; replays are beaten by the store's
-                // compare-and-set, which sees a board that already reflects the move and rejects
-                // it, so a client-supplied counter would be a second, weaker defence that a
-                // client controls.
+                // onto a topic the game is not in. A replay is refused by the rules: the service
+                // re-reads the game and re-applies the move against the state it found, and every
+                // engine's rules refuse a move that state already holds — an occupied cell, a
+                // taken seat, a number the round has already guessed. The store's compare-and-set
+                // is what beats a concurrent writer, which is a different problem; a
+                // client-supplied counter would be a second, weaker defence that a client
+                // controls, and no defence at all against a client that leaves it out.
                 let mv = domain_move(&request)?;
                 let result = self.games.play(&caller, request.game_id, mv).await?;
                 context.reply(&Acknowledged { ok: true })?;

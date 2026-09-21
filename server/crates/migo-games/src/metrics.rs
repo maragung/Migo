@@ -33,7 +33,7 @@ pub(crate) enum Rejection {
     /// It is not the caller's turn.
     NotYourTurn,
     /// The move is not legal for this game's state — an occupied cell, a second commit, a
-    /// guess out of range.
+    /// guess out of range, a number the round has already guessed.
     IllegalMove,
     /// The move's variant does not match the game's kind — a thrown hand at a board.
     WrongKind,

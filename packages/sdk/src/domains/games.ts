@@ -144,10 +144,13 @@ export class GamesDomain {
   /**
    * Submits a game action as an intent; the server decides and broadcasts the outcome.
    *
-   * The `actionId` is minted automatically and monotonically per game, so submitting the "same" action
-   * twice (a deliberate retry) would carry the next id and be treated as a new action — for an
-   * idempotent retry, pass the previous id explicitly as {@link SubmitOptions.actionId}. Resolves once
-   * the server has accepted the intent; the resulting state change arrives separately as a {@link
+   * The `actionId` is minted automatically and monotonically per game and carried because the wire's
+   * `GameAction` has the field — but the server discards it, so it names a submission without deciding
+   * anything about it. A retry of a submission whose answer was lost is not recognised by that id:
+   * every engine's rules refuse a move the state already holds (an occupied cell, a taken seat, a
+   * number the round has already guessed), so the second arrival comes back refused rather than
+   * applied twice, and {@link getView} is how a caller learns what actually landed. Resolves once the
+   * server has accepted the intent; the resulting state change arrives separately as a {@link
    * GameEvent}.
    */
   async submit(
@@ -179,8 +182,11 @@ export interface SubmitOptions {
   /**
    * An explicit action id, overriding the auto-minted one.
    *
-   * Pass the id of a previous submission to retry it idempotently — the server recognises the repeated
-   * id and does not apply the action a second time.
+   * It names the submission on the wire and nothing more: the server does not read it, so passing a
+   * previous submission's id does not make a retry of that submission idempotent. What keeps a
+   * replayed move from landing twice is the rules, which refuse a move the state already holds — and
+   * that refusal is what a caller should treat as "this may have landed already", re-reading the view
+   * rather than re-sending.
    */
   actionId?: number;
 }

@@ -1450,6 +1450,51 @@ async fn a_guess_outside_the_range_is_refused_and_costs_no_attempt() {
 }
 
 #[tokio::test]
+async fn guessing_a_number_the_round_already_holds_is_refused_and_costs_no_attempt() {
+    let harness = Harness::new();
+    harness.room().await;
+    let game = guess_number(&harness).await;
+    harness
+        .games
+        .play(&harness.caller(1), game, Move::Guess { value: 50 })
+        .await
+        .expect("the guess is legal");
+    // A replayed request is byte-for-byte the same move arriving twice: a lost acknowledgement
+    // and a retry, or a second device whose view never caught up. The round already holds the
+    // guess, so the second arrival may not spend a second attempt on it. The `action_id` that
+    // would have named the retry is discarded by the dispatcher, so the rules are what refuse
+    // it — the same way an occupied cell refuses a replayed mark and a taken seat refuses a
+    // replayed commit, and the reason this engine has no replay hole the other two do not.
+    expect_code(
+        harness
+            .games
+            .play(&harness.caller(1), game, Move::Guess { value: 50 })
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+    // A number the round does not hold is still a move: the refusal is about the guess, not
+    // about the player having guessed at all.
+    let result = harness
+        .games
+        .play(&harness.caller(1), game, Move::Guess { value: 20 })
+        .await
+        .expect("a fresh number is legal");
+    let (_, _, remaining, guesses) = range(&result.view);
+    assert_eq!(
+        guesses.iter().map(|guess| guess.value).collect::<Vec<_>>(),
+        vec![50, 20],
+        "the refused replay left no entry in the history"
+    );
+    assert_eq!(
+        remaining,
+        GamesConfig::default().guess_attempts - 2,
+        "two attempts spent, not three"
+    );
+    assert_eq!(harness.moves("guess_number"), 2, "two moves landed");
+    assert_eq!(harness.rejected("illegal_move"), 1);
+}
+
+#[tokio::test]
 async fn the_secret_appears_in_no_part_of_the_view_a_client_receives() {
     // A bound of a thousand puts the secret well clear of the range endpoints, so a substring
     // search over the whole view is meaningful rather than an accident of small numbers.

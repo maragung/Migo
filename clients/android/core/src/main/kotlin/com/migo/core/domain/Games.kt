@@ -38,21 +38,19 @@ import java.util.concurrent.ConcurrentHashMap
  * A client that animated purely on arrival order would show two players' moves swapped whenever the
  * network reordered them, which in a game is not a cosmetic problem.
  *
- * # Why an action id exists, and why this class mints it
+ * # Why an action id is minted here, and what it does not buy
  *
- * [GameAction.actionId] makes a submission idempotent: the server records the id and answers a repeat
- * with the original outcome instead of applying the move twice. Without it, a reconnect during a
- * submit would be a coin flip between a lost move and a doubled one, and in a turn-based game a
- * doubled move is a lost game.
+ * [GameAction.actionId] names a submission on the wire. It does *not* make one idempotent: the server
+ * discards the field, so it never reads the id back to recognise a repeat. What keeps a replayed move
+ * from landing twice is the engine's own rules, which refuse a move the state already holds -- an
+ * occupied cell, a taken seat, a number the round has already guessed -- so a retry of a submission
+ * whose answer was lost comes back refused rather than applied twice, and the room is told nothing a
+ * second time. A caller meeting that refusal should read the state again with [getView] rather than
+ * re-send: the refusal is also what a move that did land looks like from here.
  *
- * The ids are minted here rather than by the caller because they must be *per game* and monotonic, and
- * a caller counting them would be a caller that resets the counter when it recreates its game object.
- * They live in memory only, which is the right lifetime: the server scopes them to a game session, so
- * a fresh process starting again at 1 is correct, not a collision.
- *
- * For a deliberate retry of a submission whose answer was lost, pass the [submit] `actionId` back
- * explicitly -- that is the whole point of the field, and a retry that let a fresh id be minted would
- * be a second move.
+ * The ids are minted here rather than by the caller because the wire's field is required, and minting
+ * them in one place keeps a submission named consistently. They live in memory only, which is the
+ * right lifetime for a name nothing on the server remembers.
  */
 class GamesDomain(
     private val rpc: Rpc,
@@ -163,8 +161,9 @@ class GamesDomain(
      * succeeded: the outcome arrives as a [GameEvent], possibly after other players' moves. A client
      * that treated the acknowledgement as the result would be rendering its own guess.
      *
-     * [action] is the game's verb and [args] its operands, both game-defined. Pass [actionId] only to
-     * retry a submission whose answer was lost; leaving it null mints a fresh one.
+     * [action] is the game's verb and [args] its operands, both game-defined. [actionId] overrides the
+     * minted id and decides nothing beyond the name the submission travels under: the server does not
+     * read it, so a retry is refused by the rules rather than recognised by its id.
      */
     suspend fun submit(
         gameId: Id,
