@@ -182,6 +182,32 @@ class GamesDomain(
     }
 
     /**
+     * Abandons a game the caller is playing: a forfeit, and terminal.
+     *
+     * The game ends with no winner and no reward -- a forfeit pays nobody, so abandoning cannot be
+     * farmed -- and only a player may abandon, only while the game is still open; the server
+     * refuses anyone else, and refuses a game that has already ended. The reply is a bare ack, and
+     * unlike [startGame] the server publishes the resulting `finished` delta to the conversation
+     * *including* this connection: the reply is the answer to no fan-out this caller is excluded
+     * from, so a client rendering the event stream learns of its own abandonment without a second
+     * read, and [getView] is how the final status is read.
+     *
+     * The game's action-id counter is released once the forfeit lands, because the id only ever
+     * named a submission to a game that now cannot take one. A refusal leaves the counter alone:
+     * the game is still open, and the ids it has already spent are still spent.
+     */
+    suspend fun abandon(gameId: Id): Acknowledged {
+        val request = GameId(gameId)
+        val ack = rpc.call(
+            Op.GAME_ABANDON,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
+        )
+        forget(gameId)
+        return ack
+    }
+
+    /**
      * The action id this client last used for a game, or null if it has submitted none.
      *
      * For a client that wants to persist its counter across a restart, and for a test that wants to

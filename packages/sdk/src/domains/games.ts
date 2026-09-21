@@ -26,6 +26,13 @@
  * the substance of a move — feedback on a guess, a board — is fetched with {@link getView} after the
  * ack resolves. {@link startGame} answers with the full opening view directly, because a game that
  * has not started has no deltas to publish.
+ *
+ * # Giving up
+ *
+ * {@link abandon} is the caller's own way out: it forfeits a game it is playing, ending it with no
+ * winner and no reward. It is the one game opcode whose delta the server publishes back to the
+ * connection that sent it, because its reply is a bare ack and an abandoner that never heard its
+ * own abandonment would go on offering a move at a board the referee has closed.
  */
 
 import type { Id } from '@migo/wire';
@@ -165,6 +172,22 @@ export class GamesDomain {
       request.args = options.args;
     }
     return this.#rpc.call(OP.GAME_ACTION, encodeGameAction, decodeAcknowledged, request);
+  }
+
+  /**
+   * Abandons a game the caller is playing: a forfeit, and terminal.
+   *
+   * The game ends with no winner and no reward — a forfeit pays nobody, so abandoning cannot be
+   * farmed — and only a player may abandon, only while the game is still open; the server refuses
+   * anyone else, and refuses a game that has already ended. The reply is a bare ack, and unlike
+   * {@link startGame} the server publishes the resulting `finished` delta to the conversation
+   * *including* this connection: the reply is the answer to no fan-out this caller is excluded
+   * from, so a client rendering the event stream learns of its own abandonment without a second
+   * read, and {@link getView} is how the final status is read.
+   */
+  async abandon(gameId: Id): Promise<Acknowledged> {
+    const request: GameId = { gameId };
+    return this.#rpc.call(OP.GAME_ABANDON, encodeGameId, decodeAcknowledged, request);
   }
 
   /** Returns the next monotonic action id for a game, advancing the per-game counter. */

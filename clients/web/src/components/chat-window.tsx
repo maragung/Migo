@@ -734,6 +734,7 @@ export function ChatWindow({
                 profiles={profiles}
                 activeGuess={game.activeGuess}
                 onSubmitGuess={(value) => void game.submitGuess(value)}
+                onAbandonGame={() => void game.abandonGame()}
                 guessBusy={game.guessBusy}
                 guessError={game.guessError}
               />
