@@ -85,6 +85,7 @@ function render(
       profiles={PROFILES}
       activeGuess={activeGuess}
       onSubmitGuess={() => {}}
+      onAbandonGame={() => {}}
       guessBusy={false}
       guessError={null}
     />,
@@ -165,6 +166,22 @@ test('the guess card offers the input only when the server says it is our turn',
   assert.ok(!over.includes('Enter your guess'), 'a finished game still offered an input');
 });
 
+test('the card offers the way out exactly where it offers the input', () => {
+  const views = new Map<Id, GameViewWire>([[GAME_ID, guessView()]]);
+
+  // The forfeit and the guess are one card's two controls, and the same rule gates both: a game
+  // that is not ours to play is not ours to give up either, and a game already over has nothing
+  // left to forfeit.
+  const ours = render([], views, guessView());
+  assert.ok(ours.includes('Give up'), 'the active game must offer the way out');
+
+  const theirs = render([], new Map(), guessView({ players: [ADA], turnOf: ADA, yourTurn: false }));
+  assert.ok(!theirs.includes('Give up'), 'another player\u2019s game offered us its forfeit');
+
+  const over = render([], views, guessView({ status: 1 }));
+  assert.ok(!over.includes('Give up'), 'a finished game still offered its forfeit');
+});
+
 test('the guess card reads its range and feedback from the board the server redacted', () => {
   const narrowing = guessView({ board: '25-50:5 60:lower' });
   const markup = render([], new Map(), narrowing);
@@ -186,6 +203,7 @@ test('the guess card surfaces the submit flow\u2019s failure line', () => {
       profiles={PROFILES}
       activeGuess={guessView()}
       onSubmitGuess={() => {}}
+      onAbandonGame={() => {}}
       guessBusy={false}
       guessError={'The server rejected the request.'}
     />,
@@ -288,6 +306,7 @@ test('game rows render inside the message list\u2019s scrolling surface, below t
           profiles={PROFILES}
           activeGuess={null}
           onSubmitGuess={() => {}}
+          onAbandonGame={() => {}}
           guessBusy={false}
           guessError={null}
         />

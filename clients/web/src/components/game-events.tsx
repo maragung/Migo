@@ -9,10 +9,14 @@
  * finish gets the celebration treatment, because a win is the one game event a reader is waiting
  * to see.
  *
- * The guess card is the single interactive piece. It renders only for the active guessing game
- * while the server says it is the local player's turn — a solo game another member started is
- * theirs to play, and the card must not offer us their input — and its feedback line quotes the
- * board the server redacted for us, never a number computed locally.
+ * The guess card is the single interactive piece, and it carries both controls the game has: the
+ * guess itself, and giving up. It renders only for the active guessing game while the server says
+ * it is the local player's turn — a solo game another member started is theirs to play, and the
+ * card must not offer us their input — and its feedback line quotes the board the server redacted
+ * for us, never a number computed locally.
+ *
+ * Giving up is irreversible — the game ends at once, with no winner and no reward — so it asks
+ * first, the same `window.confirm` the panels use for a kick or a ban.
  */
 
 import { useState } from 'react';
@@ -43,7 +47,11 @@ export interface GameEventListProps {
   activeGuess: GameViewWire | null;
   /** Submits a guess for the active game. */
   onSubmitGuess: (value: number) => void;
+  /** Forfeits the active game, after the reader has confirmed. */
+  onAbandonGame: () => void;
+  /** True while either control is in flight; they share the one gate. */
   guessBusy: boolean;
+  /** The refusal from either control — a move or an abandonment the server would not take. */
   guessError: string | null;
 }
 
@@ -55,6 +63,7 @@ export function GameEventList({
   profiles,
   activeGuess,
   onSubmitGuess,
+  onAbandonGame,
   guessBusy,
   guessError,
 }: GameEventListProps): ReactNode {
@@ -74,6 +83,7 @@ export function GameEventList({
         <GuessCard
           view={activeGuess}
           onSubmit={onSubmitGuess}
+          onAbandon={onAbandonGame}
           busy={guessBusy}
           error={guessError}
         />
@@ -94,11 +104,13 @@ export function GameEventList({
 function GuessCard({
   view,
   onSubmit,
+  onAbandon,
   busy,
   error,
 }: {
   view: GameViewWire;
   onSubmit: (value: number) => void;
+  onAbandon: () => void;
   busy: boolean;
   error: string | null;
 }): ReactNode {
@@ -120,6 +132,15 @@ function GuessCard({
     }
     onSubmit(value);
     setText('');
+  }
+
+  // The confirm is the whole of the guard: a game given up is gone, and the button sits one
+  // mis-click away from the one the reader is aiming at.
+  function onGiveUp(): void {
+    if (busy || !window.confirm('Give up this game? It ends with no winner and no reward.')) {
+      return;
+    }
+    onAbandon();
   }
 
   return (
@@ -152,6 +173,15 @@ function GuessCard({
         />
         <button type="submit" className="btn btn-primary" disabled={!valid || busy}>
           Guess
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onGiveUp}
+          disabled={busy}
+          title="Ends the game now, with no winner and no reward"
+        >
+          Give up
         </button>
       </div>
       {error !== null ? <div className="guess-error">{error}</div> : null}

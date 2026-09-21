@@ -146,6 +146,20 @@ test('games: submit mints monotonic action ids per game, and an explicit id over
   );
 });
 
+test('games: abandon names only the game, and resolves on the ack', async () => {
+  const { transport, games } = rig(
+    new Map([[OP.GAME_ABANDON, () => encodeBody(encodeAcknowledged, { ok: true })]]),
+  );
+  const ack = await games.abandon(GAME);
+  assert.equal(transport.sent[0]?.opcode, OP.GAME_ABANDON);
+  // A forfeit names the game and nothing else: the server reads the caller from the connection,
+  // and `GameId` is the whole request struct, so a client must not smuggle an outcome into it.
+  assert.deepEqual(decodeBody(decodeGameId, transport.sent[0]?.body ?? new Uint8Array()), {
+    gameId: GAME,
+  });
+  assert.equal(ack.ok, true);
+});
+
 test('games: onGameEvent delivers decoded events once started, and stops cleanly', () => {
   const { transport, games } = rig(new Map());
   const seen: string[] = [];

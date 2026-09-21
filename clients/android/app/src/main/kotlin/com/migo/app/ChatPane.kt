@@ -181,6 +181,7 @@ internal fun ChatPane(
         onLoadGames = model::loadGameCatalogue,
         onStartGame = { slug -> model.startGame(open.conversationId, slug) },
         onGuess = { value -> model.submitGuess(open.conversationId, value) },
+        onAbandonGame = { model.abandonGame(open.conversationId) },
         selfId = state.accountId,
         onAcknowledgeSafety = model::acknowledgeSafetyChange,
         onStartCall = { peerId, video -> controls.requestCall(open.conversationId, peerId, video) },

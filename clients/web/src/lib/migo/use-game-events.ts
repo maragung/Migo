@@ -23,6 +23,12 @@
  * The guessing game's feedback needs one more read: `GAME_ACTION`'s reply is a bare ack, so
  * {@link submitGuess} re-fetches the view after the ack to learn the higher/lower/correct the
  * fresh board carries.
+ *
+ * Giving up is the one flow the server publishes back to us: `GAME_ABANDON`'s reply is a bare ack
+ * too, but the `finished` delta is fanned out *including* the abandoning connection — the reply is
+ * the answer to no start-shaped fan-out we are excluded from — so the row arrives on its own.
+ * {@link abandonGame} still re-reads the view, because the card must stop offering a guess the
+ * moment the referee has closed the game rather than whenever the delta lands.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -96,7 +102,16 @@ export interface GameActivity {
   startGame: (slug: string) => Promise<GameViewWire>;
   /** Submits a guess for the active game, then re-reads the view that carries the feedback. */
   submitGuess: (value: number) => Promise<void>;
+  /**
+   * Forfeits the active game, then re-reads the view that reports it ended.
+   *
+   * The game ends with no winner and no reward, and the published `finished` delta reaches this
+   * connection as well, so the thread row appears without further work.
+   */
+  abandonGame: () => Promise<void>;
+  /** True while either of the card's controls is in flight; they share the one gate. */
   guessBusy: boolean;
+  /** The refusal from either control — a move or an abandonment the server would not take. */
   guessError: string | null;
 }
 
@@ -227,12 +242,37 @@ export function useGameEvents(conversationId: Id): GameActivity {
     [client, conversationId, guessBusy, noteView],
   );
 
+  const abandonGame = useCallback(async (): Promise<void> => {
+    const game = newestOpenGuess(viewsRef.current);
+    if (!client || game === null || guessBusy) {
+      return;
+    }
+    setGuessBusy(true);
+    setGuessError(null);
+    try {
+      await client.games.abandon(game.gameId);
+      // The ack carries nothing. The status the card gates on lives in the fresh view, and the
+      // `finished` delta that says the same thing may still be in flight — waiting for it would
+      // leave the input on screen offering a move the referee has already refused.
+      try {
+        noteView(await client.games.getView(game.gameId));
+      } catch {
+        // The forfeit itself landed; the event stream's own refresh catches the view up.
+      }
+    } catch (cause) {
+      setGuessError(friendlyError(cause));
+    } finally {
+      setGuessBusy(false);
+    }
+  }, [client, guessBusy, noteView]);
+
   return {
     rows,
     views,
     activeGuess,
     startGame,
     submitGuess,
+    abandonGame,
     guessBusy,
     guessError,
   };

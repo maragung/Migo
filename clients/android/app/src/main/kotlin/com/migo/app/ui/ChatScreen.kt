@@ -41,6 +41,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
@@ -214,6 +215,8 @@ fun ChatScreen(
     onStartGame: (String) -> Unit = {},
     /** Submits a guess for the conversation's active game. */
     onGuess: (Long) -> Unit = {},
+    /** Forfeits the conversation's active game, after the reader has confirmed. */
+    onAbandonGame: () -> Unit = {},
     /** This account's own id, so the sheet never offers an action against oneself. */
     selfId: Id,
     /** Acknowledges a changed safety number for this conversation, from the warning itself. */
@@ -440,6 +443,18 @@ fun ChatScreen(
     // button opens it, and the catalogue it lists is the node's, shared with the Games panel.
     val gamesOpen = remember { mutableStateOf(false) }
 
+    // The active guessing game, gated by the view's own fields rather than by this client's idea of
+    // the game: another member's solo game is theirs to play, and a finished game has no input left.
+    // Computed once because two places read it — the card above the composer and the confirm the
+    // card's Give up opens.
+    val activeGuess = chat.game?.takeIf {
+        it.kind == GAME_KIND_GUESS_NUMBER && it.status == GAME_STATUS_OPEN && it.yourTurn == true
+    }
+
+    // Keyed on the game, so the confirm closes when that game ends and the next one opens closed:
+    // a dialog left armed across a game is a dialog that forfeits a game nobody pointed it at.
+    val giveUpOpen = remember(activeGuess?.gameId) { mutableStateOf(false) }
+
     // The verification sheet's own state, for the same reason: the header's Safety control opens
     // it, and the warning banner reopens it, so the flag lives where both can reach it.
     val safetyOpen = remember { mutableStateOf(false) }
@@ -603,11 +618,15 @@ fun ChatScreen(
 
             // The active guessing game's input, above the composer: it is the conversation's one
             // live question, and a card that scrolled away inside the list would be a question the
-            // reader has to hunt for. Gated on the view's own yourTurn and open status — another
-            // member's solo game is theirs to play, and a finished game has no input left.
-            chat.game
-                ?.takeIf { it.kind == GAME_KIND_GUESS_NUMBER && it.status == GAME_STATUS_OPEN && it.yourTurn == true }
-                ?.let { active -> GuessCard(game = active, busy = chat.gameBusy, onGuess = onGuess) }
+            // reader has to hunt for.
+            activeGuess?.let { active ->
+                GuessCard(
+                    game = active,
+                    busy = chat.gameBusy,
+                    onGuess = onGuess,
+                    onGiveUp = { giveUpOpen.value = true },
+                )
+            }
 
             // The composer's four faces, one per state a voice note can leave it in. While a
             // recording runs *unheld* — the two-step mode, or a hold that slid up into its lock —
@@ -722,6 +741,32 @@ fun ChatScreen(
                 onStart = { slug ->
                     gamesOpen.value = false
                     onStartGame(slug)
+                },
+            )
+        }
+
+        // Giving up is terminal — the game ends at once, with no winner and no reward — so it asks
+        // first, the same shape the profile screen gives its other irreversible actions. Gated on
+        // the card that offers it still being on screen: a forfeit aimed at a game that has since
+        // ended is a request the referee would only refuse.
+        if (giveUpOpen.value && activeGuess != null) {
+            AlertDialog(
+                onDismissRequest = { giveUpOpen.value = false },
+                title = { Text("Give up this game?") },
+                text = {
+                    Text(
+                        "It ends now, with no winner and no reward, and the guesses you have " +
+                            "already spent are gone with it.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        giveUpOpen.value = false
+                        onAbandonGame()
+                    }) { Text("Give up", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { giveUpOpen.value = false }) { Text("Keep playing") }
                 },
             )
         }
@@ -1191,12 +1236,17 @@ private fun GameLauncherSheet(
  * not hard-coded, so a server configured differently is obeyed rather than argued with. The
  * server re-validates regardless; an out-of-range value that slipped through comes back as the
  * shell's own failure banner.
+ *
+ * The card carries both of the game's controls: the guess, and the way out of it. [onGiveUp] only
+ * opens the confirm — the forfeit itself is sent from there, so a mis-tap on a terminal action
+ * costs a dialog rather than a game.
  */
 @Composable
 private fun GuessCard(
     game: GameViewWire,
     busy: Boolean,
     onGuess: (Long) -> Unit,
+    onGiveUp: () -> Unit,
 ) {
     val board = parseGuessBoard(game.board)
     // Without a parsable board the card still offers the protocol's bound: a board this client
@@ -1267,6 +1317,7 @@ private fun GuessCard(
                         Text("Guess")
                     }
                 }
+                TextButton(onClick = onGiveUp, enabled = !busy) { Text("Give up") }
             }
         }
     }

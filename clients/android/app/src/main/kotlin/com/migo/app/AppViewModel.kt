@@ -3268,6 +3268,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Forfeits the open chat's active game, then re-reads the view that reports it ended.
+     *
+     * The reply is a bare ack, and the server publishes the resulting `finished` delta to the
+     * conversation *including* this connection -- a forfeit has no start-shaped fan-out that
+     * excludes the caller -- so the thread's own line arrives without further work. The re-read is
+     * for the card: it must stop offering a guess the moment the referee has closed the game rather
+     * than whenever the delta lands.
+     */
+    fun abandonGame(conversationId: Id) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.conversationId != conversationId || chat.gameBusy) return
+        val game = chat.game ?: return
+        inChat(conversationId) { it.copy(gameBusy = true) }
+        viewModelScope.launch {
+            try {
+                live.client.games.abandon(game.gameId)
+                try {
+                    val view = live.client.games.getView(game.gameId)
+                    inChat(conversationId) {
+                        if (it.game?.gameId == view.gameId) it.copy(game = view) else it
+                    }
+                } catch (_: Exception) {
+                    // The forfeit itself landed; the next event refreshes the view.
+                }
+                inChat(conversationId) { it.copy(gameBusy = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(gameBusy = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
      * A published game event for the open conversation: a line in the thread, and a view refresh.
      *
      * The wire field is named `roomId`, but the server publishes the *conversation* id there — one
