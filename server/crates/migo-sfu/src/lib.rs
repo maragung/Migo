@@ -76,9 +76,9 @@ pub use adaptive::{congestion_score, shape, target_step, ForwardShape};
 pub use frame::{Delivery, InboundFrame, Layer, SealedFrame};
 pub use model::{
     Adaptation, AdaptiveThresholds, JoinOutcome, LeaveOutcome, LinkStats, Member, PublishOutcome,
-    PublishRequest, QualityStep, SfuConfig, StreamKind, SubscribeOutcome, UnpublishOutcome,
-    UnsubscribeOutcome, BITRATE_CAP_PCT, KEYFRAME_INTERVAL_MS, LOW_BITRATE_CAP_PCT,
-    LOW_DATA_FRAME_STRIDE, LOW_DATA_KEYFRAME_INTERVAL_MS, LOW_DATA_MAX_LAYER,
+    PublishRequest, QualityStep, SeatView, SfuConfig, StreamKind, StreamView, SubscribeOutcome,
+    UnpublishOutcome, UnsubscribeOutcome, BITRATE_CAP_PCT, KEYFRAME_INTERVAL_MS,
+    LOW_BITRATE_CAP_PCT, LOW_DATA_FRAME_STRIDE, LOW_DATA_KEYFRAME_INTERVAL_MS, LOW_DATA_MAX_LAYER,
     MAX_ACTIVE_VIDEO_STREAMS, MAX_AUDIO_PARTICIPANTS, MAX_SUBSCRIPTIONS_PER_PARTICIPANT,
     RAMP_INTERVAL_MS, SUBSCRIBE_WINDOW_MAX, SUBSCRIBE_WINDOW_MS,
 };

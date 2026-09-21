@@ -2,7 +2,7 @@
 
 Dokumen ini adalah turunan yang mudah dibaca dari **migo.md section 177 (IMPLEMENTATION
 STATUS)**. migo.md tetap satu-satunya sumber kebenaran; kalau keduanya berbeda, migo.md yang
-benar dan file ini yang salah. Gate `python3 tools/scripts/brief-audit.py` (41 pemeriksaan)
+benar dan file ini yang salah. Gate `python3 tools/scripts/brief-audit.py` (62 pemeriksaan)
 menegakkan section 177 secara mekanis: ia menolak crate yang ditandai BUILT tanpa test, crate
 yang punya test tapi masih ditandai belum, dan crate yang muncul di dua blok sekaligus. Di
 sebelahnya ada `infra-audit.py` (12 pemeriksaan), yang membaca berkas penyebaran di `infra/`
@@ -52,7 +52,7 @@ beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bots`,
 
 | Kategori                                                       | Jumlah                            |
 | -------------------------------------------------------------- | --------------------------------- |
-| Selesai: kode, test, clippy bersih                             | 23 crate Cargo + 12 komponen lain |
+| Selesai: kode, test, clippy bersih                             | 28 crate Cargo + 12 komponen lain |
 | Kode lengkap, test belum ditulis (workspace Cargo)             | 0, blok ini kosong                |
 | Kode lengkap, test belum ditulis (di luar workspace Cargo)     | 2 komponen                        |
 | Kode lengkap, kompilasi diverifikasi di CI, test belum ditulis | 1 komponen                        |
@@ -61,6 +61,11 @@ beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bots`,
 | Baru ada di dokumen                                            | 16 item                           |
 | Test yang hijau pada commit ini                                | 1598 Rust + 10 doc-test + 251 TS  |
 | Cacat terbuka yang belum diperbaiki                            | 0, lihat bagian 8                 |
+
+Tabel di bagian 1 belum menyebut tiga crate yang sudah menjadi anggota workspace, yaitu
+`migo-account`, `migo-calls`, dan `migo-captcha`: ketiganya sudah BUILT di section 177 migo.md
+dan diawasi gate-nya, dan barisnya di sini adalah pekerjaan penyelarasan tersendiri yang belum
+dikerjakan. Baris `migo-sfu` dan `migo-sfu-node` ditambahkan bersamaan dengan socket plane media.
 
 Tidak ada satu pun test yang gagal, dan tidak ada satu pun `#[ignore]` di seluruh workspace.
 Yang dilewati rustdoc hanyalah enam contoh dokumentasi bertanda ` ```ignore ` pada `migo-bots`,
@@ -98,6 +103,8 @@ satu pun peringatan, `cargo doc` tanpa intra-doc link rusak, dan `cargo test` se
 | `migo-gateway`             | transport realtime: mesin state koneksi, frame, heartbeat, otorisasi SUBSCRIBE, backpressure, parse-before-alloc, push-only, hygiene | 21         |
 | `migo-api`                 | permukaan REST/JSON layer 4 yang diizinkan section 118                                                                               | 65         |
 | `migod`                    | composition root layer 5, argumen, penolakan startup, graph, AppDispatcher::authorize_topics, Gateway::emit_notification round-trip  | 69         |
+| `migo-sfu`                 | plane media SFU: registry peserta, forwarder frame tersegel, simulcast, model kualitas, dan pembacaan roster                         | 20         |
+| `migo-sfu-node`            | socket plane media: listener QUIC, admisi tiket HMAC, seat map ber-SessionId, metrics sendiri                                        | 33         |
 | `packages/protocol`        | paket TypeScript hasil generate dari IDL yang sama                                                                                   | 11         |
 | `packages/wire`            | codec frame TypeScript, pasangan dari `migo-wire`                                                                                    | 16         |
 | `packages/crypto`          | primitif kripto web di atas paket `@noble`                                                                                           | 21         |
@@ -1178,7 +1185,7 @@ supaya record parsial tidak bisa crash read path.
 integrasi `tests/quic_listener.rs` yang mengikat listener sungguhan dan menggerakkan
 klien quinn/rustls nyata) semua hijau; desktop fmt/clippy/test (36); TS build + eslint +
 test web (240) + test SDK (141); `make kotlin-check` (14 selftest / 0 masalah);
-`make brief-check` (41 pemeriksaan, bersih). Rilis lewat GitHub Actions seperti biasa:
+`make brief-check` (62 pemeriksaan, bersih). Rilis lewat GitHub Actions seperti biasa:
 tag `v0.10.0` → release.yml (binary migod, tarball web, binary desktop, APK debug,
 2 image GHCR).
 
@@ -3230,3 +3237,87 @@ suite), web 655/655, sdk 280/280, loadgen 149/149, crypto 67/67, wire 24/24, pro
 tidak mencetak jumlah test), desktop fmt+clippy dan Windows check bersih, kotlin-check
 0 problem, brief-check 62 check 0 problem, doc-check hijau, prettier bersih, e2e dan
 load gate hijau.
+
+## 80. migo-sfu diikat ke socket: plane media menjadi proses kedua dengan socket sendiri
+
+- **Yang diminta**: section 92 menempatkan SFU di luar migod karena profil bebannya
+  bandwidth dan bukan logika aplikasi, dan section 166 menuntut panggilan tiga peserta
+  atau lebih memakai SFU yang hanya meneruskan frame tersegel. Sampai commit ini keduanya
+  baru separuh benar: migo-sfu adalah inti keputusan yang lengkap tanpa satu pun socket,
+  sehingga kalimat di section 177 bahwa "socket serta sisi client-nya belum termasuk"
+  adalah cacat yang jujur. Yang dikerjakan sekarang adalah socket-nya, sebagai crate baru
+  `migo-sfu-node` dengan binary `migosfud`.
+- **Yang ternyata TIDAK dituntut, dan itu temuan utamanya**: brief memprediksi bahwa
+  mengikatkan plane media ke socket akan menuntut opcode baru yang belum dialokasikan.
+  Prediksi itu salah, dan salahnya justru karena aturan section 146 dipatuhi: media bukan
+  signalling dan tidak pernah menaiki kabel MWP, jadi plane media berbicara codec-nya
+  sendiri di socket-nya sendiri. Yang dibutuhkan cuma tiga hal tanpa satu pun opcode atau
+  struct baru — satu binary kedua yang membuka listener, satu kunci HMAC bersama dengan
+  migod untuk mengadmit device tanpa store bersama, dan satu field opsional `sfu` pada
+  balasan CALL_SFU_JOIN yang sudah ada. Registry opcode tidak bertambah satu baris pun.
+- **Admisi tanpa store bersama**: tiket HMAC-SHA256 berisi tepat satu klaim (panggilan,
+  akun, device, expiry), ditandatangani migod saat CALL_SFU_JOIN dijawab dan diverifikasi
+  proses media secara offline dengan kunci yang sama, sehingga kedua proses saling percaya
+  tanpa satu pun pembacaan database di jalur admisi dan tanpa tabel sesi bersama.
+  Perbandingan tag constant-time; tiket kedaluwarsa dan tiket dari kunci lain ditolak
+  dengan pesan yang berbeda supaya pengguna bisa menindaklanjutinya.
+- **Socket-nya**: listener QUIC (quinn), kontrol di bi-stream berprefiks panjang u32
+  big-endian dengan framing yang sama seperti migod/src/quic.rs sehingga framing satu
+  bahasa di seluruh workspace, media satu frame per datagram QUIC sehingga tidak ada
+  head-of-line blocking antara kontrol dan media. Header publisher ke SFU 25 byte, SFU ke
+  subscriber 58 byte karena subscriber harus tahu siapa pengirimnya tanpa membuka payload.
+  Kursi dipetakan per pasangan panggilan dan device dengan SessionId monoton sehingga
+  teardown koneksi basi tidak menghapus kursi orang lain; keluaran per sesi dibatasi kanal
+  mpsc berkapasitas `sfu.outbound_queue` dengan try_send sehingga subscriber yang link-nya
+  kolaps berbiaya memori tetap, dan frame yang dijatuhkan dihitung. Penolakan ditulis dan
+  di-finish di stream sebelum koneksi ditutup — close() membuang data yang masih terbang,
+  dan justru penolakan itu satu-satunya hal yang harus sampai — dengan tenggang lima detik.
+  Sertifikatnya self-signed dan keep-alive diturunkan dari heartbeat gateway.
+- **Satu pembacaan baru di migo-sfu**: `Sfu::roster` yang tidak mengubah apa pun dan tidak
+  membaca jam, karena transport yang menjawab penjolner harus menyebut stream mana yang
+  sudah ada di panggilan tanpa menyimpan salinan registry sendiri yang bisa berselisih.
+  Tiga test menyertainya, termasuk panggilan kosong yang terbaca kosong alih-alih galat.
+- **Konfigurasi dibelah dua, dan validasinya jadi lebih ketat**: satu section `sfu` dibaca
+  dua proses dengan peran berbeda. `public_url` + `ticket_key` adalah bagian node
+  signalling (migod mencetak tiket, tidak membuka socket), `bind` (+ `metrics_bind`) adalah
+  bagian proses media. `bind` menuntut keduanya, dan keduanya harus ada bersama atau tidak
+  sama sekali. Sebelumnya validasi hanya berjalan bila `bind` diisi, sehingga separuh
+  signalling dari deployment terbelah tidak diperiksa sama sekali; sekarang validasi
+  berjalan tanpa syarat. `DEVELOPMENT_SFU_TICKET_KEY` ditolak di SETIAP environment,
+  bukan hanya di luar development seperti DEVELOPMENT_TOKEN_KEY, karena kunci tiket bocor
+  berarti orang lain bisa mengambil kursi di panggilan yang bukan undangannya dan menerbitkan
+  ke dalamnya, dan karena kunci ini dipakai dua proses, tidak ada satu pun dari keduanya
+  yang bisa membangkitkannya sendiri.
+- **Wujud deployment**: `infra/docker/Dockerfile.sfu` membangun image migosfud dengan
+  healthcheck berupa scrape metrics, service `sfu` di compose menjalankannya di samping
+  migod dengan public_url dan ticket_key yang sama serta bind yang hanya ada di sisi media,
+  release.yml mendapat job `migosfud-binary` (tarball `server_migosfud-<versi>-...` plus
+  sidecar sha256) dan langkah image `migo-sfu` di GHCR, dan infra-smoke menambahkan
+  assertion yang hanya bisa dilihat cara ini: plane media menjawab /metrics-nya sendiri di
+  portnya sendiri dengan meter berprefiks migo_sfu.
+- **Gerbang yang ternyata sudah membusuk**: make brief-check gagal setelah brief diperbarui,
+  dan kegagalannya benar secara isi. Aturan lama menuntut section 145 memuat kata STATUS: SPEC
+  DAN STATUS: SCHEMA sekaligus, sebagai proksi untuk "registry memisahkan opcode yang sudah
+  ada dari yang direncanakan". Entri SPEC terakhir di registry itu justru transport media SFU,
+  dan karena mengikatkannya ke socket tidak menuntut opcode apa pun, tabelnya kini seluruhnya
+  SCHEMA dan BUILT sehingga proksi itu gagal pada fakta yang baru saja menjadi benar — rot
+  yang sama, dengan sebab yang sama, seperti kasus kosakata status yang sudah lebih dulu
+  diperingatkan di berkas itu sendiri. Aturannya diganti menjadi properti yang benar-benar
+  dipakai pembaca dan masih bisa salah: tidak boleh ada baris opcode yang tercetak di atas
+  penanda status mana pun. Satu kasus selftest ditambahkan untuk mutasi itu, sehingga aturan
+  baru tidak bisa menjadi pemeriksaan yang tidak pernah gagal.
+- **Yang belum**: sisi client. Client tidak berbicara codec plane media di socket ini di
+  satu pun platform; web masih full mesh WebRTC dan Android masih roster saja, sehingga yang
+  sekarang mungkin bagi client hanyalah MEMBACA field `sfu` pada balasan CALL_SFU_JOIN.
+- **Test**: 8 test socket nyata yang menjalankan listener sungguhan di port 0 (tiket sah
+  yang mendudukkan device dan menjawab dengan roster, tiket dari kunci lain, tiket
+  kedaluwarsa, frame tersegel yang sampai ke subscriber dan tidak kembali ke publisher,
+  frame untuk stream yang tidak dilanggani, leave yang diumumkan dan menghapus kursi, frame
+  pertama yang bukan join, dan frame kontrol cacat yang ditolak sementara sesinya hidup),
+  ditambah 25 test unit di wire, ticket, dan server, serta 3 test roster baru di migo-sfu
+  yang menaikkan suite-nya ke 20. Empat test konfigurasi baru menutup kedua belah deployment
+  beserta penolakan placeholder kunci tiket di development.
+
+Gerbang: server workspace cargo fmt/clippy/test lewat CI, web, sdk, kotlin-check 0 problem,
+protocol-check/entity-check/vector-check bersih, brief-check 62 check 0 problem (selftest 23
+kasus), infra-check 12 check 0 problem, secret-check bersih, doc-check hijau, prettier bersih.

@@ -877,6 +877,9 @@ async fn dispatcher() -> DispatcherHarness {
         app.federation.clone(),
         app.bots.clone(),
         app.calls.clone(),
+        // No media plane: this test's node names none, so its joins carry no ticket and the TURN
+        // list is the whole answer — the ordinary state of a node with `sfu.public_url` unset.
+        None,
         // The room-presence tally over the same store and rooms handle, publishing through
         // an unbound gateway handle: these tests exercise dispatch and topic authorization,
         // so its out-of-band publishes are the correct no-ops, and no federation rides them.

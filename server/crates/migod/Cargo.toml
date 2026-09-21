@@ -35,6 +35,8 @@ migo-messaging  = { workspace = true }
 migo-presence   = { workspace = true }
 migo-rooms      = { workspace = true }
 migo-calls      = { workspace = true }
+migo-sfu        = { workspace = true }
+migo-sfu-node   = { workspace = true }
 migo-social     = { workspace = true }
 migo-media      = { workspace = true }
 migo-moderation = { workspace = true }

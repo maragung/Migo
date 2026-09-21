@@ -15,6 +15,10 @@
 # What a release produces:
 #   * server_migod, a stripped Linux x86_64 binary, as a .tar.gz with a SHA-256 sidecar
 #     (attached to the GitHub Release).
+#   * server_migosfud, the group-call media plane — the same workspace's other binary, packaged
+#     the same way. It is a server asset by origin and a separate deployment by design: section 92
+#     puts the SFU outside migod because its load profile is bandwidth, not application logic, so
+#     it is its own process, its own socket, and its own file on the release page.
 #   * client_web, the statically exported web bundle from clients/web/out, as a .tar.gz.
 #   * client_desktop, a stripped Linux x86_64 binary of the native egui client, as a .tar.gz.
 #   * client_desktop, the same client for Windows x86_64 (MSVC), as a .zip — a Windows user
@@ -23,13 +27,14 @@
 #   * client_android, the Android app APK (debug variant — the repository holds no
 #     release-signing key, so a signed release build is not something CI can honestly
 #     produce yet).
-#   * Two container images pushed to GHCR: migo-migod and migo-web.
+#   * Three container images pushed to GHCR: migo-migod, migo-sfu and migo-web.
 #
 # Release-asset names carry an origin prefix: server_ for the server, client_ for anything
 # that runs on a user's device (client_web, client_desktop, client_android). The prefix is
-# on the uploaded file name only — the executable inside the server tarball stays `migod`,
-# because the systemd unit, the Dockerfiles and docker-compose all invoke it by that name, so
-# renaming the binary would break every one of them while renaming the asset breaks nothing.
+# on the uploaded file name only — the executables inside the server tarballs stay `migod` and
+# `migosfud`, because the systemd units, the Dockerfiles and docker-compose all invoke them by
+# those names, so renaming a binary would break every one of them while renaming the asset breaks
+# nothing.
 # What the prefix buys is a release page that says at a glance what each file is and where it
 # belongs.
 
@@ -158,6 +163,58 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
 
+  # ---------------------------------------------------------------- migosfud binary
+  # The media plane is a separate process (section 92), so it is a separate asset: a deployment
+  # that scales forwarding apart from signalling unpacks this one on the machines that carry the
+  # media, and the node binaries on the machines that carry the sessions. Both read the same
+  # `sfu` section, and the two processes must be given the same `sfu.public_url` and the same
+  # `sfu.ticket_key` — a media plane with a different key from the node that mints admits nobody.
+  migosfud-binary:
+    name: migosfud — Linux x86_64 binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable, matching ci.yml and the migod job: one toolchain for every server binary.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The same server workspace and lockfile as the migod job, and a key of its own so the
+          # two jobs do not race to write the same cache entry for the same target/ directory.
+          workspaces: server
+          key: release-migosfud
+
+      - name: Build the release binary
+        run: cargo build --release --manifest-path server/Cargo.toml --bin migosfud
+
+      - name: Package the tarball and checksum
+        run: |
+          version="${TAG#v}"
+          triple="x86_64-unknown-linux-gnu"
+          name="server_migosfud-${version}-${triple}"
+          bin="server/target/release/migosfud"
+          test -x "$bin" || { echo "media-plane binary not found at $bin" >&2; exit 1; }
+          # strip mirrors the migod job and the Docker image build, so the tarball and the
+          # container carry the same size binary rather than one with debug symbols.
+          strip "$bin"
+          mkdir -p "dist/${name}"
+          cp "$bin" "dist/${name}/migosfud"
+          # LICENSE if the repository carries one at the root; harmless if it does not.
+          cp LICENSE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+
   # ---------------------------------------------------------------- container images
   images:
     name: Container images to GHCR
@@ -204,6 +261,20 @@ jobs:
           # between releases, so only changed crates recompile.
           cache-from: type=gha,scope=migod
           cache-to: type=gha,scope=migod,mode=max
+
+      # Same context, same cargo-chef recipe, different binary: the two Rust images share a
+      # recipe but not a cache scope, so a change to one never invalidates the other's layers.
+      - name: Build and push migo-sfu
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.sfu
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-sfu:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-sfu:latest
+          cache-from: type=gha,scope=sfu
+          cache-to: type=gha,scope=sfu,mode=max
 
       - name: Build and push migo-web
         uses: docker/build-push-action@v6

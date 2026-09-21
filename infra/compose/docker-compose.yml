@@ -3,11 +3,17 @@
 #
 #   docker compose -f infra/compose/docker-compose.yml up --build
 #
-# Brings up four services on one network:
+# Brings up five services on one network:
 #   postgres  durable store (SeaORM; migod migrates it on boot)
 #   redis     cache and rate-limiter backend (ephemeral: no persistence)
 #   migod     the server — REST on /v1, realtime gateway on /ws, probes at root
+#   sfu       the group-call media plane, its own process and its own socket
 #   web       the Next.js PWA, talking to migod from the browser
+#
+# migod and sfu are two processes on purpose (section 92): the SFU forwards
+# sealed frames and never holds a call key, and it opens no store at all — its
+# only admission check is the ticket migod signed. See the comments on the two
+# services for the half of the `sfu` section each one reads.
 #
 # Startup ordering is enforced by health checks: migod waits until postgres and
 # redis are healthy, and web waits until migod is healthy. This is a DEVELOPMENT
@@ -82,6 +88,15 @@ services:
       # --- media (development stand-in; the server never proxies bytes, brief 168) ---
       MIGO_MEDIA__BACKEND: filesystem
       MIGO_MEDIA__LOCAL_DIR: /var/lib/migo/media
+      # --- the media plane this node hands clients to (sections 92 and 166) ---
+      # The signalling half of the section: the address clients are told, and the
+      # key tickets are signed with. `sfu.bind` is deliberately absent — this
+      # process opens no media socket; the `sfu` service below opens it, with the
+      # same public_url and the same key. Configure only one of the two and a
+      # group call of three or more gets no media plane at all; configure them
+      # with different keys and the plane admits nobody.
+      MIGO_SFU__PUBLIC_URL: quic://localhost:19443
+      MIGO_SFU__TICKET_KEY: local-compose-sfu-key.not-a-secret.rotate-me
       # --- auth: the documented development placeholder, refused outside development ---
       MIGO_AUTH__TOKEN_KEY: development-only-insecure-token-key
       MIGO_AUTH__ALLOW_REGISTRATION: 'true'
@@ -90,6 +105,29 @@ services:
       - migo-media:/var/lib/migo/media
     ports:
       - '8080:8080'
+    restart: unless-stopped
+
+  # The media plane (sections 92 and 166). It reads the same `sfu` section and the
+  # other half of it: `bind` is set here and nowhere else, and public_url and the
+  # ticket key are the same values migod was given, because a ticket is verified
+  # by re-signing it and two different keys would admit nobody.
+  #
+  # Nothing here reaches a database, a cache, or a session table: it admits a
+  # device by checking a ticket offline, and forwards frames it cannot read.
+  sfu:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.sfu
+    environment:
+      MIGO_SFU__BIND: 0.0.0.0:19443
+      MIGO_SFU__PUBLIC_URL: quic://localhost:19443
+      MIGO_SFU__METRICS_BIND: 0.0.0.0:9090
+      MIGO_SFU__TICKET_KEY: local-compose-sfu-key.not-a-secret.rotate-me
+      RUST_LOG: info
+    ports:
+      # QUIC is UDP; a published TCP port here would be a socket nothing speaks on.
+      - '19443:19443/udp'
+      - '9090:9090'
     restart: unless-stopped
 
   web:

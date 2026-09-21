@@ -248,10 +248,29 @@ def run_audit(root: Path, brief_path: Path, quiet: bool = False) -> Audit:
     # Opcodes the brief plans but has not implemented are legitimate, provided
     # they are declared in the section 145 registry under a SPEC marker rather
     # than invented inline somewhere in the prose.
+    #
+    # This check used to require the registry to carry BOTH words, which was a
+    # proxy for "the registry separates the shipped table from the planned one".
+    # A proxy rots the day the last planned entry ships, and this is that day:
+    # the SFU media transport was the one SPEC entry left in the registry, and
+    # binding it to a socket turned out to need no opcode at all, so the table is
+    # now entirely SCHEMA and BUILT and the check failed on a fact that had just
+    # become true -- the same rot, for the same reason, as the status-vocabulary
+    # case below. The property behind it is stated directly instead, and it is
+    # the one a reader actually relies on: every opcode row must be printed under
+    # a status marker, so that a reader can tell a shipped entry from a planned
+    # one. A row above every marker is an entry nobody can classify, and the
+    # marker above it is exactly what says which it is. Requiring the section to
+    # carry a marker at all is not a second check here, because the rule above
+    # already demands one of every protocol section from 136 up.
     registry = sections[145][1] if 145 in sections else ""
-    a.expect("STATUS: SPEC" in registry and "STATUS: SCHEMA" in registry,
-             "section 145 separates SCHEMA opcodes from SPEC opcodes",
-             "registry is missing one of the STATUS markers")
+    registry_rows = [ln for ln in registry.splitlines()
+                     if re.match(r"^\d+ [A-Z][A-Z0-9_]+, ", ln)]
+    unlabelled = [ln.split(",")[0] for ln in registry_rows
+                  if registry.rfind("STATUS:", 0, registry.index(ln)) < 0]
+    a.expect(not unlabelled,
+             "no opcode row in section 145 is printed above a status marker",
+             f"unlabelled {unlabelled[:5]}")
     # Sections that are themselves registries may introduce names: 48 declares
     # product permissions, 72 feature bits, 140 frame flags, 145 opcodes, 161
     # error codes. A name used elsewhere in the brief must trace back to one of
@@ -874,6 +893,10 @@ def selftest() -> int:
             ("the registry prints a wrong opcode code",
              edit("migo.md", "2 PING, dua arah", "3 PING, dua arah"),
              "section 145 opcode registry matches opcodes.json"),
+            ("section 145 prints its opcode table with no status",
+             edit("migo.md", "Opcode yang sudah ada di schema. STATUS: SCHEMA.",
+                  "Opcode yang sudah ada di schema."),
+             "printed above a status marker"),
             ("docs/02 hard limits drift from meta.json",
              edit("docs/02-protocol.md", "262 144", "262 145"),
              "hard-limit table matches meta.json"),

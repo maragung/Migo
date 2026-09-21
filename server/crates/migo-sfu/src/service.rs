@@ -49,7 +49,8 @@ use crate::limit::WindowCounter;
 use crate::metrics::{AdaptKind, DropReason, JoinKind, Meters, PublishKind, SubscribeKind};
 use crate::model::{
     Adaptation, JoinOutcome, LeaveOutcome, LinkStats, Member, PublishOutcome, PublishRequest,
-    QualityStep, SfuConfig, StreamKind, SubscribeOutcome, UnpublishOutcome, UnsubscribeOutcome,
+    QualityStep, SeatView, SfuConfig, StreamKind, StreamView, SubscribeOutcome, UnpublishOutcome,
+    UnsubscribeOutcome,
 };
 
 /// One subscription held by one seat.
@@ -577,6 +578,39 @@ impl Sfu {
         };
         plane.seats[index].mode = mode;
         Ok(())
+    }
+
+    /// The seats a call holds, with what each publishes.
+    ///
+    /// A read with no side effect and no clock: a transport answering a
+    /// joiner needs the streams already in the call, because a subscriber can
+    /// only name a stream it has been told about. An unknown call reads as an
+    /// empty roster rather than an error — "nobody is here" is the honest
+    /// answer about a call that has no seats, and the transport's own join is
+    /// what creates the plane in the first place.
+    #[must_use]
+    pub fn roster(&self, call_id: Id) -> Vec<SeatView> {
+        let planes = self.planes.lock();
+        let Some(plane) = planes.get(&call_id) else {
+            return Vec::new();
+        };
+        plane
+            .seats
+            .iter()
+            .map(|seat| SeatView {
+                member: seat.member,
+                mode: seat.mode,
+                streams: seat
+                    .streams
+                    .iter()
+                    .map(|stream| StreamView {
+                        stream_id: stream.stream_id,
+                        kind: stream.kind,
+                        layers: stream.layers.clone(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Recomputes the load gauges after a mutation that can change them.

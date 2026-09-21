@@ -120,6 +120,7 @@ use crate::conversation_relay::ConversationRelay;
 use crate::presence_relay::PresenceRelay;
 use crate::replication::ReplicationRelay;
 use crate::room_relay::RoomRelay;
+use crate::sfu::SfuTickets;
 
 /// Makes sure this node holds the call row a 1:1 lifecycle frame is about
 /// before the service is asked to read it, and says nothing either way.
@@ -706,7 +707,12 @@ pub(crate) async fn handle_turn_fetch(
     // and the frame was already priced by the gateway that delivered it.
     let request: CallTurnFetch = from_frame(frame).map_err(fault::from_wire)?;
     let servers = svc.turn_servers(request.call_id).await?;
-    ctx.reply(&CallTurnResponse { servers })
+    // No ticket rides this reply, and that is a rule rather than an omission: a TURN fetch names a
+    // call but takes no seat in it, and a ticket is precisely a seat's admission. Minting one here
+    // would hand a device that never joined the ability to be seated by the media plane, which is
+    // the one thing the join is for. A group call that wants the SFU joins it (`CALL_SFU_JOIN`)
+    // and gets its ticket there.
+    ctx.reply(&CallTurnResponse { servers, sfu: None })
 }
 
 /// Carries one group-call announcement to whichever tier owns its
@@ -762,8 +768,10 @@ pub(crate) async fn forward_announcement(
 /// device is the connection's own, and a group call has no single callee.
 ///
 /// The reply is a `CallTurnResponse`, the frame the registry froze for this
-/// opcode; its `servers` list carries the configured TURN relays, exactly as
-/// a 1:1 fetch would. The roster itself is *published* to the joiner's own
+/// opcode: its `servers` list carries the configured TURN relays, exactly as a
+/// 1:1 fetch would, and its `sfu` field carries this device's ticket for the
+/// node's media plane when the node runs one — the admission the separate SFU
+/// process verifies offline (section 92). The roster itself is *published* to the joiner's own
 /// user topic as a `CALL_SFU_EVENT` carrying the full participant list — the
 /// one event the registry gives this opcode a coalescing key for — and the
 /// join announcement is published to the conversation's topic for the rest of
@@ -772,6 +780,7 @@ pub(crate) async fn handle_sfu_join(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    sfu: Option<&SfuTickets>,
     relay: &PresenceRelay,
     rooms: &RoomRelay,
     conversations: &ConversationRelay,
@@ -788,7 +797,23 @@ pub(crate) async fn handle_sfu_join(
         )
         .await?;
     let servers = svc.turn_servers(request.call_id).await?;
-    ctx.reply(&CallTurnResponse { servers })?;
+    // The media plane's half of the answer: a ticket for this device's seat in this call, so a
+    // client can dial the SFU without the two processes sharing a store. Absent on a node that
+    // runs no media plane, which is how a client learns to mesh instead — and the ticket is
+    // minted from the caller's own `now`, so the expiry named in the reply is the expiry that
+    // was signed.
+    let media = sfu.map(|tickets| {
+        tickets.issue(
+            request.call_id,
+            caller.account_id,
+            caller.device_id,
+            caller.now,
+        )
+    });
+    ctx.reply(&CallTurnResponse {
+        servers,
+        sfu: media,
+    })?;
     // The joiner's own roster: their screen builds the call from this frame,
     // on their own user topic so it arrives whether or not their client ever
     // subscribed to the conversation. The coalescing key is `None` even

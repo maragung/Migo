@@ -18,6 +18,7 @@ members = [
     "crates/migo-rooms",
     "crates/migo-calls",
     "crates/migo-sfu",
+    "crates/migo-sfu-node",
     "crates/migo-social",
     "crates/migo-media",
     "crates/migo-moderation",
@@ -58,6 +59,7 @@ migo-presence   = { path = "crates/migo-presence" }
 migo-rooms      = { path = "crates/migo-rooms" }
 migo-calls      = { path = "crates/migo-calls" }
 migo-sfu        = { path = "crates/migo-sfu" }
+migo-sfu-node   = { path = "crates/migo-sfu-node" }
 migo-social     = { path = "crates/migo-social" }
 migo-media      = { path = "crates/migo-media" }
 migo-moderation = { path = "crates/migo-moderation" }

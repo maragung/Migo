@@ -29,7 +29,14 @@
 #      degrades silently to local buckets when the cache is unreachable, so a
 #      green /health proves nothing about Redis; only this does;
 #   5. the web container serves the bundle it was built to serve: /healthz,
-#      the index page, and one real /_next/static asset from it.
+#      the index page, and one real /_next/static asset from it;
+#   6. the media plane is a second process with a second image, and it came up
+#      on the configuration the compose file gave it: its own /metrics answers
+#      on its own published port and reports the media plane's meters. This is
+#      the deployment half of section 92 — the SFU outside migod, on a socket of
+#      its own — and the check is the only one that can see it. A stack whose
+#      media process was never built, never started, or started on a ticket key
+#      its own validation refused would pass every assertion above it.
 #
 # Where the images come from: built from this tree, by the compose file's own
 # `--build`, exactly as the README documents. A prebuilt release artifact could
@@ -40,8 +47,8 @@
 # than in per-PR CI.
 #
 # What "healthy" means: `docker compose up --wait` — Postgres reporting
-# pg_isready, Redis answering redis-cli ping, and the migod and web images
-# passing their own HEALTHCHECK definitions — bounded by --wait-timeout, with a
+# pg_isready, Redis answering redis-cli ping, and the migod, media-plane and web
+# images passing their own HEALTHCHECK definitions — bounded by --wait-timeout, with a
 # script-side poll of /health afterwards so a failure names the URL and the
 # last body it saw rather than a compose timeout.
 #
@@ -49,12 +56,13 @@
 # failure path only it first dumps `compose ps` and the full container logs:
 # when the stack comes up broken, the CI log is all a reader gets.
 #
-# Ports: the compose stack publishes 8080 and 19992 on whatever host runs it
-# (the audit checks those mappings statically; this script demonstrates them by
-# fetching both). That is right for a CI runner or a throwaway machine and
-# wrong for a host where those ports belong to a live node — the up fails fast
-# on the bind, which is the safe direction. Never run this on the production
-# host.
+# Ports: the compose stack publishes 8080, 19992 and the media plane's 9090 on
+# whatever host runs it (the audit checks those mappings statically; this script
+# demonstrates them by fetching all three), plus 19443/udp for the media itself,
+# which nothing here fetches. That is right for a CI runner or a throwaway
+# machine and wrong for a host where those ports belong to a live node — the up
+# fails fast on the bind, which is the safe direction. Never run this on the
+# production host.
 #
 # Usage: tools/scripts/infra-smoke.sh   (or: make infra-smoke)
 # Requires: docker compose v2 with --wait support, curl, python3.
@@ -68,6 +76,10 @@ cd "$REPO_ROOT"
 COMPOSE_FILE="infra/compose/docker-compose.yml"
 SERVER_URL="http://localhost:8080"
 WEB_URL="http://localhost:19992"
+# The media plane's scrape endpoint, published by the compose file. Its QUIC
+# listener (19443/udp) is not reachable from this script: speaking it would mean
+# a QUIC client, which is a test the tests/ directory owns, not a smoke script.
+SFU_URL="http://localhost:9090"
 # Health polling bound, in seconds: compose's own --wait has already gated on
 # the container healthchecks by the time this runs, so this poll is the belt to
 # that braces — it exists to name the failing URL, not to wait out a slow boot.
@@ -251,11 +263,28 @@ curl -fsS --max-time 20 -o /dev/null "$WEB_URL$asset" \
   || die "the bundle asset $asset is not served"
 echo "     ok: index page and $asset are served"
 
+# --- the media plane ----------------------------------------------------------
+# Section 92 keeps the SFU out of migod, so this asserts on a second container:
+# its metrics listener answering proves the process started at all, and the
+# meter names prove which process it is. It answers on its own port, from its own
+# image, on the ticket key the compose file gave it — its validation refuses a
+# key that is too short and refuses the documented placeholder outright, so a
+# stack assembled with either of those never reaches this line.
+note "checking the media plane's own meters on its own port"
+sfu_metrics="$(curl -fsS --max-time 10 "$SFU_URL/metrics")"
+grep -q '^# TYPE ' <<<"$sfu_metrics" \
+  || die "the media plane's /metrics rendered no metric families: $(head -3 <<<"$sfu_metrics")"
+sfu_meters="$(grep -c '^migo_sfu' <<<"$sfu_metrics" || true)"
+[ "${sfu_meters:-0}" -gt 0 ] \
+  || die "the media plane's /metrics carries no migo_sfu* meters: this port is \
+answering, but not from the media plane"
+echo "     ok: the media plane reports $sfu_meters meter line(s) of its own"
+
 # --- teardown, and proof that it released the ports ---------------------------
 teardown
-for port_url in "$SERVER_URL/health" "$WEB_URL/healthz"; do
+for port_url in "$SERVER_URL/health" "$WEB_URL/healthz" "$SFU_URL/metrics"; do
   if curl -fsS --max-time 3 "$port_url" >/dev/null 2>&1; then
     die "$port_url still answers after teardown: the stack did not release its ports"
   fi
 done
-note "PASS: the stack built, served on both published ports, wrote through Postgres and Redis, and tore down clean"
+note "PASS: the stack built, the server, media plane and web all served on their published ports, wrote through Postgres and Redis, and tore down clean"

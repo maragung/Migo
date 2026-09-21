@@ -10856,10 +10856,53 @@ impl Decode for CallTurnFetch {
     }
 }
 
-/// TURN servers with temporary credentials.
+/// The forwarding SFU's own socket, as a call's devices dial it (section 166).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallSfuMedia {
+    /// Where the media plane listens, e.g. quic://sfu.example:19443.
+    pub url: String,
+    /// Admits exactly this device to exactly this call until `expires_at`. Signed by the node, verified by the media plane offline: the two share a key, not a store.
+    pub ticket: String,
+    /// When the ticket stops admitting. A seat already taken is not torn down at this moment; only a new connection presenting it is refused.
+    pub expires_at: Timestamp,
+}
+
+impl Encode for CallSfuMedia {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.url)?;
+        w.write_str(&self.ticket)?;
+        w.write_timestamp(self.expires_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallSfuMedia {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.url = r.read_string()?;
+        out.ticket = r.read_string()?;
+        out.expires_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// TURN servers with temporary credentials, and the call's SFU when this node runs one.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallTurnResponse {
     pub servers: Vec<TurnServer>,
+    /// Set when this node names the media plane for the call (`sfu.public_url`), so a group call of three or more forwards instead of meshing. Absent means no plane was named — this node runs none, or runs the signalling half of a deployment whose plane is elsewhere — and the call relays over TURN.
+    pub sfu: Option<CallSfuMedia>,
 }
 
 impl Encode for CallTurnResponse {
@@ -10871,7 +10914,14 @@ impl Encode for CallTurnResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.sfu.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.sfu {
+            w.optional(1, |w| {
+                v.encode(w)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10891,9 +10941,12 @@ impl Decode for CallTurnResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.sfu = Some(CallSfuMedia::decode(sub)?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)

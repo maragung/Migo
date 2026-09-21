@@ -8922,15 +8922,59 @@ data class CallTurnFetch(
     }
 }
 
-/** TURN servers with temporary credentials. */
+/** The forwarding SFU's own socket, as a call's devices dial it (section 166). */
+data class CallSfuMedia(
+    /** Where the media plane listens, e.g. quic://sfu.example:19443. */
+    val url: String,
+    /** Admits exactly this device to exactly this call until `expires_at`. Signed by the node, verified by the media plane offline: the two share a key, not a store. */
+    val ticket: String,
+    /** When the ticket stops admitting. A seat already taken is not torn down at this moment; only a new connection presenting it is refused. */
+    val expiresAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(url)
+        w.str(ticket)
+        w.timestamp(expiresAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallSfuMedia {
+            r.enter()
+            val url = r.str()
+            val ticket = r.str()
+            val expiresAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallSfuMedia(url, ticket, expiresAt)
+        }
+    }
+}
+
+/** TURN servers with temporary credentials, and the call's SFU when this node runs one. */
 data class CallTurnResponse(
     val servers: List<TurnServer>,
+    /** Set when this node names the media plane for the call (`sfu.public_url`), so a group call of three or more forwards instead of meshing. Absent means no plane was named — this node runs none, or runs the signalling half of a deployment whose plane is elsewhere — and the call relays over TURN. */
+    val sfu: CallSfuMedia? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(servers.size)
         for (item in servers) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (sfu != null) present++
+        w.u32(present)
+        if (sfu != null) {
+            val value = sfu
+            w.optional(1) { w ->
+                value.encode(w)
+            }
+        }
         w.leave()
     }
 
@@ -8938,12 +8982,17 @@ data class CallTurnResponse(
         fun decode(r: Reader): CallTurnResponse {
             r.enter()
             val servers = run { val n = r.listLen(); val acc = ArrayList<TurnServer>(n); for (i in 0 until n) acc.add(TurnServer.decode(r)); acc }
+            var sfu: CallSfuMedia? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> sfu = CallSfuMedia.decode(sub)
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return CallTurnResponse(servers)
+            return CallTurnResponse(servers, sfu)
         }
     }
 }

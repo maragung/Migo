@@ -1,0 +1,41 @@
+[package]
+name = "migo-sfu-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The SFU's own socket: a process that binds the group-call media plane to a QUIC listener, admits a device with a short-lived ticket, and forwards sealed frames by their routing header."
+
+[lib]
+name = "migo_sfu_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "migosfud"
+path = "src/main.rs"
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-sfu.workspace = true
+
+bytes.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+
+base64.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+axum.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time"] }

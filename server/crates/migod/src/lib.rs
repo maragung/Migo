@@ -26,6 +26,7 @@ pub mod relay_reanchor;
 pub mod replication;
 pub mod room_presence;
 pub mod room_relay;
+pub mod sfu;
 pub mod typing_sweep;
 
 mod compose;
