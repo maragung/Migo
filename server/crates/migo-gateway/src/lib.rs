@@ -952,9 +952,8 @@ mod tests {
         // Nobody is subscribed yet: the broadcast is a silent no-op that leaves the mailbox
         // untouched and must not panic — the "same gate" property's absence branch.
         gateway.broadcast_to_topic(&room, Opcode::NotificationEvent, &event, ts(NOW));
-        assert_eq!(
-            outbound.take_ready(ts(NOW)),
-            Vec::new(),
+        assert!(
+            outbound.take_ready(ts(NOW)).is_empty(),
             "a topic with no subscribers delivers nothing"
         );
 
@@ -963,9 +962,8 @@ mod tests {
             .inner
             .hub
             .subscribe(session_id, std::slice::from_ref(&room));
-        assert_eq!(
-            subscribed.rejected,
-            Vec::new(),
+        assert!(
+            subscribed.rejected.is_empty(),
             "a single subscription is far below the per-session cap"
         );
 
@@ -1034,9 +1032,8 @@ mod tests {
                 .inner
                 .hub
                 .subscribe(session_id, std::slice::from_ref(&topic));
-            assert_eq!(
-                joined.rejected,
-                Vec::new(),
+            assert!(
+                joined.rejected.is_empty(),
                 "both sessions hold the topic; the feature bit gates the frame, not the subscription"
             );
         }
@@ -1049,9 +1046,8 @@ mod tests {
             1,
             "the subscriber that negotiated PRESENCE hears the event"
         );
-        assert_eq!(
-            outbound[1].take_ready(ts(NOW)),
-            Vec::new(),
+        assert!(
+            outbound[1].take_ready(ts(NOW)).is_empty(),
             "the session without the bit is not sent the frame at all"
         );
 
