@@ -155,13 +155,9 @@ jobs:
 
       # The debug APK, kept as a downloadable artifact of every build. It is unsigned and
       # not a release (that is release.yml's job on a version tag), but it is the thing a
-      # reviewer wants to sideload to see a change on a device without building locally.
-      # The week matches every other upload in this repository, and the default ninety days
-      # is what this one used to take: this job runs on every push to every branch, so it
-      # was the upload that accumulated, and on 2026-10-03 the load job's evidence upload
-      # failed with "Artifact storage quota has been hit" because of the total the account
-      # was holding. An APK a reviewer has not sideloaded in a week is not the one they
-      # wanted to sideload.
+      # reviewer wants to sideload to a device without building locally. The week matches
+      # every other upload here; this one's 90-day default is what filled the account's
+      # artifact storage on 2026-10-03.
       - name: Upload the debug APK
         if: success()
         uses: actions/upload-artifact@v4

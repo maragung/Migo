@@ -823,11 +823,7 @@ mod tests {
             PushOutcome::Held,
             "twenty seconds is inside the thirty-second floor of an UltraLowData session"
         );
-        // clippy's `assert_is_empty` only rewrites an emptiness assert that carries no message —
-        // a custom one is a diagnostic the author already chose, so it leaves those alone. This
-        // is the one site in migo-gateway without a message, and the empty array is written out
-        // with its length because `Vec<Bytes>` implements `PartialEq` against several types, so
-        // a bare `Vec::new()` on the right would leave the element type uninferable.
+        // message-less, so clippy rewrites this one; the array pins the element type.
         assert_eq!(
             outbound.take_ready(Timestamp::from_millis(29_999)),
             [] as [Bytes; 0]
