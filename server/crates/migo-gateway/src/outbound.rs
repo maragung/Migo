@@ -656,10 +656,9 @@ mod tests {
             PushOutcome::CoalescedHeld,
             "a newer value for a held key replaces it inside the hold"
         );
-        assert!(
-            outbound
-                .take_ready(Timestamp::from_millis(4_999))
-                .is_empty(),
+        assert_eq!(
+            outbound.take_ready(Timestamp::from_millis(4_999)),
+            Vec::new(),
             "the window has not closed yet"
         );
         let ready = outbound.take_ready(Timestamp::from_millis(5_000));
@@ -750,8 +749,9 @@ mod tests {
             ),
             PushOutcome::Suppressed
         );
-        assert!(
-            outbound.take_ready(Timestamp::from_millis(0)).is_empty(),
+        assert_eq!(
+            outbound.take_ready(Timestamp::from_millis(0)),
+            Vec::new(),
             "a suppressed frame never occupied a slot"
         );
         // The same opcode reaches a Normal session unchanged.
@@ -823,9 +823,10 @@ mod tests {
             PushOutcome::Held,
             "twenty seconds is inside the thirty-second floor of an UltraLowData session"
         );
-        assert!(outbound
-            .take_ready(Timestamp::from_millis(29_999))
-            .is_empty());
+        assert_eq!(
+            outbound.take_ready(Timestamp::from_millis(29_999)),
+            Vec::new()
+        );
         assert_eq!(
             outbound.take_ready(Timestamp::from_millis(30_000)),
             vec![Bytes::from_static(b"v2")]
