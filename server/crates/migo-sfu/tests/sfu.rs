@@ -696,3 +696,82 @@ fn a_subscriber_who_never_asked_receives_nothing_and_the_publisher_never_receive
         "a participant does not subscribe to himself"
     );
 }
+
+/// The read a transport answers a joiner with: who is seated, what each
+/// publishes, and the layer set a subscribe may name.
+#[test]
+fn the_roster_reads_back_every_seat_with_the_streams_it_publishes() {
+    let h = Harness::new(BandwidthMode::Normal, Layer::High);
+    let roster = h.sfu.roster(id(CALL));
+    assert_eq!(roster.len(), 3);
+
+    let alice = roster
+        .iter()
+        .find(|seat| seat.member == h.alice)
+        .expect("alice is seated");
+    assert_eq!(alice.mode, BandwidthMode::Normal);
+    let ids: Vec<Id> = alice
+        .streams
+        .iter()
+        .map(|stream| stream.stream_id)
+        .collect();
+    assert_eq!(ids, vec![id(VIDEO), id(AUDIO)]);
+    let video = &alice.streams[0];
+    assert_eq!(video.kind, StreamKind::Video);
+    assert_eq!(video.layers, vec![Layer::Low, Layer::Medium, Layer::High]);
+    let audio = &alice.streams[1];
+    assert_eq!(audio.kind, StreamKind::Audio);
+    assert_eq!(audio.layers, vec![Layer::Low]);
+
+    let bob = roster
+        .iter()
+        .find(|seat| seat.member == h.bob)
+        .expect("bob is seated");
+    assert!(
+        bob.streams.is_empty(),
+        "a seat that publishes nothing reports nothing"
+    );
+}
+
+/// A read of a call nobody is in is empty rather than an error, and a call
+/// the last seat has left reads empty again.
+#[test]
+fn an_empty_call_reads_as_an_empty_roster() {
+    let registry = Registry::new();
+    let sfu = Sfu::new(SfuConfig::default(), &registry).expect("config is valid");
+    assert!(sfu.roster(id(CALL)).is_empty());
+    assert!(sfu.roster(id(9_999)).is_empty());
+
+    let alice = member(ALICE, ALICE_PHONE);
+    sfu.join(id(CALL), alice, BandwidthMode::Normal, now_plus(0))
+        .expect("joins");
+    assert_eq!(sfu.roster(id(CALL)).len(), 1);
+    sfu.leave(id(CALL), alice).expect("leaves");
+    assert!(
+        sfu.roster(id(CALL)).is_empty(),
+        "the last leave retires the plane, and the read agrees"
+    );
+}
+
+/// The read is a snapshot: revoking a seat's stream removes it from what the
+/// next read reports, so a transport can never hand a joiner a stream id the
+/// plane would answer NOT_FOUND for.
+#[test]
+fn the_roster_follows_an_unpublish() {
+    let h = Harness::new(BandwidthMode::Normal, Layer::High);
+    h.sfu
+        .unpublish(id(CALL), h.alice, id(VIDEO))
+        .expect("unpublishes");
+    let alice = h
+        .sfu
+        .roster(id(CALL))
+        .into_iter()
+        .find(|seat| seat.member == h.alice)
+        .expect("alice is seated");
+    let ids: Vec<Id> = alice
+        .streams
+        .iter()
+        .map(|stream| stream.stream_id)
+        .collect();
+    assert_eq!(ids, vec![id(AUDIO)]);
+}

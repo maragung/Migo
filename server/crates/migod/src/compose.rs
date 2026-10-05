@@ -68,6 +68,7 @@ use crate::ports::{
     EconomyKickTariff, EconomyRewards, FsStorage, StaffRoster, StoreCallGate, StoreMessageGate,
 };
 use crate::room_presence::GatewayHandle;
+use crate::sfu::SfuTickets;
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
 /// document. The CALLS bit: this build signals 1:1 calls end to end — the ring lifecycle
@@ -907,6 +908,14 @@ impl App {
         // exists. The handle above is the one-slot cell that resolves the cycle: the dispatcher and
         // the room relay both hold it now, empty, and the composition root fills it the moment the
         // gateway is open, exactly as it hands the same gateway to the mesh a few lines down.
+        // The media plane's door: built here rather than by the calls service, because the key it
+        // holds is the *node's* agreement with a separate process, not a property of call
+        // signalling. A node with no `sfu.public_url` builds nothing and its joins carry no
+        // ticket; one that names a plane running elsewhere builds the minter and opens no socket,
+        // which is the split section 92 asks for.
+        let sfu = SfuTickets::from_config(&config.sfu)
+            .map_err(|error| anyhow::anyhow!("sfu.ticket_key is unusable: {error}"))?;
+
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(AppDispatcher::new(
             store.clone(),
             messaging.clone(),
@@ -922,6 +931,7 @@ impl App {
             federation.clone(),
             bots.clone(),
             calls.clone(),
+            sfu.clone(),
             room_presence.clone(),
             Arc::clone(&gateway_handle),
             Arc::clone(&room_relay),

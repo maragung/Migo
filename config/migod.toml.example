@@ -50,6 +50,32 @@ local_dir = "./var/media"             # filesystem backend only
 # endpoint = "http://127.0.0.1:9000"  # s3 backend
 # bucket = "migo-media"
 
+# The group-call media plane (sections 92 and 166). A call of three or more
+# forwards through an SFU that runs as its own process, never inside migod.
+# This section is the agreement between the two processes, and each reads a
+# different half of it:
+#
+#   migod     (this file)  public_url + ticket_key — it mints admissions and
+#                          opens no media socket, so `bind` stays unset here
+#   migosfud  (its own)    the same public_url and ticket_key, plus `bind` and
+#                          optionally `metrics_bind` — the sockets it opens
+#
+# Uncomment all three on both sides to turn the plane on. Give the two
+# processes different keys and the plane admits nobody; leave the section out
+# entirely and a join answers with its TURN list alone, exactly as before.
+# [sfu]
+# public_url = "quic://sfu.example:19443"   # what clients are told to dial
+# ticket_key = "generate-with-openssl-rand-base64-32"
+# ticket_ttl_ms = 120000                    # 5s..1h; how long a ticket admits
+# outbound_queue = 256                      # frames buffered per session
+# bind = "0.0.0.0:19443"                    # migosfud only
+# metrics_bind = "127.0.0.1:9091"           # migosfud only
+#
+# The key is the whole of the media plane's authentication, so it is validated
+# harder than anything else here: at least 32 decoded bytes, and the documented
+# placeholder "development-only-insecure-sfu-ticket-key" is refused in every
+# environment including development.
+
 [auth]
 # The well-known development placeholder: it boots a local node and is refused
 # outside development. Generate a real key with: openssl rand -base64 32

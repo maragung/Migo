@@ -1,0 +1,92 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# migosfud — the group-call media plane, on a socket of its own.
+#
+# Section 92 puts the SFU outside migod: it never touches plaintext media, and
+# its load profile is bandwidth rather than application logic, so it scales as
+# its own process with its own socket. This image is that process — the same
+# workspace, a different binary, and a runtime that opens one QUIC listener and
+# one scrape endpoint and nothing else.
+#
+# Multi-stage in the same shape as Dockerfile.migod: cargo-chef caches the
+# dependency compile as its own layer, so editing our own crates recompiles only
+# those. The builder needs a C toolchain and cmake because the rustls crypto
+# backend compiles C at build time.
+#
+# Context is the repository ROOT:
+#   docker build -f infra/docker/Dockerfile.sfu -t migo/migosfud .
+#
+# Both processes read the same `sfu` section, and the two halves of it are what
+# they must agree on: `sfu.public_url` and `sfu.ticket_key` are the same value on
+# both, and `sfu.bind` is set here and not on the node that mints. A deployment
+# that gives them different keys is one whose media plane admits nobody.
+# =============================================================================
+
+ARG RUST_VERSION=1.94
+ARG DEBIAN_RELEASE=bookworm
+
+# --- toolchain base (shared by planner and builder) --------------------------
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS chef
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
+WORKDIR /build
+
+# --- plan: distil the dependency graph into a recipe -------------------------
+FROM chef AS planner
+COPY server/ ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- build: cook dependencies (cached layer), then the workspace -------------
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY server/ ./
+# cargo-chef cooks the whole workspace, so this binary's dependencies are already
+# compiled; only the crates above them rebuild.
+RUN cargo build --release --bin migosfud \
+    && strip target/release/migosfud
+
+# --- runtime: the binary on a minimal base -----------------------------------
+FROM debian:${DEBIAN_RELEASE}-slim AS runtime
+# curl: the HEALTHCHECK client (the base has no HTTP tool otherwise).
+# tini: PID 1 that forwards signals and reaps — the media plane closes its
+# endpoint on SIGTERM so every seated transport ends promptly, and a process
+# running as PID 1 does not receive default signal actions.
+#
+# ca-certificates is deliberately absent, unlike the server image: this process
+# makes no outbound connection at all. Its one certificate is the self-signed
+# leaf it mints for its own listener, and its one client-facing socket is QUIC,
+# so there is no trust store here to keep current.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 migo
+COPY --from=builder /build/target/release/migosfud /usr/local/bin/migosfud
+
+USER migo
+WORKDIR /home/migo
+
+# The media listener is QUIC over UDP; the scrape endpoint is the only TCP
+# socket this process opens.
+EXPOSE 19443/udp
+EXPOSE 9090/tcp
+
+# Sensible image defaults; every value is overridable by the orchestrator.
+# MIGO_SFU__TICKET_KEY has no default on purpose: it is the one secret the two
+# halves share, and an image that shipped one would ship the same key to every
+# deployment that used it. This process refuses to start without it.
+ENV MIGO_SFU__BIND=0.0.0.0:19443 \
+    MIGO_SFU__METRICS_BIND=0.0.0.0:9090 \
+    RUST_LOG=info
+
+# Liveness: the media endpoint is bound before the scrape endpoint is, and a
+# bound endpoint is the only thing this process has to be alive *for*, so a
+# scrape that answers proves the plane came up rather than merely that a process
+# exists.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+    CMD curl -fsS http://localhost:9090/metrics >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["migosfud"]

@@ -100,6 +100,7 @@ use crate::presence_relay::PresenceRelay;
 use crate::replication::ReplicationRelay;
 use crate::room_presence::{GatewayHandle, RoomPresence};
 use crate::room_relay::RoomRelay;
+use crate::sfu::SfuTickets;
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -154,6 +155,11 @@ pub struct AppDispatcher {
     /// shares the same tally — a member event that crossed the mesh is the only word this
     /// node gets about who is online on the nodes it came from — and neither the dispatcher
     /// nor the transport may own the other.
+    /// The media plane's door on this node, when this node names one: the tickets `migod` mints so
+    /// the SFU that verifies them can admit a device without a shared store. `None` on a node with
+    /// no `sfu.public_url`, which is the ordinary state of a deployment that runs no media plane
+    /// — and of one whose ticket minter is on another node.
+    sfu: Option<Arc<SfuTickets>>,
     room_presence: Arc<RoomPresence>,
     /// The late-bound gateway, filled by the composition root once the gateway is open. Used to
     /// publish presence and room lifecycle events out of band — with no client request in hand —
@@ -208,6 +214,7 @@ impl AppDispatcher {
         federation: SharedMesh,
         bots: SharedBots,
         calls: SharedCallkeeper,
+        sfu: Option<Arc<SfuTickets>>,
         room_presence: Arc<RoomPresence>,
         gateway: Arc<GatewayHandle>,
         room_relay: Arc<RoomRelay>,
@@ -230,6 +237,7 @@ impl AppDispatcher {
             federation,
             bots,
             calls,
+            sfu,
             room_presence,
             gateway,
             room_relay,
@@ -1537,6 +1545,7 @@ impl Dispatcher for AppDispatcher {
                     context,
                     frame,
                     &self.calls,
+                    self.sfu.as_deref(),
                     &self.presence_relay,
                     &self.room_relay,
                     &self.conversation_relay,

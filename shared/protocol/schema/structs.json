@@ -4247,12 +4247,40 @@
       ]
     },
     {
+      "name": "CallSfuMedia",
+      "doc": "The forwarding SFU's own socket, as a call's devices dial it (section 166).",
+      "fields": [
+        {
+          "name": "url",
+          "type": "string",
+          "doc": "Where the media plane listens, e.g. quic://sfu.example:19443."
+        },
+        {
+          "name": "ticket",
+          "type": "string",
+          "doc": "Admits exactly this device to exactly this call until `expires_at`. Signed by the node, verified by the media plane offline: the two share a key, not a store."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "doc": "When the ticket stops admitting. A seat already taken is not torn down at this moment; only a new connection presenting it is refused."
+        }
+      ]
+    },
+    {
       "name": "CallTurnResponse",
-      "doc": "TURN servers with temporary credentials.",
+      "doc": "TURN servers with temporary credentials, and the call's SFU when this node runs one.",
       "fields": [
         {
           "name": "servers",
           "type": "list<TurnServer>"
+        },
+        {
+          "name": "sfu",
+          "type": "CallSfuMedia",
+          "optional": true,
+          "id": 1,
+          "doc": "Set when this node names the media plane for the call (`sfu.public_url`), so a group call of three or more forwards instead of meshing. Absent means no plane was named — this node runs none, or runs the signalling half of a deployment whose plane is elsewhere — and the call relays over TURN."
         }
       ]
     },

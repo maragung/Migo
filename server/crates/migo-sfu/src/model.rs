@@ -11,7 +11,7 @@
 //! refuse to start rather than discover the arithmetic at two in the morning.
 
 use migo_core::{Id, Timestamp};
-use migo_protocol::fault;
+use migo_protocol::{fault, BandwidthMode};
 
 use crate::frame::Layer;
 
@@ -476,3 +476,34 @@ pub struct Adaptation {
 /// handing the plane the same `Timestamp` it will later assert against, and
 /// there is no sleep anywhere to race.
 pub type Now = Timestamp;
+
+/// One stream a seat publishes, as the plane's own read reports it.
+///
+/// The layers are the published offer, sorted and deduplicated the way the
+/// publish stored them, so a transport relaying the roster to a joiner hands
+/// on exactly what a subscribe may ask for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamView {
+    /// The publisher-minted id a subscribe or an unpublish names.
+    pub stream_id: Id,
+    /// Audio or video.
+    pub kind: StreamKind,
+    /// The simulcast layers offered; audio carries the one implicit layer.
+    pub layers: Vec<Layer>,
+}
+
+/// One seated participant and everything the plane holds for them.
+///
+/// A read: no clock, no counter, no state change. It exists because a
+/// transport has to answer a joiner with what is already in the call — which
+/// streams exist to subscribe to — and a transport that kept its own copy of
+/// the roster would be a second registry that can disagree with this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeatView {
+    /// The seat's device and account.
+    pub member: Member,
+    /// The bandwidth mode the seat joined with.
+    pub mode: BandwidthMode,
+    /// What the seat publishes.
+    pub streams: Vec<StreamView>,
+}

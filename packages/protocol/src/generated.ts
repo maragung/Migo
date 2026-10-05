@@ -7085,15 +7085,53 @@ export function decodeCallTurnFetch(r: Reader): CallTurnFetch {
   return out;
 }
 
-/** TURN servers with temporary credentials. */
+/** The forwarding SFU's own socket, as a call's devices dial it (section 166). */
+export interface CallSfuMedia {
+  /** Where the media plane listens, e.g. quic://sfu.example:19443. */
+  url: string;
+  /** Admits exactly this device to exactly this call until `expires_at`. Signed by the node, verified by the media plane offline: the two share a key, not a store. */
+  ticket: string;
+  /** When the ticket stops admitting. A seat already taken is not torn down at this moment; only a new connection presenting it is refused. */
+  expiresAt: number;
+}
+
+export function encodeCallSfuMedia(w: Writer, v: CallSfuMedia): void {
+  w.enter();
+  w.str(v.url);
+  w.str(v.ticket);
+  w.timestamp(v.expiresAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallSfuMedia(r: Reader): CallSfuMedia {
+  r.enter();
+  const url = r.str();
+  const ticket = r.str();
+  const expiresAt = r.timestamp();
+  const out: CallSfuMedia = { url, ticket, expiresAt } as CallSfuMedia;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** TURN servers with temporary credentials, and the call's SFU when this node runs one. */
 export interface CallTurnResponse {
   servers: TurnServer[];
+  /** Set when this node names the media plane for the call (`sfu.public_url`), so a group call of three or more forwards instead of meshing. Absent means no plane was named — this node runs none, or runs the signalling half of a deployment whose plane is elsewhere — and the call relays over TURN. */
+  sfu?: CallSfuMedia;
 }
 
 export function encodeCallTurnResponse(w: Writer, v: CallTurnResponse): void {
   w.enter();
   { w.listLen(v.servers.length); for (const item of v.servers) { encodeTurnServer(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.sfu !== undefined) present++;
+  w.u32(present);
+  if (v.sfu !== undefined) { const value = v.sfu; w.optional(1, (w) => { encodeCallSfuMedia(w, value); }); }
   w.leave();
 }
 
@@ -7102,9 +7140,13 @@ export function decodeCallTurnResponse(r: Reader): CallTurnResponse {
   const servers = ((): TurnServer[] => { const n = r.listLen(); const v: TurnServer[] = []; for (let i = 0; i < n; i++) v.push(decodeTurnServer(r)); return v; })();
   const out: CallTurnResponse = { servers } as CallTurnResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.sfu = decodeCallSfuMedia(sub); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }

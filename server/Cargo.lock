@@ -2282,6 +2282,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "migo-sfu-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "bytes",
+ "hmac 0.12.1",
+ "migo-core",
+ "migo-protocol",
+ "migo-sfu",
+ "parking_lot",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "migo-social"
 version = "0.1.0"
 dependencies = [
@@ -2354,6 +2377,8 @@ dependencies = [
  "migo-protocol",
  "migo-ratelimit",
  "migo-rooms",
+ "migo-sfu",
+ "migo-sfu-node",
  "migo-social",
  "migo-store",
  "migo-wire",

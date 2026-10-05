@@ -40,6 +40,20 @@ pub const DEVELOPMENT_TOKEN_KEY: &str = "development-only-insecure-token-key";
 /// Minimum accepted length, in bytes, of decoded session-token key material.
 pub const MIN_TOKEN_KEY_BYTES: usize = 32;
 
+/// The development placeholder ticket key for the group-call media plane.
+///
+/// Rejected by name in every environment, and not only outside development the way
+/// [`DEVELOPMENT_TOKEN_KEY`] is. The difference is what a leaked key costs. A session-token key
+/// signed with a key every reader of this repository knows lets somebody mint a session for an
+/// account that is not theirs; a ticket key signed with one lets them take a seat in a call they
+/// were never invited to, and — because the ticket is the whole of the media plane's
+/// authentication and the plane keeps no membership of its own — lets them publish into it. A
+/// server can also generate its own token key at startup, which is what a development node does;
+/// a ticket key is shared by two processes, so neither can generate it and the only source is the
+/// operator. A placeholder that ships in the open therefore has to be refused rather than
+/// tolerated.
+pub const DEVELOPMENT_SFU_TICKET_KEY: &str = "development-only-insecure-sfu-ticket-key";
+
 /// Environment variable prefix for every configuration key.
 pub const ENV_PREFIX: &str = "MIGO_";
 
@@ -791,6 +805,174 @@ impl Default for CallsConfig {
     }
 }
 
+/// The group-call media plane's own socket (sections 92 and 166).
+///
+/// Section 92 puts the SFU outside `migod`: it does not touch plaintext media, and its load
+/// profile is bandwidth rather than application logic, so it scales as its own process with its
+/// own socket. This section is that process's configuration, and it lives here rather than in a
+/// file of its own because the two halves of the plane must agree on exactly one secret — the
+/// ticket key — and two files is two places for that agreement to drift.
+///
+/// The section has two halves and the two processes read different ones. `public_url` and
+/// `ticket_key` are what a *signalling* node reads: with them set, `migod` mints a ticket into
+/// every `CALL_SFU_JOIN` reply it answers, naming a plane that may well be running on another
+/// host. `bind` is what the *media* process reads: `migosfud` opens that socket, verifies the
+/// tickets it receives, and forwards sealed frames between the devices that present them. A node
+/// that runs both holds all three; a signalling node that runs no media plane itself is the
+/// ordinary case, and is exactly the deployment section 92 describes.
+///
+/// A node with none of the three set tells clients nothing about a media plane, and a group call
+/// over it stays on the signalling plane's relay.
+///
+/// The ticket is how the two processes authenticate without a shared store: `migod` knows who
+/// belongs in the call and signs that claim, the media plane verifies the signature and needs to
+/// know nothing else. See `migo_sfu_node::ticket`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SfuNodeConfig {
+    /// Socket the media process binds, or `None` when no media plane runs here.
+    ///
+    /// Read by `migosfud`, which has a socket to open; `migod` never opens this one, and a
+    /// signalling node leaves it unset even while it hands clients the address of a plane running
+    /// somewhere else.
+    pub bind: Option<String>,
+    /// The address clients dial, as it goes into a `CallSfuMedia` reply.
+    ///
+    /// Separate from `bind` because a listener's bind address is rarely the address a client
+    /// outside the host can reach: `bind` is often `[::]:19443` and this is
+    /// `quic://sfu.example:19443`. Set it wherever tickets are minted, which is the signalling
+    /// node, and again on the media process, which has to be told no less than its clients are.
+    pub public_url: String,
+    /// Socket this process renders `/metrics` on, or `None` for no scrape endpoint.
+    pub metrics_bind: Option<String>,
+    /// The HMAC key the two halves share: `migod` signs a ticket with it, the media process
+    /// verifies with it. Treated as a credential and never logged.
+    pub ticket_key: Secret,
+    /// How long a minted ticket admits its holder, milliseconds.
+    ///
+    /// An admission, not a lease: a session already seated is not torn down when its ticket
+    /// expires, only a *new* connection presenting it. Short enough that a leaked ticket is worth
+    /// little, long enough to outlive the join it was minted for.
+    pub ticket_ttl_ms: i64,
+    /// How many participants one call holds, or `None` for the product default
+    /// (`migo_sfu::MAX_AUDIO_PARTICIPANTS`, thirty-two).
+    ///
+    /// Optional rather than defaulted here, because the number belongs to the plane that enforces
+    /// it: a second default in this file would be a second answer to the same question.
+    pub max_audio_participants: Option<usize>,
+    /// How many video streams may be active at once, or `None` for the product default
+    /// (`migo_sfu::MAX_ACTIVE_VIDEO_STREAMS`, eight).
+    pub max_active_video_streams: Option<usize>,
+    /// How many frames may be waiting for one session before the plane starts dropping them.
+    ///
+    /// A bound rather than a queue that grows: a subscriber whose link has collapsed must cost
+    /// this process a fixed amount of memory, and the plane drops the newest frame and counts it
+    /// rather than letting the backlog become the outage.
+    pub outbound_queue: usize,
+}
+
+impl SfuNodeConfig {
+    /// Collects every problem with this section into the caller's list.
+    ///
+    /// One implementation, two callers: `Config::validate` runs it for a node that runs both the
+    /// signalling plane and the media plane, and the media process runs it on startup over the
+    /// section it reads, having deliberately skipped the whole-file validation that would have
+    /// refused it over a store it does not open. One list rather than a `Result` because the
+    /// whole-config validator collects every problem before reporting, and a section that
+    /// reported one at a time would be a worse citizen than the file it lives in.
+    pub fn validate(&self, problems: &mut Vec<String>) {
+        if let Some(bind) = &self.bind {
+            check_socket_addr("sfu.bind", bind, problems);
+        }
+        if let Some(bind) = &self.metrics_bind {
+            check_socket_addr("sfu.metrics_bind", bind, problems);
+            if self.bind.is_none() {
+                problems.push(
+                    "sfu.metrics_bind is set but sfu.bind is not: no media plane runs here to \
+                     scrape"
+                        .to_string(),
+                );
+            }
+        }
+
+        // `public_url` and `ticket_key` are the pair that makes a node able to hand a device a
+        // seat: the first says where to go, the second is what the plane there checks. Half of
+        // the pair is a node that either names a plane it cannot sign for or holds a key it never
+        // uses, and both are mistakes worth refusing at startup rather than at the first call.
+        let advertises = !self.public_url.trim().is_empty();
+        let signs = !self.ticket_key.is_empty();
+        if advertises && !signs {
+            problems.push(
+                "sfu.public_url is set but sfu.ticket_key is not: this node would name a media \
+                 plane it could mint no ticket for, and that plane would admit nobody"
+                    .to_string(),
+            );
+        }
+        if signs && !advertises {
+            problems.push(
+                "sfu.ticket_key is set but sfu.public_url is not: this node would mint tickets \
+                 naming no address, and a client holding one would have nowhere to present it"
+                    .to_string(),
+            );
+        }
+        if self.bind.is_some() && !(advertises && signs) {
+            problems.push(
+                "sfu.bind is set but sfu.public_url and sfu.ticket_key are not: the media plane \
+                 admits a device by checking the ticket it presents, which needs the key, and it \
+                 is reachable for no other reason"
+                    .to_string(),
+            );
+        }
+
+        if signs {
+            if self.ticket_key.expose() == DEVELOPMENT_SFU_TICKET_KEY {
+                problems.push(
+                    "sfu.ticket_key is the documented development placeholder: generate a real \
+                     one and give both processes the same value, or every deployment that copied \
+                     this section shares one admission key"
+                        .to_string(),
+                );
+            } else {
+                let bytes = decode_key_material(self.ticket_key.expose()).len();
+                if bytes < MIN_TOKEN_KEY_BYTES {
+                    problems.push(format!(
+                        "sfu.ticket_key decodes to {bytes} bytes; at least {MIN_TOKEN_KEY_BYTES} \
+                         are required, because the ticket is the whole of the media plane's \
+                         authentication"
+                    ));
+                }
+            }
+            if !(5_000..=3_600_000).contains(&self.ticket_ttl_ms) {
+                problems.push(format!(
+                    "sfu.ticket_ttl_ms must be within 5000..=3600000, got {}",
+                    self.ticket_ttl_ms
+                ));
+            }
+        }
+        if self.bind.is_some() && !(16..=65_536).contains(&self.outbound_queue) {
+            problems.push(format!(
+                "sfu.outbound_queue must be within 16..=65536, got {}",
+                self.outbound_queue
+            ));
+        }
+    }
+}
+
+impl Default for SfuNodeConfig {
+    fn default() -> Self {
+        Self {
+            bind: None,
+            public_url: String::new(),
+            metrics_bind: None,
+            ticket_key: Secret::default(),
+            ticket_ttl_ms: 120_000,
+            max_audio_participants: None,
+            max_active_video_streams: None,
+            outbound_queue: 256,
+        }
+    }
+}
+
 /// Staged rollout of the feature bits the node advertises (section 175).
 ///
 /// A protocol change ships additive: the server learns the feature first, then advertises the
@@ -843,6 +1025,8 @@ pub struct Config {
     pub captcha: CaptchaConfig,
     /// Call signaling.
     pub calls: CallsConfig,
+    /// The group-call media plane's own socket.
+    pub sfu: SfuNodeConfig,
     /// Staged rollout of advertised feature bits.
     pub features: FeaturesConfig,
 }
@@ -898,6 +1082,29 @@ impl Config {
         let config = Self::from_sources(&files, &env)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Loads the same files and environment [`Config::load`] does, without validating.
+    ///
+    /// The media plane is a separate process that reads exactly one section (section 92), and it
+    /// must not refuse to start over a section it will never open: a node whose `store.url` is
+    /// unset because the media process has no store is a healthy media process, not a broken one.
+    /// So this process loads, validates the section it uses, and leaves the rest alone. It
+    /// validates its own section itself — see [`SfuNodeConfig::validate`] — because "not
+    /// validating" must not come to mean "not checking".
+    pub fn load_unvalidated() -> Result<Self, ConfigError> {
+        let mut files: Vec<PathBuf> = Vec::new();
+        match std::env::var("MIGO_CONFIG") {
+            Ok(path) if !path.trim().is_empty() => files.push(PathBuf::from(path)),
+            _ => {
+                let default_path = PathBuf::from("config/migod.toml");
+                if default_path.is_file() {
+                    files.push(default_path);
+                }
+            }
+        }
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        Self::from_sources(&files, &env)
     }
 
     /// Builds configuration from explicit sources without touching the process
@@ -1140,6 +1347,14 @@ impl Config {
                 self.calls.seat_grace_ms
             ));
         }
+
+        // --- the media plane ---
+        // Always checked, and the section itself decides whether it has anything to say: a node
+        // with none of its fields set runs no media plane and produces no problem. Gating this
+        // call on `sfu.bind`, as it once was, would skip the checks for the signalling half of a
+        // split deployment — a node that mints tickets for a plane running elsewhere, which is
+        // exactly what section 92 asks an operator to build.
+        self.sfu.validate(&mut problems);
 
         // --- telemetry ---
         // `log_level` is parsed by `migod`'s subscriber, not here: EnvFilter's
@@ -1419,12 +1634,9 @@ fn check_socket_addr(field: &str, value: &str, problems: &mut Vec<String>) {
 pub fn decode_key_material(value: &str) -> Vec<u8> {
     use base64::Engine as _;
     let trimmed = value.trim();
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
-        return bytes;
-    }
-    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed) {
-        return bytes;
-    }
+    // Hex before base64, because every hex digit is also a base64 character: a 64-character hex
+    // key is a well-formed 48-byte base64 string, so decoding base64 first answers a question the
+    // operator did not ask and leaves this arm dead for exactly the length a 32-byte key has.
     if trimmed.len().is_multiple_of(2)
         && !trimmed.is_empty()
         && trimmed.chars().all(|c| c.is_ascii_hexdigit())
@@ -1439,6 +1651,12 @@ pub fn decode_key_material(value: &str) -> Vec<u8> {
             out.push(hi << 4 | lo);
         }
         return out;
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+        return bytes;
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed) {
+        return bytes;
     }
     trimmed.as_bytes().to_vec()
 }
@@ -1786,6 +2004,92 @@ mod tests {
         .expect("builds");
         let rendered = config.validate().expect_err("must refuse").to_string();
         assert!(rendered.contains("development placeholder"), "{rendered}");
+    }
+
+    /// The section as the two halves of a split deployment read it.
+    ///
+    /// A signalling node names a plane and holds the key; a media process binds the socket and
+    /// holds the same two values. Neither configuration is the other's, and both have to pass the
+    /// same validation, because it is one section of one file.
+    #[test]
+    fn a_signalling_node_may_name_a_media_plane_it_does_not_bind() {
+        let config = Config::from_sources(
+            &[],
+            &env(&[
+                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                (
+                    "MIGO_SFU__TICKET_KEY",
+                    "migo-test-ticket-key.for-the-media-plane.only",
+                ),
+            ]),
+        )
+        .expect("builds");
+        config
+            .validate()
+            .expect("naming a plane elsewhere is the ordinary split deployment");
+    }
+
+    #[test]
+    fn a_media_plane_may_bind_a_socket_no_signalling_node_binds() {
+        let config = Config::from_sources(
+            &[],
+            &env(&[
+                ("MIGO_SFU__BIND", "0.0.0.0:19443"),
+                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                (
+                    "MIGO_SFU__TICKET_KEY",
+                    "migo-test-ticket-key.for-the-media-plane.only",
+                ),
+            ]),
+        )
+        .expect("builds");
+        config.validate().expect("a media process is a valid node");
+    }
+
+    #[test]
+    fn half_of_the_media_plane_agreement_is_refused() {
+        let advertises_only = Config::from_sources(
+            &[],
+            &env(&[("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443")]),
+        )
+        .expect("builds");
+        let rendered = advertises_only
+            .validate()
+            .expect_err("must refuse")
+            .to_string();
+        assert!(rendered.contains("sfu.ticket_key is not"), "{rendered}");
+
+        let signs_only = Config::from_sources(
+            &[],
+            &env(&[(
+                "MIGO_SFU__TICKET_KEY",
+                "migo-test-ticket-key.for-the-media-plane.only",
+            )]),
+        )
+        .expect("builds");
+        let rendered = signs_only.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("sfu.public_url is not"), "{rendered}");
+
+        let binds_alone = Config::from_sources(&[], &env(&[("MIGO_SFU__BIND", "0.0.0.0:19443")]))
+            .expect("builds");
+        let rendered = binds_alone.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("sfu.bind is set"), "{rendered}");
+    }
+
+    /// Development is not an exemption here, unlike everywhere else in this block.
+    #[test]
+    fn the_documented_ticket_key_is_refused_in_development_too() {
+        let config = Config::from_sources(
+            &[],
+            &env(&[
+                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                ("MIGO_SFU__TICKET_KEY", DEVELOPMENT_SFU_TICKET_KEY),
+            ]),
+        )
+        .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("development placeholder"), "{rendered}");
+        assert_eq!(config.node.environment, Environment::Development);
     }
 
     #[test]
