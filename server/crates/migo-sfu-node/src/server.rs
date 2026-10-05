@@ -291,7 +291,7 @@ impl Server {
         // The writer task owns the send half from here on, so every reply from this task goes
         // through the same channel as the media: the connection observes one order, and the send
         // half is never written from two places.
-        let writer = tokio::spawn(write_loop(connection.clone(), write, outbound));
+        let mut writer = tokio::spawn(write_loop(connection.clone(), write, outbound));
 
         self.plane.reply(
             &session,
@@ -303,9 +303,19 @@ impl Server {
 
         self.pump(connection, &mut read, &mut buf, &session).await;
 
-        self.plane.close(&session);
-        writer.abort();
         tracing::debug!(%remote, call = %session.call_id.to_text(), "media session ended");
+        self.plane.close(&session);
+        // `session` holds the last sender, so the queue stays open until it drops. The writer then
+        // drains what is queued and finishes the stream; aborting it instead, which is what this
+        // did, discards the reply the session was handed on its way out — for a leave, the answer
+        // the client is waiting for.
+        drop(session);
+        if tokio::time::timeout(REFUSAL_GRACE, &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+        }
     }
 
     /// Runs a session's loop: control frames on its stream, sealed frames on datagrams.
@@ -501,7 +511,10 @@ fn refusal_reply(error: &Error) -> Reply {
 
 /// Renders an unreadable control frame as the wire's error reply.
 fn malformed(error: &WireError) -> Reply {
-    refusal_reply(&fault::malformed_frame(error.to_string()))
+    refusal_reply(
+        &fault::malformed_frame(error.to_string())
+            .public("this node could not read that control frame; it was not acted on"),
+    )
 }
 
 /// Reads one length-prefixed control frame, banking partial reads in `buf`.
