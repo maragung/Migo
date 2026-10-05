@@ -95,7 +95,13 @@ services:
       # same public_url and the same key. Configure only one of the two and a
       # group call of three or more gets no media plane at all; configure them
       # with different keys and the plane admits nobody.
-      MIGO_SFU__PUBLIC_URL: quic://localhost:19443
+      #
+      # The URL is what a browser hands to `new WebTransport(...)`: https, with
+      # the port spelled out. The listener's certificate is self-signed, so a
+      # browser opens this session only under mkcert or its WebTransport
+      # developer mode — the plane is reachable on a stock browser at a real
+      # certificate, and that is the deployment this stand-in is not.
+      MIGO_SFU__PUBLIC_URL: https://localhost:19443
       MIGO_SFU__TICKET_KEY: local-compose-sfu-key.not-a-secret.rotate-me
       # --- auth: the documented development placeholder, refused outside development ---
       MIGO_AUTH__TOKEN_KEY: development-only-insecure-token-key
@@ -120,7 +126,7 @@ services:
       dockerfile: infra/docker/Dockerfile.sfu
     environment:
       MIGO_SFU__BIND: 0.0.0.0:19443
-      MIGO_SFU__PUBLIC_URL: quic://localhost:19443
+      MIGO_SFU__PUBLIC_URL: https://localhost:19443
       MIGO_SFU__METRICS_BIND: 0.0.0.0:9090
       MIGO_SFU__TICKET_KEY: local-compose-sfu-key.not-a-secret.rotate-me
       RUST_LOG: info

@@ -64,7 +64,8 @@ local_dir = "./var/media"             # filesystem backend only
 # processes different keys and the plane admits nobody; leave the section out
 # entirely and a join answers with its TURN list alone, exactly as before.
 # [sfu]
-# public_url = "quic://sfu.example:19443"   # what clients are told to dial
+# public_url = "https://sfu.example:19443"  # what clients are told to dial: WebTransport
+#                                           # over HTTP/3, so https and an explicit port
 # ticket_key = "generate-with-openssl-rand-base64-32"
 # ticket_ttl_ms = 120000                    # 5s..1h; how long a ticket admits
 # outbound_queue = 256                      # frames buffered per session

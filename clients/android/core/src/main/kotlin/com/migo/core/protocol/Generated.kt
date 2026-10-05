@@ -8924,7 +8924,7 @@ data class CallTurnFetch(
 
 /** The forwarding SFU's own socket, as a call's devices dial it (section 166). */
 data class CallSfuMedia(
-    /** Where the media plane listens, e.g. quic://sfu.example:19443. */
+    /** Where the media plane listens, e.g. `https://sfu.example:19443`. A WebTransport URL, so the scheme is https and the port is spelled out: this string goes to a browser's WebTransport constructor, which refuses anything else. */
     val url: String,
     /** Admits exactly this device to exactly this call until `expires_at`. Signed by the node, verified by the media plane offline: the two share a key, not a store. */
     val ticket: String,

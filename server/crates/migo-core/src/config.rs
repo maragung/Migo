@@ -840,8 +840,12 @@ pub struct SfuNodeConfig {
     ///
     /// Separate from `bind` because a listener's bind address is rarely the address a client
     /// outside the host can reach: `bind` is often `[::]:19443` and this is
-    /// `quic://sfu.example:19443`. Set it wherever tickets are minted, which is the signalling
+    /// `https://sfu.example:19443`. Set it wherever tickets are minted, which is the signalling
     /// node, and again on the media process, which has to be told no less than its clients are.
+    ///
+    /// `https`, and with the port spelled out, because the plane is reached by WebTransport and
+    /// this string is handed to a browser verbatim: its constructor refuses any other scheme, and
+    /// refuses a URL whose port it would have to infer.
     pub public_url: String,
     /// Socket this process renders `/metrics` on, or `None` for no scrape endpoint.
     pub metrics_bind: Option<String>,
@@ -922,6 +926,27 @@ impl SfuNodeConfig {
                  is reachable for no other reason"
                     .to_string(),
             );
+        }
+
+        // The URL's shape is not this node's business until it is a browser's: the string goes
+        // into `CallSfuMedia.url` and out to a client that hands it to `new WebTransport(...)`,
+        // which throws a `SyntaxError` for a scheme that is not `https` and for a URL with no
+        // port. Both are cheap to refuse here and invisible from this side when refused there.
+        if advertises {
+            let scheme = self.public_url.split("://").next().unwrap_or_default();
+            if !self.public_url.contains("://") || !scheme.eq_ignore_ascii_case("https") {
+                problems.push(format!(
+                    "sfu.public_url must be an absolute https:// URL, got {:?}: it is handed to \
+                     a browser, and a WebTransport session opens to no other scheme",
+                    self.public_url
+                ));
+            } else if !names_a_port(&self.public_url) {
+                problems.push(format!(
+                    "sfu.public_url must name a port, got {:?}: the WebTransport constructor \
+                     throws on a URL it would have to pick one for, rather than assuming 443",
+                    self.public_url
+                ));
+            }
         }
 
         if signs {
@@ -1619,6 +1644,25 @@ fn check_socket_addr(field: &str, value: &str, problems: &mut Vec<String>) {
     }
 }
 
+/// Whether a URL spells its port out, which the WebTransport constructor requires.
+///
+/// Read off the authority rather than by parsing: the crate has no URL parser, and this is the
+/// one question asked of one. Splitting on the last colon is also what keeps a bracketed IPv6
+/// host honest — `[::1]:19443` leaves `19443`, and `[::1]` alone leaves `1]`, which is not a
+/// port and is correctly refused.
+fn names_a_port(url: &str) -> bool {
+    let authority = url
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    match authority.rsplit_once(':') {
+        Some((_, port)) => !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()),
+        None => false,
+    }
+}
+
 /// Decodes configured key material. Accepts standard base64, URL-safe base64, and
 /// hex, because operators paste all three.
 ///
@@ -2016,7 +2060,7 @@ mod tests {
         let config = Config::from_sources(
             &[],
             &env(&[
-                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                ("MIGO_SFU__PUBLIC_URL", "https://sfu.example:19443"),
                 (
                     "MIGO_SFU__TICKET_KEY",
                     "migo-test-ticket-key.for-the-media-plane.only",
@@ -2035,7 +2079,7 @@ mod tests {
             &[],
             &env(&[
                 ("MIGO_SFU__BIND", "0.0.0.0:19443"),
-                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                ("MIGO_SFU__PUBLIC_URL", "https://sfu.example:19443"),
                 (
                     "MIGO_SFU__TICKET_KEY",
                     "migo-test-ticket-key.for-the-media-plane.only",
@@ -2050,7 +2094,7 @@ mod tests {
     fn half_of_the_media_plane_agreement_is_refused() {
         let advertises_only = Config::from_sources(
             &[],
-            &env(&[("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443")]),
+            &env(&[("MIGO_SFU__PUBLIC_URL", "https://sfu.example:19443")]),
         )
         .expect("builds");
         let rendered = advertises_only
@@ -2076,13 +2120,52 @@ mod tests {
         assert!(rendered.contains("sfu.bind is set"), "{rendered}");
     }
 
+    /// The two shapes a browser refuses, and this repository's own former spelling of the first.
+    ///
+    /// Both are refused where the mistake is made rather than where it is felt. A `quic://` URL
+    /// was correct while the plane was a raw QUIC listener and is now a session no client can
+    /// open; a port-less URL is one the WebTransport constructor will not fill in for itself.
+    #[test]
+    fn a_media_plane_url_a_browser_could_not_open_is_refused() {
+        let key = "migo-test-ticket-key.for-the-media-plane.only";
+        for (url, expected) in [
+            (
+                "quic://sfu.example:19443",
+                "must be an absolute https:// URL",
+            ),
+            ("sfu.example:19443", "must be an absolute https:// URL"),
+            ("https://sfu.example", "must name a port"),
+            ("https://[2001:db8::1]", "must name a port"),
+        ] {
+            let config = Config::from_sources(
+                &[],
+                &env(&[("MIGO_SFU__PUBLIC_URL", url), ("MIGO_SFU__TICKET_KEY", key)]),
+            )
+            .expect("builds");
+            let rendered = config.validate().expect_err(url).to_string();
+            assert!(rendered.contains(expected), "{url}: {rendered}");
+        }
+
+        // The bracketed IPv6 form names a port the same way the dotted one does.
+        for url in ["https://sfu.example:19443", "https://[2001:db8::1]:19443"] {
+            let config = Config::from_sources(
+                &[],
+                &env(&[("MIGO_SFU__PUBLIC_URL", url), ("MIGO_SFU__TICKET_KEY", key)]),
+            )
+            .expect("builds");
+            config
+                .validate()
+                .expect("a WebTransport URL a browser accepts");
+        }
+    }
+
     /// Development is not an exemption here, unlike everywhere else in this block.
     #[test]
     fn the_documented_ticket_key_is_refused_in_development_too() {
         let config = Config::from_sources(
             &[],
             &env(&[
-                ("MIGO_SFU__PUBLIC_URL", "quic://sfu.example:19443"),
+                ("MIGO_SFU__PUBLIC_URL", "https://sfu.example:19443"),
                 ("MIGO_SFU__TICKET_KEY", DEVELOPMENT_SFU_TICKET_KEY),
             ]),
         )

@@ -4253,7 +4253,7 @@
         {
           "name": "url",
           "type": "string",
-          "doc": "Where the media plane listens, e.g. quic://sfu.example:19443."
+          "doc": "Where the media plane listens, e.g. `https://sfu.example:19443`. A WebTransport URL, so the scheme is https and the port is spelled out: this string goes to a browser's WebTransport constructor, which refuses anything else."
         },
         {
           "name": "ticket",

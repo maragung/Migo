@@ -62,7 +62,7 @@ fn other_key_bytes() -> String {
 fn config(ticket_key: &str) -> SfuNodeConfig {
     SfuNodeConfig {
         bind: Some("127.0.0.1:0".to_string()),
-        public_url: "quic://127.0.0.1:0".to_string(),
+        public_url: "https://127.0.0.1:0".to_string(),
         metrics_bind: None,
         ticket_key: Secret::new(ticket_key),
         ticket_ttl_ms: 120_000,
