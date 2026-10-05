@@ -1,4 +1,5 @@
-//! The socket: a QUIC listener that admits a device with a ticket and then moves its frames.
+//! The socket: a WebTransport listener that admits a device with a ticket and then moves its
+//! frames.
 //!
 //! # Why QUIC
 //!
@@ -10,6 +11,12 @@
 //! 138), and this module mirrors it: a self-signed leaf minted at boot, one stream per session, a
 //! keep-alive pair sized from the configured heartbeat.
 //!
+//! It is WebTransport over HTTP/3 rather than raw QUIC because the clients are browsers, and those
+//! two channels are exactly what a `WebTransport` object opens: the binding changes, the protocol
+//! above it does not. No other ALPN is negotiated. The ticket still arrives in the first control
+//! frame rather than in the session's URL — it is a bearer credential, and a URL is the part of a
+//! session that ends up in logs.
+//!
 //! A self-signed certificate gives the connection confidentiality and integrity; it does not
 //! prove the server's identity, and that is the right trade here rather than a shortcut. A
 //! client's admission is decided by the ticket, which the node it already trusts signed, and the
@@ -19,8 +26,8 @@
 //! # One connection, one session
 //!
 //! A stream's first control frame must be `JOIN`: nothing is read, seated or answered before the
-//! ticket has been verified, and a frame that is not a join closes the connection without a reply,
-//! because there is nobody to reply to yet. A connection that opens a second stream is a client
+//! ticket has been verified, and a frame that is not a join ends the session without a reply,
+//! because there is nobody to reply to yet. A session that opens a second stream is a client
 //! reconnecting, and that stream becomes its own session the same way a second socket connection
 //! would — which the seat map resolves by device, so it takes the seat rather than doubling it.
 //!
@@ -40,6 +47,7 @@ use std::time::Duration;
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
+use web_transport_quinn as wt;
 
 use migo_core::config::SfuNodeConfig;
 use migo_core::metrics::Registry;
@@ -54,20 +62,20 @@ use crate::wire::{
     WireError, MAX_CONTROL_BYTES,
 };
 
-/// The QUIC application error code a refused admission closes the connection with.
+/// The application error code a refused admission closes the session with.
 ///
-/// Not a protocol status code — QUIC's application codes belong to this process — and it exists so
-/// a client's logs can tell "the media plane hung up on my ticket" from "the network went away".
+/// Not a protocol status code — the codes this process closes with are its own — and it exists so a
+/// client's logs can tell "the media plane hung up on my ticket" from "the network went away".
 const CLOSE_REFUSED: u32 = 1;
 
-/// The QUIC application error code a shutdown closes connections with.
+/// The application error code a shutdown closes sessions with.
 const CLOSE_SHUTDOWN: u32 = 2;
 
-/// How long a refused connection is given to read its refusal before it is closed.
+/// How long a refused session is given to read its refusal before it is closed.
 ///
 /// The refusal is a courtesy, and a client that is not reading it must not cost more than this:
 /// the stream is finished first, so a client that is reading gets the whole frame, and a client
-/// that is not costs a bounded wait rather than a connection held until the idle timeout.
+/// that is not costs a bounded wait rather than a session held until the idle timeout.
 const REFUSAL_GRACE: Duration = Duration::from_secs(5);
 
 /// The media plane's listener and the sessions it serves.
@@ -134,12 +142,28 @@ impl Server {
             rcgen::generate_simple_self_signed(vec!["migo-sfu".to_owned()]).map_err(|error| {
                 anyhow::anyhow!("cannot mint the media plane's certificate: {error}")
             })?;
-        let mut server_config = quinn::ServerConfig::with_single_cert(
+        // Shaped by hand rather than by `quinn::ServerConfig::with_single_cert`, which sets no
+        // ALPN at all: WebTransport is HTTP/3, so a handshake that negotiates no protocol is one
+        // no WebTransport client will complete. Everything else follows what that helper does,
+        // including the 0-RTT allowance QUIC permits (nothing, or all of it).
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| anyhow::anyhow!("cannot shape the media plane's TLS config: {error}"))?
+        .with_no_client_auth()
+        .with_single_cert(
             vec![rustls::pki_types::CertificateDer::from(certificate.cert)],
             rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der())
                 .into(),
         )
         .map_err(|error| anyhow::anyhow!("cannot build the media plane's TLS config: {error}"))?;
+        tls.alpn_protocols = vec![wt::ALPN.as_bytes().to_vec()];
+        tls.max_early_data_size = u32::MAX;
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|error| {
+            anyhow::anyhow!("the media plane's TLS config is not QUIC's: {error}")
+        })?;
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
 
         // The keep-alive pair, sized the way the gateway's own QUIC listener sizes it: ping at
         // half the heartbeat, and time out past the slowest beat a session can run. The timeout
@@ -158,6 +182,7 @@ impl Server {
         let endpoint = quinn::Endpoint::server(server_config, addr)
             .map_err(|error| anyhow::anyhow!("cannot bind the media plane to {bind}: {error}"))?;
         let bound = endpoint.local_addr()?;
+        let mut sessions = wt::Server::new(endpoint);
 
         let server = Arc::clone(self);
         let connections = Arc::new(AtomicU64::new(0));
@@ -167,42 +192,50 @@ impl Server {
                 tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => break,
-                    incoming = endpoint.accept() => match incoming {
+                    request = sessions.accept() => match request {
                         None => break,
-                        Some(incoming) => {
+                        Some(request) => {
                             let server = Arc::clone(&server);
                             let connections = Arc::clone(&connections);
                             tokio::spawn(async move {
-                                let connection = match incoming.await {
-                                    Ok(connection) => connection,
+                                let session = match request.ok().await {
+                                    Ok(session) => session,
                                     Err(error) => {
-                                        tracing::debug!(%error, "media handshake abandoned by peer");
+                                        tracing::debug!(%error, "media session abandoned by peer");
                                         return;
                                     }
                                 };
-                                let remote = connection.remote_address();
+                                let remote = session.remote_address();
                                 let open = connections.fetch_add(1, Ordering::Relaxed) + 1;
-                                tracing::debug!(%remote, open, "media connection accepted");
+                                tracing::debug!(%remote, open, "media session accepted");
                                 loop {
-                                    match connection.accept_bi().await {
+                                    match session.accept_bi().await {
                                         Ok((write, read)) => {
-                                            server.serve_stream(&connection, write, read).await;
+                                            server.serve_stream(&session, write, read).await;
                                         }
-                                        Err(quinn::ConnectionError::LocallyClosed) => break,
                                         Err(error) => {
-                                            tracing::debug!(%error, %remote, "media connection ended");
+                                            // A local close is this node ending the session, which
+                                            // it has already logged; anything else is the peer's.
+                                            if !matches!(
+                                                error,
+                                                wt::SessionError::ConnectionError(
+                                                    quinn::ConnectionError::LocallyClosed
+                                                )
+                                            ) {
+                                                tracing::debug!(%error, %remote, "media session ended");
+                                            }
                                             break;
                                         }
                                     }
                                 }
                                 let left = connections.fetch_sub(1, Ordering::Relaxed) - 1;
-                                tracing::debug!(%remote, open = left, "media connection closed");
+                                tracing::debug!(%remote, open = left, "media session closed");
                             });
                         }
                     }
                 }
             }
-            endpoint.close(CLOSE_SHUTDOWN.into(), b"shutdown");
+            sessions.close(CLOSE_SHUTDOWN.into(), b"shutdown");
         });
 
         Ok(bound)
@@ -211,11 +244,11 @@ impl Server {
     /// Serves one control stream, from `JOIN` to the seat's end.
     async fn serve_stream(
         &self,
-        connection: &quinn::Connection,
-        mut write: quinn::SendStream,
-        mut read: quinn::RecvStream,
+        transport: &wt::Session,
+        mut write: wt::SendStream,
+        mut read: wt::RecvStream,
     ) {
-        let remote = connection.remote_address();
+        let remote = transport.remote_address();
         let mut buf = BytesMut::new();
 
         // Nothing is read, seated or answered before the ticket has been verified.
@@ -231,12 +264,12 @@ impl Server {
             Ok(Request::Join { ticket }) => ticket,
             Ok(_) => {
                 tracing::debug!(%remote, "media connection opened with something other than a join");
-                connection.close(CLOSE_REFUSED.into(), b"join first");
+                transport.close(CLOSE_REFUSED, b"join first");
                 return;
             }
             Err(error) => {
                 tracing::debug!(%error, %remote, "media connection opened with an unreadable frame");
-                connection.close(CLOSE_REFUSED.into(), b"unreadable");
+                transport.close(CLOSE_REFUSED, b"unreadable");
                 return;
             }
         };
@@ -261,7 +294,7 @@ impl Server {
                 };
                 tracing::debug!(%error, %remote, "media admission refused");
                 self.plane.admission_refused();
-                refuse(connection, &mut write, &refusal, b"refused").await;
+                refuse(transport, &mut write, &refusal, b"refused").await;
                 return;
             }
         };
@@ -277,7 +310,7 @@ impl Server {
             Err(error) => {
                 tracing::debug!(%error, %remote, "media seat refused");
                 self.plane.admission_refused();
-                refuse(connection, &mut write, &refusal_reply(&error), b"no seat").await;
+                refuse(transport, &mut write, &refusal_reply(&error), b"no seat").await;
                 return;
             }
         };
@@ -291,7 +324,7 @@ impl Server {
         // The writer task owns the send half from here on, so every reply from this task goes
         // through the same channel as the media: the connection observes one order, and the send
         // half is never written from two places.
-        let mut writer = tokio::spawn(write_loop(connection.clone(), write, outbound));
+        let mut writer = tokio::spawn(write_loop(transport.clone(), write, outbound));
 
         self.plane.reply(
             &session,
@@ -301,7 +334,7 @@ impl Server {
             },
         );
 
-        self.pump(connection, &mut read, &mut buf, &session).await;
+        self.pump(transport, &mut read, &mut buf, &session).await;
 
         tracing::debug!(%remote, call = %session.call_id.to_text(), "media session ended");
         self.plane.close(&session);
@@ -321,8 +354,8 @@ impl Server {
     /// Runs a session's loop: control frames on its stream, sealed frames on datagrams.
     async fn pump(
         &self,
-        connection: &quinn::Connection,
-        read: &mut quinn::RecvStream,
+        transport: &wt::Session,
+        read: &mut wt::RecvStream,
         buf: &mut BytesMut,
         session: &Session,
     ) {
@@ -357,11 +390,11 @@ impl Server {
                         return;
                     }
                 },
-                datagram = connection.read_datagram() => match datagram {
+                datagram = transport.read_datagram() => match datagram {
                     Ok(bytes) => self.publish(session, &bytes),
                     // A datagram failing ends the session here rather than being waited on: the
-                    // only errors quinn reports on this path mean the connection is gone, and
-                    // the stream read above would report the same thing a moment later.
+                    // only errors this path reports mean the session is gone, and the stream read
+                    // above would report the same thing a moment later.
                     Err(error) => {
                         tracing::debug!(%error, "media datagram read ended");
                         return;
@@ -449,27 +482,22 @@ pub async fn serve_metrics(
     Ok(bound)
 }
 
-/// Answers a refusal on a stream that has no writer task yet, and closes the connection.
+/// Answers a refusal on a stream that has no writer task yet, and closes the session.
 ///
-/// The frame is written and the stream finished before the connection is closed, so a client that
-/// is reading gets the whole refusal; the wait that follows is bounded by [`REFUSAL_GRACE`], and a
-/// client that is not reading costs that and nothing more. Closing a connection whose stream data
-/// is still in flight would discard the refusal, which is the one thing this exists to deliver.
-async fn refuse(
-    connection: &quinn::Connection,
-    write: &mut quinn::SendStream,
-    reply: &Reply,
-    reason: &[u8],
-) {
+/// The frame is written and the stream finished before the session is closed, so a client that is
+/// reading gets the whole refusal; the wait that follows is bounded by [`REFUSAL_GRACE`], and a
+/// client that is not reading costs that and nothing more. Closing a session whose stream data is
+/// still in flight would discard the refusal, which is the one thing this exists to deliver.
+async fn refuse(transport: &wt::Session, write: &mut wt::SendStream, reply: &Reply, reason: &[u8]) {
     if write
         .write_all(&frame_bytes(&encode_reply(reply)))
         .await
         .is_ok()
     {
         let _ = write.finish();
-        let _ = tokio::time::timeout(REFUSAL_GRACE, connection.closed()).await;
+        let _ = tokio::time::timeout(REFUSAL_GRACE, transport.closed()).await;
     }
-    connection.close(CLOSE_REFUSED.into(), reason);
+    transport.close(CLOSE_REFUSED, reason);
 }
 
 /// Drains a session's outbound channel onto its connection, until the channel closes.
@@ -478,8 +506,8 @@ async fn refuse(
 /// control message. It exits when the session's channel closes, which happens when the session's
 /// own task ends and drops its sender.
 async fn write_loop(
-    connection: quinn::Connection,
-    mut write: quinn::SendStream,
+    transport: wt::Session,
+    mut write: wt::SendStream,
     mut outbound: mpsc::Receiver<Outbound>,
 ) {
     while let Some(item) = outbound.recv().await {
@@ -493,7 +521,7 @@ async fn write_loop(
                 // A datagram the transport refuses is gone: there is no retry for a media frame,
                 // because a retried frame arrives late enough to be worse than the gap it fills.
                 // The session's queue already counted it on the way in.
-                let _ = connection.send_datagram(datagram);
+                let _ = transport.send_datagram(datagram);
             }
         }
     }
@@ -523,7 +551,7 @@ fn malformed(error: &WireError) -> Reply {
 /// dropped mid-frame by the `select!` above loses nothing and the next call resumes from the bytes
 /// already banked.
 async fn read_frame(
-    read: &mut quinn::RecvStream,
+    read: &mut wt::RecvStream,
     buf: &mut BytesMut,
 ) -> Result<Option<Bytes>, ReadError> {
     loop {
