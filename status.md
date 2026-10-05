@@ -3254,7 +3254,7 @@ load gate hijau.
   akun. Retensinya kini 7 hari seperti setiap unggahan lain di repo ini, dan 322 APK lama
   dihapus.
 - **Dua job yang tampak gagal uji sebenarnya tidak.** "Two-node end-to-end smoke" merah di
-  step *Upload node logs* dan job Android merah di step *Upload the debug APK*; uji di
+  step _Upload node logs_ dan job Android merah di step _Upload the debug APK_; uji di
   masing-masing job itu lulus.
 
 Gerbang: server workspace cargo fmt/clippy/test 2487 lolos (0 gagal, 11 ignored, 129
