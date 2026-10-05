@@ -3238,7 +3238,39 @@ tidak mencetak jumlah test), desktop fmt+clippy dan Windows check bersih, kotlin
 0 problem, brief-check 62 check 0 problem, doc-check hijau, prettier bersih, e2e dan
 load gate hijau.
 
-## 80. migo-sfu diikat ke socket: plane media menjadi proses kedua dengan socket sendiri
+## 80. Nightly merah dua belas hari: satu lint yang hanya menyala tanpa pesan, satu pool store, dan satu kuota artefak
+
+- **Tiga sebab, bukan satu pohon yang rusak.** `main` tidak bergerak sejak 21 September
+  sementara Nightly merah sejak 22 September — yang bertemu adalah gate dengan dunia yang
+  berubah, bukan perubahan pada kode.
+- **Lint.** `assert_is_empty` dari clippy 1.99 menembak dua assert kehampaan di crate
+  yang mengaktifkan `clippy::pedantic`: `power_names(Powers::NONE).is_empty()` di migo-api
+  dan satu situs di migo-gateway. Lint itu melewati assert yang membawa pesan kustom, jadi
+  hanya assert tanpa pesan yang perlu diubah — penyisiran pertama mencari bentuk kehampaan
+  saja, melaporkan tujuh kandidat di migo-gateway, dan lima di antaranya justru merah
+  karena `Vec::new()` tidak dapat dipakai sebagai pembanding: `bytes::Bytes`
+  mengimplementasikan `PartialEq` terhadap lima tipe lain sehingga tipe elemennya
+  menggantung. Bentuk yang dipakai adalah `[] as [Bytes; 0]`, yang clippy sendiri sarankan.
+- **Load.** `idle-10k` kehilangan 12 dari 10000 sesi, dan `errorsByClass` menyebut
+  `remote:STORAGE_UNAVAILABLE` dua belas kali: pool store default pengembangan sebesar 16
+  kehabisan koneksi di bawah burst 200 handshake. Node load kini menetapkan
+  `max_connections = 48`, masih di bawah 100 milik container Postgres sendiri. Karena
+  persyaratannya tidak berubah, §172 tidak disentuh.
+- **Kuota artefak.** Unggahan APK debug Android mengambil default sembilan puluh hari dan
+  berjalan pada setiap push; 325 APK menahan ~10,25 GB dan menghabiskan kuota penyimpanan
+  akun. Retensinya kini 7 hari seperti setiap unggahan lain di repo ini, dan 322 APK lama
+  dihapus.
+- **Dua job yang tampak gagal uji sebenarnya tidak.** "Two-node end-to-end smoke" merah di
+  step _Upload node logs_ dan job Android merah di step _Upload the debug APK_; uji di
+  masing-masing job itu lulus.
+
+Gerbang: server workspace cargo fmt/clippy/test 2487 lolos (0 gagal, 11 ignored, 129
+suite), web 656/656, sdk 281/281, loadgen 149/149, crypto 67/67, wire 24/24, protocol
+11/11, MSRV 1.94 hijau, e2e hijau, load gate hijau dengan idle-10k 10000/10000 tersambung
+dan error rate 0.00% atas 60.1s. Tiga step unggahan masih merah pada run ini semata karena
+penghitungan kuota GitHub baru disegarkan setiap 6–12 jam.
+
+## 81. migo-sfu diikat ke socket: plane media menjadi proses kedua dengan socket sendiri
 
 - **Yang diminta**: section 92 menempatkan SFU di luar migod karena profil bebannya
   bandwidth dan bukan logika aplikasi, dan section 166 menuntut panggilan tiga peserta

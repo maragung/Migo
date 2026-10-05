@@ -753,7 +753,7 @@ mod tests {
             vec!["triage", "takedown"],
             power_names(Powers::TRIAGE.with(Powers::TAKEDOWN))
         );
-        assert!(power_names(Powers::NONE).is_empty());
+        assert_eq!(Vec::<&str>::new(), power_names(Powers::NONE));
     }
 
     /// The actor kind names cover the four the store defines and admit to anything else.
