@@ -29,7 +29,6 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
-use tokio::io::AsyncWriteExt;
 
 use migo_core::config::SfuNodeConfig;
 use migo_core::metrics::Registry;
