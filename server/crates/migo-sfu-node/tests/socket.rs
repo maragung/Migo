@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use migo_core::config::SfuNodeConfig;
 use migo_core::metrics::Registry;
@@ -267,12 +267,18 @@ impl Client {
     /// Reads the next control frame's body, if one arrives before the stream ends.
     async fn next_body(&mut self) -> Result<Bytes, std::io::Error> {
         let mut prefix = [0u8; 4];
-        self.recv.read_exact(&mut prefix).await?;
+        self.recv
+            .read_exact(&mut prefix)
+            .await
+            .map_err(std::io::Error::other)?;
         let len = body_len(&prefix).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
         })?;
         let mut body = vec![0u8; len];
-        self.recv.read_exact(&mut body).await?;
+        self.recv
+            .read_exact(&mut body)
+            .await
+            .map_err(std::io::Error::other)?;
         Ok(Bytes::from(body))
     }
 
@@ -406,7 +412,6 @@ async fn a_sealed_frame_reaches_the_subscriber_and_never_the_publisher() {
     let plane = serve(&key_bytes()).await;
     let stream = id(9);
     let publisher_seat = member(2, 3);
-    let subscriber_seat = member(4, 5);
 
     let mut publisher = Client::connect(plane.addr).await;
     publisher
@@ -621,8 +626,7 @@ async fn a_malformed_control_frame_is_refused_and_the_session_survives() {
     let mut framed = BytesMut::new();
     framed.extend_from_slice(&3u32.to_be_bytes());
     framed.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
-    let mut send = client.send.clone();
-    send.write_all(&framed).await.expect("the write lands");
+    client.send_raw(&framed).await;
 
     let reply = client
         .await_reply(|reply| matches!(reply, Reply::Error { .. }))
