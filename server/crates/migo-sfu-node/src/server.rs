@@ -250,13 +250,14 @@ impl Server {
                 // one distinction kept is expiry, because an honest client whose ticket aged out
                 // can act on it — mint another and reconnect — while a forger cannot.
                 let refusal = match error {
-                    TicketError::Expired => fault::permission_denied(
-                        "ticket",
-                        "the ticket expired; join the call again for a fresh one",
+                    TicketError::Expired => refusal_reply(
+                        &fault::permission_denied("ticket")
+                            .public("the ticket expired; join the call again for a fresh one"),
                     ),
-                    _ => {
-                        fault::permission_denied("ticket", "the ticket is not one this node minted")
-                    }
+                    _ => refusal_reply(
+                        &fault::permission_denied("ticket")
+                            .public("the ticket is not one this node minted"),
+                    ),
                 };
                 tracing::debug!(%error, %remote, "media admission refused");
                 self.plane.admission_refused();
@@ -552,7 +553,7 @@ fn take_frame(buf: &mut BytesMut) -> Result<Option<Bytes>, ReadError> {
 pub enum ReadError {
     /// The transport failed.
     #[error("the control stream failed: {0}")]
-    Transport(#[from] quinn::ReadError),
+    Transport(#[from] std::io::Error),
     /// The frame was not one this protocol has.
     #[error("{0}")]
     Wire(WireError),
