@@ -823,9 +823,11 @@ mod tests {
             PushOutcome::Held,
             "twenty seconds is inside the thirty-second floor of an UltraLowData session"
         );
-        assert!(outbound
-            .take_ready(Timestamp::from_millis(29_999))
-            .is_empty());
+        // message-less, so clippy rewrites this one; the array pins the element type.
+        assert_eq!(
+            outbound.take_ready(Timestamp::from_millis(29_999)),
+            [] as [Bytes; 0]
+        );
         assert_eq!(
             outbound.take_ready(Timestamp::from_millis(30_000)),
             vec![Bytes::from_static(b"v2")]

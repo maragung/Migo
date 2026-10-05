@@ -190,6 +190,17 @@ bot_refill_per_second = 2500
 [auth]
 registration_cost = 1
 
+# The same reasoning as the rate limits above, one layer down. Every step drives this node
+# from one process, and the development pool of 16 is what a 200-way connect burst exhausts
+# first: a handshake that waits acquire_timeout_ms for a connection answers
+# STORAGE_UNAVAILABLE, and idle-10k counts a session that answered that as one that never
+# opened. On 2026-10-03 that cost 12 of 10000 sessions on a runner about a fifth slower than
+# the one that connected all ten thousand on 2026-09-21 with the same tree, so the pool —
+# not the server's ability to hold ten thousand sessions — was the thing under test. 48 stays
+# well under the Postgres container's own max_connections of 100.
+[store]
+max_connections = 48
+
 [media]
 local_dir = "$WORK_DIR/media"
 EOF
