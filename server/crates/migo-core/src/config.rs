@@ -1634,12 +1634,9 @@ fn check_socket_addr(field: &str, value: &str, problems: &mut Vec<String>) {
 pub fn decode_key_material(value: &str) -> Vec<u8> {
     use base64::Engine as _;
     let trimmed = value.trim();
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
-        return bytes;
-    }
-    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed) {
-        return bytes;
-    }
+    // Hex before base64, because every hex digit is also a base64 character: a 64-character hex
+    // key is a well-formed 48-byte base64 string, so decoding base64 first answers a question the
+    // operator did not ask and leaves this arm dead for exactly the length a 32-byte key has.
     if trimmed.len().is_multiple_of(2)
         && !trimmed.is_empty()
         && trimmed.chars().all(|c| c.is_ascii_hexdigit())
@@ -1654,6 +1651,12 @@ pub fn decode_key_material(value: &str) -> Vec<u8> {
             out.push(hi << 4 | lo);
         }
         return out;
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+        return bytes;
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed) {
+        return bytes;
     }
     trimmed.as_bytes().to_vec()
 }
