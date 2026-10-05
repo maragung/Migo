@@ -3353,3 +3353,69 @@ penghitungan kuota GitHub baru disegarkan setiap 6–12 jam.
 Gerbang: server workspace cargo fmt/clippy/test lewat CI, web, sdk, kotlin-check 0 problem,
 protocol-check/entity-check/vector-check bersih, brief-check 62 check 0 problem (selftest 23
 kasus), infra-check 12 check 0 problem, secret-check bersih, doc-check hijau, prettier bersih.
+
+## 82. Plane media dijangkau peramban: migosfud bicara WebTransport, bukan QUIC mentah
+
+- **Yang diminta**: section 166 sudah menuntut panggilan tiga peserta atau lebih melewati SFU
+  yang hanya meneruskan, dan section 81 sudah mendirikan socket-nya sebagai proses kedua. Yang
+  belum adalah siapa pun yang bisa membukanya: listener itu QUIC mentah dengan codec sendiri,
+  sementara client web hanya punya WebSocket dan client Android hanya OkHttp. Jadi sebelum satu
+  baris pun sisi client ditulis, binding-nya harus berubah lebih dulu.
+- **WebTransport di atas HTTP/3, dan alasannya bukan selera**: setiap client Migo adalah mesin
+  browser — Chromium di Android, mesin browser di web — jadi WebTransport adalah satu-satunya
+  cara mereka menjangkau socket ini. Pemetaannya tetap satu lawan satu: satu bidi stream tetap
+  kanal kontrol, satu datagram WebTransport tetap satu frame media. `wire.rs` dan `plane.rs`
+  tidak disentuh sama sekali, begitu pula protokol di atasnya; yang berubah hanya lapisan yang
+  memindahkan byte.
+- **ALPN h3 disusun tangan, dan itu satu-satunya bagian yang benar-benar baru.**
+  `quinn::ServerConfig::with_single_cert` tidak menyetel ALPN sama sekali, sedangkan
+  WebTransport adalah HTTP/3 sehingga handshake yang tidak menegosiasikan protokol apa pun
+  tidak akan pernah selesai di sisi client. Config rustls-nya karena itu dibangun sendiri dengan
+  pola `builder_with_provider(ring)` yang sudah dipakai graf ini — termasuk
+  `max_early_data_size = u32::MAX` yang helper itu sendiri pasang — lalu masuk lewat
+  `QuicServerConfig::try_from` → `ServerConfig::with_crypto`. Sisi test mendapat baris yang sama,
+  karena satu ujung tanpa h3 sama saja dengan tidak ada sesi.
+- **Tiket tetap di frame kontrol pertama.** Rencana awal memindahkannya ke permintaan sesi
+  WebTransport, dan pembacaan itu keliru: tiketnya memang tidak pernah ada di handshake QUIC —
+  ia sudah di frame pertama sebelum apa pun dijawab. Memindahkannya ke URL berarti kredensial
+  bearer masuk ke bagian sesi yang paling mudah tercatat di log, dan memaksa test penolakan
+  ditulis ulang: tiket kedaluwarsa memang dijawab in-band sebagai `Reply::Error`, bukan sebagai
+  status HTTP. Jadi binding-nya berubah, protokol di atasnya tidak.
+- **Harga dependensinya 31 paket, bukan enam seperti perkiraan awal.** `web-transport-quinn`
+  meminta quinn dengan fitur `platform-verifier`, dan fitur cargo bersifat aditif untuk seluruh
+  graf: `rustls-platform-verifier` beserta `rustls-native-certs` ikut masuk ke build walau
+  `migosfud` adalah server yang tidak pernah memverifikasi sertifikat siapa pun, dan tidak ada
+  knob untuk mematikannya. `fastbloom`+`loom`+`generator` datang dari fitur `bloom`, dan crate
+  khusus platform (jni, schannel, security-framework) ikut sebagai konsekuensinya. MSRV
+  tertinggi di antaranya `kio` 1.91, jadi job "Compiles on Rust 1.94" tetap terpenuhi;
+  `Cargo.lock` diperbarui dengan resolusi saja — 337 baris ditambah, nol baris lama berubah.
+- **`sfu.public_url` kini URL WebTransport, dan divalidasi sebagai URL yang bisa dibuka
+  browser.** String ini masuk ke `CallSfuMedia.url` dan diteruskan verbatim ke
+  `new WebTransport(...)`, yang melempar `SyntaxError` untuk skema selain `https` dan untuk URL
+  yang portnya harus ia tebak sendiri. Keduanya kini ditolak saat startup dan bukan saat
+  panggilan pertama — termasuk `quic://`, bentuk yang benar selama listener-nya QUIC mentah.
+  Pemeriksaan port membelah pada titik dua terakhir alih-alih memakai parser URL, yang juga
+  membuat host IPv6 berkurung tetap benar. Contoh config, compose, dan infra/README ikut
+  berubah, begitu pula doc field `CallSfuMedia` di schema beserta tiga berkas turunannya;
+  contoh URL-nya ditulis di dalam backtick karena URL telanjang di doc-comment menyala sebagai
+  `rustdoc::bare_urls` — lint yang belum pernah tersentuh sebelum doc schema pertama yang
+  memuat URL https ini.
+- **Test**: kedelapan test socket yang sudah ada tidak ditambah satu pun, tetapi seluruhnya kini
+  menyambung lewat `wt::Client` dengan ALPN h3 di config rustls-nya, jadi yang diuji adalah
+  binding yang benar-benar dipakai browser dan bukan binding yang mirip. Client test menyusun
+  config dan verifier-nya sendiri alih-alih memakai `ClientBuilder` bawaan supaya endpoint-nya
+  tetap IPv4 loopback. Satu test konfigurasi baru menutup empat bentuk URL yang harus ditolak
+  dan dua yang harus diterima, termasuk host IPv6 berkurung.
+- **Yang belum**: sisi client, yaitu Tahap 2 dan 3. Web masih full mesh WebRTC dan Android
+  masih roster saja; yang sekarang mungkin bagi keduanya masih sebatas membaca field `sfu` pada
+  balasan CALL_SFU_JOIN. Jalur mesh tetap dipertahankan sebagai fallback untuk peramban tanpa
+  WebTransport, dan itu memang yang dinyatakan schema.
+
+Gerbang: server workspace cargo fmt/clippy/test 2529 lolos (0 gagal, 11 ignored, 133 suite),
+web 656/656, sdk 281/281, loadgen 149/149, crypto 67/67, wire 24/24, protocol 11/11, android
+hijau lewat BUILD SUCCESSFUL dengan :core dan :app testDebugUnitTest serta :app:assembleDebug
+(job-nya tidak mencetak jumlah test), desktop fmt+clippy dan Windows check bersih, kotlin-check
+0 problem, brief-check 62 check 0 problem, infra-check 12 check 0 problem, pydeps-check 6 check
+0 problem, secret-check 21 check 0 problem, protocol-check/entity-check/vector-check up to date,
+doc-check hijau, prettier bersih, e2e dan load gate hijau. Angka diambil dari run CI 37282852315
+dan run Android 37282852343 pada 55d626fa.

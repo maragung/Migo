@@ -28,13 +28,13 @@ docker compose -f infra/compose/docker-compose.yml up --build
 
 This builds all three images and starts five services in dependency order:
 
-| Service    | Purpose                                           | Address                |
-| ---------- | ------------------------------------------------- | ---------------------- |
-| `postgres` | durable store; `migod` migrates it on boot        | internal               |
-| `redis`    | cache and rate-limiter backend (no persistence)   | internal               |
-| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root | http://localhost:8080  |
-| `sfu`      | the group-call media plane: QUIC + `/metrics`     | udp/19443, :9090       |
-| `web`      | the static web client (no server-side rendering)  | http://localhost:19992 |
+| Service    | Purpose                                               | Address                |
+| ---------- | ----------------------------------------------------- | ---------------------- |
+| `postgres` | durable store; `migod` migrates it on boot            | internal               |
+| `redis`    | cache and rate-limiter backend (no persistence)       | internal               |
+| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root     | http://localhost:8080  |
+| `sfu`      | the group-call media plane: WebTransport + `/metrics` | udp/19443, :9090       |
+| `web`      | the static web client (no server-side rendering)      | http://localhost:19992 |
 
 Open http://localhost:19992. Registration is enabled, so you can create an account
 and sign in immediately.
@@ -116,9 +116,11 @@ docker build -f infra/docker/Dockerfile.web   -t migo/web     .
 ```
 
 `migosfud` refuses to start without `MIGO_SFU__TICKET_KEY` (and the matching
-`MIGO_SFU__PUBLIC_URL`); it opens one QUIC listener (`MIGO_SFU__BIND`, `udp/19443` by
-default) and one scrape listener (`MIGO_SFU__METRICS_BIND`, `tcp/9090`), and its image
-healthcheck is a scrape of the second, which is only bound after the first is.
+`MIGO_SFU__PUBLIC_URL`, an `https://` URL with the port spelled out, because that is
+what a browser's WebTransport constructor takes); it opens one WebTransport listener
+over HTTP/3 (`MIGO_SFU__BIND`, `udp/19443` by default) and one scrape listener
+(`MIGO_SFU__METRICS_BIND`, `tcp/9090`), and its image healthcheck is a scrape of the
+second, which is only bound after the first is.
 
 The web client reads its server URLs at build time (Next.js inlines `NEXT_PUBLIC_*`
 into the bundle), so point a non-local build at its server with build args:

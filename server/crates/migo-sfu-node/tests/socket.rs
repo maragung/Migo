@@ -1,8 +1,9 @@
-//! The media plane over a real socket, driven by a real QUIC client.
+//! The media plane over a real socket, driven by a real WebTransport client.
 //!
 //! These tests bind `Server` exactly the way `migosfud` binds it — a loopback address chosen by
-//! the OS, a ticket key from configuration — and then dial it with the same quinn/rustls stack a
-//! Migo client would use. What they prove, in order:
+//! the OS, a ticket key from configuration — and then dial it the way a Migo client does: a
+//! WebTransport session over HTTP/3, one bidirectional stream for control, datagrams for media.
+//! What they prove, in order:
 //!
 //!   1. Admission is a ticket and nothing else: a ticket this node minted seats the device and
 //!      answers with the call's roster, a ticket another key minted is refused, and a ticket
@@ -13,10 +14,10 @@
 //!   3. A seat's end is observed: an explicit `LEAVE` reaches the other seats as a departure,
 //!      and the seat is gone from the roster the next joiner is answered with.
 //!
-//! The client verifier in this file skips certificate verification on purpose. The listener's
-//! leaf is self-signed by design — `migo_sfu_node::server`'s module doc explains why an SFU's
-//! identity is established by the ticket rather than by a chain — so a test client asserts on the
-//! session the media plane runs, not on a certificate the deployment never promised.
+//! The client in this file skips certificate verification on purpose. The listener's leaf is
+//! self-signed by design — `migo_sfu_node::server`'s module doc explains why an SFU's identity is
+//! established by the ticket rather than by a chain — so a test client asserts on the session the
+//! media plane runs, not on a certificate the deployment never promised.
 //!
 //! The negative assertions (a frame that must *not* arrive) run against a short window rather
 //! than the step budget: absence is only observable by waiting, and the shortest wait that
@@ -29,6 +30,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
+use url::Url;
+use web_transport_quinn as wt;
 
 use migo_core::config::SfuNodeConfig;
 use migo_core::metrics::Registry;
@@ -59,7 +62,7 @@ fn other_key_bytes() -> String {
 fn config(ticket_key: &str) -> SfuNodeConfig {
     SfuNodeConfig {
         bind: Some("127.0.0.1:0".to_string()),
-        public_url: "quic://127.0.0.1:0".to_string(),
+        public_url: "https://127.0.0.1:0".to_string(),
         metrics_bind: None,
         ticket_key: Secret::new(ticket_key),
         ticket_ttl_ms: 120_000,
@@ -166,14 +169,14 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
     }
 }
 
-/// One connected client: its endpoint, its connection, and its control stream.
+/// One connected client: its endpoint, its WebTransport session, and its control stream.
 ///
-/// The endpoint is owned here because dropping it would end the connection with it.
+/// The endpoint is owned here because dropping it would end the session with it.
 struct Client {
     _endpoint: quinn::Endpoint,
-    connection: quinn::Connection,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    session: wt::Session,
+    send: wt::SendStream,
+    recv: wt::RecvStream,
 }
 
 impl Client {
@@ -188,28 +191,27 @@ impl Client {
         crypto
             .dangerous()
             .set_certificate_verifier(Arc::new(AcceptAnyServerCert { provider }));
+        // The one thing this client needs that a QUIC one does not: a WebTransport session is
+        // HTTP/3, so a handshake that negotiates no protocol never opens one.
+        crypto.alpn_protocols = vec![wt::ALPN.as_bytes().to_vec()];
         let quic = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
             .expect("the client crypto is QUIC-compatible");
 
-        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("a loopback bind"))
+        let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("a loopback bind"))
             .expect("a client endpoint binds");
-        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic)));
-        let connection = tokio::time::timeout(
-            STEP,
-            endpoint
-                .connect(addr, "migo-sfu")
-                .expect("the address is dialable"),
-        )
-        .await
-        .expect("the handshake does not stall")
-        .expect("the handshake completes");
-        let (send, recv) = tokio::time::timeout(STEP, connection.open_bi())
+        let client = wt::Client::new(endpoint.clone(), quinn::ClientConfig::new(Arc::new(quic)));
+        let url = Url::parse(&format!("https://{addr}/")).expect("a WebTransport URL");
+        let session = tokio::time::timeout(STEP, client.connect(url))
+            .await
+            .expect("the handshake does not stall")
+            .expect("the handshake completes");
+        let (send, recv) = tokio::time::timeout(STEP, session.open_bi())
             .await
             .expect("opening a stream does not stall")
             .expect("the stream opens");
         Client {
             _endpoint: endpoint,
-            connection,
+            session,
             send,
             recv,
         }
@@ -284,14 +286,14 @@ impl Client {
     /// Sends one sealed frame as a datagram.
     fn publish_frame(&self, stream_id: Id, sequence: u64, layer: Layer, payload: &[u8]) {
         let datagram = encode_publish_datagram(stream_id, sequence, layer, payload);
-        self.connection
+        self.session
             .send_datagram(datagram)
             .expect("the datagram is small enough for the path");
     }
 
     /// Reads the next delivery datagram, or `None` if none arrives within `within`.
     async fn delivery_within(&self, within: Duration) -> Option<(Member, Id, u64, Layer, Vec<u8>)> {
-        match tokio::time::timeout(within, self.connection.read_datagram()).await {
+        match tokio::time::timeout(within, self.session.read_datagram()).await {
             Ok(Ok(bytes)) => {
                 let (from, stream_id, sequence, layer, payload) =
                     decode_delivery_datagram(&bytes).expect("a delivery this protocol has");

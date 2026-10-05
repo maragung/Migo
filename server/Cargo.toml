@@ -88,6 +88,12 @@ async-trait  = "0.1"
 quinn       = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "log"] }
 rustls      = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen       = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+# WebTransport over HTTP/3: the binding the media plane is reached through, because every
+# Migo client is a browser engine rather than a QUIC stack of its own. Ring-only like the
+# rest of this graph (its own default is aws-lc-rs), and it costs rustls-platform-verifier
+# and rustls-native-certs transitively — it asks quinn for `platform-verifier`, and cargo
+# features are additive graph-wide, so a server that verifies no one still links them.
+web-transport-quinn = { version = "0.13", default-features = false, features = ["ring"] }
 # The mandatory TLS 1.3 channel on the server-to-server mesh (section 7): tokio-rustls
 # adapts the rustls handshake to the tokio streams the mesh transport dials and accepts,
 # and rustls-webpki is the X.509 reader the pinning verifiers take a leaf's public key

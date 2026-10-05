@@ -26,6 +26,7 @@ tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+web-transport-quinn.workspace = true
 
 base64.workspace = true
 hmac.workspace = true
@@ -39,3 +40,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time"] }
+# The socket tests dial the plane the way a browser does, and a WebTransport session is
+# named by its URL. web-transport-quinn builds a ConnectRequest from one, but `url` is not
+# part of its public surface, so the test names the type itself.
+url = "2"
